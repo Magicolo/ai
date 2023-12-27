@@ -2,8 +2,8 @@
 
 positive="ultra detailed, surreal, abstract, conceptual, masterpiece"
 negative="blurry, smooth, simple, plain, cute, naked, nude, nudity, sexy"
-width=1200
-height=900
+width=1152
+height=896
 steps=10
 guidance=2.5
 model="TURBO_DreamShaper.safetensors"

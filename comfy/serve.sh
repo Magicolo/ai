@@ -9,9 +9,16 @@ entry=$(cat "$folder/entry.sh")
 
 docker build --tag comfy "$folder" &> /dev/null
 if [ "$port" -le 0 ]; then
-    comfy=$(docker run --interactive --gpus all --rm --detach --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$entry")
+    comfy=$(docker run --interactive --gpus all --rm --detach \
+        --volume "$output:/comfy/output" \
+        --volume comfy:/comfy/models \
+        comfy bash -c "$entry")
 else
-    comfy=$(docker run --interactive --gpus all --rm --detach --publish "$port:8188" --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$entry")
+    comfy=$(docker run --interactive --gpus all --rm --detach \
+        --publish "$port:8188" \
+        --volume "$output:/comfy/output" \
+        --volume comfy:/comfy/models \
+        comfy bash -c "$entry")
 fi
 
 # Waiting for healthy container.
