@@ -1,0 +1,32 @@
+volumes:
+  flowise:
+    external: true
+
+services:
+    flowise:
+        image: flowiseai/flowise
+        restart: always
+        ports:
+            - 3000:3000
+        volumes:
+            - flowise:/root/.flowise
+        command: "flowise start"
+        environment:
+            - PORT=3000
+            - FLOWISE_USERNAME=boba
+            - FLOWISE_PASSWORD=fett
+            - DEBUG
+            - DATABASE_PATH
+            - DATABASE_TYPE
+            - DATABASE_PORT
+            - DATABASE_HOST
+            - DATABASE_NAME
+            - DATABASE_USER
+            - DATABASE_PASSWORD
+            - APIKEY_PATH
+            - SECRETKEY_PATH
+            - FLOWISE_SECRETKEY_OVERWRITE
+            - LOG_LEVEL
+            - LOG_PATH
+        depends_on:
+            - ollama

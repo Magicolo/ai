@@ -1,0 +1,35 @@
+services:
+  cheshire:
+    image: ghcr.io/cheshire-cat-ai/core:latest
+    ports:
+      - 1865:80
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - WATCHFILES_FORCE_POLLING=true
+      - CORE_HOST=localhost
+      - CORE_PORT=1865
+      - QDRANT_HOST=memory
+      - QDRANT_PORT=6333
+      - LOG_LEVEL=WARNING
+      - DEBUG=true
+      - SAVE_MEMORY_SNAPSHOTS=false
+      - CORE_USE_SECURE_PROTOCOLS
+      - API_KEY
+    volumes:
+      - ./static:/app/cat/static
+      - ./plugins:/app/cat/plugins
+      - ./data:/app/cat/data
+      - ./metadata.json:/app/metadata.json
+    depends_on:
+      - ollama
+      - memory
+
+  memory:
+    image: qdrant/qdrant
+    container_name: memory
+    expose:
+      - 6333
+    volumes:
+      - ./memory:/qdrant/storage
+    restart: unless-stopped
