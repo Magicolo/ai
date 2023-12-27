@@ -13,4 +13,4 @@ RUN pip install --upgrade pip
 RUN pip install -r comfy/requirements.txt
 RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
 HEALTHCHECK --interval=1s --timeout=30s --start-period=1s --retries=10 CMD curl localhost:8188
-CMD python /comfy/main.py
+ENTRYPOINT python /comfy/main.py

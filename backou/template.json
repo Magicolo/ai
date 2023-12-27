@@ -1,0 +1,164 @@
+{
+    "prompt": {
+        "4": {
+            "inputs": {
+                "ckpt_name": "$model"
+            },
+            "class_type": "CheckpointLoaderSimple"
+        },
+        "5": {
+            "inputs": {
+                "width": $width,
+                "height": $height,
+                "batch_size": 1
+            },
+            "class_type": "EmptyLatentImage"
+        },
+        "6": {
+            "inputs": {
+                "text": "($positive) $prompt",
+                "clip": [
+                    "4",
+                    1
+                ]
+            },
+            "class_type": "CLIPTextEncode"
+        },
+        "7": {
+            "inputs": {
+                "text": "($negative) $forbid",
+                "clip": [
+                    "4",
+                    1
+                ]
+            },
+            "class_type": "CLIPTextEncode"
+        },
+        "8": {
+            "inputs": {
+                "samples": [
+                    "10",
+                    0
+                ],
+                "vae": [
+                    "4",
+                    2
+                ]
+            },
+            "class_type": "VAEDecode"
+        },
+        "10": {
+            "inputs": {
+                "add_noise": true,
+                "noise_seed": $noise_seed,
+                "cfg": $guidance,
+                "model": [
+                    "4",
+                    0
+                ],
+                "positive": [
+                    "6",
+                    0
+                ],
+                "negative": [
+                    "7",
+                    0
+                ],
+                "sampler": [
+                    "12",
+                    0
+                ],
+                "sigmas": [
+                    "42",
+                    0
+                ],
+                "latent_image": [
+                    "5",
+                    0
+                ]
+            },
+            "class_type": "SamplerCustom"
+        },
+        "12": {
+            "inputs": {
+                "sampler_name": "$sampler"
+            },
+            "class_type": "KSamplerSelect"
+        },
+        "22": {
+            "inputs": {
+                "model_name": "$upscaler"
+            },
+            "class_type": "UpscaleModelLoader"
+        },
+        "35": {
+            "inputs": {
+                "upscale_by": $upscale,
+                "seed": $seed,
+                "steps": $steps,
+                "cfg": $guidance,
+                "sampler_name": "$sampler",
+                "scheduler": "$scheduler",
+                "denoise": 1,
+                "mode_type": "None",
+                "tile_width": 1024,
+                "tile_height": 1024,
+                "mask_blur": 8,
+                "tile_padding": 32,
+                "tiled_decode": false,
+                "seam_fix_mode": "None",
+                "seam_fix_denoise": 1,
+                "seam_fix_width": 64,
+                "seam_fix_mask_blur": 8,
+                "seam_fix_padding": 16,
+                "force_uniform_tiles": "enable",
+                "image": [
+                    "8",
+                    0
+                ],
+                "model": [
+                    "4",
+                    0
+                ],
+                "positive": [
+                    "6",
+                    0
+                ],
+                "negative": [
+                    "7",
+                    0
+                ],
+                "vae": [
+                    "4",
+                    2
+                ],
+                "upscale_model": [
+                    "22",
+                    0
+                ]
+            },
+            "class_type": "UltimateSDUpscale"
+        },
+        "36": {
+            "inputs": {
+                "filename_prefix": "$prefix",
+                "images": [
+                    "35",
+                    0
+                ]
+            },
+            "class_type": "SaveImage"
+        },
+        "42": {
+            "inputs": {
+                "scheduler": "$scheduler",
+                "steps": $steps,
+                "model": [
+                    "4",
+                    0
+                ]
+            },
+            "class_type": "BasicScheduler"
+        }
+    }
+}

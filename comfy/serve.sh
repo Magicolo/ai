@@ -5,13 +5,13 @@ folder="$(realpath $(dirname $0))"
 output="$folder/output"
 wait=0.5
 timeout=50
-command=$(cat "$folder/command.sh")
+entry=$(cat "$folder/entry.sh")
 
 docker build --tag comfy "$folder" &> /dev/null
 if [ "$port" -le 0 ]; then
-    comfy=$(docker run --interactive --gpus all --rm --detach --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$command")
+    comfy=$(docker run --interactive --gpus all --rm --detach --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$entry")
 else
-    comfy=$(docker run --interactive --gpus all --rm --detach --publish "$port:8188" --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$command")
+    comfy=$(docker run --interactive --gpus all --rm --detach --publish "$port:8188" --volume "$output:/comfy/output" --volume comfy:/comfy/models comfy bash -c "$entry")
 fi
 
 # Waiting for healthy container.
