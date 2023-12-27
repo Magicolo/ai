@@ -4,5 +4,5 @@ cheshire/data
 cheshire/memory
 cheshire/plugins
 cheshire/static
-cheshire/metadata.json
+cheshire/metadata.*
 comfy/output
