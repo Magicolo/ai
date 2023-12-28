@@ -47,7 +47,7 @@ You are strictly only allowed to write a single prompt; no introduction, no comm
 The prompt may relate to these inspiration words: $inspire.
 The prompt must NOT relate to any of these forbidden, banned, disallowed words: $forbid.
 The prompt must consist of specific, unambiguous, clear, obvious and detailed visual indications.
-The prompt must be weird, menacing, creepy, intricate, lively, impossible, concrete, incomprehensible, exalted, surreal, suprising, experimental.
+The prompt must be weird, intricate, lively, impossible, menacing, awe-inspiring, concrete, creepy, incomprehensible, exalted, surreal, suprising, experimental.
 The prompt must describe the colors, shapes, characters, themes, creatures, environments, places that will be in the image with lots of adjectives.
 The prompt must begin with a parenthesized short description of the distinct, exotic and niche artistic visual style of the image.
 Write a single succinct image prompt that strictly comply with the above rules.
@@ -76,7 +76,8 @@ else
     now=$(date +"%Y%m%d%H%M%S")
     [ "$keep" == "true" ] && cp -f "$image" "$folder/keep/background-$now.png"
     mv -f "$image" "$background" || exit $?
-    gsettings set org.gnome.desktop.background picture-uri "file://$background" || exit $?
+    gsettings set org.gnome.desktop.background picture-uri "file://$background"
+    gsettings set org.gnome.desktop.background picture-uri-dark "file://$background"
     
     if [ "$skip" == "describe" ]; then
         echo "=> Skipping image description."

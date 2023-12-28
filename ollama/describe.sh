@@ -8,7 +8,7 @@ image="$3"
 [ -z "$image" ] && { echo "Missing image path." >&2; exit 1; }
 
 folder="$(realpath $(dirname $0))"
-ollama=$(bash "$folder/serve.sh" 11444) || exit $?
+ollama=$(bash "$folder/serve.sh" 0) || exit $?
 stop() { docker stop "$ollama" &> /dev/null; }
 trap stop EXIT
 
@@ -19,5 +19,5 @@ data='{
     "stream": false,
     "images": '"$(jq <<< "$images")"'
 }'
-response=$(echo "$data" | curl "localhost:11444/api/generate" --silent --data @-) || exit $?
+response=$(echo "$data" | docker exec --interactive "$ollama" curl localhost:11434/api/generate --silent --data @-)
 echo "$response" | jq  -r ".response" || exit $?

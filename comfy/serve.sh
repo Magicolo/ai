@@ -8,6 +8,7 @@ timeout=50
 entry=$(cat "$folder/entry.sh")
 
 docker build --tag comfy "$folder" &> /dev/null
+docker volume create comfy &> /dev/null
 if [ "$port" -le 0 ]; then
     comfy=$(docker run --interactive --gpus all --rm --detach \
         --volume "$output:/comfy/output" \
