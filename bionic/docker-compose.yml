@@ -4,9 +4,14 @@ services:
     platform: linux/amd64
 
   embeddings-api:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-0.2.2
-    platform: linux/amd64
-    command: --model-id BAAI/bge-small-en-v1.5
+    image: ghcr.io/huggingface/text-embeddings-inference
+    command: --model-id BAAI/bge-large-en-v1.5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
 
   # Handles parsing of multiple documents types.
   unstructured:
