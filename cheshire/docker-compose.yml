@@ -1,9 +1,15 @@
 services:
   cheshire:
-    image: ghcr.io/cheshire-cat-ai/core:latest
+    image: ghcr.io/cheshire-cat-ai/core
     ports:
       - 1865:80
     restart: unless-stopped
+    healthcheck:
+      test: curl localhost
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 5s
     environment:
       - PYTHONUNBUFFERED=1
       - WATCHFILES_FORCE_POLLING=true

@@ -4,10 +4,15 @@ volumes:
 
 services:
   ollama:
-    image: ollama
-    build: .
+    image: ollama/ollama
     volumes:
       - ollama:/root/.ollama
+    healthcheck:
+      test: ollama --version
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 5s
     deploy:
       resources:
         reservations:

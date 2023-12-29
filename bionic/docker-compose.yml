@@ -1,17 +1,25 @@
 services:
   llm-api:
-    image: ghcr.io/bionic-gpt/llama-2-7b-chat:1.0.4
+    image: ghcr.io/berriai/litellm:main-v1.10.3
+    command: ["/bin/sh", "-c", "pip install async_generator && litellm --model ollama/solar:10.7b-instruct-v1-q8_0 --drop_params --api_base http://ollama:11434 --host 0.0.0.0 --port 3000"]
+    entrypoint: []
     platform: linux/amd64
+    ports:
+      - 3000:3000
+    depends_on:
+      - ollama
 
   embeddings-api:
-    image: ghcr.io/huggingface/text-embeddings-inference
+    image: ghcr.io/huggingface/text-embeddings-inference:0.2.2
+    platform: linux/amd64
     command: --model-id BAAI/bge-large-en-v1.5
     deploy:
       resources:
         reservations:
           devices:
-            - capabilities: [ gpu ]
-              count: all
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # Handles parsing of multiple documents types.
   unstructured:
