@@ -1,0 +1,19 @@
+volumes:
+  comfy:
+    external: true
+
+services:
+  comfy:
+    image: comfy
+    build: .
+    volumes:
+      - ./output:/comfy/output
+      - ./entry.sh:/comfy/entry.sh
+      - comfy:/comfy/models
+    entrypoint: /comfy/entry.sh
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all

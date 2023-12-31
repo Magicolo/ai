@@ -4,22 +4,15 @@ port="${1:-8188}"
 folder="$(realpath $(dirname $0))"
 output="$folder/output"
 wait=0.5
-timeout=50
+timeout=10
 entry=$(cat "$folder/entry.sh")
 
 docker build --tag comfy "$folder" &> /dev/null || exit $?
 docker volume create comfy &> /dev/null || exit $?
 if [ "$port" -le 0 ]; then
-    comfy=$(docker run --interactive --gpus all --rm --detach \
-        --volume "$output:/comfy/output" \
-        --volume comfy:/comfy/models \
-        comfy bash -c "$entry")
+    comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach comfy) || exit $?
 else
-    comfy=$(docker run --interactive --gpus all --rm --detach \
-        --publish "$port:8188" \
-        --volume "$output:/comfy/output" \
-        --volume comfy:/comfy/models \
-        comfy bash -c "$entry")
+    comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach --publish "$port:8188" comfy) || exit $?
 fi
 
 # Waiting for healthy container.

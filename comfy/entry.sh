@@ -1,6 +1,6 @@
 #!/bin/bash
 
-folder="$(dirname $0)"
+folder="$(realpath $(dirname $0))"
 models="$folder/models"
 checkpoints="$models/checkpoints"
 loras="$models/loras"
@@ -36,4 +36,4 @@ download "$nets/SDXL_T2i-Adapter_Diffusers_Openpose.safetensors" https://hugging
 download "$nets/SDXL_T2i-Adapter_Diffusers_Sketch.safetensors" https://huggingface.co/lllyasviel/sd_control_collection/resolve/main/t2i-adapter_diffusers_xl_sketch.safetensors?download=true &
 download "$loras/SDXL_Lora.safetensors" https://huggingface.co/latent-consistency/lcm-lora-sdxl/resolve/main/pytorch_lora_weights.safetensors?download=true &
 download "$loras/SD15_Lora.safetensors" https://huggingface.co/latent-consistency/lcm-lora-sdv1-5/resolve/main/pytorch_lora_weights.safetensors?download=true &
-python "$folder/main.py"
+python "$folder/main.py" --listen 0.0.0.0 --port 8188

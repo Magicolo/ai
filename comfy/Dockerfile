@@ -10,7 +10,8 @@ RUN cd /comfy/custom_nodes && git clone --recursive https://github.com/Kosinkadi
 RUN cd /comfy/custom_nodes && git clone --recursive https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet.git
 RUN cd /comfy/custom_nodes && git clone --recursive https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
 RUN pip install --upgrade pip
+RUN pip install opencv-python
 RUN pip install -r comfy/requirements.txt
 RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
-HEALTHCHECK --interval=5s --timeout=30s --start-period=5s --retries=10 CMD curl localhost:8188
-ENTRYPOINT python /comfy/main.py
+HEALTHCHECK --interval=5s --timeout=30s --start-period=5s --retries=10 CMD curl http://localhost:8188
+ENTRYPOINT python /comfy/main.py --listen 0.0.0.0 --port 8188
