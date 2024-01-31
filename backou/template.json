@@ -152,6 +152,7 @@
         "42": {
             "inputs": {
                 "scheduler": "$scheduler",
+                "denoise": 1,
                 "steps": $steps,
                 "model": [
                     "4",
