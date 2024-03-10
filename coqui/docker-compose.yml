@@ -1,0 +1,24 @@
+volumes:
+  coqui:
+    external: true
+
+services:
+  coqui:
+    image: coqui
+    build: .
+    volumes:
+      - coqui:/root/.local/share
+      - ./input:/input
+      - ./output:/output
+    entrypoint: sleep infinity
+    # entrypoint: tts --model_name tts_models/multilingual/multi-dataset/xtts_v2 --text "Qu'est-ce qu'un paladin? L'ail qui péril sur le bord du fleuve nous ramène à l'essence même de l'escabot de verre." --speaker_wav /input/test.wav --language_idx fr --use_cuda true
+    # entrypoint: tts --model_name tts_models/multilingual/multi-dataset/bark --text "Qu'est-ce qu'un paladin? L'ail qui péril sur le bord du fleuve nous ramène à l'essence même de l'escabot de verre." --use_cuda true
+    # entrypoint: python3 TTS/server/server.py --model_name tts_models/multilingual/multi-dataset/xtts_v2 --use_cuda true
+    environment:
+      - COQUI_TOS_AGREED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all

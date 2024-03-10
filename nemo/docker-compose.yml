@@ -1,0 +1,20 @@
+volumes:
+  nemo:
+    external: true
+
+services:
+  nemo:
+    image: nemo
+    build: .
+    volumes:
+      - ./input:/input
+      - nemo:/root/.cache
+    entrypoint: python /input/canary.py
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all

@@ -5,7 +5,6 @@ folder="$(realpath $(dirname $0))"
 output="$folder/output"
 wait=0.5
 timeout=10
-entry=$(cat "$folder/entry.sh")
 
 docker build --tag comfy "$folder" &> /dev/null || exit $?
 docker volume create comfy &> /dev/null || exit $?
