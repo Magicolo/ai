@@ -7,9 +7,5 @@ cheshire/plugins
 cheshire/static
 cheshire/metadata.*
 comfy/output
-coqui/output/speech-2024-03-07_04-24-51.wav
-coqui/output/speech-2024-03-08_03-52-13.wav
-coqui/output/speech-2024-03-08_03-52-53.wav
-coqui/output/speech-2024-03-08_03-53-17.wav
-coqui/output/speech-2024-03-08_03-53-57.wav
-coqui/output/speech-2024-03-08_03-54-30.wav
+pistade/data/*.wav
+coqui/output

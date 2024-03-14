@@ -1,0 +1,38 @@
+volumes:
+  bark:
+    external: true
+  canary:
+    external: true
+
+services:
+  bark:
+    image: bark
+    build: bark
+    volumes:
+      - bark:/root/.cache
+      - ./data:/data
+    entrypoint: python /data/generate.py
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
+
+  canary:
+    image: canary
+    build: canary
+    volumes:
+      - canary:/root/.cache
+      - ./data:/data
+    entrypoint: python /data/transcribe.py
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
