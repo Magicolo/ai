@@ -9,3 +9,6 @@ cheshire/metadata.*
 comfy/output
 pistade/data/*.wav
 coqui/output
+pistade/data/token
+pistade/data/words
+pistade/dump

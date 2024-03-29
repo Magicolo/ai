@@ -1,35 +1,24 @@
 volumes:
-  bark:
+  pistade:
     external: true
-  canary:
+  enhance:
     external: true
 
 services:
-  bark:
-    image: bark
-    build: bark
+  pistade:
+    container_name: pistade
+    image: pistade
+    build: .
     volumes:
-      - bark:/root/.cache
+      - pistade:/root/.cache
+      - enhance:/opt/conda/lib/python3.10/site-packages/resemble_enhance/model_repo
       - ./data:/data
-    entrypoint: python /data/generate.py
+      - ./dump:/dump
+    entrypoint: python /data/run.py --synthesize
     devices:
       - "/dev/snd:/dev/snd"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [ gpu ]
-              count: all
-
-  canary:
-    image: canary
-    build: canary
-    volumes:
-      - canary:/root/.cache
-      - ./data:/data
-    entrypoint: python /data/transcribe.py
-    devices:
-      - "/dev/snd:/dev/snd"
+    depends_on:
+      - ollama
     deploy:
       resources:
         reservations:

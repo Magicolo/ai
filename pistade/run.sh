@@ -1,8 +1,6 @@
 #!/bin/bash
 
 folder="$(realpath $(dirname $0))"
-docker volume create canary
-docker build --tag canary "$folder/canary"
-docker volume create bark
-docker build --tag bark "$folder/bark"
-docker compose --file "$folder/docker-compose.yml" up
+docker volume create pistade
+docker volume create enhance
+docker compose --file "$folder/docker-compose.yml" --file "$folder/../ollama/docker-compose.yml" up --remove-orphans --build
