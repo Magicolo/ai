@@ -1,10 +1,10 @@
-import os, time, random, threading, math, re, json, contextlib, io, argparse
-import whisperx, whisperx.audio, ollama, numpy, sounddevice, noisereduce, scipy, scipy.signal, bark, torch, torchaudio
+import os, time, random, threading, math, re, json, argparse
+import whisperx, whisperx.audio, ollama, numpy, sounddevice, scipy, scipy.signal, bark, torch, torchaudio
 import pydub, pydub.playback, pydub.effects
 import resemble_enhance, resemble_enhance.enhancer, resemble_enhance.enhancer.inference
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--synthesize', action='store_true', help='Synthesize audio input.')
+parser.add_argument("--synthesize", action="store_true", help="Synthesize audio input.")
 arguments = parser.parse_args()
 print(f"> Run with: {arguments}")
 
@@ -13,11 +13,14 @@ audio = None
 synthesize = arguments.synthesize
 
 print(f"> Clear dump.")
-for file in os.listdir("/dump"): os.remove(f"/dump/{file}")
+for file in os.listdir("/dump"):
+    os.remove(f"/dump/{file}")
 
 print(f"> Load Ollama.")
-ollama_model = "gemma:2b-instruct" # llava # gemma:2b-instruct-fp16 # gemma:7b-instruct-q3_K_L
-ollama_client = ollama.Client(host='http://ollama:11434')
+ollama_model = (
+    "gemma:2b-instruct"  # llava # gemma:2b-instruct-fp16 # gemma:7b-instruct-q3_K_L
+)
+ollama_client = ollama.Client(host="http://ollama:11434")
 ollama_client.pull(ollama_model)
 
 print(f"> Load Enhance.")
@@ -39,12 +42,16 @@ whisper_lock = threading.Lock()
 # with open("/data/token", "r") as file:
 #     whisper_diarize = whisperx.DiarizationPipeline(use_auth_token=file.read(), device=whisper_device)
 
+
 def unique_path(folder, name, extension):
     counter = 0
     while True:
         current = f"{folder}/{name}_{counter}.{extension}"
-        if os.path.exists(current): counter += 1
-        else: return current
+        if os.path.exists(current):
+            counter += 1
+        else:
+            return current
+
 
 def dump(name, value, rate=None):
     if isinstance(value, str):
@@ -58,7 +65,10 @@ def dump(name, value, rate=None):
     elif torch.is_tensor(value):
         torchaudio.save(unique_path("/dump/", name, "wav"), value, rate)
     else:
-        scipy.io.wavfile.write(unique_path("/dump/", name, "wav"), rate=rate, data=value)
+        scipy.io.wavfile.write(
+            unique_path("/dump/", name, "wav"), rate=rate, data=value
+        )
+
 
 def whisper(samples):
     global whisper_model, whisper_lock, whisper_align, whisper_device
@@ -71,13 +81,18 @@ def whisper(samples):
             align_model, align_meta = whisper_align[language]
         elif language in ["fr", "en", "de", "es", "it"]:
             print(f"> Load align model for '{language}'.")
-            align_model, align_meta = whisperx.load_align_model(language_code=language, device=whisper_device)
+            align_model, align_meta = whisperx.load_align_model(
+                language_code=language, device=whisper_device
+            )
             whisper_align[language] = align_model, align_meta
         else:
             return None
 
         segments = result["segments"]
-        return whisperx.align(segments, align_model, align_meta, samples, whisper_device)
+        return whisperx.align(
+            segments, align_model, align_meta, samples, whisper_device
+        )
+
 
 def generate(prompt, rate):
     global bark_rate, bark_lock
@@ -86,22 +101,28 @@ def generate(prompt, rate):
     response = ollama_client.generate(ollama_model, prompt=prompt)
     text = response["response"]
     print(f"> Synthesize audio for '{text}'.")
-    with bark_lock: 
+    with bark_lock:
         history, samples = bark.generate_audio(text, silent=True, output_full=True)
     # TODO: Use 'history' for more coherence in the generated audio?
     print(f"> Resample synthesized audio.")
-    samples = scipy.signal.resample(samples, int(len(samples) * float(rate) / float(bark_rate)))
+    samples = scipy.signal.resample(
+        samples, int(len(samples) * float(rate) / float(bark_rate))
+    )
     return text, history, samples
+
 
 def enhance(audio, rate):
     global enhance_device, enhance_model, enhance_lock
 
     with enhance_lock:
-        return resemble_enhance.inference.inference(enhance_model, audio, rate, enhance_device)  
+        return resemble_enhance.inference.inference(
+            enhance_model, audio, rate, enhance_device
+        )
+
 
 def take(rate):
     global audio_data, audio_lock
-    
+
     if audio_data is None or len(audio_data) < rate:
         return None
     else:
@@ -111,12 +132,14 @@ def take(rate):
 
         meta = numpy.iinfo(numpy.int16)
         multiplier = 0.5 / (meta.max - meta.min)
-        return numpy.multiply(samples, multiplier, dtype=numpy.float32)
+        return numpy.multiply(audio, multiplier, dtype=numpy.float32)
 
-def word_path(name): 
+
+def word_path(name):
     name = name.replace(" ", "_")
     name = re.sub(r"[^\w\s]", "", name)
     return f"/data/words/{name}.wav"
+
 
 def extract(audio, result, rate):
     for segment in result["segments"]:
@@ -129,8 +152,15 @@ def extract(audio, result, rate):
             start = None
 
             for word in words[i:]:
-                if "score" not in word or "start" not in word or "end" not in word or "word" not in word: break
-                if word["score"] < 0.75: break
+                if (
+                    "score" not in word
+                    or "start" not in word
+                    or "end" not in word
+                    or "word" not in word
+                ):
+                    break
+                if word["score"] < 0.75:
+                    break
 
                 name = word["word"] if name is None else name + " " + word["word"]
                 start = start or word["start"]
@@ -138,41 +168,56 @@ def extract(audio, result, rate):
                 data = audio[int(start * rate) : int(word["end"] * rate)]
                 scipy.io.wavfile.write(word_path(name), rate=rate, data=data)
 
+
 def record():
     global synthesize, whisper_rate
-    
+
     def callback(input, frames, time, status):
         global audio_data, audio_lock
 
         with audio_lock:
-            audio_data = input if audio_data is None else numpy.append(audio_data, input)
+            audio_data = (
+                input if audio_data is None else numpy.append(audio_data, input)
+            )
 
-    if synthesize: return
+    if synthesize:
+        return
 
-    with sounddevice.InputStream(samplerate=whisper_rate, channels=1, dtype=numpy.int16, callback=callback) as stream:
+    with sounddevice.InputStream(
+        samplerate=whisper_rate, channels=1, dtype=numpy.int16, callback=callback
+    ) as stream:
         while stream.active:
             time.sleep(1)
 
+
 def transcribe():
     global synthesize, whisper_rate
-    
+
     while True:
         if synthesize:
-            _, _, samples = generate(f"Écris une courte phrase créative et poétique en français sans introduction.", whisper_rate)
+            _, _, samples = generate(
+                f"Écris une courte phrase créative et poétique en français sans introduction.",
+                whisper_rate,
+            )
         else:
             samples = take(whisper_rate)
 
-        if samples is None: time.sleep(0.1); continue
+        if samples is None:
+            time.sleep(0.1)
+            continue
         result = whisper(samples)
-        if result is None: time.sleep(0.1); continue
+        if result is None:
+            time.sleep(0.1)
+            continue
         extract(samples, result, whisper_rate)
         dump("transcribe-audio", samples, rate=whisper_rate)
         dump("transcribe-result", result)
-        
+
         # diarize_segments = diarize_model(record)
         # result = whisperx.assign_word_speakers(diarize_segments, result)
         # print(diarize_segments)
         # print(result["segments"])
+
 
 def speak():
     global whisper_rate
@@ -184,7 +229,8 @@ def speak():
         words = set()
         for file in os.listdir(folder):
             [name, *_] = os.path.splitext(file)
-            for split in name.split('_'): words.add(split)
+            for split in name.split("_"):
+                words.add(split)
         words = random.sample(words, min(len(words), 100))
 
         prompt = f"Écris une phrase composée uniquement des mots dans la liste suivante: {words}."
@@ -192,8 +238,9 @@ def speak():
         scipy.io.wavfile.write(f"/data/speak.wav", rate=whisper_rate, data=samples)
         print(f"> Transcribe generated audio.")
         result = whisper(samples)
-        if result is None: continue
-        
+        if result is None:
+            continue
+
         print(f"> Mutate generated audio.")
         audio = pydub.AudioSegment.from_wav("/data/speak.wav")
         # TODO: Find out why creating the 'AudioSegment' leads to massive clipping and distortion.
@@ -210,29 +257,54 @@ def speak():
                 end = None
 
                 for word in words[index:]:
-                    if "score" not in word or "start" not in word or "end" not in word or "word" not in word: break
-                    if word["score"] < 0.5: print("> Word score too low."); break
+                    if (
+                        "score" not in word
+                        or "start" not in word
+                        or "end" not in word
+                        or "word" not in word
+                    ):
+                        break
+                    if word["score"] < 0.5:
+                        print("> Word score too low.")
+                        break
 
                     name = word["word"] if name is None else name + " " + word["word"]
                     path = word_path(name)
-                    if os.path.exists(path): segment = path
-                    else: print(f"> Word '{name}' at path '{path}' not found."); break
+                    if os.path.exists(path):
+                        segment = path
+                    else:
+                        print(f"> Word '{name}' at path '{path}' not found.")
+                        break
 
                     index += 1
                     start = start or word["start"]
                     end = word["end"]
-                
-                if segment is None or start is None or end is None: index += 1; continue
+
+                if segment is None or start is None or end is None:
+                    index += 1
+                    continue
                 segment = pydub.AudioSegment.from_wav(segment)
                 start *= 1000
                 end *= 1000
                 speed = len(segment) / float(end - start)
-                try: segment = pydub.effects.speedup(segment, playback_speed=speed, crossfade=10)
-                except Exception as error: print("> Speedup error:", error)
-                try: segment = pydub.effects.normalize(segment)
-                except Exception as error: print("> Normalize error:", error)
-                try: audio = audio[:start].append(segment, crossfade=fade).append(audio[end:], crossfade=fade)
-                except Exception as error: print("> Append error:", error)
+                try:
+                    segment = pydub.effects.speedup(
+                        segment, playback_speed=speed, crossfade=10
+                    )
+                except Exception as error:
+                    print("> Speedup error:", error)
+                try:
+                    segment = pydub.effects.normalize(segment)
+                except Exception as error:
+                    print("> Normalize error:", error)
+                try:
+                    audio = (
+                        audio[:start]
+                        .append(segment, crossfade=fade)
+                        .append(audio[end:], crossfade=fade)
+                    )
+                except Exception as error:
+                    print("> Append error:", error)
                 print(f"> Replace word '{name}' in generated audio.")
 
         # TODO: Find a way to convert the AudioSegment directly to a tensor.
@@ -246,7 +318,6 @@ def speak():
         dump("speak-result", result)
         dump("speak-raw", samples, rate=whisper_rate)
         dump("speak-process", audio.unsqueeze(0), rate=rate)
-
 
         # print(f"> Compose sentence: {text}")
         # words = [word for word in re.split(r'\W+', text) if word != '']
@@ -266,11 +337,14 @@ def speak():
         # TODO: Reduce noise from audio using 'resemblance-ai' model.
         # TODO: Trim silence from beginning and end of audio.
 
+
 threads = [
     # threading.Thread(target=record),
     # threading.Thread(target=transcribe),
     threading.Thread(target=speak),
 ]
 
-for thread in threads: thread.start()
-for thread in threads: thread.join()
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
