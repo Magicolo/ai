@@ -13,9 +13,9 @@ upscaler="RealESRGAN_x2.pth"
 upscale=2
 skip=""
 prompt=""
-memory=25
+memory=50
 keep=false
-prompter="solar:10.7b-instruct-v1-q8_0"
+prompter="llama3:8b-instruct-q8_0"
 descriptor="llava:13b"
 
 while [ $# -gt 0 ]; do

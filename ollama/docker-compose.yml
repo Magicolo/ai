@@ -4,7 +4,8 @@ volumes:
 
 services:
   ollama:
-    image: ollama/ollama
+    image: ollama
+    build: .
     volumes:
       - ollama:/root/.ollama
     healthcheck:
