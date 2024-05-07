@@ -1,0 +1,1 @@
+from streamdiffusion.utils.wrapper import StreamDiffusionWrapper

@@ -6,8 +6,8 @@ output="$folder/output"
 wait=0.5
 timeout=10
 
-docker build --tag comfy "$folder" &> /dev/null || exit $?
 docker volume create comfy &> /dev/null || exit $?
+docker compose --file "$folder/docker-compose.yml" build --quiet comfy &> /dev/null || exit $?
 if [ "$port" -le 0 ]; then
     comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach comfy) || exit $?
 else

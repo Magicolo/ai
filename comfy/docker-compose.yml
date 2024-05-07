@@ -7,6 +7,7 @@ services:
     image: comfy
     build: .
     volumes:
+      - ./input:/comfy/input
       - ./output:/comfy/output
       - ./entry.sh:/comfy/entry.sh
       - comfy:/comfy/models

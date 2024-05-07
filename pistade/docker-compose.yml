@@ -14,7 +14,8 @@ services:
       - enhance:/opt/conda/lib/python3.10/site-packages/resemble_enhance/model_repo
       - ./data:/data
       - ./dump:/dump
-    entrypoint: python /data/run.py --synthesize
+    entrypoint: sleep infinity
+    # entrypoint: python /data/run.py --synthesize
     devices:
       - "/dev/snd:/dev/snd"
     depends_on:

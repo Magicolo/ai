@@ -13,12 +13,15 @@ download() {
     fi
 }
 
-download "$checkpoints/TURBO_TurboVision.safetensors" https://civitai.com/api/download/models/255474 &
+download "$checkpoints/TURBO_SDXL_Original.safetensors" https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors?download=true &
+download "$checkpoints/TURBO_TurboVision.safetensors" https://civitai.com/api/download/models/273102 &
 download "$checkpoints/TURBO_UnstableDiffusers.safetensors" https://civitai.com/api/download/models/247214 &
-download "$checkpoints/TURBO_DreamShaper.safetensors" https://civitai.com/api/download/models/251662 &
-download "$checkpoints/SDXL_Juggernaut.safetensors" https://civitai.com/api/download/models/240840?type=Model&format=SafeTensor&size=full&fp=fp16 &
-download "$checkpoints/SDXL_Colossus.safetensors" https://civitai.com/api/download/models/238319?type=Model&format=SafeTensor&size=full&fp=fp16 &
+download "$checkpoints/TURBO_DreamShaper.safetensors" https://civitai.com/api/download/models/351306 &
+download "$checkpoints/SDXL_Juggernaut.safetensors" https://civitai.com/api/download/models/456194 &
+download "$checkpoints/SDXL_UnstableDiffusers.safetensors" https://civitai.com/api/download/models/395107?type=Model&format=SafeTensor&size=pruned&fp=fp16 &
+download "$checkpoints/SDXL_Colossus.safetensors" https://civitai.com/api/download/models/459216 &
 download "$checkpoints/SDXL_ThinkDiffusion.safetensors" https://civitai.com/api/download/models/190908?type=Model&format=SafeTensor&size=full&fp=fp16 &
+download "$checkpoints/LIGHTNING_RealVis.safetensors" https://civitai.com/api/download/models/361593 &
 download "$vaes/SD15_ClearVae.safetensors" https://civitai.com/api/download/models/88156?type=Model&format=SafeTensor &
 download "$vaes/SD15_Kl-F8-Anime.safetensors" https://civitai.com/api/download/models/28569?type=Model&format=Other &
 download "$vaes/SD15_Vae-Ft-Mse840000.safetensors" https://huggingface.co/stabilityai/sd-vae-ft-mse-original/resolve/main/vae-ft-mse-840000-ema-pruned.safetensors?download=true &

@@ -1,0 +1,56 @@
+volumes:
+  stream:
+    external: true
+
+services:
+  stream:
+    image: stream
+    build: ./StreamDiffusion
+    volumes:
+      - ./input:/input
+      - ./output:/output
+      - stream:/home/user/.cache
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
+
+  stream-t2i:
+    image: stream-t2i
+    build: ./StreamDiffusion/demo/realtime-txt2img
+    volumes:
+      - ./input:/input
+      - ./output:/output
+      - stream:/home/user/.cache
+    ports:
+      - 9090:9090
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
+
+  stream-i2i:
+    image: stream-i2i
+    build: ./StreamDiffusion/demo/realtime-img2img
+    volumes:
+      - ./input:/input
+      - ./output:/output
+      - stream:/home/user/.cache
+    ports:
+      - 7860:7860
+    devices:
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
