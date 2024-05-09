@@ -9,7 +9,7 @@ timeout=10
 docker volume create comfy &> /dev/null || exit $?
 docker compose --file "$folder/docker-compose.yml" build --quiet comfy &> /dev/null || exit $?
 if [ "$port" -le 0 ]; then
-    comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach comfy) || exit $?
+    comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach --service-ports comfy) || exit $?
 else
     comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach --publish "$port:8188" comfy) || exit $?
 fi

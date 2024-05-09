@@ -1,22 +1,18 @@
 volumes:
-  stream:
+  fooocus:
     external: true
 
 services:
-  stream:
-    image: stream
+  fooocus:
+    image: fooocus
     build: .
-    entrypoint: python /input/t2i.py
     ports:
-      - 9090:9090
       - 7860:7860
     volumes:
       - ./input:/input
       - ./output:/output
-      - stream:/root/.cache
-    devices:
-      - /dev/video0:/dev/video0
-      - /dev/snd:/dev/snd
+      - fooocus:/fooocus/models
+    entrypoint: /fooocus/entry.sh
     deploy:
       resources:
         reservations:
