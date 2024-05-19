@@ -8,7 +8,9 @@ services:
     build: .
     ports:
       - 8188:8188
+      - 7860:7860
     volumes:
+      - ./input:/input
       - ./Comfy:/comfy
       - comfy:/root/.cache
     entrypoint: python /comfy/main.py --listen 0.0.0.0 --port 8188
@@ -18,6 +20,8 @@ services:
       timeout: 30s
       retries: 10
       start_period: 5s
+    devices:
+      - /dev/video0:/dev/video0
     deploy:
       resources:
         reservations:
