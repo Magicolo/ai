@@ -1,0 +1,19 @@
+volumes:
+  audiocraft:
+    external: true
+
+services:
+  audiocraft:
+    image: audiocraft
+    build: .
+    volumes:
+      - ./input:/input
+      - ./audiocraft:/audiocraft
+      - audiocraft:/root/.cache
+    entrypoint: sleep infinity
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all

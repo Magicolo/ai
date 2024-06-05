@@ -1,0 +1,19 @@
+volumes:
+  tango:
+    external: true
+
+services:
+  tango:
+    image: tango
+    build: .
+    volumes:
+      - ./input:/input
+      - ./Tango:/tango
+      - tango:/root/.cache
+    entrypoint: sleep infinity
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all

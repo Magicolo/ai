@@ -1,0 +1,20 @@
+volumes:
+  riffusion:
+    external: true
+
+services:
+  riffusion:
+    image: riffusion
+    build: .
+    ports:
+      - 8501:8501
+    volumes:
+      - ./riffusion:/riffusion
+      - riffusion:/root/.cache
+    entrypoint: sleep infinity
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [ gpu ]
+              count: all
