@@ -13,7 +13,7 @@ services:
       - ./input:/input
       - ./Comfy:/comfy
       - comfy:/root/.cache
-    entrypoint: python /comfy/main.py --listen 0.0.0.0 --port 8188
+    entrypoint: python /comfy/main.py --listen 0.0.0.0 --port 8188 --highvram
     healthcheck:
       test: curl http://localhost:8188
       interval: 5s
