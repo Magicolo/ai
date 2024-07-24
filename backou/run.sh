@@ -15,8 +15,8 @@ skip=""
 prompt=""
 memory=50
 keep=false
-prompter="llama3:8b-instruct-q8_0"
-descriptor="llava:13b"
+prompter="llama3.1"
+descriptor="llava"
 
 while [ $# -gt 0 ]; do
     key="${1#--}"
