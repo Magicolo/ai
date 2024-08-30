@@ -7,7 +7,19 @@ wait=0.5
 timeout=10
 
 docker volume create comfy &> /dev/null || exit $?
-docker compose --file "$folder/docker-compose.yml" build comfy || exit $?
+
+attempt=0
+maximum=10
+while true; do
+    if docker compose --file "$folder/docker-compose.yml" build comfy; then
+        break
+    elif [ $attempt -le $maximum ]; then
+        attempt=$((attempt+1))
+    else 
+        exit $?
+    fi
+done
+
 if [ "$port" -le 0 ]; then
     comfy=$(docker compose --file "$folder/docker-compose.yml" run --rm --detach comfy) || exit $?
 else
