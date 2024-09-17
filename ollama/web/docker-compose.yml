@@ -1,12 +1,18 @@
 volumes:
   ollama:
     external: true
+  web:
+    external: true
 
 services:
-  ollama:
-    image: ollama/ollama
+  web:
+    image: ghcr.io/open-webui/open-webui:ollama
+    restart: always
+    ports:
+      - 3000:8080
     volumes:
       - ollama:/root/.ollama
+      - web:/app/backend/data
     healthcheck:
       test: ollama --version
       interval: 5s
