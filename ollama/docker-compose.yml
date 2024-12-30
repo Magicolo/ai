@@ -9,6 +9,7 @@ services:
       - ollama:/root/.ollama
     ports:
       - 11434:11434
+    restart: always
     healthcheck:
       test: ollama --version
       interval: 5s
