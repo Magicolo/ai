@@ -24,4 +24,6 @@ RUN pip install transformers gradio xformers tensorrt flash-attn onnxruntime-gpu
     --requirement https://raw.githubusercontent.com/Lightricks/ComfyUI-LTXVideo/refs/heads/master/requirements.txt \
     --requirement https://raw.githubusercontent.com/kijai/ComfyUI-Florence2/refs/heads/main/requirements.txt \
     --requirement https://raw.githubusercontent.com/pydn/ComfyUI-to-Python-Extension/refs/heads/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/DoctorDiffusion/ComfyUI-MediaMixer/refs/heads/main/requirements.txt
+    --requirement https://raw.githubusercontent.com/DoctorDiffusion/ComfyUI-MediaMixer/refs/heads/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/wallish77/wlsh_nodes/refs/heads/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/yuvraj108c/ComfyUI-Upscaler-Tensorrt/refs/heads/master/requirements.txt
