@@ -1,15 +1,17 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel
 
 RUN apt update && \
     apt upgrade --yes && \
-    apt install --no-install-recommends --yes git git-lfs curl libgl1 libglib2.0-0 && \
+    apt install --no-install-recommends --yes git git-lfs curl ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 && \
     apt autoremove --yes && \
     apt clean --yes && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-RUN pip install transformers gradio xformers tensorrt flash-attn onnxruntime-gpu \
-    --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cu124 \
-    --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/refs/heads/master/requirements.txt \
+RUN pip install --upgrade uv pip wheel setuptools
+RUN uv pip install \
+    transformers accelerate safetensors sentencepiece einops gradio bitsandbytes optimum imageio-ffmpeg xformers tensorrt-cu12 flash-attn onnxruntime-gpu \
+    --system \
+    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/requirements.txt \
     --requirement https://raw.githubusercontent.com/Fannovel16/comfyui_controlnet_aux/main/requirements.txt \
     --requirement https://raw.githubusercontent.com/cubiq/ComfyUI_essentials/main/requirements.txt \
     --requirement https://raw.githubusercontent.com/Fannovel16/ComfyUI-Frame-Interpolation/main/requirements-with-cupy.txt \
@@ -21,9 +23,9 @@ RUN pip install transformers gradio xformers tensorrt flash-attn onnxruntime-gpu
     --requirement https://raw.githubusercontent.com/kijai/ComfyUI-SUPIR/main/requirements.txt \
     --requirement https://raw.githubusercontent.com/Kosinkadink/ComfyUI-VideoHelperSuite/main/requirements.txt \
     --requirement https://raw.githubusercontent.com/rgthree/rgthree-comfy/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/Lightricks/ComfyUI-LTXVideo/refs/heads/master/requirements.txt \
-    --requirement https://raw.githubusercontent.com/kijai/ComfyUI-Florence2/refs/heads/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/pydn/ComfyUI-to-Python-Extension/refs/heads/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/DoctorDiffusion/ComfyUI-MediaMixer/refs/heads/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/wallish77/wlsh_nodes/refs/heads/main/requirements.txt \
-    --requirement https://raw.githubusercontent.com/yuvraj108c/ComfyUI-Upscaler-Tensorrt/refs/heads/master/requirements.txt
+    --requirement https://raw.githubusercontent.com/Lightricks/ComfyUI-LTXVideo/master/requirements.txt \
+    --requirement https://raw.githubusercontent.com/kijai/ComfyUI-Florence2/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/pydn/ComfyUI-to-Python-Extension/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/DoctorDiffusion/ComfyUI-MediaMixer/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/wallish77/wlsh_nodes/main/requirements.txt \
+    --requirement https://raw.githubusercontent.com/yuvraj108c/ComfyUI-Upscaler-Tensorrt/master/requirements.txt
