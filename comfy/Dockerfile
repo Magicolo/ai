@@ -6,8 +6,8 @@ RUN apt update && \
     apt autoremove --yes && \
     apt clean --yes && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-RUN pip install --upgrade uv pip wheel setuptools
+RUN pip install --upgrade uv pip wheel setuptools numpy
 RUN pip install \
-    transformers accelerate safetensors sentencepiece einops gradio bitsandbytes optimum imageio-ffmpeg xformers tensorrt-cu12 flash-attn onnxruntime-gpu cupy-cuda12x \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
-    --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/requirements.txt
+    transformers accelerate safetensors sentencepiece einops gradio bitsandbytes optimum imageio-ffmpeg xformers tensorrt-cu12 onnxruntime-gpu cupy-cuda12x \
+    --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/requirements.txt \
+    --requirement https://raw.githubusercontent.com/Comfy-Org/ComfyUI-Manager/main/requirements.txt
