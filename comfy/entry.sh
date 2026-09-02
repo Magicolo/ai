@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -o errexit
 
 # Dual-process entrypoint: ComfyUI + comfy-mcp over HTTP (no extra script)
 # - ComfyUI on :8188
@@ -15,13 +15,13 @@ comfy set-default /comfy >/dev/null 2>&1 || true
 # (covers fresh host clones that were not baked into image, follows same --requirement pattern).
 for req in /comfy/custom_nodes/*/requirements.txt /comfy/custom_nodes/*/requirements-*.txt; do
   [ -f "$req" ] || continue
-  echo "[entry.sh] pip install -r $req"
-  pip install --no-cache-dir -r "$req" || echo "[entry.sh] WARN: pip install -r $req failed" >&2
+  echo "[entry.sh] pip install --requirement $req"
+  pip install --no-cache-dir --requirement "$req" || echo "[entry.sh] WARN: pip install --requirement $req failed" >&2
 done
 
 # Ensure loopback patch persists across rebuilds/host clones (fixed workflow_key for ernie_zoom)
 PY_PATCH="/comfy/custom_nodes/comfy-loopback-buffer/src/image_loopback/nodes.py"
-if [ -f "$PY_PATCH" ] && ! grep -q 'ernie_zoom_fixed source=store_node' "$PY_PATCH"; then
+if [ -f "$PY_PATCH" ] && ! grep --quiet 'ernie_zoom_fixed source=store_node' "$PY_PATCH"; then
   echo "[entry.sh] patching loopback nodes.py for fixed ernie_zoom key"
   python3 - << 'PYPATCH'
 import pathlib
@@ -47,8 +47,8 @@ fi
 # Migrate any old temp loopback history to new output-confined location (one-time)
 if [ -d /comfy/temp/image_loopback/ernie_zoom_fixed ] && [ ! -d /comfy/output/loopback_ernie_zoom/ernie_zoom_fixed ]; then
   echo "[entry.sh] migrating loopback history temp -> output"
-  mkdir -p /comfy/output/loopback_ernie_zoom
-  cp -a /comfy/temp/image_loopback/ernie_zoom_fixed/* /comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/ 2>/dev/null || cp -a /comfy/temp/image_loopback/ernie_zoom_fixed /comfy/output/loopback_ernie_zoom/ 2>/dev/null || true
+  mkdir --parents /comfy/output/loopback_ernie_zoom
+  cp --archive /comfy/temp/image_loopback/ernie_zoom_fixed/* /comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/ 2>/dev/null || cp --archive /comfy/temp/image_loopback/ernie_zoom_fixed /comfy/output/loopback_ernie_zoom/ 2>/dev/null || true
 fi
 
 # Always render square edges (Straight) — requires frontend settings patch
@@ -73,7 +73,7 @@ PYSETTINGS
 fi
 # Ensure settings file exists even if missing (first boot)
 if [ ! -f "$SETTINGS" ]; then
-  mkdir -p "$(dirname "$SETTINGS")"
+  mkdir --parents "$(dirname "$SETTINGS")"
   echo '{"Comfy.LinkRenderMode":"Straight"}' > "$SETTINGS"
 fi
 
