@@ -27,7 +27,7 @@ comfy/                          # wrapper repo (this file's scope)
       comfyui-manager           # 3.41, package manager
       comfy-loopback-buffer     # holo-q/comfy-loopback-buffer 1.0.0 MIT — Store/Load/Configure Loopback (history append via disk)
       ComfyUI-VideoHelperSuite  # Kosinkadink 1.7.9 — VideoCombine etc. (kept QoL, not used after native CreateVideo)
-      cg-use-everywhere         # chrisgoringe 7.8 Apache2 — Anything Everywhere broadcast (replaces manual spaghetti)
+      cg-use-everywhere         # chrisgoringe 8.0 (50ae9f8) — Anything Everywhere broadcast; ⚠️ BROKEN with frontend 1.51.9 — do not add UE nodes to workflows (see §7)
       comfyui-workflow-prettier # deepme987/comfyui-workflow-prettier — auto-positioning (Sugiyama Layered DAG layout)
     user/default/
       workflows/                # browser-visible workflows (auto-formatted, see below)
@@ -74,8 +74,8 @@ comfy/                          # wrapper repo (this file's scope)
 
 ### 6. Workflows & Validation
 - Browser location is `Comfy/user/default/workflows/` (not `Comfy/workflows/`). All 5 custom workflows are listed below; 3 are subgraph-based (Ernie Turbo QT), 2 are flat DAGs (infinite zoom).
-- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (or `python3 /tmp/prettify.py` port) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 25 nodes 15 layers 5540×1330; `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
-- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 25 nodes valid; `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
+- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (or `python3 /tmp/prettify.py` port) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 24 nodes 15 layers 5540×1330; `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
+- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 24 nodes valid; `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
 
 #### 6.1 Ernie Turbo QT — Subgraph Family (3 files, `definitions.subgraphs[0]` id `03921aea-a70e-44b4-bc77-f6bda10f2120`)
 
@@ -150,7 +150,7 @@ Wiring deltas vs simple: `94:0 --115--> 93:0` and `93:0 --117--> 95:4 (STRING)`,
 - Linear chain ×11: `ImageScaleBy bicubic 0.85` (768→652.8, border ~57.6px) → `ImagePadForOutpaint 58,58,58,58 feather 20` → `VAEEncodeForInpaint grow_mask_by 6` → `KSampler 8 steps cfg 1 euler simple denoise 0.65 seed 1235..1245` → `VAEDecode`. Final scale `0.85^11 ≈ 0.167`.
 - `BatchImagesNode` with 12 explicit `images.image0..11` inputs tapped from each `VAEDecode` → `CreateVideo fps 8` → `SaveVideo prefix Ernie_Zoom format auto`. Produces 12f @8fps = 1.5s per queue, rebuilds all frames every queue — **legacy, do not extend**.
 
-**`ernie_infinite_zoom_loop.json` (✅ incremental, 25 nodes, 29 links, 15 levels, bbox 5540×1330):**
+**`ernie_infinite_zoom_loop.json` (✅ incremental, 24 nodes, 29 links, 15 levels, bbox 5540×1330):**
 
 | id | type | widgets / inputs | role |
 |----|------|------------------|------|
@@ -178,7 +178,8 @@ Wiring deltas vs simple: `94:0 --115--> 93:0` and `93:0 --117--> 95:4 (STRING)`,
 | 61 | `PreviewImage` | — | preview accumulated stack (126) |
 | 62 | `CreateVideo` | `[8]` fps | VIDEO from 127 |
 | 63 | `SaveVideo` | `["Ernie_Zoom_Loop","auto","auto"]` | mp4 under `output/` |
-| 70 | `Anything Everywhere` | `[]` | broadcast MODEL/CLIP/VAE/COND to reduce spaghetti |
+
+**2026-09-02: node 70 (`Anything Everywhere`) REMOVED.** It was completely disconnected (input `link:null`, zero links — broadcast nothing) but its mere presence made every browser Queue fail with `res is undefined`: UE 8.0's `find_duplicate_broadcasted_types` crashes on `node.inputs === undefined` (frontend 1.51.9), the exception is swallowed by `call_function_with_modified_graph` which returns `undefined`, and VHS's outer `graphToPrompt` wrapper then dereferences `res.workflow` → error dialog. All MODEL/CLIP/VAE/COND wiring was already explicit links, so removal required no rewiring; verified end-to-end (queue OK, history 6→7, new mp4). Do not re-add UE nodes (see §7).
 
 Flow per Queue: `32→33→34→40(starting_image) —40:117→50→51→52→53→54→55→56(1-1000)→61+62→63`, with `55:124→60` for per-frame preview. `57` configures unlimited history. Pad math: `512*0.85=435.2`, border `(512-435)/2≈38.5` → `38,38,39,39`. Seeds `randomize` per queue. History under `/comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/history/*.png` (fixed key patch, see §3), video `output/Ernie_Zoom_Loop_*.mp4`.
 
@@ -187,7 +188,7 @@ Flow per Queue: `32→33→34→40(starting_image) —40:117→50→51→52→53
 ### 7. Custom Nodes Audit (QoL / Safety)
 - **comfy-loopback-buffer** (holo-q, 1.0.0 MIT, deps torch/pillow/numpy/aiohttp): replaces filesystem Save/Load reimplementation for incremental accumulation. Small, tested, maintained — **keep** (required for perpetual zoom). Not hugely starred but functionally unique, no known CVEs, no network.
 - **ComfyUI-VideoHelperSuite** (Kosinkadink, 1.7.9, ~4k★): `VideoCombine` etc. Thousands of dependents, active, deps already baked (`opencv-python imageio-ffmpeg`). Native `CreateVideo/SaveVideo` now covers our use, so VHS is not strictly needed but harmless QoL for future video tasks — **keep**, but don't rely on it for core workflow.
-- **cg-use-everywhere** (chrisgoringe, 7.8 Apache2, 1k★, frontend-only): `Anything Everywhere` broadcast reduces link spaghetti, no python deps. Lightweight, widely used — **keep** (replaces manual wiring reimplementation).
+- **cg-use-everywhere** (chrisgoringe, checkout 50ae9f8 = upstream main HEAD 2026-07-20, "8.0", 1k★, frontend-only): `Anything Everywhere` broadcast reduces link spaghetti, no python deps. **⚠️ INCOMPATIBLE with frontend 1.51.9** — any workflow containing a UE node fails at browser Queue: UE 8.0 assumes `node.inputs`/`node.outputs` always defined (`find_duplicate_broadcasted_types` use_everywhere_utilities.js:365 `reading 'length'`; also `fix_unconnected_inputs` `reading 'filter'` in afterConfigureGraph on load), the throw is swallowed by `call_function_with_modified_graph` → returns `undefined` → VHS's outer wrapper dereferences `res.workflow` → `res is undefined` error dialog. No newer upstream fix exists as of 2026-09-02. **Keep installed** (workflows without UE nodes queue fine — wrappers pass through cleanly) but **do not add UE nodes to any workflow** until upstream/compatible-frontend resolves; wire explicitly instead.
 - **comfyui-workflow-prettier** (deepme987, Sugi­yama Layered/Compact/Linear/SortByType, 1103-line JS, zero python deps): auto-positions DAGs properly (barycenter crossing minimization, median coordinates). Successor to hand-rolled `/tmp/format_*.py` scripts — **keep** (required tool for all position edits, avoids horizontal explosion).
 - No removal recommended; all are maintained, trustworthy, popular. If a new dep is added, check stars, commit recency, license, and whether it replaces a reimplementation.
 
