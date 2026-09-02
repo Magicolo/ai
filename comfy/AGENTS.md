@@ -35,7 +35,7 @@ comfy/                          # wrapper repo (this file's scope)
         ernie_turbo_qt_simple.json        # minimal variant
         ernie_turbo_qt_enhanced.json      # backup with enhancer chain (OOM on 16GB — don't use without >24GB)
         ernie_infinite_zoom.json          # unrolled 12-frame fixed batch, N=12 768px, CreateVideo fps8 (legacy, per-queue rebuilds all frames)
-        ernie_infinite_zoom_loop.json     # ✅ incremental: one new frame per Queue, 512px, scale 0.85 Pad 38/39 feather20, history_limit 0 unlimited, Preview + CreateVideo fps8
+        ernie_infinite_zoom_loop.json     # ✅ incremental IN-zoom: one new frame per Queue, crop 492@10,10 → rescale 512 bicubic (1.041×/frame), img2img denoise 0.60, history_limit 0 unlimited, video chronological "1000-1", CreateVideo fps8
       comfy.settings.json       # frontend settings — *must* contain `"Comfy.LinkRenderMode":"Straight"` for square right-angle edges
 ```
 
@@ -69,13 +69,13 @@ comfy/                          # wrapper repo (this file's scope)
 - Host reports `RTX 4060 Ti 16GB` (17175674880 bytes → 15.57 GiB usable) + secondary 2060. comfy-mcp `server_info` confirms same.
 - Ernie Turbo QT: base ~8B DiT + ministral-3b + flux2-vae, official template `image_ernie_image_turbo` (subgraph 19 nodes, shift 3.1, 8 steps euler simple cfg1). Civitai 2660020 fp8-v2 id 3028150 hash 3A2FC7B902.
 - **Why enhancer removed**: `TextGenerate` (prompt enhancer) loads second LLM ~6.5G on top of ministral 7.2G + DiT 7.7G + VAE 0.32G → OOM (`15.57 GiB` limit). Logs showed `nodes_textgen.py:64 clip.generate OOM` even when Switch false (node still executes). Fix: delete nodes 93,95,96,97,98 and wire `94->67` directly via link 134; keep 9 inputs with empty linkIds for slot indices. Kept `ernie_turbo_qt_enhanced.json` as backup for >24GB VRAM.
-- Resolution dropped to **512** (PrimitiveInt) from original 1024/768 to keep img2img 0.85 pad math cheap and fit VRAM: pad = (512-435)//2 ≈ 38/39 with feather 20, grow_mask_by 6, denoise 0.65, steps 8 cfg1 euler simple. Few sec/frame on 4060 Ti.
+- Resolution kept at **512** (PrimitiveInt) from original 1024/768 to fit VRAM and stay fast. Zoom mechanics (since 2026-09-02 redesign): crop 492² centered (10 px shaved/side) → bicubic rescale back to 512² (= 1.041× dive per frame), full-frame img2img denoise 0.60, steps 8 cfg1 euler simple. Few sec/frame on 4060 Ti.
 - Models symlinked: `ernieImageTurboQT_fp8V2.safetensors` ↔ `ernie-image-turbo.safetensors` for CLIPLoader compatibility.
 
 ### 6. Workflows & Validation
 - Browser location is `Comfy/user/default/workflows/` (not `Comfy/workflows/`). All 5 custom workflows are listed below; 3 are subgraph-based (Ernie Turbo QT), 2 are flat DAGs (infinite zoom).
-- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (or `python3 /tmp/prettify.py` port) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 24 nodes 15 layers 5540×1330; `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
-- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 24 nodes valid; `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
+- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (or `python3 /tmp/prettify.py` port) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 28 nodes 15 layers 5460×2060; `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
+- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 28 nodes valid; `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
 
 #### 6.1 Ernie Turbo QT — Subgraph Family (3 files, `definitions.subgraphs[0]` id `03921aea-a70e-44b4-bc77-f6bda10f2120`)
 
@@ -150,38 +150,44 @@ Wiring deltas vs simple: `94:0 --115--> 93:0` and `93:0 --117--> 95:4 (STRING)`,
 - Linear chain ×11: `ImageScaleBy bicubic 0.85` (768→652.8, border ~57.6px) → `ImagePadForOutpaint 58,58,58,58 feather 20` → `VAEEncodeForInpaint grow_mask_by 6` → `KSampler 8 steps cfg 1 euler simple denoise 0.65 seed 1235..1245` → `VAEDecode`. Final scale `0.85^11 ≈ 0.167`.
 - `BatchImagesNode` with 12 explicit `images.image0..11` inputs tapped from each `VAEDecode` → `CreateVideo fps 8` → `SaveVideo prefix Ernie_Zoom format auto`. Produces 12f @8fps = 1.5s per queue, rebuilds all frames every queue — **legacy, do not extend**.
 
-**`ernie_infinite_zoom_loop.json` (✅ incremental, 24 nodes, 29 links, 15 levels, bbox 5540×1330):**
+**`ernie_infinite_zoom_loop.json` (✅ incremental IN-zoom, 28 nodes, 32 links, 15 levels, bbox 5460×2060):**
 
 | id | type | widgets / inputs | role |
 |----|------|------------------|------|
 | 10 | `UNETLoader` | `["ernie-image-turbo.safetensors","default"]` | MODEL → 33,53 |
 | 11 | `CLIPLoader` | `["ministral-3-3b.safetensors","flux2","default"]` | CLIP → 21 |
-| 12 | `VAELoader` | `["flux2-vae.safetensors"]` | VAE → 34,52,54 |
+| 12 | `VAELoader` | `["flux2-vae.safetensors"]` | VAE → 34,85,54 |
 | 20 | `PrimitiveStringMultiline` | psychedelic prompt (ultra fractal cathedral, neon mandala, …) | STRING → 21 |
 | 21 | `CLIPTextEncode` | `[""]` text 100 + clip 101 | COND → 22,33,53 |
 | 22 | `ConditioningZeroOut` | — | COND → 33,53 (negative) |
 | 30 | `PrimitiveInt` | `[512]` | width → 32 |
 | 31 | `PrimitiveInt` | `[512]` | height → 32 |
 | 32 | `EmptyFlux2LatentImage` | `[512,512,1]` + links 112/113 | LATENT → 33 |
-| 33 | `KSampler` | `[42,"randomize",8,1.0,"euler","simple",1.0]` | init txt2img, denoise 1.0 |
+| 33 | `KSampler` | `[42,"fixed",8,1.0,"euler","simple",1.0]` | init txt2img, denoise 1.0 — **fixed** so ComfyUI output cache skips this whole branch after first Queue (→ 1 diffusion/pass, ~2× speed; first Queue after server restart re-executes once) |
 | 34 | `VAEDecode` | vae 109 | IMAGE 116 → 40:starting_image |
 | 40 | `Image-Loopback-Load` | `["/comfy/output/loopback_ernie_zoom",True,"1",-1,"skip","off",512,512]` | Sample last frame (history_indices "1") |
-| 50 | `ImageScaleBy` | `["bicubic",0.85]` | 512→435 (scale 0.85) |
-| 51 | `ImagePadForOutpaint` | `[38,38,39,39,20]` | pad back to 512, feather 20, outputs image+mask |
-| 52 | `VAEEncodeForInpaint` | `[6]` grow_mask_by | LATENT for inpaint |
-| 53 | `KSampler` | `[43,"randomize",8,1.0,"euler","simple",0.65]` | inpaint, denoise 0.65 |
+| 80 | `PrimitiveInt` | `[492]` "Zoom crop size" | width+height → 83 (links 131/132) |
+| 81 | `PrimitiveInt` | `[10]` "Crop offset X" | x → 83 (link 133) |
+| 82 | `PrimitiveInt` | `[10]` "Crop offset Y" | y → 83 (link 134) |
+| 83 | `ImageCrop` | `[492,492,10,10]`, all 4 crop widgets wired to 80/81/82 | center-crop 492² @ (10,10) — title "Zoom In: Crop" |
+| 84 | `ImageScale` | `["bicubic",512,512,"disabled"]` | rescale crop back to 512² bicubic — title "Zoom In: Rescale" |
+| 85 | `VAEEncode` | pixels←136, vae←137 | encode zoomed frame — title "Zoom In: Encode" |
+| 53 | `KSampler` | `[43,"randomize",8,1.0,"euler","simple",0.60]` | img2img restore detail, denoise 0.60 |
 | 54 | `VAEDecode` | — | IMAGE 123 → 55 |
 | 55 | `Image-Loopback-Cache` | `["/comfy/output/loopback_ernie_zoom",True]` | Store Loopback (appends history) → 56,60 |
-| 56 | `Image-Loopback-Load` | `[..., "1-1000", ...]` | Sample full history for video |
+| 56 | `Image-Loopback-Load` | `[..., "1000-1", ...]` | full history for video, DESCENDING range = chronological batch (oldest→newest) |
 | 57 | `Image-Loopback-Configure` | `["/comfy/output/loopback_ernie_zoom",0]` | history_limit 0 = unlimited |
 | 60 | `PreviewImage` | — | preview latest frame (124) |
 | 61 | `PreviewImage` | — | preview accumulated stack (126) |
 | 62 | `CreateVideo` | `[8]` fps | VIDEO from 127 |
 | 63 | `SaveVideo` | `["Ernie_Zoom_Loop","auto","auto"]` | mp4 under `output/` |
+| 87 | `MarkdownNote` | docs: flow, params (offset=(512−size)/2 centered), reset cmd | reference card in-editor |
 
 **2026-09-02: node 70 (`Anything Everywhere`) REMOVED.** It was completely disconnected (input `link:null`, zero links — broadcast nothing) but its mere presence made every browser Queue fail with `res is undefined`: UE 8.0's `find_duplicate_broadcasted_types` crashes on `node.inputs === undefined` (frontend 1.51.9), the exception is swallowed by `call_function_with_modified_graph` which returns `undefined`, and VHS's outer `graphToPrompt` wrapper then dereferences `res.workflow` → error dialog. All MODEL/CLIP/VAE/COND wiring was already explicit links, so removal required no rewiring; verified end-to-end (queue OK, history 6→7, new mp4). Do not re-add UE nodes (see §7).
 
-Flow per Queue: `32→33→34→40(starting_image) —40:117→50→51→52→53→54→55→56(1-1000)→61+62→63`, with `55:124→60` for per-frame preview. `57` configures unlimited history. Pad math: `512*0.85=435.2`, border `(512-435)/2≈38.5` → `38,38,39,39`. Seeds `randomize` per queue. History under `/comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/history/*.png` (fixed key patch, see §3), video `output/Ernie_Zoom_Loop_*.mp4`.
+**2026-09-02: REDESIGNED from out-zoom (scale 0.85 + pad + inpaint) to true IN-zoom** (user request). Old nodes 50 `ImageScaleBy`/51 `ImagePadForOutpaint`/52 `VAEEncodeForInpaint` deleted; new 80-85 (crop→rescale→encode) + 87 docs; node 53 now full-frame img2img denoise 0.60; node 56 range flipped `"1-1000"`→`"1000-1"` (ascending range = newest→oldest batch order — WRONG for playback; descending = chronological). History was RESET (old 18 out-zoom frames purged, `rm -rf` must run INSIDE container — host lacks perms on root-owned files). Verified end-to-end: 4 sequential headless Queues → history 2→5, 4 mp4s; direction confirmed numerically (each frame closer to 1.04× magnified predecessor than to predecessor itself, all 4 pairs ~0.126 vs ~0.18 mean abs diff @128²).
+
+Flow per Queue: `32→33→34→40(starting_image) —40:130→83(crop 492²@10,10, params from 80/81/82)→84(rescale 512 bicubic)→85(encode)→53(img2img 0.60)→54→55→56(1000-1 chronological)→61+62→63`, with `55:124→60` for per-frame preview. `57` configures unlimited history. Zoom math: `512/492 = 1.0407` per frame (≈4% dive; user's "10px each side"); offset rule `(512−size)/2 = 10` keeps it centered. First Queue seeds history with txt2img frame (history = [seed, processed]); every later Queue appends exactly 1. **2026-09-02 fix: node 33 seed now `fixed` (was `randomize`)** — ComfyUI's cross-prompt output cache reuses the entire txt2img subgraph (nodes 32,33,34 + 10,11,12,20,21,22) on every Queue after the first → only the img2img KSampler 53 (seed `randomize`) actually executes → ~2× per-Queue speedup; verified via `/history` `execution_cached` (33,34 appear in cached list on hit, e.g. prompt `3797bb0e…` cached `33,34`, prompt `1213a087…` miss on first `42` → 11.3s vs 6.8s hit). After a server/container restart the cache is cold so the next Queue re-executes the seed branch once (no history append when cache already exists). History under `/comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/history/*.png` (fixed key patch, see §3), video `output/Ernie_Zoom_Loop_*.mp4`.
 
 - Straight edges enforced globally via `comfy.settings.json` `Comfy.LinkRenderMode=Straight` and per-workflow `extra._linkRenderMode` doc hint (see §3).
 
