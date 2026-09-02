@@ -6,8 +6,8 @@ RUN apt update && \
     apt autoremove --yes && \
     apt clean --yes && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-RUN pip install --upgrade uv pip wheel setuptools numpy
-RUN pip install \
+RUN pip install --no-cache-dir --upgrade uv pip wheel setuptools numpy
+RUN pip install --no-cache-dir --upgrade \
     transformers accelerate safetensors sentencepiece einops gradio bitsandbytes optimum imageio-ffmpeg xformers tensorrt-cu12 onnxruntime-gpu cupy-cuda12x \
-    --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/requirements.txt \
-    --requirement https://raw.githubusercontent.com/Comfy-Org/ComfyUI-Manager/main/requirements.txt
+    --requirement Comfy/requirements.txt \
+    --requirement Comfy/custom_nodes/comfyui-manager/requirements.txt

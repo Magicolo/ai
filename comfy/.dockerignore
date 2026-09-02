@@ -1,0 +1,12 @@
+.git
+**/.git
+**/__pycache__
+**/*.pyc
+**/*.pyo
+input
+output
+Comfy/input
+Comfy/output
+Comfy/models
+Comfy/user
+token-optimizer

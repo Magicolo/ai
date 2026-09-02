@@ -13,9 +13,9 @@ services:
       - ./input:/input
       - ./Comfy:/comfy
       - comfy:/root/.cache
-    entrypoint: python /comfy/main.py --listen 0.0.0.0 --port 8188
+    entrypoint: ["python", "/comfy/main.py", "--listen", "0.0.0.0", "--port", "8188"]
     healthcheck:
-      test: curl http://localhost:8188
+      test: ["CMD-SHELL", "curl -f http://localhost:8188 || exit 1"]
       interval: 5s
       timeout: 30s
       retries: 10
@@ -24,5 +24,6 @@ services:
       resources:
         reservations:
           devices:
-            - capabilities: [ gpu ]
+            - driver: nvidia
               count: all
+              capabilities: [gpu]
