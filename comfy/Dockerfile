@@ -11,3 +11,6 @@ RUN pip install --no-cache-dir --upgrade \
     transformers accelerate safetensors sentencepiece einops gradio bitsandbytes optimum imageio-ffmpeg xformers tensorrt-cu12 onnxruntime-gpu cupy-cuda12x \
     --requirement https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/requirements.txt \
     --requirement https://raw.githubusercontent.com/Comfy-Org/ComfyUI-Manager/main/requirements.txt
+RUN pip install --no-cache-dir comfy-cli comfy-mcp uvicorn
+COPY entry.sh ./entry.sh
+ENTRYPOINT ["./entry.sh"]

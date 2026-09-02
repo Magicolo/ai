@@ -9,17 +9,18 @@ services:
     ports:
       - 8188:8188
       - 7860:7860
+      - 9000:9000
     volumes:
       - ./input:/input
       - ./Comfy:/comfy
       - comfy:/root/.cache
-    entrypoint: python /comfy/main.py --listen 0.0.0.0 --port 8188
+    init: true
     healthcheck:
-      test: curl --fail http://localhost:8188
+      test: curl --fail http://localhost:8188 && curl --fail http://localhost:9000/status
       interval: 5s
       timeout: 30s
       retries: 10
-      start_period: 5s
+      start_period: 10s
     deploy:
       resources:
         reservations:
