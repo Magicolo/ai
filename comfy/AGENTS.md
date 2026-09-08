@@ -19,27 +19,29 @@ comfy/                          # wrapper repo (this file's scope)
       vae/                      # flux2-vae.safetensors 321M (HF Comfy-Org/ERNIE-Image)
       frame_interpolation/      # film_net_fp16.safetensors 66M (FILM, default) + rife_v4.25/4.26/4.26_heavy 22M each (HF Comfy-Org/frame_interpolation)
     input/  -> ../input host mount (see docker-compose)
-    output/                     # ALL generations confined here, including loopback cache `output/loopback_ernie_zoom/` — `rm -rf Comfy/output/*` cleans everything
-      loopback_ernie_zoom/ernie_zoom_fixed/{history/*.png, cached_img.png, current_img.png, loopback_config.json}
-      Ernie_Zoom_Loop_*.mp4     # LEGACY (pre-preview) — no longer produced; current loop uses temp preview (see below)
+      ernie_zoom_seed.png       # cold-start seed frame for loop workflow ImageReceiver (rendered once via throwaway txt2img run)
+    output/                     # ALL generations confined here — `rm -rf Comfy/output/*` cleans everything
+      Ernie_Zoom_Frames/frame_*.png  # current loop: one frame per Queue via SaveImage (the sequence; video loader reads this dir)
+      Ernie_Zoom_*.mp4          # current loop video via VHS VideoCombine (only when video group unbypassed; save_output toggle)
+      loopback_ernie_zoom/      # LEGACY (pre-Send/Receive) — no longer produced; remove if it reappears
+      Ernie_Zoom_Loop_*.mp4     # LEGACY (pre-VHS) — no longer produced
       Ernie-Image-Turbo_*.png   # earlier single-frame tests
     temp/
-      ComfyUI_temp_video_*.mp4  # current loop preview via PreviewVideo (CreateVideo + 4× FILM → Switch → PreviewVideo, 32fps when enabled else 8fps)
       image_loopback/           # LEGACY location, migrated on boot to output/ — do NOT rely on it (now empty)
     custom_nodes/
       comfyui-manager           # 3.41, package manager
-      comfy-loopback-buffer     # holo-q/comfy-loopback-buffer 1.0.0 MIT — Store/Load/Configure Loopback (history append via disk)
-      ComfyUI-VideoHelperSuite  # Kosinkadink 1.7.9 — VideoCombine etc. (kept QoL, not used after native CreateVideo)
+      comfy-loopback-buffer     # holo-q/comfy-loopback-buffer 1.0.0 MIT — Store/Load/Configure Loopback (LEGACY: no workflow uses it since Send/Receive redesign; keep installed)
+      ComfyUI-VideoHelperSuite  # Kosinkadink 1.7.9 — VHS_LoadImagesPath + VHS_VideoCombine drive the loop video group (see §6.2)
+      comfyui-impact-pack       # ltdrdata — ImageSender/ImageReceiver cross-Queue feedback (see §6.2); host git clone, NOT baked in Dockerfile; sam2 trimmed from requirements.txt
       cg-use-everywhere         # chrisgoringe 8.0 (50ae9f8) — Anything Everywhere broadcast; ⚠️ BROKEN with frontend 1.51.9 — do not add UE nodes to workflows (see §7)
-      comfyui-workflow-prettier # deepme987/comfyui-workflow-prettier — auto-positioning (Sugiyama Layered DAG layout)
-      preview_video_plus        # local — PreviewVideo (VIDEO→temp preview via save_video_preview, replaces SaveVideo; 90 lines, no pip deps)
+      comfyui-workflow-prettier # deepme987/comfyui-workflow-prettier — auto-positioning (Sugiyama Layered DAG layout; canvas-menu JS only, no CLI — hand-position new nodes carefully, see §6)
     user/default/
       workflows/                # browser-visible workflows (auto-formatted, see below)
         ernie_turbo_qt.json               # adapted official Ernie Turbo template (PreviewAny fixed, enhancer removed)
         ernie_turbo_qt_simple.json        # minimal variant
         ernie_turbo_qt_enhanced.json      # backup with enhancer chain (OOM on 16GB — don't use without >24GB)
         ernie_infinite_zoom.json          # unrolled 12-frame fixed batch, N=12 768px, CreateVideo fps8 (legacy, per-queue rebuilds all frames)
-        ernie_infinite_zoom_loop.json     # ✅ incremental IN-zoom: one new frame per Queue, crop 492@10,10 → rescale 512 bicubic (1.041×/frame), img2img denoise 0.60, history_limit 0 unlimited, video chronological "1000-1", CreateVideo fps8 + 4× FILM interpolation (multiplier 4 → (n-1)*4+1 frames @32fps) toggle via 88+92, PreviewVideo temp preview (replaces SaveVideo)
+        ernie_infinite_zoom_loop.json     # ✅ incremental IN-zoom: one new frame per Queue, crop 492@10,10 → rescale 512 bicubic (1.041×/frame), img2img denoise 0.60, ImageReceiver/ImageSender (Impact Pack) cross-Queue feedback, frames → output/Ernie_Zoom_Frames/, bypassed video group (VHS loader + 4× FILM + VideoCombine) + bypassed audio group (ACE-Step 1.5 music + MMAudio SFX, mixed → VideoCombine audio) — see §6.2
       comfy.settings.json       # frontend settings — *must* contain `"Comfy.LinkRenderMode":"Straight"` for square right-angle edges
 ```
 
@@ -78,8 +80,8 @@ comfy/                          # wrapper repo (this file's scope)
 
 ### 6. Workflows & Validation
 - Browser location is `Comfy/user/default/workflows/` (not `Comfy/workflows/`). All 5 custom workflows are listed below; 3 are subgraph-based (Ernie Turbo QT), 2 are flat DAGs (infinite zoom).
-- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (or `python3 /tmp/prettify.py` port) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 33 nodes 17 layers 6580×2450; `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
-- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 33 nodes valid; `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
+- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (canvas-menu JS only, no CLI; the `/tmp/prettify.py` host port is ephemeral and may not exist — hand-position new nodes carefully and verify zero overlaps) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 38 nodes 5870×2280 (20 active + 18 bypassed: video group 89/98/90/99 + audio group 100-114); `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
+- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 38 nodes valid (1 expected warning: 90 unreachable while video group bypassed); `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
 
 #### 6.1 Ernie Turbo QT — Subgraph Family (3 files, `definitions.subgraphs[0]` id `03921aea-a70e-44b4-bc77-f6bda10f2120`)
 
@@ -154,68 +156,85 @@ Wiring deltas vs simple: `94:0 --115--> 93:0` and `93:0 --117--> 95:4 (STRING)`,
 - Linear chain ×11: `ImageScaleBy bicubic 0.85` (768→652.8, border ~57.6px) → `ImagePadForOutpaint 58,58,58,58 feather 20` → `VAEEncodeForInpaint grow_mask_by 6` → `KSampler 8 steps cfg 1 euler simple denoise 0.65 seed 1235..1245` → `VAEDecode`. Final scale `0.85^11 ≈ 0.167`.
 - `BatchImagesNode` with 12 explicit `images.image0..11` inputs tapped from each `VAEDecode` → `CreateVideo fps 8` → `SaveVideo prefix Ernie_Zoom format auto`. Produces 12f @8fps = 1.5s per queue, rebuilds all frames every queue — **legacy, do not extend**.
 
-**`ernie_infinite_zoom_loop.json` (✅ incremental IN-zoom, 33 nodes, 38 links, 17 levels, bbox 6580×2450):**
+**`ernie_infinite_zoom_loop.json` (✅ incremental IN-zoom, 38 nodes, 42 links, 2 groups, bbox 5870×2280):**
 
 | id | type | widgets / inputs | role |
 |----|------|------------------|------|
-| 10 | `UNETLoader` | `["ernie-image-turbo.safetensors","default"]` | MODEL → 33,53 |
+| 10 | `UNETLoader` | `["ernie-image-turbo.safetensors","default"]` | MODEL → 53 |
 | 11 | `CLIPLoader` | `["ministral-3-3b.safetensors","flux2","default"]` | CLIP → 21 |
-| 12 | `VAELoader` | `["flux2-vae.safetensors"]` | VAE → 34,85,54 |
+| 12 | `VAELoader` | `["flux2-vae.safetensors"]` | VAE → 85 (137), 54 (111) |
 | 20 | `PrimitiveStringMultiline` | psychedelic prompt (ultra fractal cathedral, neon mandala, …) | STRING → 21 |
-| 21 | `CLIPTextEncode` | `[""]` text 100 + clip 101 | COND → 22,33,53 |
-| 22 | `ConditioningZeroOut` | — | COND → 33,53 (negative) |
-| 30 | `PrimitiveInt` | `[512]` | width → 32 |
-| 31 | `PrimitiveInt` | `[512]` | height → 32 |
-| 32 | `EmptyFlux2LatentImage` | `[512,512,1]` + links 112/113 | LATENT → 33 |
-| 33 | `KSampler` | `[42,"fixed",8,1.0,"euler","simple",1.0]` | init txt2img, denoise 1.0 — **fixed** so ComfyUI output cache skips this whole branch after first Queue (→ 1 diffusion/pass, ~2× speed; first Queue after server restart re-executes once) |
-| 34 | `VAEDecode` | vae 109 | IMAGE 116 → 40:starting_image |
-| 40 | `Image-Loopback-Load` | `["/comfy/output/loopback_ernie_zoom",True,"1",-1,"skip","off",512,512]` | Sample last frame (history_indices "1") |
+| 21 | `CLIPTextEncode` | `[""]` text 100 + clip 101 | COND → 22,53 |
+| 22 | `ConditioningZeroOut` | — | COND → 53 (negative) |
+| 95 | `ImageReceiver` | `["ernie_zoom_seed.png",1,False,"",False]` link_id 1 | last frame from previous Queue (cold start: seed PNG from `/comfy/input`) → 83 |
 | 80 | `PrimitiveInt` | `[492]` "Zoom crop size" | width+height → 83 (links 131/132) |
 | 81 | `PrimitiveInt` | `[10]` "Crop offset X" | x → 83 (link 133) |
 | 82 | `PrimitiveInt` | `[10]` "Crop offset Y" | y → 83 (link 134) |
 | 83 | `ImageCrop` | `[492,492,10,10]`, all 4 crop widgets wired to 80/81/82 | center-crop 492² @ (10,10) — title "Zoom In: Crop" |
 | 84 | `ImageScale` | `["bicubic",512,512,"disabled"]` | rescale crop back to 512² bicubic — title "Zoom In: Rescale" |
 | 85 | `VAEEncode` | pixels←136, vae←137 | encode zoomed frame — title "Zoom In: Encode" |
-| 53 | `KSampler` | `[43,"randomize",8,1.0,"euler","simple",0.60]` | img2img restore detail, denoise 0.60 |
-| 54 | `VAEDecode` | — | IMAGE 123 → 55 |
-| 55 | `Image-Loopback-Cache` | `["/comfy/output/loopback_ernie_zoom",True]` | Store Loopback (appends history) → 56,60 |
-| 56 | `Image-Loopback-Load` | `[..., "1000-1", ...]` | full history for video, DESCENDING range = chronological batch (oldest→newest) |
-| 57 | `Image-Loopback-Configure` | `["/comfy/output/loopback_ernie_zoom",0]` | history_limit 0 = unlimited |
-| 60 | `PreviewImage` | — | preview latest frame (124) |
-| 61 | `PreviewImage` | — | preview accumulated stack (126) |
-| 62 | `CreateVideo` | `[8]` fps | VIDEO from 127 — raw branch |
-| 88 | `PrimitiveBoolean` | `[True]` "Enable Interpolation" | BOOLEAN → 92:switch (link 139) |
-| 89 | `FrameInterpolationModelLoader` | `["film_net_fp16.safetensors"]` | INTERP_MODEL → 90 (link 140) — FILM 66M, alt rife_v4.26/heavy 22M |
-| 90 | `FrameInterpolate` | `[4]` multiplier 4 | images 141 ←56, interp 140 → 142 — title "4x Interpolation (FILM)" |
-| 91 | `CreateVideo` | `[32]` fps | VIDEO interp from 142 — title "CreateVideo (Interp)" (32 = 8×4) |
-| 92 | `ComfySwitchNode` | `[]` switch BOOLEAN lazy | on_false 128 ←62 raw, on_true 143 ←91 interp, output 144 — title "Toggle Interpolation" |
-| 93 | `PreviewVideo` | — | preview VIDEO 144 via temp (replaces SaveVideo) |
+| 53 | `KSampler` | `[<seed>,"randomize",8,1.0,"euler","simple",0.60]` | img2img restore detail, denoise 0.60 |
+| 54 | `VAEDecode` | — | IMAGE → 60,96,97 (links 150/151/152) |
+| 60 | `PreviewImage` | — | preview new frame (150) |
+| 96 | `ImageSender` | `["Ernie_Zoom_Send",1]` link_id 1 | holds frame for next Queue's Receiver (img-send event) |
+| 97 | `SaveImage` | `["Ernie_Zoom_Frames/frame"]` | persists frame → `output/Ernie_Zoom_Frames/frame_*.png` (the sequence) |
+| 89 | `FrameInterpolationModelLoader` | `["film_net_fp16.safetensors"]` mode 4 (bypassed) | INTERP_MODEL → 90 — FILM 66M, alt rife_v4.26/heavy 22M |
+| 90 | `FrameInterpolate` | `[4]` multiplier 4 | images ←98, interp ←89 — title "4x Interpolation (FILM)" |
+| 98 | `VHS_LoadImagesPath` | `["/comfy/output/Ernie_Zoom_Frames",0,0,1]` mode 4 (bypassed) | loads all saved frames → 90 |
+| 99 | `VHS_VideoCombine` | `[32,0,"Ernie_Zoom","video/h264-mp4",False,True]` mode 4 (bypassed) | 32fps mp4 + preview; save_output toggle; AUDIO ←114 (link 173, muxes `-audio.mp4` twin) |
 | 87 | `MarkdownNote` | docs: flow, params (offset=(512−size)/2 centered), reset cmd | reference card in-editor |
+
+**Audio group (nodes 100-114, frontend group id 2 `Audio: ACE music + MMAudio SFX, mixed`, bbox [2060,700,1280,900], ALL mode 4 bypassed — unbypass together with video group to render):**
+
+| id | type | widgets / inputs | role |
+|----|------|------------------|------|
+| 103 | `PrimitiveFloat` | `[0.657,"fixed"]` "Duration" | SINGLE KNOB for music+SFX length (seconds) → 104 (155), 105 (156), 111 (157) |
+| 100 | `UNETLoader` | `["acestep_v1.5_turbo.safetensors","default"]` | ACE-Step 1.5 2B turbo DiT 4.79G → 106 (159) |
+| 106 | `ModelSamplingAuraFlow` | `[3]` shift 3.0 | → 107 (160) |
+| 101 | `DualCLIPLoader` | `["qwen_0.6b_ace15.safetensors","qwen_1.7b_ace15.safetensors","ace","default"]` | ACE text encoders (3.71G + small) → 105 (158) |
+| 105 | `TextEncodeAceStepAudio1.5` | ambient-instrumental tags, lyrics `""` (instrumental), seed 31 fixed, bpm 90, timesig 4, lang en; duration widget stale 5.0, live value ←103 via 156 | COND → 107 (161) |
+| 104 | `EmptyAceStep1.5LatentAudio` | seconds widget stale 5.0, live ←103 via 155 | LATENT → 107 (163) |
+| 107 | `KSampler` | `[31,"fixed",8,1,"euler","simple",1]` + negative ←22 (162, zeroed COND reused) | music latent → 108 (164) |
+| 102 | `VAELoader` | `["ace_1.5_vae.safetensors"]` 337M | → 108 (165) |
+| 108 | `VAEDecodeAudio` | — | AUDIO music → 112 (169) |
+| 109 | `MMAudioModelLoader` | `["mmaudio_large_44k_v2_fp16.safetensors","fp16"]` 2.06G | MODEL → 111 (166) |
+| 110 | `MMAudioFeatureUtilsLoader` | `[vae_44k_fp16 611M, synchformer_fp16 475M, DFN5B-CLIP_fp16 1.97G, "44k","fp16"]` (bigvgan auto-downloads at runtime — no VoCoderLoader needed) | FEATUREUTILS → 111 (167) |
+| 111 | `MMAudioSampler` | `[5.0(stale,←103 via 157),25,4.5,7,rumble/whoosh prompt,vocal-negative,True,True]` steps 25 cfg 4.5 seed 7 fixed, mask_away_clip True, force_offload True | images ←90 interp frames (168) → synced SFX AUDIO → 113 (170) |
+| 112 | `AudioAdjustVolume` | `[0]` dB (INT, 0 = unchanged) | music level → 114 (171) |
+| 113 | `AudioAdjustVolume` | `[-6]` dB | SFX level → 114 (172) |
+| 114 | `AudioMerge` | `["add"]` | mix → 99.audio (173) |
+
+**2026-09-08: ADDED full-mix audio (music + SFX) to the bypassed video group** (user request: local/free/SOTA/instrumental, wired into node 99). Music bed = ACE-Step 1.5 2B turbo (native nodes, instrumental via empty lyrics, quality-max that fits 16GB alongside MMAudio — XL 4B rejected); SFX = MMAudio large fp16 in-workflow (interp frames → video-synced rumble/whoosh, mask_away_clip True so CLIP text doesn't fight the video conditioning). Mix = music 0dB + SFX −6dB via `AudioMerge add` → `VHS_VideoCombine.audio` (slot 11 — node 99 has 11 inputs 0-10, so audio is 11 not 12; installed VHS exposes the optional slot, disk JSON needed the input entry appended). Duration = single knob 103 (linked everywhere; stale 5.0 widget fallbacks on 104/105/111 are inert while linked — update 103 to match video length `(n-1)*4+1/32`s; each video-render Queue also appends 1 frame, so exact match drifts by design). Verified end-to-end from scratch: full reset → 6 bypassed Queues (warm cache ≈5s each) → 1 unbypassed render (`Ernie_Zoom_00004.mp4` 21f + `-audio.mp4` with AAC, 0.657s) → 103 set 5.0→0.657 → final render 7 frames → `Ernie_Zoom_00005.mp4` 25f @32fps + `-audio.mp4` AAC, 0.782s, ≈10-20s render on 4060 Ti sequential (Ernie models stay loaded; audio only runs on video render). Stable Audio Open 1.0 kept as backup SFX source; TangoFlux rejected (no ComfyUI nodes); API audio (Seed/ElevenLabs) excluded — not signed in.
 
 **2026-09-02: node 70 (`Anything Everywhere`) REMOVED.** It was completely disconnected (input `link:null`, zero links — broadcast nothing) but its mere presence made every browser Queue fail with `res is undefined`: UE 8.0's `find_duplicate_broadcasted_types` crashes on `node.inputs === undefined` (frontend 1.51.9), the exception is swallowed by `call_function_with_modified_graph` which returns `undefined`, and VHS's outer `graphToPrompt` wrapper then dereferences `res.workflow` → error dialog. All MODEL/CLIP/VAE/COND wiring was already explicit links, so removal required no rewiring; verified end-to-end (queue OK, history 6→7, new mp4). Do not re-add UE nodes (see §7).
 
-**2026-09-02: REDESIGNED from out-zoom (scale 0.85 + pad + inpaint) to true IN-zoom** (user request). Old nodes 50 `ImageScaleBy`/51 `ImagePadForOutpaint`/52 `VAEEncodeForInpaint` deleted; new 80-85 (crop→rescale→encode) + 87 docs; node 53 now full-frame img2img denoise 0.60; node 56 range flipped `"1-1000"`→`"1000-1"` (ascending range = newest→oldest batch order — WRONG for playback; descending = chronological). History was RESET (old 18 out-zoom frames purged, `rm -rf` must run INSIDE container — host lacks perms on root-owned files). Verified end-to-end: 4 sequential headless Queues → history 2→5, 4 mp4s; direction confirmed numerically (each frame closer to 1.04× magnified predecessor than to predecessor itself, all 4 pairs ~0.126 vs ~0.18 mean abs diff @128²).
+**2026-09-02: REDESIGNED from out-zoom (scale 0.85 + pad + inpaint) to true IN-zoom** (user request). Old nodes 50 `ImageScaleBy`/51 `ImagePadForOutpaint`/52 `VAEEncodeForInpaint` deleted; new 80-85 (crop→rescale→encode) + 87 docs; node 53 now full-frame img2img denoise 0.60; node 56 range flipped `"1-1000"`→`"1000-1"` (ascending range = newest→oldest batch order — WRONG for playback; descending = chronological). History was RESET (old 18 out-zoom frames purged, `rm -rf` must run INSIDE container — host lacks perms on root-owned files). Verified end-to-end: 4 sequential headless Queues → history 2→5, 4 mp4s; direction confirmed numerically (each frame closer to 1.04× magnified predecessor than to predecessor itself, all 4 pairs ~0.126 vs ~0.18 mean abs diff @128²). Later superseded by Send/Receive redesign below (loopback nodes 40/55/56/57 deleted).
 
-Flow per Queue: `32→33→34→40(starting_image) —40:130→83(crop 492²@10,10, params from 80/81/82)→84(rescale 512 bicubic)→85(encode)→53(img2img 0.60)→54→55→56(1000-1 chronological)→61+62→92→93`, with `55:124→60` for per-frame preview. `57` configures unlimited history. After `56` the video forks: raw `56:127→62 CreateVideo 8fps →92:on_false (128)` vs interpolated `56:141→90 FrameInterpolate 4× (interp_model 140 from 89 FILM, multiplier 4) →91 CreateVideo 32fps (8×4, duration preserved) →92:on_true (143)`; `92 ComfySwitchNode Toggle Interpolation` selects by `88 PrimitiveBoolean Enable Interpolation` (139, lazy — disabled branch never executes, saving VRAM/time) →144→ `93 PreviewVideo` temp preview (replaces SaveVideo, saves to `temp/ComfyUI_temp_video_*` @32fps when enabled /8fps when disabled, not to `output/`). Zoom math: `512/492 = 1.0407` per frame (≈4% dive; user's "10px each side"); offset rule `(512−size)/2 = 10` keeps it centered. First Queue seeds history with txt2img frame (history = [seed, processed]); every later Queue appends exactly 1. **2026-09-02 fix: node 33 seed now `fixed` (was `randomize`)** — ComfyUI's cross-prompt output cache reuses the entire txt2img subgraph (nodes 32,33,34 + 10,11,12,20,21,22) on every Queue after the first → only the img2img KSampler 53 (seed `randomize`) actually executes → ~2× per-Queue speedup; verified via `/history` `execution_cached` (33,34 appear in cached list on hit, e.g. prompt `3797bb0e…` cached `33,34`, prompt `1213a087…` miss on first `42` → 11.3s vs 6.8s hit). After a server/container restart the cache is cold so the next Queue re-executes the seed branch once. **2026-09-02: Added 4× FILM interpolation (nodes 88-93)** — native `comfy_extras.nodes_frame_interpolation` FrameInterpolate + FILM model `film_net_fp16.safetensors` 66M (HF Comfy-Org/frame_interpolation, alternatives rife_v4.26/heavy 22M); multiplier 4 → `(n-1)*4+1` frames (2→5,3→9,4→13 verified via ffprobe/av, 32fps vs raw 8fps duration-matched, greedy feature caching across pairs); toggle via `88`+`92` (set 88 to false for raw), `93` replaces `SaveVideo`. History under `/comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/history/*.png` (fixed key patch, see §3), video now `temp/ComfyUI_temp_video_*.mp4` preview (not `output/Ernie_Zoom_Loop_*.mp4`).
+**2026-09-02: REDESIGNED from loopback history to Send/Receive + saved frames** (user request: simplify). Deleted seed branch (30-34), all loopback nodes (40/55/56/57), old video tail (62/88/91-94) and the `ComfySwitchNode` toggle. Cross-Queue feedback is now Impact Pack `ImageSender` 96 / `ImageReceiver` 95 (link_id 1): `img-send` frontend event rewrites Receiver's image widget to the Sender's temp file (`Ernie_Zoom_Send_temp_*.png [temp]`), so each Queue's crop chain starts from the previous Queue's frame — memory-resident, lost on page reload → falls back to `/comfy/input/ernie_zoom_seed.png` (rendered once via throwaway txt2img run, 512²). Frames persist via `SaveImage` 97 to `output/Ernie_Zoom_Frames/frame_*.png` (subfolder keeps Turbo PNGs / AnimateDiff leftovers out of the sequence). Video group (89/98/90/99, frontend group id 1) is **bypassed by default**: unbypass to render — `VHS_LoadImagesPath` 98 loads all frames → `FrameInterpolate` 90 4× FILM (`(n-1)*4+1` frames, `<2` frames pass through) → `VHS_VideoCombine` 99 @32fps with preview + optional save (`Ernie_Zoom_*.mp4`, save_output toggle). Zoom math unchanged: `512/492 = 1.0407` per frame (≈4% dive); offset rule `(512−size)/2 = 10` keeps it centered. Verified end-to-end: cold Q1 12.1s → Receiver rewritten to temp PNG; Q2 6.0s; zoom continuity mean|f2−zoom(f1)|=0.085 vs mean|f2−f1|=0.133; 4 dir frames → `Ernie_Zoom_00001.mp4` 13 frames @32fps = (4−1)*4+1, no pingpong. History under loopback is gone — `rm -rf` of `Ernie_Zoom_Frames/` + videos (INSIDE container) resets.
+
+Flow per Queue: `95(ImageReceiver: last frame or seed) —148→83(crop 492²@10,10, params from 80/81/82)→84(rescale 512 bicubic)→85(encode)→53(img2img 0.60)→54→60 PreviewImage (150) + 96 ImageSender (151, feeds next Queue) + 97 SaveImage (152, persists sequence)`. Zoom math: `512/492 = 1.0407` per frame (≈4% dive; user's "10px each side"); offset rule `(512−size)/2 = 10` keeps it centered. Bypassed video group (unbypass to render): `98 VHS_LoadImagesPath(dir) —153→90 FrameInterpolate 4× FILM (interp_model from 89) —154→99 VHS_VideoCombine @32fps` with preview + optional save toggle; `(n-1)*4+1` frames (4 dir frames → 13 @32fps verified, no pingpong). **GOTCHA — VHS_VideoCombine `widgets_values` must be the 6 declared widgets only** `[32,0,"Ernie_Zoom","video/h264-mp4",False,True]` (format sub-widgets default: crf19/yuv420p/meta-true/trim-false); a 10-element array with sub-widget values misaligns positionally → `pingpong` got truthy `"yuv420p"` → pingponged videos (2 frames→8, 3→16). VHS counter quirk: its metadata PNG matches the `Ernie_Zoom_(\d+)` counter regex → numbering can skip (harmless).
 
 - Straight edges enforced globally via `comfy.settings.json` `Comfy.LinkRenderMode=Straight` and per-workflow `extra._linkRenderMode` doc hint (see §3).
 
 ### 7. Custom Nodes Audit (QoL / Safety)
-- **comfy-loopback-buffer** (holo-q, 1.0.0 MIT, deps torch/pillow/numpy/aiohttp): replaces filesystem Save/Load reimplementation for incremental accumulation. Small, tested, maintained — **keep** (required for perpetual zoom). Not hugely starred but functionally unique, no known CVEs, no network.
-- **ComfyUI-VideoHelperSuite** (Kosinkadink, 1.7.9, ~4k★): `VideoCombine` etc. Thousands of dependents, active, deps already baked (`opencv-python imageio-ffmpeg`). Native `CreateVideo/SaveVideo` now covers our use, so VHS is not strictly needed but harmless QoL for future video tasks — **keep**, but don't rely on it for core workflow.
+- **comfy-loopback-buffer** (holo-q, 1.0.0 MIT, deps torch/pillow/numpy/aiohttp): replaces filesystem Save/Load reimplementation for incremental accumulation. Small, tested, maintained — **keep installed** but LEGACY: no workflow uses it since the Send/Receive redesign (§6.2).
+- **ComfyUI-VideoHelperSuite** (Kosinkadink, 1.7.9, ~4k★): `VideoCombine` etc. Thousands of dependents, active, deps already baked (`opencv-python imageio-ffmpeg`). `VHS_LoadImagesPath` + `VHS_VideoCombine` drive the loop workflow's bypassed video group — **keep**, now load-bearing for video rendering.
+- **comfyui-impact-pack** (ltdrdata, ~1k★, active): `ImageSender`/`ImageReceiver` cross-Queue feedback drives the loop workflow (link_id pair; `img-send` frontend event rewrites Receiver widget to Sender's temp file — memory-resident, falls back to seed PNG on reload). Host git clone (NOT baked in Dockerfile — code persists via `./Comfy:/comfy` mount, pip deps via entry.sh runtime loop); `requirements.txt` trimmed of `git+.../sam2` (SAM nodes unneeded → faster boot; `[Impact Pack] SAM2 functionality unavailable` warning + `impact-sam-editor.js` 404 are expected/harmless). **keep** (required for perpetual zoom).
+- **comfyui-mmaudio** (kijai, 574★ MIT, pushed 2026-02): `MMAudioModelLoader`/`MMAudioFeatureUtilsLoader`/`MMAudioSampler` drive the loop workflow's bypassed audio group (video-synced SFX from interp frames). Host git clone (same pattern as impact-pack — NOT baked in Dockerfile); light deps (librosa/torchdiffeq/einops/timm/omegaconf/open_clip/accelerate/ftfy). Models (~4.6G: large fp16 2.06G + synchformer 475M + vae 611M + CLIP 1.97G) under `models/mmaudio/`. **keep** (required for SFX).
 - **cg-use-everywhere** (chrisgoringe, checkout 50ae9f8 = upstream main HEAD 2026-07-20, "8.0", 1k★, frontend-only): `Anything Everywhere` broadcast reduces link spaghetti, no python deps. **⚠️ INCOMPATIBLE with frontend 1.51.9** — any workflow containing a UE node fails at browser Queue: UE 8.0 assumes `node.inputs`/`node.outputs` always defined (`find_duplicate_broadcasted_types` use_everywhere_utilities.js:365 `reading 'length'`; also `fix_unconnected_inputs` `reading 'filter'` in afterConfigureGraph on load), the throw is swallowed by `call_function_with_modified_graph` → returns `undefined` → VHS's outer wrapper dereferences `res.workflow` → `res is undefined` error dialog. No newer upstream fix exists as of 2026-09-02. **Keep installed** (workflows without UE nodes queue fine — wrappers pass through cleanly) but **do not add UE nodes to any workflow** until upstream/compatible-frontend resolves; wire explicitly instead.
 - **comfyui-workflow-prettier** (deepme987, Sugi­yama Layered/Compact/Linear/SortByType, 1103-line JS, zero python deps): auto-positions DAGs properly (barycenter crossing minimization, median coordinates). Successor to hand-rolled `/tmp/format_*.py` scripts — **keep** (required tool for all position edits, avoids horizontal explosion).
-- **preview_video_plus** (local, 90 lines, no pip deps): `PreviewVideo` VIDEO→`temp/ComfyUI_temp_video_*` preview via `save_video_preview` (ultrafast MP4, `FolderType.temp`); replaces `SaveVideo` in loop workflow so video previews in browser without polluting `output/` (interpolation tail needs duration-matched preview, not saved mp4). Uses `comfy_api.latest` Input/Types, registered via `ComfyExtension`. **keep** (required for toggleable preview).
 - **Native FrameInterpolate** (`comfy_extras.nodes_frame_interpolation`, no pack): `FrameInterpolationModelLoader` + `FrameInterpolate` (multiplier 2-16, align-aware, OOM-batch halving, feature caching across pairs). Models under `models/frame_interpolation/` — `film_net_fp16.safetensors` 66M (FILM, default, best for large-motion/zoom) + `rife_v4.25/4.26/4.26_heavy` 22M (RIFE, faster). FILMNet has no pad_align, IFNet pad_align 64; both load via same loader. Greedy `prev_frame` + `feat_cache` reuse across pairs. No extra pip deps — **keep**; do not install Fannovel16/ComfyUI-Frame-Interpolation pack (duplicate).
 - No removal recommended; all are maintained, trustworthy, popular. If a new dep is added, check stars, commit recency, license, and whether it replaces a reimplementation.
 
 ### 8. Confinement & Cleanup Discipline
-- Everything generated goes under `Comfy/output/` — verify after each workflow edit: `ls -R Comfy/output` should contain only intended files. Loopback history counts as generation.
+- Everything generated goes under `Comfy/output/` — verify after each workflow edit: `ls -R Comfy/output` should contain only intended files. Saved frames (`Ernie_Zoom_Frames/`) count as generation.
 - `Comfy/temp/` should stay empty of persistent history; entry.sh migration ensures legacy temp history moves to output.
-- To reset loopback history: `rm -rf Comfy/output/loopback_ernie_zoom` or queue with `Store` disabled once. To clean videos: `rm Comfy/output/Ernie_Zoom*.mp4`.
+- To reset the loop sequence: `rm -rf Comfy/output/Ernie_Zoom_Frames` (+ videos `rm Comfy/output/Ernie_Zoom*.mp4`) — **must run INSIDE the container** (host lacks perms on root-owned files). Next Queue cold-starts from `input/ernie_zoom_seed.png`.
+- `Comfy/output/loopback_ernie_zoom/` is LEGACY — remove if it reappears.
 
-### 9. Update Discipline
+### 9. Update Discipline & Task Alignment
 - **After each significant amount of work, update this AGENTS.md** if new relevant info/facts became known (new model, new workflow, new custom node, new volume, new port, new patch, perf numbers, VRAM lessons). Keep this file as the single source of truth for the wrapper; don't let facts live only in chat.
+- **When defining/planning a task, go through rounds of Q&A to further specify the solution and ensure proper alignment** before building: ask clarifying questions (node choices, naming, durability, toggle mechanics, scope), present a researched plan, and only proceed once the user confirms. Never jump from a vague request straight to implementation.
 
 ## Commands Cheat Sheet
 
@@ -224,7 +243,7 @@ Flow per Queue: `32→33→34→40(starting_image) —40:130→83(crop 492²@10,
 docker ps --format "{{.Names}} {{.Status}}"   # comfy-comfy-run-... Up (healthy)
 docker logs <cid> --tail 100                 # ComfyUI logs
 docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/ernie_infinite_zoom_loop.json
-docker exec <cid> bash -c 'ls /comfy/output/loopback_ernie_zoom/ernie_zoom_fixed/history | wc -l'
+docker exec <cid> bash -c 'ls /comfy/output/Ernie_Zoom_Frames | wc -l'
 curl -s http://localhost:9000/status | jq    # comfy-mcp bridge health
 curl -s http://localhost:8188 | head         # ComfyUI health
 # Format workflows after manual edits (Sugiyama Layered, straight edges):
