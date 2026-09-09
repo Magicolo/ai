@@ -33,9 +33,14 @@ services:
     image: zoomy
     build: ./Zoomy
     ports:
-      - 127.0.0.1:7861:7861
+      - 7861:7861
     volumes:
       - ./Comfy/output:/comfy/output
+    # Declared dependency on comfy (startup is enforced by zoomy.sh through
+    # serve.sh). --no-deps in zoomy.sh skips compose-managed startup so a
+    # second, port-conflicting comfy instance is never auto-started.
+    depends_on:
+      - comfy
     environment:
       ZOOMY_COMFY_ADDRESS: http://comfy:8188
       ZOOMY_OUTPUT_DIRECTORY: /comfy/output
