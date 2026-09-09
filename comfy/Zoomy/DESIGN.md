@@ -19,8 +19,9 @@ Deliberate non-goals:
   duration math) now lives in Python; only the heavyweight ComfyUI nodes
   (loaders, samplers, interpolation, audio models, video encode) remain in
   the submitted graphs.
-- No multi-user support, no auth. Single local user; the UI binds
-  loopback-only on the host (`127.0.0.1:7861`).
+- No multi-user support, no auth. Single local user assumed; like ComfyUI
+  itself, the UI listens on all interfaces (no auth — never expose the host
+  beyond a trusted network).
 - No host-side dependencies. Everything (runtime and dev tools) runs inside
   the `zoomy` container.
 
@@ -32,15 +33,21 @@ browser (host) ──http──> zoomy:7861 ──REST──> comfy:8188 ──f
 ```
 
 - `zoomy` service (`Zoomy/Dockerfile`, `python:3.12-slim`): Gradio app,
-  port `127.0.0.1:7861:7861`, volume `./Comfy/output:/comfy/output`.
+  port `7861:7861`, volume `./Comfy/output:/comfy/output`. Declares
+  `depends_on: [comfy]`; the healthcheck is `curl --fail
+  http://localhost:7861/` (same tool/pattern as the comfy service).
 - The `comfy` container carries a fixed `--name comfy` (see `serve.sh`), so
   the name resolves on the shared `comfy_default` bridge and zoomy reaches
   ComfyUI at `http://comfy:8188` with no host-network access and no dependence
   on published ports. Do not restart comfy or edit `serve.sh` beyond the name
   for zoomy networking.
-- Lifecycle is independent: `./zoomy.sh`
-  (`run --build --rm --detach --service-ports --no-deps zoomy`) creates an
-  ephemeral `comfy-zoomy-run-*` container; `docker stop` removes it.
+- Lifecycle: `./zoomy.sh` spawns comfy via `serve.sh` when no container
+  named `comfy` is running, then launches zoomy itself
+  (`run --build --rm --detach --service-ports --no-deps zoomy`) as an
+  ephemeral `comfy-zoomy-run-*` container; `docker stop` removes it. The
+  `depends_on` in compose declares the relationship, but `--no-deps`
+  deliberately skips compose-managed startup so a second, port-conflicting
+  comfy instance is never auto-started.
 
 ## 3. Repository layout (`Zoomy/`)
 

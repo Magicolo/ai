@@ -7,8 +7,8 @@
 ```
 comfy/                          # wrapper repo (this file's scope)
   serve.sh                      # ONLY entrypoint for comfy — `docker compose run --build --rm --detach --service-ports comfy`
-  zoomy.sh                      # ONLY entrypoint for zoomy — same pattern + `--no-deps zoomy` (comfy lifecycle independent)
-  docker-compose.yml            # TWO services: `comfy` (ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache, GPU reservations) + `zoomy` (build ./Zoomy, port 127.0.0.1:7861:7861, volume ./Comfy/output:/comfy/output, ZOOMY_* env)
+  zoomy.sh                      # ONLY entrypoint for zoomy — spawns comfy via serve.sh when missing, then `run --build --rm --detach --service-ports --no-deps zoomy`
+  docker-compose.yml            # TWO services: `comfy` (ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache, GPU reservations) + `zoomy` (build ./Zoomy, port 7861:7861, volume ./Comfy/output:/comfy/output, depends_on comfy, ZOOMY_* env)
   Dockerfile                    # FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel, bakes comfy-cli/mcp + custom nodes + requirements.txt
   entry.sh                      # dual-process: ComfyUI :8188 + comfy-mcp bridged :9000 (Streamable HTTP /mcp), handles set-default, req installs, patches
   AGENTS.md                     # THIS FILE — wrapper facts + update discipline
@@ -65,8 +65,8 @@ comfy/                          # wrapper repo (this file's scope)
 
 ### 1. Host vs Container Boundary
 - **opencode runs on host only, comfy MUST stay in container** via `serve.sh` (`docker compose run --build --rm --detach ...`). Never `comfy launch` on host; host has no comfy binaries by design (`pip uninstall comfy-cli/comfy-mcp`, `~/.config/comfy-cli` removed, opencode `mcp: { comfy-mcp: { type: remote, url: http://localhost:9000/mcp, oauth:false }}`).
-- `serve.sh` uses **`run` not `up`** intentionally — keep it that way. `run --service-ports` publishes 8188/9000 and creates an ephemeral container name like `comfy-comfy-run-<hash>`. `docker ps` shows `comfy-comfy-run-... Up (healthy)`.
-- zoomy lifecycle is independent via `zoomy.sh` (same `run` pattern + `--no-deps`, ephemeral `comfy-zoomy-run-<hash>`, UI at `http://localhost:7861`). The comfy container carries a fixed `--name comfy` (see `serve.sh`), so zoomy reaches ComfyUI bridge-locally at `http://comfy:8188` — no host-network access, no `extra_hosts`. Never restart comfy or edit `serve.sh` beyond the name for zoomy networking.
+- `serve.sh` uses **`run` not `up`** intentionally — keep it that way. `run --service-ports` publishes 8188/7860/9000 under the fixed container name `comfy` (`--name comfy`, stable and resolvable on the compose network). `docker ps` shows `comfy Up (healthy)`. A second `serve.sh` while one runs fails fast on the name — same outcome as the old port-bind failure, clearer message.
+- zoomy lifecycle is driven by `zoomy.sh`: it spawns comfy via `serve.sh` when no container named `comfy` is running, then starts zoomy itself (`run --build --rm --detach --service-ports --no-deps`, ephemeral `comfy-zoomy-run-<hash>`, UI at `http://localhost:7861`). The dependency is also declared as `depends_on` in compose, but `--no-deps` deliberately skips compose-managed startup — otherwise compose would auto-start a second, port-conflicting `comfy` instance next to serve.sh's. The comfy container carries a fixed `--name comfy` (see `serve.sh`), so zoomy reaches ComfyUI bridge-locally at `http://comfy:8188` — no host-network access, no `extra_hosts`. Never restart comfy or edit `serve.sh` beyond the name for zoomy networking.
 - `COMFY_BIN` / `COMFYUI_URL` env passthrough is via `mcp-proxy` style `--pass-environment` (now inlined bridge). Don't set them manually.
 
 ### 2. Dockerfile Rebuild Safety
@@ -300,6 +300,7 @@ Verified end-to-end: validate 0 errors (21 expected bypass warnings, 58 converte
 
 ### 9. Update Discipline & Task Alignment
 - **After each significant amount of work, update this AGENTS.md** if new relevant info/facts became known (new model, new workflow, new custom node, new volume, new port, new patch, perf numbers, VRAM lessons). Keep this file as the single source of truth for the wrapper; don't let facts live only in chat.
+- **NEVER commit without the user's explicit request for *each* commit.** The user may approve several commits at once, but approval is *always* required per commit — never `git commit` (nor amend, push, or PR) on your own initiative, even for small or "obvious" changes. Leave changes uncommitted for review unless asked.
 - **When defining/planning a task, go through rounds of Q&A to further specify the solution and ensure proper alignment** before building: ask clarifying questions (node choices, naming, durability, toggle mechanics, scope), present a researched plan, and only proceed once the user confirms. Never jump from a vague request straight to implementation.
 
 ### 10. Zoomy App & Engineering Standards
@@ -322,7 +323,7 @@ docker exec <cid> bash -c 'ls /comfy/output/Z_Zoom_Frames | wc -l'
 curl -s http://localhost:9000/status | jq    # comfy-mcp bridge health
 curl -s http://localhost:8188 | head         # ComfyUI health
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:7861/  # zoomy UI health
-./zoomy.sh                                 # build + run zoomy (ephemeral, --no-deps) — independent of comfy
+./zoomy.sh                                 # build + run zoomy (spawns comfy via serve.sh when missing)
 # zoomy quality loop (fixes host files via bind mount, then verify clean):
 docker compose run --rm --no-deps -v ./Zoomy:/workspace -e RUFF_CACHE_DIR=/tmp/ruff-cache -e MYPY_CACHE_DIR=/tmp/mypy-cache zoomy sh -c "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider"
 # zoomy e2e inside its container (ZOOMY_* env already set): docker exec <zoomy-cid> python -c "from zoomy. ... render_next_frame / finalize_video ..."
