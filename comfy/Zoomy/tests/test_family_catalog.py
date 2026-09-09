@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from zoomy.errors import ZoomyError
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
+
+KNOWN_FAMILY_KEYS = tuple(family.key for family in FAMILY_CATALOG)
 
 
 def test_family_keys_are_unique() -> None:
@@ -81,3 +85,24 @@ def test_find_family_rejects_unknown_key() -> None:
     """An unknown key lists the available families in the error."""
     with pytest.raises(ZoomyError, match="available families"):
         find_family(FAMILY_CATALOG, "does_not_exist")
+
+
+@given(key=st.sampled_from(KNOWN_FAMILY_KEYS))
+def test_find_family_roundtrip(key: str) -> None:
+    """Every catalog key resolves to the family carrying it."""
+    assert find_family(FAMILY_CATALOG, key).key == key
+
+
+@given(key=st.text(max_size=30))
+def test_find_family_rejects_any_unknown_key(key: str) -> None:
+    """Anything outside the catalog raises, never returns a wrong family."""
+    assume(key not in KNOWN_FAMILY_KEYS)
+    with pytest.raises(ZoomyError, match="available families"):
+        find_family(FAMILY_CATALOG, key)
+
+
+def test_lora_strengths_are_positive() -> None:
+    """Default strengths are usable slider values, never zero or negative."""
+    for family in FAMILY_CATALOG:
+        for lora in family.loras:
+            assert lora.default_strength > 0

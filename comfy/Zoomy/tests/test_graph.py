@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from zoomy.graph import ComfyWorkflow, NodeReference
+
+# Node keys are free-form non-empty strings in practice; link slots count
+# outputs from zero.
+node_key_text = st.text(
+    alphabet=st.characters(blacklist_characters="\x00"), min_size=1, max_size=12
+)
+output_slot = st.integers(min_value=0, max_value=8)
 
 
 def test_add_converts_node_references_to_link_arrays() -> None:
@@ -57,3 +66,31 @@ def test_build_returns_an_independent_copy() -> None:
     document["load_model"]["inputs"]["unet_name"] = "mutated.safetensors"
     fresh_document = workflow.build()
     assert fresh_document["load_model"]["inputs"]["unet_name"] == "a.safetensors"
+
+
+@given(key=node_key_text, slot=output_slot)
+def test_reference_conversion_roundtrip(key: str, slot: int) -> None:
+    """Any key/slot reference serializes to exactly its link array."""
+    workflow = ComfyWorkflow()
+    workflow.add("consumer", "KSampler", {"model": NodeReference(key=key, output_slot=slot)})
+    assert workflow.build()["consumer"]["inputs"]["model"] == [key, slot]
+
+
+@given(
+    keys=st.lists(node_key_text, min_size=1, max_size=6, unique=True),
+    slot=output_slot,
+)
+def test_chained_workflow_links_all_resolve(keys: list[str], slot: int) -> None:
+    """A chain where each node feeds the next has no dangling links."""
+    workflow = ComfyWorkflow()
+    for position, key in enumerate(keys):
+        inputs: dict[str, object] = {"label": f"node-{position}"}
+        if position > 0:
+            inputs["model"] = NodeReference(key=keys[position - 1], output_slot=slot)
+        workflow.add(key, "SomeNode", inputs)
+    document = workflow.build()
+    assert len(document) == len(keys)
+    for node in document.values():
+        for value in node["inputs"].values():
+            if isinstance(value, list):
+                assert value[0] in document

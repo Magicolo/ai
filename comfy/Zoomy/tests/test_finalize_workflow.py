@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.finalize_workflow import (
@@ -41,6 +43,35 @@ def test_audio_seconds_floors_at_the_sync_minimum() -> None:
     assert compute_audio_seconds(13) == 1.0
     assert compute_audio_seconds(32) == 1.0
     assert compute_audio_seconds(77) == pytest.approx(77 / 32)
+
+
+@given(frame_count=st.integers(min_value=1, max_value=500))
+def test_audio_formula_holds_across_sequence_lengths(frame_count: int) -> None:
+    """Interpolation and the floored duration follow the proven formulas."""
+    interpolated = (frame_count - 1) * 4 + 1
+    assert compute_interpolated_frame_count(frame_count) == interpolated
+    assert compute_audio_seconds(interpolated) == pytest.approx(max(interpolated / 32, 1.0))
+    assert compute_audio_seconds(interpolated) >= 1.0
+
+
+@given(
+    first=st.integers(min_value=1, max_value=300),
+    second=st.integers(min_value=1, max_value=300),
+)
+def test_audio_seconds_grows_monotonically(first: int, second: int) -> None:
+    """Longer sequences never produce shorter audio tracks."""
+    assume(first <= second)
+    first_seconds = compute_audio_seconds(compute_interpolated_frame_count(first))
+    second_seconds = compute_audio_seconds(compute_interpolated_frame_count(second))
+    assert first_seconds <= second_seconds
+
+
+@given(frame_count=st.integers(max_value=0))
+def test_builder_rejects_non_positive_frame_counts(frame_count: int) -> None:
+    """Zero or negative counts fail fast instead of building nonsense."""
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    with pytest.raises(ValueError, match="frames"):
+        _build_document(family, frame_count=frame_count)
 
 
 def test_duration_flows_to_every_audio_node() -> None:
