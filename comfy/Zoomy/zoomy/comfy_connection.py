@@ -1,8 +1,8 @@
 """HTTP client for the ComfyUI REST API.
 
-Wraps the three endpoints zoomy needs — queue a workflow (``POST /prompt``),
-read a prompt's history entry (``GET /history/<id>``), and interrupt the
-running job (``POST /interrupt``) — plus a lightweight reachability probe.
+Wraps the endpoints zoomy needs — queue a workflow (``POST /prompt``), read a
+prompt's history entry (``GET /history/<id>``), interrupt the running job
+(``POST /interrupt``), and read live memory figures (``GET /system_stats``).
 
 The class also declares :class:`ConnectionProtocol`, the structural contract
 the rendering and interface layers depend on, so tests can supply scripted
@@ -11,6 +11,7 @@ fakes without subclassing anything.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -36,8 +37,10 @@ class HistoryEntry:
             because artifacts are discovered through the frame repository.
         status_messages: Status event pairs (``[name, payload]``) recorded by
             ComfyUI while the prompt ran, such as ``execution_error``.
-        is_completed: Whether ComfyUI finished the prompt (successfully or
-            not); execution failures are diagnosed from ``status_messages``.
+        is_completed: Whether ComfyUI marked the prompt completed. Note that
+            interrupted and errored prompts never flip this flag (they stay
+            ``completed: False`` with a terminal status message), so callers
+            must scan ``status_messages`` for terminal failures first.
     """
 
     outputs: dict[str, Any]
@@ -45,11 +48,34 @@ class HistoryEntry:
     is_completed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SystemStatistics:
+    """Memory figures reported by ComfyUI's ``/system_stats`` endpoint.
+
+    Attributes:
+        system_memory_free_bytes: Free system RAM in bytes.
+        system_memory_total_bytes: Total system RAM in bytes.
+        video_memory_free_bytes: Free VRAM of the first reported device, or
+            ``None`` when ComfyUI reports no devices.
+        video_memory_total_bytes: Total VRAM of the first reported device, or
+            ``None`` when ComfyUI reports no devices.
+    """
+
+    system_memory_free_bytes: int
+    system_memory_total_bytes: int
+    video_memory_free_bytes: int | None
+    video_memory_total_bytes: int | None
+
+
 class ConnectionProtocol(Protocol):
     """Structural contract for anything that talks to ComfyUI for zoomy."""
 
     def is_reachable(self) -> bool:
         """Return True when ComfyUI answers a lightweight probe request."""
+        ...
+
+    def system_statistics(self) -> SystemStatistics:
+        """Return live memory figures from ComfyUI."""
         ...
 
     def queue_workflow(self, workflow: Mapping[str, Any]) -> str:
@@ -74,12 +100,28 @@ class ComfyConnection:
         self._client = httpx.Client(base_url=self.address, timeout=REQUEST_TIMEOUT_SECONDS)
 
     def is_reachable(self) -> bool:
-        """Return True when ComfyUI answers a lightweight statistics request."""
+        """Return True when ComfyUI answers the statistics endpoint."""
         try:
-            self._request("GET", "/system_stats")
+            self.system_statistics()
         except ComfyConnectionError:
             return False
         return True
+
+    def system_statistics(self) -> SystemStatistics:
+        """Return live memory figures from ComfyUI's ``/system_stats`` endpoint.
+
+        Raises:
+            ComfyConnectionError: ComfyUI is unreachable, answered invalid
+                JSON, or used an unexpected payload shape.
+        """
+        response = self._request("GET", "/system_stats")
+        try:
+            payload = response.json()
+        except ValueError as failure:
+            raise ComfyConnectionError(
+                "ComfyUI answered /system_stats with invalid JSON"
+            ) from failure
+        return _parse_system_statistics(payload)
 
     def queue_workflow(self, workflow: Mapping[str, Any]) -> str:
         """Queue an API-format workflow and return its prompt identifier.
@@ -148,12 +190,60 @@ class ComfyConnection:
         return response
 
 
+def _parse_system_statistics(payload: object) -> SystemStatistics:
+    """Translate a ``/system_stats`` body into typed memory figures.
+
+    Video memory comes from the first reported device; when ComfyUI reports
+    no devices both video figures stay ``None``.
+
+    Raises:
+        ComfyConnectionError: The payload does not have the expected shape.
+    """
+    if not isinstance(payload, dict):
+        raise ComfyConnectionError("ComfyUI /system_stats answered with an unexpected shape")
+    system = payload.get("system")
+    if not isinstance(system, dict):
+        raise ComfyConnectionError("ComfyUI /system_stats answered without a system section")
+    video_free: int | None = None
+    video_total: int | None = None
+    devices = payload.get("devices")
+    if isinstance(devices, list) and devices:
+        first_device = devices[0]
+        if isinstance(first_device, dict):
+            raw_free = first_device.get("vram_free")
+            raw_total = first_device.get("vram_total")
+            if raw_free is not None and raw_total is not None:
+                video_free = _parse_byte_count(raw_free, "vram_free")
+                video_total = _parse_byte_count(raw_total, "vram_total")
+    return SystemStatistics(
+        system_memory_free_bytes=_parse_byte_count(system.get("ram_free"), "ram_free"),
+        system_memory_total_bytes=_parse_byte_count(system.get("ram_total"), "ram_total"),
+        video_memory_free_bytes=video_free,
+        video_memory_total_bytes=video_total,
+    )
+
+
+def _parse_byte_count(value: object, label: str) -> int:
+    """Coerce a JSON byte count to int, rejecting booleans and garbage.
+
+    Non-finite floats are rejected explicitly: ``int()`` would leak a bare
+    ``ValueError`` for NaN instead of the typed connection error.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ComfyConnectionError(f"ComfyUI /system_stats field {label!r} is not a number")
+    if not math.isfinite(value):
+        raise ComfyConnectionError(f"ComfyUI /system_stats field {label!r} is not finite")
+    return int(value)
+
+
 def _rejected_workflow_error(response: httpx.Response) -> ComfyRejectedWorkflowError:
     """Translate a 400 validation body into a rejection error."""
     try:
         payload = response.json()
     except ValueError:
         payload = {}
+    if not isinstance(payload, dict):
+        return ComfyRejectedWorkflowError(summary="unknown validation failure", node_errors={})
     error = payload.get("error")
     if isinstance(error, dict):
         summary = str(error.get("message") or error.get("type") or "unknown validation failure")
