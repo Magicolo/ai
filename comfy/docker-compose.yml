@@ -28,3 +28,25 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  zoomy:
+    image: zoomy
+    build: ./Zoomy
+    ports:
+      - "127.0.0.1:7861:7861"
+    volumes:
+      - ./Comfy/output:/comfy/output
+    extra_hosts:
+      # The compose-run comfy container has no "comfy" DNS alias, so zoomy
+      # reaches it through the host's published port instead.
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZOOMY_COMFY_ADDRESS: http://host.docker.internal:8188
+      ZOOMY_OUTPUT_DIRECTORY: /comfy/output
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7861')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
