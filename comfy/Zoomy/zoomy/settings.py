@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from zoomy.errors import ZoomyError
 
-DEFAULT_COMFY_ADDRESS = "http://host.docker.internal:8188"
+DEFAULT_COMFY_ADDRESS = "http://comfy:8188"
 DEFAULT_OUTPUT_DIRECTORY = "/comfy/output"
 DEFAULT_INTERFACE_ADDRESS = "0.0.0.0"
 DEFAULT_INTERFACE_PORT = 7861

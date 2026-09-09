@@ -24,7 +24,7 @@ def test_from_environment_uses_defaults_when_unset(
     for name in SETTING_NAMES:
         monkeypatch.delenv(name, raising=False)
     settings = Settings.from_environment()
-    assert settings.comfy_address == "http://host.docker.internal:8188"
+    assert settings.comfy_address == "http://comfy:8188"
     assert settings.output_directory == "/comfy/output"
     assert settings.interface_address == "0.0.0.0"
     assert settings.interface_port == 7861

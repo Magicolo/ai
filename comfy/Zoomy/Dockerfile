@@ -5,6 +5,9 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# curl serves the compose healthcheck (same tool as the comfy service check).
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /application
 
 COPY requirements.txt requirements-dev.txt ./
