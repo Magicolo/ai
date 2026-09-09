@@ -1,0 +1,53 @@
+[project]
+name = "zoomy"
+version = "0.1.0"
+description = "Web control panel that drives infinite-zoom ComfyUI workflows"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  # ComfyUI API-format workflow payloads are untyped JSON documents.
+  "ANN401",
+  # This project carries no copyright-header policy.
+  "CPY001",
+  # Conflicts with the formatter (must be disabled when formatting).
+  "COM812",
+  # Conflicts with D213; the google convention puts the summary on the first line.
+  "D203",
+  # Conflicts with D203; the google convention puts the summary on the first line.
+  "D213",
+  # User-facing error messages embed values inline and read better as literals.
+  "EM101",
+  # User-facing error messages embed values inline and read better as literals.
+  "EM102",
+  # Conflicts with the formatter (must be disabled when formatting).
+  "ISC001",
+  # The interface intentionally binds 0.0.0.0 inside its own container.
+  "S104",
+  # User-facing error messages carry context in the exception string itself.
+  "TRY003",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+  # Tests intentionally assert against concrete magic numbers.
+  "PLR2004",
+  # Tests assert outcomes with plain asserts.
+  "S101",
+]
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
