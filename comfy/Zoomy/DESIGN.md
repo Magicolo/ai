@@ -56,7 +56,7 @@ Zoomy/
   DESIGN.md               # this file (excluded from the image via .dockerignore)
   pyproject.toml          # metadata + ruff (ALL, line-length 100) + mypy strict + pytest
   requirements.txt        # runtime: gradio==6.26.0, httpx==0.28.1
-  requirements-dev.txt    # dev: ruff==0.16.6, mypy==2.3.1, pytest==9.1.1
+  requirements-dev.txt    # dev: ruff==0.16.6, mypy==2.3.1, pytest==9.1.1, hypothesis==6.168.0
   Dockerfile              # python:3.12-slim, /application, CMD ["python", "-m", "zoomy"]
   .dockerignore
   zoomy/                  # the application package
@@ -101,19 +101,33 @@ Zoomy/
 - `frame_repository.FrameRepository(output_directory)`: `frame_paths` globs
   `Zoomy/<sequence>/frame_*.png` sorted (ComfyUI zero-pads counters, so name
   order is render order); `latest_video_path` returns the newest
-  `Zoomy_<sequence>*.mp4`, **preferring the `-audio` twin** (see §7).
+  `Zoomy_<sequence>*.mp4`, **preferring the `-audio` twin** (see §7);
+  `sequence_statistics()` summarizes count, bytes, recent paths, and video
+  details in one pass for the stats panel (tolerates files vanishing
+  mid-read).
 - `comfy_connection.ComfyConnection`: persistent `httpx.Client`;
   `queue_workflow` posts `{"prompt": workflow, "client_id": "zoomy"}` and
   parses 400 bodies into `ComfyRejectedWorkflowError`;
   `fetch_history` parses `GET /history/<id>` into `HistoryEntry(outputs,
   status_messages, is_completed)`; `interrupt` posts `/interrupt`;
-  `is_reachable` probes `/system_stats`. `ConnectionProtocol` is the
-  structural contract rendering/interface depend on (lets tests use fakes).
-- `rendering`: `render_next_frame` / `finalize_video` are generators yielding
-  `ProgressUpdate(message, frame_path, video_path, frame_count)`. The poll
-  loop fetches history first and checks the timeout after, so fast jobs never
-  trip a zero budget; completed entries are scanned once for
-  `execution_error` / `execution_interrupted`.
+  `system_statistics` parses `GET /system_stats` into typed RAM/VRAM figures
+  (first device; `is_reachable` shares the fetch).
+  `ConnectionProtocol` is the structural contract rendering/interface depend
+  on (lets tests use fakes).
+- `rendering`: `render_next_frame` / `finalize_video` / `render_loop` are
+  generators yielding `ProgressUpdate(message, frame_path, video_path,
+  frame_count, elapsed_seconds)`; all three take a `RenderEnvironment`
+  bundle (connection + repository + polling budgets). The poll loop fetches
+  history first and checks the timeout after, so fast jobs never trip a zero
+  budget; terminal failure messages are scanned *before* the completion flag
+  because interrupted/errored prompts keep `completed: False` (see §9).
+  `render_loop` renders until a frame target, a stop request (module-level
+  `threading.Event`, single-user justification documented), or exhausted
+  per-frame retries (3 attempts, transient errors only — interrupts and
+  rejections propagate immediately). Each frame attempt lives in
+  `_attempt_frame_with_retries`, which reports back whether the frame landed;
+  an attempt budget below 1 is rejected outright (zero attempts would spin
+  the loop forever).
 - `interface.build_application(...)`: see §8.
 - `main.main()`: builds settings/connection/repository, queues the app with
   `default_concurrency_limit=1` (one ComfyUI job at a time), and launches
@@ -185,30 +199,49 @@ prefers it.
 
 ## 8. Interface behavior (`interface.py`)
 
-Header row (family dropdown, reachability badge, frame counter) → status
-line → previews column (latest frame, finalized video) + per-family panel
-column. The panel is drawn by `@gr.render(inputs=[family_dropdown])`: LoRA
-`CheckboxGroup` + one strength slider (0–2, step 0.05) per family LoRA,
-prompt box, negative box only for families that define one, and the render
-button. Components the panel wiring touches are created *before* the render
-block (the decorator executes immediately at build).
+Header row (family dropdown + reachability badge), live statistics line
+(frames · disk · last/avg durations · video · VRAM/RAM), short status line,
+session log (append-only, last 8 of 200 lines), then a main row with previews
+on the left (latest frame, 8-frame gallery strip, finalized video) and the
+per-family panel on the right. The panel is drawn by
+`@gr.render(inputs=[family_dropdown])`: LoRA `CheckboxGroup` + one strength
+slider (0–2, step 0.05) per family LoRA, prompt box, negative box only for
+families that define one, Render button, Loop checkbox, and frame-target
+number (blank = run until stopped; blank submits 0, so the Number carries no
+`minimum=` — Gradio validates minimums in preprocess, before the handler
+runs, and would reject every blank-target loop outright). Components the
+panel wiring touches are created *before* the render block (the decorator
+executes immediately at build).
 
-Events: render/finalize buttons run the rendering generators (streamed
-status); health badge + counter refresh on a 10 s `Timer` and on dropdown
-change/refresh (`queue=False` so they never block behind a render); interrupt
-posts `/interrupt`; clear-frames uses a two-click confirm (`gr.State` armed
-flag + button label change); `blocks.queue(default_concurrency_limit=1)`
-serializes ComfyUI jobs. Wiring lives in `FamilyPanelWiring` /
-`InterfaceContext` dataclasses with small `_bind_*` factories to keep every
-function under the complexity budget.
+Events: render/loop/finalize generators stream status + log + previews +
+stats (gallery/preview refresh only on frame completion to avoid flicker;
+durations accumulate in session `State`); the Loop checkbox carries TWO
+`change` listeners because generators must queue while stops must not wait:
+the queued generator (starts the loop when checked, no-ops when unchecked)
+and an unqueued plain handler (no-op when checked, sets the stop flag when
+unchecked — this is what ends a running loop). The final yield unchecks the
+box programmatically, which fires no event, so no phantom loop can start.
+Health badge + stats refresh on a 10 s `Timer` and on dropdown
+change/refresh (`queue=False` so they never block behind a render); Interrupt
+posts `/interrupt` and also sets the loop-stop flag so it ends loops even
+between frames; clear-frames uses a two-click confirm (`gr.State` armed flag
++ button label change) and refreshes disarm it (no cross-family accidents);
+`blocks.queue(default_concurrency_limit=1)` serializes ComfyUI jobs. Wiring
+lives in `FamilyPanelWiring` / `InterfaceContext` dataclasses with small
+`_bind_*`/`_create_*` factories plus pure, unit-tested format/parse helpers
+to keep every function under the complexity budget.
 
 Gradio 6.26 specifics (all verified against the runtime, not assumed):
 `Dropdown` tuple choices are `(display, key)`; `Timer` takes
 `value=<seconds>` (not `seconds=`); `gr.State(value=...)` keyword form;
-`gr.render` is decorator-only (no direct-call form); event methods
-(`tick`/`change`/`click`) exist at runtime but are generated dynamically, so
-the stubs omit them — each call site carries a targeted
-`# type: ignore[attr-defined]` (see §11).
+`gr.render` is decorator-only (no direct-call form); `Checkbox` exposes
+`change`/`input`/`select` but NO `unselect` (assuming it broke page load
+once — the construct test never executes render functions, so only the
+headless draw-all-panels test guards this); event methods
+(`tick`/`change`/`click`/`select`) exist at runtime but are generated
+dynamically, so the stubs omit them — each call site carries a targeted
+`# type: ignore[attr-defined]` (see §11). Launch URLs carry a trailing
+slash — strip it before joining paths in tests, or every probe 404s.
 
 ## 9. ComfyUI API contract
 
@@ -219,9 +252,15 @@ the stubs omit them — each call site carries a targeted
   bool, "messages": [[name, payload], ...]}}}`. `execution_error` payload
   carries `node_type`/`exception_message`; `execution_interrupted` means the
   user (or someone) stopped the job.
-- `POST /interrupt`, `GET /system_stats` (reachability probe).
+- `POST /interrupt`, `GET /system_stats` (memory figures + reachability).
 - Artifacts are resolved through the repository (mtime/name), not through
   history outputs — SaveImage/VHS naming is deterministic.
+- **GOTCHA — interrupted/errored prompts keep `completed: False`.** A prompt
+  killed via `/interrupt` stays `{status_str: error, completed: False}` with
+  its `execution_interrupted` message (verified live); an earlier poll loop
+  that only honored the flag polled such entries forever. The loop now scans
+  status messages for terminal failures *before* consulting the flag
+  (regression-tested with `completed: False` entries).
 
 ## 10. Configuration
 
@@ -253,10 +292,18 @@ conflicts, `D203`/`D213` convention conflict, `S104` container bind,
 `pythonpath = ["."]`.
 
 Test layout mirrors the package (`test_settings/graph/family_catalog/
-frame_workflow/finalize_workflow/frame_repository/rendering/interface`;
-rendering uses a scripted `ConnectionProtocol` fake; workflow tests assert
-cold/warm starts, LoRA chaining, shift/negative conditionals, crop math, the
-duration formula, and that every `[key, slot]` link resolves).
+frame_workflow/finalize_workflow/frame_repository/rendering/interface`, plus
+`test_comfy_connection` for the statistics parser); rendering uses a scripted
+`ConnectionProtocol` fake; workflow tests assert cold/warm starts, LoRA
+chaining, shift/negative conditionals, crop math, the duration formula, and
+that every `[key, slot]` link resolves; engine tests cover elapsed timing,
+loop targets, graceful stops, retry exhaustion/success, and interrupt +
+rejection propagation; interface tests cover the pure format/parse helpers
+(bytes, stats line, panel submission, frame target, log trim, durations).
+Two rigor gates go beyond construction: headless `_draw_family_panel` for
+every family (executes all component constructors and event-method bindings
+— the only thing that catches draw-time `AttributeError`s before page load)
+and an ephemeral launch serving HTTP 200 (catches launch/config regressions).
 
 Known stub gaps (gradio 6.26 ships incomplete types for its dynamically
 generated API): `Timer`/`Dropdown`/`Button` event methods
@@ -280,9 +327,16 @@ The 400-path was verified live too: the first finalize attempt (0.7 s floor)
 was rejected with per-node detail, which exposed the ACE `seconds >= 1.0`
 minimum and led to the 1.0 floor (§7).
 
+Loop verification (same procedure): z_fast N=2 loop completed both frames
+with measured times (16 s, 10 s) and the exact target message; infinite loop
+with a mid-run stop request finished the running frame then exited with the
+stop message; a mid-frame interrupt raised `RenderInterruptedError` on the
+next 1 s poll (this run exposed the `completed: False` gotcha above — the
+pre-fix client polled the dead entry for 299 s); `/system_stats` returned
+live VRAM 15.0/15.6 GiB and RAM 53.9/62.6 GiB through the new parser.
+
 ## 13. Future work
 
 - More families = more catalog entries (nothing else changes).
 - Optional seed control / per-frame prompt history in the UI.
-- Frame gallery strip (currently only the latest frame previews).
 - If the UI is ever exposed beyond localhost, add auth in front of it.
