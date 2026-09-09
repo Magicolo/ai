@@ -6,24 +6,37 @@
 
 ```
 comfy/                          # wrapper repo (this file's scope)
-  serve.sh                      # ONLY entrypoint — `docker compose run --build --rm --detach --service-ports comfy`
-  docker-compose.yml            # single service `comfy`, init:true, healthcheck, ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache
+  serve.sh                      # ONLY entrypoint for comfy — `docker compose run --build --rm --detach --service-ports comfy`
+  zoomy.sh                      # ONLY entrypoint for zoomy — same pattern + `--no-deps zoomy` (comfy lifecycle independent)
+  docker-compose.yml            # TWO services: `comfy` (ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache, GPU reservations) + `zoomy` (build ./Zoomy, port 127.0.0.1:7861:7861, volume ./Comfy/output:/comfy/output, extra_hosts host-gateway, ZOOMY_* env)
   Dockerfile                    # FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel, bakes comfy-cli/mcp + custom nodes + requirements.txt
   entry.sh                      # dual-process: ComfyUI :8188 + comfy-mcp bridged :9000 (Streamable HTTP /mcp), handles set-default, req installs, patches
   AGENTS.md                     # THIS FILE — wrapper facts + update discipline
+  Zoomy/                        # zoomy app (see §10, full design in Zoomy/DESIGN.md)
+    pyproject.toml              # ruff ALL (line-length 100) + mypy strict + pytest config
+    requirements.txt            # runtime: gradio==6.26.0, httpx==0.28.1 (dev: ruff/mypy/pytest)
+    Dockerfile                  # FROM python:3.12-slim, /application, CMD ["python","-m","zoomy"]
+    DESIGN.md                   # app design doc — update with every behavior change
+    zoomy/                      # package: settings/errors/family_catalog/graph/frame_repository/comfy_connection/frame_workflow/finalize_workflow/rendering/interface/main
+    tests/                      # one test module per source module (49 tests, all green)
   Comfy/                        # upstream checkout (mounted as /comfy inside container), NOT rebuilt from scratch
     main.py                     # `python /comfy/main.py --listen 0.0.0.0 --port 8188` (invoked by entry.sh)
     models/
-      diffusion_models/         # ernieImageTurboQT_fp8V2.safetensors (7.7G, Civitai 3028150 fp8 inference requested, symlink ernie-image-turbo.safetensors) + put_*here placeholders
-      text_encoders/            # ministral-3-3b.safetensors 7.2G, ernie-image-prompt-enhancer.safetensors 6.5G (currently NOT wired — see GPU note)
-      vae/                      # flux2-vae.safetensors 321M (HF Comfy-Org/ERNIE-Image)
-      loras/                    # c64style_ernie.safetensors 188M (Ernie C64, Civitai 304097 v2882202, trigger `c64style`, diffusion-only weights — no text-encoder keys, so strength_clip is a no-op)
+      diffusion_models/         # ernieImageTurboQT_fp8V2.safetensors (7.7G, Civitai 3028150 fp8 inference requested, symlink ernie-image-turbo.safetensors) + Juggernaut-Z pair (ZImageBase, Civitai 2600510, safetensors-full 12.3G each, sha-verified): juggernautZ_v10FastBy (v3011968 Fast by RunDiffusion) + juggernautZ_v10ByRundiffusion (v2921151) + put_*here placeholders
+      text_encoders/            # ministral-3-3b.safetensors 7.2G, ernie-image-prompt-enhancer.safetensors 6.5G (currently NOT wired — see GPU note) + qwen_3_4b_fp8_mixed.safetensors 5.6G (Z-Image TE, HF Comfy-Org/z_image; full 8.04G rejected for 16GB VRAM)
+      vae/                      # flux2-vae.safetensors 321M (HF Comfy-Org/ERNIE-Image) + ae.safetensors 335M (Z-Image VAE, HF Comfy-Org/z_image)
+      loras/                    # c64style_ernie.safetensors 188M (Ernie C64, Civitai 304097 v2882202, trigger `c64style`, diffusion-only weights — no text-encoder keys, so strength_clip is a no-op) + Chalkboard01-1_CE_ZIMG_AIT4k.safetensors 170M (Civitai 648912 v2660695, no trainedWords) + ClayArt01a_CE_ZIMG_AIT3k.safetensors 170M (Civitai 1492159 v3021033) — both ZImageBase, diffusion-only (strength_clip no-op)
       frame_interpolation/      # film_net_fp16.safetensors 66M (FILM, default) + rife_v4.25/4.26/4.26_heavy 22M each (HF Comfy-Org/frame_interpolation)
     input/  -> ../input host mount (see docker-compose)
       ernie_zoom_seed.png       # cold-start seed frame for loop workflow ImageReceiver (rendered once via throwaway txt2img run, 1376×768 HD C64-style)
+      z_zoom_seed.png           # cold-start seed for Z loop (rendered via Juggernaut quality model 22 steps, 1376×768)
     output/                     # ALL generations confined here — `rm -rf Comfy/output/*` cleans everything
       Ernie_Zoom_Frames/frame_*.png  # current loop: one frame per Queue via SaveImage (the sequence; video loader reads this dir)
       Ernie_Zoom_*.mp4          # current loop video via VHS VideoCombine (only when video group unbypassed; save_output toggle)
+      Z_Zoom_Frames/frame_*.png # Z loop sequence (same mechanics, Juggernaut-Z frames)
+      Z_Zoom_*.mp4              # Z loop video + `-audio.mp4` twin (only when 99 unbypassed)
+      Zoomy/<sequence>/frame_*.png  # zoomy app sequences (`ernie_turbo`, `z_image`) — one frame per Render click
+      Zoomy_<sequence>_*.mp4    # zoomy finalized videos: silent main + `-audio.mp4` twin WITH the soundtrack (the twin is the real artifact) + preview PNG
       loopback_ernie_zoom/      # LEGACY (pre-Send/Receive) — no longer produced; remove if it reappears
       Ernie_Zoom_Loop_*.mp4     # LEGACY (pre-VHS) — no longer produced
       Ernie-Image-Turbo_*.png   # earlier single-frame tests
@@ -44,6 +57,7 @@ comfy/                          # wrapper repo (this file's scope)
         ernie_turbo_qt_enhanced.json      # backup with enhancer chain (OOM on 16GB — don't use without >24GB)
         ernie_infinite_zoom.json          # unrolled 12-frame fixed batch, N=12 768px, CreateVideo fps8 (legacy, per-queue rebuilds all frames)
         ernie_infinite_zoom_loop.json     # ✅ incremental IN-zoom: one new frame per Queue, C64-style LoRA (120, strength 1.0) on Ernie DiT, HD 1376×768 (official preset), crop 1356×748@10,10 → rescale bicubic (1.0147×/frame), img2img denoise 0.60, ImageReceiver/ImageSender (Impact Pack) cross-Queue feedback, frames → output/Ernie_Zoom_Frames/, video group (VHS loader + 4× FILM + VideoCombine, only 99 bypassed) + audio group (ACE-Step 1.5 music + MMAudio SFX via pad-to-17 node 123, mixed → VideoCombine audio; duration auto via 115/116 `max(a/b,0.7)`; shared primitives 117 fps / 118 link_id / 119+121 frame-size / 80+122 crop-size) — see §6.2
+        z_infinite_zoom_loop.json         # ✅ Z-Image twin of the ernie loop (same Send/Receive + frames-dir + bypassed-VHS-video + duplicated-audio mechanics): Juggernaut-Z Fast (10) / Quality (200) DiTs toggled by ONE boolean (208 QualityMode) via lazy MODEL+LATENT switches (201/214, only selected branch executes), LoRA 3-way int selector (207: 0 off / 1 chalkboard 203 / 2 clay-art 204) via cascaded lazy switches (209-212) after a shared shift-3 node (202); fast KSampler 53 (DDIM 6 steps cfg 1.0) vs quality 213 (res_multistep/beta 22 steps cfg 4); SEMANTIC prompts required (Z-Image); link_id is 2 (not 1 — avoids crosstalk with the ernie tab); frames → output/Z_Zoom_Frames/, video `Z_Zoom_*.mp4` — see §6.3
       comfy.settings.json       # frontend settings — *must* contain `"Comfy.LinkRenderMode":"Straight"` for square right-angle edges
 ```
 
@@ -52,6 +66,7 @@ comfy/                          # wrapper repo (this file's scope)
 ### 1. Host vs Container Boundary
 - **opencode runs on host only, comfy MUST stay in container** via `serve.sh` (`docker compose run --build --rm --detach ...`). Never `comfy launch` on host; host has no comfy binaries by design (`pip uninstall comfy-cli/comfy-mcp`, `~/.config/comfy-cli` removed, opencode `mcp: { comfy-mcp: { type: remote, url: http://localhost:9000/mcp, oauth:false }}`).
 - `serve.sh` uses **`run` not `up`** intentionally — keep it that way. `run --service-ports` publishes 8188/9000 and creates an ephemeral container name like `comfy-comfy-run-<hash>`. `docker ps` shows `comfy-comfy-run-... Up (healthy)`.
+- zoomy lifecycle is independent via `zoomy.sh` (same `run` pattern + `--no-deps`, ephemeral `comfy-zoomy-run-<hash>`, UI at `http://localhost:7861`). The compose-run comfy container has **no `comfy` DNS alias**, so zoomy reaches ComfyUI via `http://host.docker.internal:8188` (`extra_hosts: host-gateway` in compose). Never restart comfy or edit `serve.sh` for zoomy networking.
 - `COMFY_BIN` / `COMFYUI_URL` env passthrough is via `mcp-proxy` style `--pass-environment` (now inlined bridge). Don't set them manually.
 
 ### 2. Dockerfile Rebuild Safety
@@ -82,8 +97,8 @@ comfy/                          # wrapper repo (this file's scope)
 
 ### 6. Workflows & Validation
 - Browser location is `Comfy/user/default/workflows/` (not `Comfy/workflows/`). All 5 custom workflows are listed below; 3 are subgraph-based (Ernie Turbo QT), 2 are flat DAGs (infinite zoom).
-- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (canvas-menu JS only, no CLI; the `/tmp/prettify.py` host port is ephemeral and may not exist — hand-position new nodes carefully and verify zero overlaps) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 44 nodes 5870×2444 (43 active + 1 bypassed: only 99; group wrappers removed, bypass managed per-node); `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
-- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 44 nodes valid (20 expected warnings: tail nodes unreachable while 99 bypassed — server prunes them so normal Queues stay cheap); `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
+- All workflows are auto-formatted via **comfyui-workflow-prettier** (Sugiyama Layered DAG: topoSort → assignLayers → 6-iter barycenter minimizeCrossings → median assignCoordinates, Left-to-Right, `hGap 100 vGap 100`). Never hand-tweak `pos` — re-run prettier (canvas-menu JS only, no CLI; the `/tmp/prettify.py` host port is ephemeral and may not exist — hand-position new nodes carefully and verify zero overlaps) after manual edits. Current bbox: `ernie_infinite_zoom_loop.json` 44 nodes 5870×2444 (43 active + 1 bypassed: only 99; group wrappers removed, bypass managed per-node); `z_infinite_zoom_loop.json` 60 nodes 4290×5362 (59 active + 1 bypassed: only 99); `ernie_infinite_zoom.json` 67 nodes 63 layers 21690×840 (linear chain inherently wide, legacy).
+- Validate via `docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/<name>.json` (or comfy-mcp `validate_workflow`). Must be `valid: true, 0 errors` before queue. Current: `ernie_infinite_zoom_loop.json` 44 nodes valid (20 expected warnings: tail nodes unreachable while 99 bypassed — server prunes them so normal Queues stay cheap); `z_infinite_zoom_loop.json` 60 nodes valid (21 expected warnings, same class; 58 converted); `ernie_infinite_zoom.json` 67 nodes valid; `ernie_turbo_qt*.json` 3 top nodes + subgraph (9 or 14 inner nodes) valid.
 
 #### 6.1 Ernie Turbo QT — Subgraph Family (3 files, `definitions.subgraphs[0]` id `03921aea-a70e-44b4-bc77-f6bda10f2120`)
 
@@ -226,12 +241,49 @@ Wiring deltas vs simple: `94:0 --115--> 93:0` and `93:0 --117--> 95:4 (STRING)`,
 
 Flow per Queue (current HD design): `95(ImageReceiver: last frame or seed) —148→83(crop 1356×748@10,10, params from 80/122/81/82)→84(rescale 1376×768 bicubic, size from 119/121)→85(encode)→53(img2img 0.60, LoRA 120 on MODEL/CLIP)→54→96 ImageSender (151, feeds next Queue) + 97 SaveImage (152, persists sequence)`. Zoom math: `1376/1356 = 1.0147` per frame (~1.5% dive); offset rule `(1376−1356)/2 = 10` keeps it centered. Bypassed video group (unbypass 99 to render): `98 VHS_LoadImagesPath(dir) —153→90 FrameInterpolate 4× FILM (interp_model from 89) —154→99 VHS_VideoCombine @32fps (frame_rate ←117)` with preview + optional save toggle; `(n-1)*4+1` frames (4 dir frames → 13 @32fps verified, no pingpong). Bypassed audio group renders with it: 115 counts 90's frames → 116 `max(a/b,0.7)` → 104/105/111; 90's frames also condition MMAudio via 123 pad-to-17 → 111; mix 114 → 99.audio. **GOTCHA — VHS_VideoCombine `widgets_values` must be the 6 declared widgets only** `[32,0,"Ernie_Zoom","video/h264-mp4",False,True]` (format sub-widgets default: crf19/yuv420p/meta-true/trim-false); a 10-element array with sub-widget values misaligns positionally → `pingpong` got truthy `"yuv420p"` → pingponged videos (2 frames→8, 3→16). VHS counter quirk: its metadata PNG matches the `Ernie_Zoom_(\d+)` counter regex → numbering can skip (harmless).
 
+#### 6.3 Z-Image Loop — `z_infinite_zoom_loop.json` (✅ Z twin, 60 nodes, 80 links, 0 groups, bbox 4290×5362)
+
+Adapted duplicate of the ernie loop (same crop→rescale→encode→img2img→Sender/SaveImage per-Queue flow, same frames-dir + bypassed-VHS-video + duplicated-audio mechanics, same 1376×768 which is div-16 ✓ for Z-Image). Only the generation core + prompts differ; zoom/crop prims (80/122/81/82), size prims (119/121), fps prim (117) are per-workflow copies (NOT shared across files).
+
+| id | type | widgets / inputs | role |
+|----|------|------------------|------|
+| 10 | `UNETLoader` | `["juggernautZ_v10FastBy.safetensors","default"]` 12.3G | fast MODEL → 201 (300) |
+| 200 | `UNETLoader` | `["juggernautZ_v10ByRundiffusion.safetensors","default"]` 12.3G | quality MODEL → 201 (301) |
+| 208 | `PrimitiveBoolean` | `[False]` "QualityMode" | THE one-button switch → 201 (303) + 214 (357) |
+| 201 | `ComfySwitchNode` | switch ←208, on_false ←10, on_true ←200 (lazy) | selected MODEL → 202 (302) — unselected UNETLoader never executes |
+| 11 | `CLIPLoader` | `["qwen_3_4b_fp8_mixed.safetensors","lumina2","default"]` 5.6G | CLIP → 203/204 (parallel, lazy) |
+| 202 | `ModelSamplingAuraFlow` | `[3]` shift 3.0 (gallery-canonical for Z) | MODEL ←201 → 203/204/209-off |
+| 207 | `PrimitiveInt` | `[0]` "Style" (0 off / 1 chalkboard / 2 clay-art) | → 205.a (348) + 206.a (349) |
+| 205/206 | `ComfyMathExpression` | `["a == 1"]` / `["a == 2"]` (BOOL out slot 2) | → 209.switch (350) / 210.switch (352) |
+| 203 | `LoraLoader` | `["Chalkboard01-1_CE_ZIMG_AIT4k.safetensors",0.85,1.0]` model ←202 (344), clip ←11 (345) | chalk MODEL → 209 (351); no trainedWords — style comes from prose, not a trigger |
+| 204 | `LoraLoader` | `["ClayArt01a_CE_ZIMG_AIT3k.safetensors",0.85,1.0]` model ←202 (346), clip ←11 (347) | clay MODEL → 210 (353) |
+| 209/210 | `ComfySwitchNode` | cascaded MODEL select (209: chalk vs 202-base; 210: clay vs 209-out) | MODEL → 53/213 (354/355) |
+| 211/212 | `ComfySwitchNode` | same cascade for CLIP (211: chalk vs 11; 212: clay vs 211-out) | CLIP → 21 (356) |
+| 21 | `CLIPTextEncode` | SEMANTIC prose prompt (215) + clip ←212 | COND → 53, 213 |
+| 216 | `CLIPTextEncode` | trimmed official Juggernaut negative (illustrated/drawing/comic/CGI tags dropped — they fight the LoRAs) | COND → 53, 213 (negative) |
+| 53 | `KSampler` | `[<seed>,"randomize",6,1.0,"ddim","normal",0.60]` (page-faithful fast: steps 4-8, CFG 1-1.5) | fast img2img → 214 (358) |
+| 213 | `KSampler` | `[777,"randomize",22,4.0,"res_multistep","beta",0.60]` (official recipe: res_2s/beta/22/cfg 4; single pass — 3-step refiner omitted, gallery-canonical) | quality img2img → 214 (359) |
+| 214 | `ComfySwitchNode` | switch ←208, on_false ←53, on_true ←213 (lazy) | LATENT → 54 (360) — only the selected sampler runs |
+| 217 | `ImpactInt` | `[2]` "Send/Receive Link ID" | → 95 (335) + 96 (336); id **2** (not 1) avoids crosstalk with the ernie tab |
+| 95/96 | `ImageReceiver`/`ImageSender` | widget link_id **must equal 2** (see GOTCHA below) | seed `z_zoom_seed.png` (rendered via quality model, 22 steps, 66s) → 83; frames → `Z_Zoom_Frames/` |
+| 220 | `ComfyMathExpression` | `["max(a / b, 0.7)"]` (dup of 116) | audio seconds → new audio group |
+| 225 | `BatchPadToMin` | `[17]` (dup of 123) | 90 → new MMAudio 240 |
+| 230-243 | audio-group duplicate | ACE music (230-237) + MMAudio SFX (238-241) + mix 242 → 99.audio; 243 `ConditioningZeroOut` replaces shared-with-ernie node 22 as 236's negative | `Z_Zoom` video + `-audio.mp4` twin |
+
+Flow per Queue: identical to ernie (95→83→84→85→branch→54→96/97), except the img2img stage is `85 → 53/213 (model ←210, pos ←21, neg ←216) → 214 → 54`. Video/audio groups are copies retargeted at `Z_Zoom_*` paths. **Prompts MUST be semantic sentences** (Z-Image requirement — no SDXL tag soup, no C64 trigger).
+
+**2026-09-08: Z-Image support + canonical mappings** (research before build): Z-Image runs on native nodes — `CLIPLoader` offers `lumina2` type (Qwen3-4B), `KSampler` offers `res_multistep` (= res_2s family) + `ddim`, schedulers `beta`/`normal`, `EmptySD3LatentImage` works (ZImage latent is Lumina2-derived) — no custom sampler pack needed (`ClownsharKSampler_Beta` in the official Juggernaut wf maps to native `KSampler`). Gallery templates `image_z_image` (25 steps/cfg 4/res_multistep/simple/shift 3, note "steps 30-50, cfg 3-5") + `image_z_image_turbo` (8 steps/cfg 1) and the official wf (cfg 4 via PrimitiveFloat link; pass1 res_2s/beta/22/1.0, pass2 res_2s/normal/3/0.15; recommended 960×1440 ≈1.38MP, div-16 ideal) all agree: **quality cfg = 4**. Fast = DDIM 6 steps cfg 1.0 is page-faithful (gallery turbo uses res_multistep, page says DDIM — page wins). TE/VAE from HF `Comfy-Org/z_image` (ungated: `qwen_3_4b_fp8_mixed` + `ae.safetensors`); official `Tongyi-MAI/Z-Image` files are diffuser-format (not directly loadable). CivitAI downloads need the version-scoped URL form (`/api/download/models/{versionId}?fileId={fileId}` — the bare file form 404s); on-disk HF token is INVALID (breaks public HF calls if sent — use no Authorization header).
+
+**GOTCHA — img-send matches the frontend widget VALUE, not the link** (Impact Pack `js/impact-pack.js`, frontend 1.51.9): the linked-widget branch requires `widgets[1].type == 'converted-widget'`, which this frontend never sets (probed live: `{name link_id, type 'number'}` with the link present) — so matching falls through to `widgets[1].value` vs the sent link_id. Consequence: 95/96 `widgets_values[1]` MUST equal the link_id primitive's value (2 for Z, 1 for ernie) or the receiver silently never updates; the `ImpactInt`-vs-`PrimitiveInt` type is irrelevant to the handler (swap was harmless but the value alignment was the real fix). The ernie loop carries the same latent trap (118=1 matches today) — DO NOT touch the ernie file for this (clobber risk); if its link_id ever changes, align its 95/96 widget values too.
+
+Verified end-to-end: validate 0 errors (21 expected bypass warnings, 58 converted); fast branch ~10-15s/frame, quality 65.3s/frame; lazy pruning PROVEN (QualityMode false + fresh seed → 15.1s vs 65.3s true — a ~50s delta is impossible if both branches executed); receiver rewrite works in both modes (q2 `95.image` = `Z_Zoom_Send_temp_*.png [temp]`); directional continuity in both modes (fast 29.24<30.29, quality 21.17<22.66 at the exact 1.0147× factor); LoRA 3-way ALL confirmed visually (0 = photorealistic cathedral, 1 = black chalkboard + chalk linework, 2 = plasticine claymation); A/V render `Z_Zoom_00001.mp4` 53f @32fps = 1.656s = (14−1)×4+1 with full-length AAC (RMS 0.075-0.144 in every window). Test rig `/tmp/opencode/uebug/queue_z.mjs [N] [--video]` (single page session — receiver rewrite is in-memory; fresh seed per run or the server cache-hits and appends nothing; filter `/history` for node `203` to isolate Z entries from ernie-tab interleaving; prompt JSON carries widget values as direct `inputs`, not `widgets_values`).
+
 - Straight edges enforced globally via `comfy.settings.json` `Comfy.LinkRenderMode=Straight` and per-workflow `extra._linkRenderMode` doc hint (see §3).
 
 ### 7. Custom Nodes Audit (QoL / Safety)
 - **comfy-loopback-buffer** (holo-q, 1.0.0 MIT, deps torch/pillow/numpy/aiohttp): replaces filesystem Save/Load reimplementation for incremental accumulation. Small, tested, maintained — **keep installed** but LEGACY: no workflow uses it since the Send/Receive redesign (§6.2).
 - **ComfyUI-VideoHelperSuite** (Kosinkadink, 1.7.9, ~4k★): `VideoCombine` etc. Thousands of dependents, active, deps already baked (`opencv-python imageio-ffmpeg`). `VHS_LoadImagesPath` + `VHS_VideoCombine` drive the loop workflow's bypassed video group — **keep**, now load-bearing for video rendering.
-- **comfyui-impact-pack** (ltdrdata, ~1k★, active): `ImageSender`/`ImageReceiver` cross-Queue feedback drives the loop workflow (link_id pair; `img-send` frontend event rewrites Receiver widget to Sender's temp file — memory-resident, falls back to seed PNG on reload). Host git clone (NOT baked in Dockerfile — code persists via `./Comfy:/comfy` mount, pip deps via entry.sh runtime loop); `requirements.txt` trimmed of `git+.../sam2` (SAM nodes unneeded → faster boot; `[Impact Pack] SAM2 functionality unavailable` warning + `impact-sam-editor.js` 404 are expected/harmless). **keep** (required for perpetual zoom).
+- **comfyui-impact-pack** (ltdrdata, ~1k★, active): `ImageSender`/`ImageReceiver` cross-Queue feedback drives the loop workflow (link_id pair; `img-send` frontend event rewrites Receiver widget to Sender's temp file — memory-resident, falls back to seed PNG on reload). Host git clone (NOT baked in Dockerfile — code persists via `./Comfy:/comfy` mount, pip deps via entry.sh runtime loop); `requirements.txt` trimmed of `git+.../sam2` (SAM nodes unneeded → faster boot; `[Impact Pack] SAM2 functionality unavailable` warning + `impact-sam-editor.js` 404 are expected/harmless). **keep** (required for perpetual zoom). ⚠️ img-send matches the frontend widget VALUE, not the link (frontend 1.51.9 never marks linked widgets `converted-widget`, so the linked branch of `imgSendHandler` is dead code) — Receiver/Sender `widgets_values[1]` MUST equal the link_id primitive's value or the receiver silently never updates (see §6.3 GOTCHA).
 - **comfyui-mmaudio** (kijai, 574★ MIT, pushed 2026-02): `MMAudioModelLoader`/`MMAudioFeatureUtilsLoader`/`MMAudioSampler` drive the loop workflow's bypassed audio group (video-synced SFX from interp frames). Host git clone (same pattern as impact-pack — NOT baked in Dockerfile); light deps (librosa/torchdiffeq/einops/timm/omegaconf/open_clip/accelerate/ftfy). Models (~4.6G: large fp16 2.06G + synchformer 475M + vae 611M + CLIP 1.97G) under `models/mmaudio/`. **keep** (required for SFX). ⚠️ Two gotchas: (1) synchformer needs **≥16 sync frames** — short renders crash `torch.stack([])` in `encode_video_with_sync` (fixed in-workflow via 116 `max()` floor + 123 pad node, see §6.2); (2) old-style INPUT_TYPES has no `control_after_generate`, frontend injects it after seed — disk `widgets_values` must carry the control value or the prompt slot shifts (see §6.2).
 - **batching_utils** (local, host-written, torch only, no deps): single node `BatchPadToMin` (images + min_frames, default 17) — pads short batches by whole-batch tiling for MMAudio's 16-frame sync segments, passthrough when long. Exists only because no native pad-to-min node fits (RepeatImageBatch is fixed-count → OOM at scale). **keep** (required by loop audio group).
 - **cg-use-everywhere** (chrisgoringe, checkout 50ae9f8 = upstream main HEAD 2026-07-20, "8.0", 1k★, frontend-only): `Anything Everywhere` broadcast reduces link spaghetti, no python deps. **⚠️ INCOMPATIBLE with frontend 1.51.9** — any workflow containing a UE node fails at browser Queue: UE 8.0 assumes `node.inputs`/`node.outputs` always defined (`find_duplicate_broadcasted_types` use_everywhere_utilities.js:365 `reading 'length'`; also `fix_unconnected_inputs` `reading 'filter'` in afterConfigureGraph on load), the throw is swallowed by `call_function_with_modified_graph` → returns `undefined` → VHS's outer wrapper dereferences `res.workflow` → `res is undefined` error dialog. No newer upstream fix exists as of 2026-09-02. **Keep installed** (workflows without UE nodes queue fine — wrappers pass through cleanly) but **do not add UE nodes to any workflow** until upstream/compatible-frontend resolves; wire explicitly instead.
@@ -242,12 +294,20 @@ Flow per Queue (current HD design): `95(ImageReceiver: last frame or seed) —14
 ### 8. Confinement & Cleanup Discipline
 - Everything generated goes under `Comfy/output/` — verify after each workflow edit: `ls -R Comfy/output` should contain only intended files. Saved frames (`Ernie_Zoom_Frames/`) count as generation.
 - `Comfy/temp/` should stay empty of persistent history; entry.sh migration ensures legacy temp history moves to output.
-- To reset the loop sequence: `rm -rf Comfy/output/Ernie_Zoom_Frames` (+ videos `rm Comfy/output/Ernie_Zoom*.mp4`) — **must run INSIDE the container** (host lacks perms on root-owned files). Next Queue cold-starts from `input/ernie_zoom_seed.png`.
+- To reset the loop sequence: `rm -rf Comfy/output/Ernie_Zoom_Frames` (+ videos `rm Comfy/output/Ernie_Zoom*.mp4`) — **must run INSIDE the container** (host lacks perms on root-owned files). Next Queue cold-starts from `input/ernie_zoom_seed.png`. Z loop: same with `Z_Zoom_Frames` / `Z_Zoom*.mp4` / `input/z_zoom_seed.png`.
+- zoomy sequences reset the same way from inside the zoomy container: `rm -rf /comfy/output/Zoomy /comfy/output/Zoomy_<sequence>*` (frames dir + videos + `-audio` twins + preview PNGs), or the UI's two-click **Clear frames**. Next Render cold-starts from the family's seed image.
 - `Comfy/output/loopback_ernie_zoom/` is LEGACY — remove if it reappears.
 
 ### 9. Update Discipline & Task Alignment
 - **After each significant amount of work, update this AGENTS.md** if new relevant info/facts became known (new model, new workflow, new custom node, new volume, new port, new patch, perf numbers, VRAM lessons). Keep this file as the single source of truth for the wrapper; don't let facts live only in chat.
 - **When defining/planning a task, go through rounds of Q&A to further specify the solution and ensure proper alignment** before building: ask clarifying questions (node choices, naming, durability, toggle mechanics, scope), present a researched plan, and only proceed once the user confirms. Never jump from a vague request straight to implementation.
+
+### 10. Zoomy App & Engineering Standards
+- **zoomy** (`Zoomy/`, full design in `Zoomy/DESIGN.md`) is the default interface: Gradio control panel (family dropdown → LoRA multi-select + strength sliders → Render next frame → Finalize video) driving ComfyUI over REST. Families `ernie_turbo` / `z_fast` / `z_quality` (z pair shares sequence `z_image`); new family = one `FamilyDefinition` appended, nothing else changes. Existing workflow JSONs are untouched (additive).
+- **All zoomy deps are containerized — never pollute the host**: runtime `gradio==6.26.0 httpx==0.28.1`, dev `ruff==0.16.6 mypy==2.3.1 pytest==9.1.1`, all installed in the image. Host has no comfy/gradio/pytest binaries by design.
+- **Standards (binding for all zoomy work)**: type annotations everywhere; ruff `ALL` (line-length 100) + `ruff format` + mypy `strict` + pytest after each significant piece of work until clean; document non-obvious code (module docstrings explain the *why*); good names — no acronyms/abbreviations/contractions/single-letter variables (domain terms `lora/comfy/json/http` allowed; prefer `autoencoder/text_encoder/base_model` over `vae/clip/unet` in our names, node class_types + input keys stay literal); keep modules small (split before hitting complexity limits); maintain `Zoomy/DESIGN.md` with every behavior change.
+- **Quality loop runs against host files via bind mount** (image files are throwaway copies): `docker compose run --rm --no-deps -v ./Zoomy:/workspace ... zoomy sh -c "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider"` — then rebuild + launch via `zoomy.sh`.
+- **Verified live behaviors**: `EmptyAceStep1.5LatentAudio.seconds` enforces min **1.0** → audio floor is `max(interp/32, 1.0)` (ACE text encoder allows ≥0, MMAudio no min); VHS mux always applies `-shortest` so floored audio trims to the video, and writes a silent main mp4 + `-audio.mp4` twin WITH the soundtrack (the twin is the preview artifact — `latest_video_path` prefers it). Gradio 6.26: `Dropdown` tuple choices are `(display, key)`; `Timer` takes `value=` seconds; `gr.State(value=...)` keyword form; `gr.render` is decorator-only; event methods (`tick/change/click`) exist at runtime but are stub-omitted (targeted `type: ignore`s, runtime-verified). E2E timings on 4060 Ti: z_fast frame ~10-15 s, finalize 2 frames ~20 s, ernie frame ~23 s.
 
 ## Commands Cheat Sheet
 
@@ -256,9 +316,16 @@ Flow per Queue (current HD design): `95(ImageReceiver: last frame or seed) —14
 docker ps --format "{{.Names}} {{.Status}}"   # comfy-comfy-run-... Up (healthy)
 docker logs <cid> --tail 100                 # ComfyUI logs
 docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/ernie_infinite_zoom_loop.json
+docker exec <cid> comfy workflow validate --workflow /comfy/user/default/workflows/z_infinite_zoom_loop.json
 docker exec <cid> bash -c 'ls /comfy/output/Ernie_Zoom_Frames | wc -l'
+docker exec <cid> bash -c 'ls /comfy/output/Z_Zoom_Frames | wc -l'
 curl -s http://localhost:9000/status | jq    # comfy-mcp bridge health
 curl -s http://localhost:8188 | head         # ComfyUI health
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:7861/  # zoomy UI health
+./zoomy.sh                                 # build + run zoomy (ephemeral, --no-deps) — independent of comfy
+# zoomy quality loop (fixes host files via bind mount, then verify clean):
+docker compose run --rm --no-deps -v ./Zoomy:/workspace -e RUFF_CACHE_DIR=/tmp/ruff-cache -e MYPY_CACHE_DIR=/tmp/mypy-cache zoomy sh -c "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider"
+# zoomy e2e inside its container (ZOOMY_* env already set): docker exec <zoomy-cid> python -c "from zoomy. ... render_next_frame / finalize_video ..."
 # Format workflows after manual edits (Sugiyama Layered, straight edges):
 python3 /tmp/prettify.py --all               # or workflow_prettier UI: select Layered → Save
 ```
@@ -269,3 +336,5 @@ python3 /tmp/prettify.py --all               # or workflow_prettier UI: select L
 - Workflow `id` changes on save can drift hash key — fixed key patch prevents history loss.
 - Frames are **1376×768** (official Ernie preset; ~20s/frame on 4060 Ti). Don't change resolution without re-checking VRAM + re-rendering the seed PNG at the new size (cold-start seed must match frame size).
 - `Comfy.LinkRenderMode` must be `Straight`; if edges look curved, re-check `comfy.settings.json`.
+- zoomy finalize: the `-audio.mp4` twin (not the same-named mp4) carries the soundtrack — preview/ship the twin. Audio floor is `max(interp/32, 1.0)` because `EmptyAceStep1.5LatentAudio.seconds` rejects anything below 1.0 with a 400.
+- zoomy e2e writes real artifacts under `Comfy/output/Zoomy/` + `Zoomy_*` — clean them from inside the zoomy container after verification; never delete the user's `Ernie_Zoom_*`/`Z_Zoom_*` files by pattern accident (`Zoomy_` ≠ `Z_Zoom_`/`Ernie_Zoom_`).
