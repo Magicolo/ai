@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -49,9 +50,13 @@ def _read_text(name: str, default: str) -> str:
 
 
 def _read_integer(name: str, default: int) -> int:
-    """Parse an integer environment value, raising a friendly error on garbage."""
+    """Parse an integer environment value, raising a friendly error on garbage.
+
+    A missing or blank value falls back to the default, matching the text
+    settings (an explicitly blank variable means "not configured").
+    """
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     try:
         parsed = int(raw)
@@ -62,13 +67,22 @@ def _read_integer(name: str, default: int) -> int:
 
 
 def _read_float(name: str, default: float) -> float:
-    """Parse a floating-point environment value, raising a friendly error."""
+    """Parse a floating-point environment value, raising a friendly error.
+
+    Blank means the default (see :func:`_read_integer`); non-finite values
+    like ``nan`` or ``inf`` are rejected because they silently poison timeout
+    arithmetic (any comparison against NaN is False, so a NaN budget would
+    never expire).
+    """
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     try:
         parsed = float(raw)
     except ValueError as failure:
         message = f"Environment variable {name} must contain a number, received {raw!r}"
         raise ZoomyError(message) from failure
+    if not math.isfinite(parsed):
+        message = f"Environment variable {name} must contain a finite number, received {raw!r}"
+        raise ZoomyError(message)
     return parsed
