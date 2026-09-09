@@ -8,7 +8,7 @@
 comfy/                          # wrapper repo (this file's scope)
   serve.sh                      # ONLY entrypoint for comfy — `docker compose run --build --rm --detach --service-ports comfy`
   zoomy.sh                      # ONLY entrypoint for zoomy — same pattern + `--no-deps zoomy` (comfy lifecycle independent)
-  docker-compose.yml            # TWO services: `comfy` (ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache, GPU reservations) + `zoomy` (build ./Zoomy, port 127.0.0.1:7861:7861, volume ./Comfy/output:/comfy/output, extra_hosts host-gateway, ZOOMY_* env)
+  docker-compose.yml            # TWO services: `comfy` (ports 8188/7860/9000, volumes ./Comfy:/comfy ./input:/input comfy:/root/.cache, GPU reservations) + `zoomy` (build ./Zoomy, port 127.0.0.1:7861:7861, volume ./Comfy/output:/comfy/output, ZOOMY_* env)
   Dockerfile                    # FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel, bakes comfy-cli/mcp + custom nodes + requirements.txt
   entry.sh                      # dual-process: ComfyUI :8188 + comfy-mcp bridged :9000 (Streamable HTTP /mcp), handles set-default, req installs, patches
   AGENTS.md                     # THIS FILE — wrapper facts + update discipline
@@ -66,7 +66,7 @@ comfy/                          # wrapper repo (this file's scope)
 ### 1. Host vs Container Boundary
 - **opencode runs on host only, comfy MUST stay in container** via `serve.sh` (`docker compose run --build --rm --detach ...`). Never `comfy launch` on host; host has no comfy binaries by design (`pip uninstall comfy-cli/comfy-mcp`, `~/.config/comfy-cli` removed, opencode `mcp: { comfy-mcp: { type: remote, url: http://localhost:9000/mcp, oauth:false }}`).
 - `serve.sh` uses **`run` not `up`** intentionally — keep it that way. `run --service-ports` publishes 8188/9000 and creates an ephemeral container name like `comfy-comfy-run-<hash>`. `docker ps` shows `comfy-comfy-run-... Up (healthy)`.
-- zoomy lifecycle is independent via `zoomy.sh` (same `run` pattern + `--no-deps`, ephemeral `comfy-zoomy-run-<hash>`, UI at `http://localhost:7861`). The compose-run comfy container has **no `comfy` DNS alias**, so zoomy reaches ComfyUI via `http://host.docker.internal:8188` (`extra_hosts: host-gateway` in compose). Never restart comfy or edit `serve.sh` for zoomy networking.
+- zoomy lifecycle is independent via `zoomy.sh` (same `run` pattern + `--no-deps`, ephemeral `comfy-zoomy-run-<hash>`, UI at `http://localhost:7861`). The comfy container carries a fixed `--name comfy` (see `serve.sh`), so zoomy reaches ComfyUI bridge-locally at `http://comfy:8188` — no host-network access, no `extra_hosts`. Never restart comfy or edit `serve.sh` beyond the name for zoomy networking.
 - `COMFY_BIN` / `COMFYUI_URL` env passthrough is via `mcp-proxy` style `--pass-environment` (now inlined bridge). Don't set them manually.
 
 ### 2. Dockerfile Rebuild Safety

@@ -33,12 +33,11 @@ browser (host) ──http──> zoomy:7861 ──REST──> comfy:8188 ──f
 
 - `zoomy` service (`Zoomy/Dockerfile`, `python:3.12-slim`): Gradio app,
   port `127.0.0.1:7861:7861`, volume `./Comfy/output:/comfy/output`.
-- The compose-run `comfy` container has **no `comfy` DNS alias** (only its
-  ephemeral container-name alias), so zoomy reaches ComfyUI through
-  `http://host.docker.internal:8188` with compose
-  `extra_hosts: ["host.docker.internal:host-gateway"]` (8188 is published on
-  `0.0.0.0` by the comfy service). Do not restart comfy or edit `serve.sh`
-  for networking.
+- The `comfy` container carries a fixed `--name comfy` (see `serve.sh`), so
+  the name resolves on the shared `comfy_default` bridge and zoomy reaches
+  ComfyUI at `http://comfy:8188` with no host-network access and no dependence
+  on published ports. Do not restart comfy or edit `serve.sh` beyond the name
+  for zoomy networking.
 - Lifecycle is independent: `./zoomy.sh`
   (`run --build --rm --detach --service-ports --no-deps zoomy`) creates an
   ephemeral `comfy-zoomy-run-*` container; `docker stop` removes it.
@@ -73,7 +72,7 @@ Zoomy/
 ## 4. Module reference
 
 - `settings.Settings.from_environment()`: `ZOOMY_COMFY_ADDRESS`
-  (default `http://host.docker.internal:8188`), `ZOOMY_OUTPUT_DIRECTORY`
+  (default `http://comfy:8188`), `ZOOMY_OUTPUT_DIRECTORY`
   (`/comfy/output`), `ZOOMY_INTERFACE_ADDRESS` (`0.0.0.0` — inside the
   container only), `ZOOMY_INTERFACE_PORT` (`7861`),
   `ZOOMY_OPERATION_TIMEOUT_SECONDS` (`1800`), `ZOOMY_POLL_INTERVAL_SECONDS`
@@ -221,7 +220,7 @@ the stubs omit them — each call site carries a targeted
 
 | variable | default | used by |
 |----------|---------|---------|
-| `ZOOMY_COMFY_ADDRESS` | `http://host.docker.internal:8188` | connection |
+| `ZOOMY_COMFY_ADDRESS` | `http://comfy:8188` | connection |
 | `ZOOMY_OUTPUT_DIRECTORY` | `/comfy/output` | repository, loaders, save prefixes |
 | `ZOOMY_INTERFACE_ADDRESS` | `0.0.0.0` (container-local) | launch |
 | `ZOOMY_INTERFACE_PORT` | `7861` | launch |
