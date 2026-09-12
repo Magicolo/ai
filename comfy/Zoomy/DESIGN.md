@@ -173,23 +173,45 @@ Zoom math: `1376 / 1356 ≈ 1.0147` per frame (~1.5% dive); offset rule
 (`FRAME_WIDTH_PIXELS`, `FRAME_HEIGHT_PIXELS`, `CROP_BORDER_PIXELS`) are
 module-level and covered by tests.
 
-## 7. Finalize workflow (`finalize_workflow.py`)
+## 7. Finalize (`finalize_workflow.py` + `final_assembly.py` + `rendering`)
 
-Python computes `interpolated = (frame_count − 1) * 4 + 1` and
-`audio_seconds = max(interpolated / 32, MINIMUM_AUDIO_SECONDS)`; the graph
-holds only the heavy nodes: full-frame loader → FILM `×4` → `BatchPadToMin`
-(17, for MMAudio's ≥16 sync-frame requirement) → ACE-Step music chain
-(seed 31, 8 steps, cfg 1.0, euler/simple, empty lyrics = instrumental) →
-MMAudio SFX chain (conditioned on the *padded* frames, 25 steps, cfg 4.5,
-seed 7, mask_away_clip, force_offload, −6 dB) → `AudioMerge(add)` →
-`VHS_VideoCombine` (images ← the **unpadded** interpolation, audio ← merge,
-32 fps, `Zoomy_<sequence>` prefix, h264/yuv420p/crf 19).
+Short sequences finalize in one pass (the same interpolate → music + SFX →
+mux graph over the full frame range, merged soundtrack, `Zoomy_<sequence>`
+prefix). Long ones — anything interpolating past what 48 source frames
+produce (`needs_segmentation`) — finalize window by window and assemble in
+Python, so VRAM per job depends only on the fixed 48-frame window, never on
+the total frame count (a 300-frame single pass OOMs MMAudio at 13.9 GB; a
+48-frame window peaks at ~13.0 of 15.57 GiB, verified live).
 
-Audio floor rationale: `EmptyAceStep1.5LatentAudio.seconds` enforces
-**min 1.0** (live-server truth; the ACE text encoder allows ≥ 0.0 and
-MMAudio has no minimum), so `MINIMUM_AUDIO_SECONDS = 1.0`. Overshoot is safe:
-the VHS mux always applies `-shortest`, trimming floored audio to the video
-length (verified: 2-frame finalize → 0.157s video, no 1.0s stretch).
+Per-window graph (mirrors the single pass, windowed loader + indexed stems):
+windowed `VHS_LoadImagesPath(skip_first_images, image_load_cap)` → FILM `×4`
+→ `BatchPadToMin` (17) → ACE-Step music chain (seed `31 + window.index`, so
+music evolves while tags/bpm/key stay shared) → MMAudio SFX chain (seed 7,
+fixed — conditioning frames already vary) → twin videos
+(`..._seg<i>_music` ← decode_music, `..._seg<i>_sfx` ← soften) + FLAC stems
+(`SaveAudioAdvanced`, `..._seg<i>_{music,sfx}_stem`).
+
+Each stem over-generates beyond its video span by exactly the assembly
+overlap (music +1.0 s, SFX +0.25 s; pinned equal to the assembly crossfades
+by test). The assembly then blends neighbors over the overlap, so every stem
+stays sample-locked to its video — no cumulative drift — and the final mux
+trims the last tail. (The twins trim audio to the video span via `-shortest`,
+which is why the overlaps only survive in the stems.)
+
+Assembly (`final_assembly.py`, ffmpeg via `imageio-ffmpeg`, quiet flags):
+extract stems → join each stem with deterministic fades/delays placed from
+the known durations (fade out, delayed fade in, one `amix`) → mix music 0 dB
++ SFX −6 dB (the graph's balance) → concat video streams (stream copy) →
+mux AAC twin. Never `acrossfade`: it collapses on short tails (verified
+live — a 0.84 s tail truncated a whole join to silence). Every step verifies
+its outputs are present and non-empty, raising `AssemblyError` at the culprit
+step; intermediates (videos, twins, stems, VHS preview PNGs) are removed
+after a successful mux.
+
+Verified live on 295 frames: 7 windows in 281 s, peak VRAM 13.8 GiB flat
+across segments, final `Zoomy_z_image_00004.mp4` + `-audio` twin at 36.2 s
+(1159 frames) with full-length stereo AAC (RMS ≥ 0.02 in every 0.5 s window,
+no boundary dropouts).
 
 **VHS twin behavior** (read from the installed VHS source): with audio
 connected, the node writes a silent main file `Zoomy_<seq>_00001.mp4` *plus*
