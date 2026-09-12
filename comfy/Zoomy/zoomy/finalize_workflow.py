@@ -32,6 +32,17 @@ VIDEO_FRAMES_PER_SECOND = 32
 # always applies -shortest, so a floored audio track is trimmed to the video.
 MINIMUM_AUDIO_SECONDS = 1.0
 MINIMUM_SYNC_FRAMES = 17
+# Source frames per finalize segment: 48 frames interpolate to 189 frames and
+# about 5.9 s of audio, inside the envelope verified live on the 16 GB card —
+# while the 300-frame single pass (1197 interpolated frames) OOMs MMAudio.
+SEGMENT_SOURCE_FRAMES = 48
+# Extra audio each segment generates beyond its video span: the assembly
+# overlaps neighbors by exactly the crossfade length, so generating the
+# overlap keeps every stem sample-locked to its video (no drift) while the
+# final mux trims the last tail. Each must equal the assembly's matching
+# crossfade — pinned by test_extension_matches_assembly_overlaps.
+SEGMENT_MUSIC_EXTENSION_SECONDS = 1.0
+SEGMENT_SOUND_EXTENSION_SECONDS = 0.25
 
 INTERPOLATION_MODEL_FILE = "film_net_fp16.safetensors"
 
@@ -95,6 +106,22 @@ class FinalizeRequest:
     output_directory: str
 
 
+@dataclass(frozen=True, slots=True)
+class SegmentWindow:
+    """One contiguous slice of a frame sequence finalized as a single job.
+
+    Attributes:
+        index: Zero-based position among the sequence's windows.
+        skip_first_images: Source frames to skip in ``VHS_LoadImagesPath``.
+        frame_count: Source frames this window holds (at most
+            :data:`SEGMENT_SOURCE_FRAMES`).
+    """
+
+    index: int
+    skip_first_images: int
+    frame_count: int
+
+
 def compute_interpolated_frame_count(frame_count: int) -> int:
     """Return the frame count after interpolation: ``(n - 1) * 4 + 1``."""
     return (frame_count - 1) * INTERPOLATION_MULTIPLIER + 1
@@ -111,6 +138,64 @@ def compute_audio_seconds(interpolated_frame_count: int) -> float:
     return max(raw_seconds, MINIMUM_AUDIO_SECONDS)
 
 
+def compute_segment_video_seconds(window_frame_count: int) -> float:
+    """Return the video duration one segment window produces."""
+    return compute_audio_seconds(compute_interpolated_frame_count(window_frame_count))
+
+
+def compute_segment_music_seconds(window_frame_count: int) -> float:
+    """Return the music duration a segment generates: video plus the overlap."""
+    return compute_segment_video_seconds(window_frame_count) + SEGMENT_MUSIC_EXTENSION_SECONDS
+
+
+def compute_segment_sound_seconds(window_frame_count: int) -> float:
+    """Return the effects duration a segment generates: video plus overlap."""
+    return compute_segment_video_seconds(window_frame_count) + SEGMENT_SOUND_EXTENSION_SECONDS
+
+
+def needs_segmentation(frame_count: int) -> bool:
+    """Return True when a sequence is too long for one finalize pass.
+
+    A single pass stays within the verified VRAM envelope only while its
+    interpolated frame count fits what :data:`SEGMENT_SOURCE_FRAMES` source
+    frames produce; anything longer must be finalized window by window.
+    """
+    single_pass_budget = compute_interpolated_frame_count(SEGMENT_SOURCE_FRAMES)
+    return compute_interpolated_frame_count(frame_count) > single_pass_budget
+
+
+def compute_segment_windows(
+    frame_count: int, *, segment_size: int = SEGMENT_SOURCE_FRAMES
+) -> tuple[SegmentWindow, ...]:
+    """Split a sequence into contiguous windows of at most ``segment_size``.
+
+    The windows tile ``[0, frame_count)`` without gaps or overlaps, so a
+    segmented finalize covers exactly the source frames — boundary frames of
+    adjacent windows are consecutive renders, which is why interpolation
+    needs no overlap between windows.
+
+    Raises:
+        ValueError: If ``frame_count`` is below one or ``segment_size`` is
+            below one.
+    """
+    if frame_count < 1:
+        message = f"Cannot segment a sequence with {frame_count} frames"
+        raise ValueError(message)
+    if segment_size < 1:
+        message = f"Segment size must be at least 1, received {segment_size}"
+        raise ValueError(message)
+    windows = []
+    for index, first_frame in enumerate(range(0, frame_count, segment_size)):
+        windows.append(
+            SegmentWindow(
+                index=index,
+                skip_first_images=first_frame,
+                frame_count=min(segment_size, frame_count - first_frame),
+            )
+        )
+    return tuple(windows)
+
+
 def build_finalize_workflow(request: FinalizeRequest) -> dict[str, dict[str, Any]]:
     """Build the API-format finalize workflow for one frame sequence.
 
@@ -121,19 +206,86 @@ def build_finalize_workflow(request: FinalizeRequest) -> dict[str, dict[str, Any
     if request.frame_count < 1:
         message = f"Cannot finalize a sequence with {request.frame_count} frames"
         raise ValueError(message)
-    interpolated_frame_count = compute_interpolated_frame_count(request.frame_count)
-    audio_seconds = compute_audio_seconds(interpolated_frame_count)
     sequence_key = request.family.sequence_key
-    frames_directory = f"{request.output_directory}/Zoomy/{sequence_key}"
+    return _assemble_finalize_document(
+        request.family,
+        _DocumentSpec(
+            frames_directory=f"{request.output_directory}/Zoomy/{sequence_key}",
+            skip_first_images=0,
+            image_load_cap=0,
+            music_seconds=compute_segment_music_seconds(request.frame_count),
+            sound_seconds=compute_segment_sound_seconds(request.frame_count),
+            music_seed=MUSIC_SEED,
+            filename_prefix=f"Zoomy_{sequence_key}",
+        ),
+    )
 
+
+def build_finalize_segment_workflow(
+    request: FinalizeRequest, window: SegmentWindow
+) -> dict[str, dict[str, Any]]:
+    """Build the finalize workflow for one segment window of a long sequence.
+
+    The graph mirrors :func:`build_finalize_workflow` but reads only the
+    window's frames and scores only the window's seconds of audio, so peak
+    VRAM depends on the window size — never on the total frame count. Music
+    evolves across windows (``MUSIC_SEED + window.index``) while tags, tempo,
+    and key stay shared; the Python-side assembly crossfades the boundary.
+
+    Raises:
+        ValueError: If the sequence or the window holds no frames.
+    """
+    if request.frame_count < 1:
+        message = f"Cannot finalize a sequence with {request.frame_count} frames"
+        raise ValueError(message)
+    if window.frame_count < 1:
+        message = (
+            f"Cannot finalize a segment window with {window.frame_count} frames "
+            f"(index {window.index})"
+        )
+        raise ValueError(message)
+    sequence_key = request.family.sequence_key
+    return _assemble_finalize_document(
+        request.family,
+        _DocumentSpec(
+            frames_directory=f"{request.output_directory}/Zoomy/{sequence_key}",
+            skip_first_images=window.skip_first_images,
+            image_load_cap=window.frame_count,
+            music_seconds=compute_segment_music_seconds(window.frame_count),
+            sound_seconds=compute_segment_sound_seconds(window.frame_count),
+            music_seed=MUSIC_SEED + window.index,
+            filename_prefix=f"Zoomy_{sequence_key}_seg{window.index:03d}",
+            separate_soundtrack=True,
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _DocumentSpec:
+    """The values that vary between a full and a segment finalize graph."""
+
+    frames_directory: str
+    skip_first_images: int
+    image_load_cap: int
+    music_seconds: float
+    sound_seconds: float
+    music_seed: int
+    filename_prefix: str
+    separate_soundtrack: bool = False
+
+
+def _assemble_finalize_document(
+    family: FamilyDefinition, spec: _DocumentSpec
+) -> dict[str, dict[str, Any]]:
+    """Assemble the shared interpolate → music + SFX → mux graph."""
     workflow = ComfyWorkflow()
     frame_sequence = workflow.add(
         "load_frame_sequence",
         "VHS_LoadImagesPath",
         {
-            "directory": frames_directory,
-            "image_load_cap": 0,
-            "skip_first_images": 0,
+            "directory": spec.frames_directory,
+            "image_load_cap": spec.image_load_cap,
+            "skip_first_images": spec.skip_first_images,
             "select_every_nth": 1,
         },
     )
@@ -156,13 +308,37 @@ def build_finalize_workflow(request: FinalizeRequest) -> dict[str, dict[str, Any
         "BatchPadToMin",
         {"images": interpolated_frames, "min_frames": MINIMUM_SYNC_FRAMES},
     )
-    music_audio = _add_music_chain(workflow, request.family.music_prompt, audio_seconds)
+    music_audio = _add_music_chain(
+        workflow, family.music_prompt, spec.music_seconds, music_seed=spec.music_seed
+    )
     sound_effect_audio = _add_sound_effect_chain(
         workflow,
-        request.family.sound_effect_prompt,
-        request.family.sound_effect_negative_prompt,
-        audio_seconds,
+        family.sound_effect_prompt,
+        family.sound_effect_negative_prompt,
+        spec.sound_seconds,
     )
+    if spec.separate_soundtrack:
+        _add_video_node(
+            workflow,
+            "render_video_music",
+            interpolated_frames,
+            music_audio,
+            f"{spec.filename_prefix}_music",
+        )
+        _add_video_node(
+            workflow,
+            "render_video_effects",
+            interpolated_frames,
+            sound_effect_audio,
+            f"{spec.filename_prefix}_sfx",
+        )
+        _add_stem_node(
+            workflow, "save_music_stem", music_audio, f"{spec.filename_prefix}_music_stem"
+        )
+        _add_stem_node(
+            workflow, "save_sound_stem", sound_effect_audio, f"{spec.filename_prefix}_sfx_stem"
+        )
+        return workflow.build()
     merged_audio = workflow.add(
         "merge_audio_tracks",
         "AudioMerge",
@@ -172,15 +348,29 @@ def build_finalize_workflow(request: FinalizeRequest) -> dict[str, dict[str, Any
             "merge_method": "add",
         },
     )
+    _add_video_node(
+        workflow, "render_video", interpolated_frames, merged_audio, spec.filename_prefix
+    )
+    return workflow.build()
+
+
+def _add_video_node(
+    workflow: ComfyWorkflow,
+    key: str,
+    images: NodeReference,
+    audio: NodeReference,
+    filename_prefix: str,
+) -> None:
+    """Add a VideoHelperSuite combine node with the proven encode settings."""
     workflow.add(
-        "render_video",
+        key,
         "VHS_VideoCombine",
         {
-            "images": interpolated_frames,
-            "audio": merged_audio,
+            "images": images,
+            "audio": audio,
             "frame_rate": VIDEO_FRAMES_PER_SECOND,
             "loop_count": VIDEO_LOOP_COUNT,
-            "filename_prefix": f"Zoomy_{sequence_key}",
+            "filename_prefix": filename_prefix,
             "format": VIDEO_FORMAT,
             "pix_fmt": VIDEO_PIXEL_FORMAT,
             "crf": VIDEO_CONSTANT_RATE_FACTOR,
@@ -190,11 +380,26 @@ def build_finalize_workflow(request: FinalizeRequest) -> dict[str, dict[str, Any
             "save_output": True,
         },
     )
-    return workflow.build()
+
+
+def _add_stem_node(
+    workflow: ComfyWorkflow, key: str, audio: NodeReference, filename_prefix: str
+) -> None:
+    """Save one full-length soundtrack stem as lossless FLAC.
+
+    The video twins trim audio to the video span (VHS applies ``-shortest``),
+    so the over-generated overlap tails the assembly blends only survive in
+    these stem files.
+    """
+    workflow.add(
+        key,
+        "SaveAudioAdvanced",
+        {"audio": audio, "filename_prefix": filename_prefix, "format": "flac"},
+    )
 
 
 def _add_music_chain(
-    workflow: ComfyWorkflow, music_prompt: str, audio_seconds: float
+    workflow: ComfyWorkflow, music_prompt: str, audio_seconds: float, *, music_seed: int
 ) -> NodeReference:
     """Build the ACE-Step music bed chain and return its audio output."""
     music_model = workflow.add(
@@ -223,7 +428,7 @@ def _add_music_chain(
             "clip": music_text_encoders,
             "tags": music_prompt,
             "lyrics": "",
-            "seed": MUSIC_SEED,
+            "seed": music_seed,
             "bpm": MUSIC_BEATS_PER_MINUTE,
             "duration": audio_seconds,
             "timesignature": MUSIC_TIME_SIGNATURE,
@@ -255,7 +460,7 @@ def _add_music_chain(
             "positive": encoded_music_prompt,
             "negative": zeroed_music_negative,
             "latent_image": music_noise,
-            "seed": MUSIC_SEED,
+            "seed": music_seed,
             "steps": MUSIC_STEPS,
             "cfg": MUSIC_CLASSIFIER_FREE_GUIDANCE,
             "sampler_name": MUSIC_SAMPLER,
