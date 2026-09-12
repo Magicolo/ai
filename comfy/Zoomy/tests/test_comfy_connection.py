@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -16,6 +16,15 @@ from zoomy.comfy_connection import (
 )
 from zoomy.errors import ComfyConnectionError, ZoomyError
 
+# Wire-transportable text: NUL-free (matching the settings domain) and
+# surrogate-free (lone surrogates are not UTF-8 encodable, so httpx refuses
+# to build a body with them — like non-finite floats, they can never arrive
+# on the wire and must not be generated for response bodies).
+_SURROGATE_CATEGORY: tuple[Literal["Cs"], ...] = ("Cs",)
+wire_characters = st.characters(
+    blacklist_characters="\x00", blacklist_categories=_SURROGATE_CATEGORY
+)
+
 json_atom = (
     st.none()
     | st.booleans()
@@ -23,12 +32,13 @@ json_atom = (
     # Non-finite floats are not JSON-transportable (httpx refuses to encode
     # them), so bodies under test stay within what can arrive on the wire.
     | st.floats(allow_nan=False, allow_infinity=False)
-    | st.text(alphabet=st.characters(blacklist_characters="\x00"), max_size=20)
+    | st.text(alphabet=wire_characters, max_size=20)
 )
 json_value = st.recursive(
     json_atom,
     lambda children: (
-        st.lists(children, max_size=4) | st.dictionaries(st.text(max_size=8), children, max_size=3)
+        st.lists(children, max_size=4)
+        | st.dictionaries(st.text(alphabet=wire_characters, max_size=8), children, max_size=3)
     ),
     max_leaves=8,
 )
@@ -137,3 +147,10 @@ def test_rejection_parsing_handles_non_json_bodies() -> None:
     """A non-JSON 400 still produces a usable rejection error."""
     error = _rejected_workflow_error(httpx.Response(400, content=b"not json"))
     assert "unknown validation failure" in str(error)
+
+
+def test_rejection_parsing_handles_lone_surrogate_bodies() -> None:
+    """Surrogate bytes arrive raw on the wire and must not crash parsing."""
+    error = _rejected_workflow_error(httpx.Response(400, content=b'{"error": "\xed\xa0\x80"}'))
+    assert isinstance(error, ZoomyError)
+    assert str(error)
