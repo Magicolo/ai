@@ -178,3 +178,76 @@ def test_sequence_statistics_of_an_empty_sequence(tmp_path: Path) -> None:
     assert statistics.video_path is None
     assert statistics.video_bytes is None
     assert statistics.video_modified_timestamp is None
+
+
+def test_segment_twin_paths_resolves_the_newest_music_and_effects_twins(
+    tmp_path: Path,
+) -> None:
+    """Each window's two soundtrack twins resolve independently by recency."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00001-audio.mp4", modification_time=100.0)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00002-audio.mp4", modification_time=200.0)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_sfx_00001-audio.mp4", modification_time=150.0)
+    twins = repository.segment_twin_paths("z_image", 2)
+    assert twins == (
+        tmp_path / "Zoomy_z_image_seg002_music_00002-audio.mp4",
+        tmp_path / "Zoomy_z_image_seg002_sfx_00001-audio.mp4",
+    )
+
+
+def test_segment_twin_paths_needs_both_stems(tmp_path: Path) -> None:
+    """A window with only one rendered twin is not ready for assembly."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00001-audio.mp4")
+    assert repository.segment_twin_paths("z_image", 2) is None
+    assert repository.segment_twin_paths("z_image", 3) is None
+
+
+def test_segment_stem_paths_resolves_the_newest_flac_stems(tmp_path: Path) -> None:
+    """Each window's two overlap stems resolve independently by recency."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_music_stem.flac", modification_time=100.0)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_music_stem_00001.flac", modification_time=200.0)
+    _write_file(tmp_path / "Zoomy_z_image_seg002_sfx_stem.flac", modification_time=150.0)
+    stems = repository.segment_stem_paths("z_image", 2)
+    assert stems == (
+        tmp_path / "Zoomy_z_image_seg002_music_stem_00001.flac",
+        tmp_path / "Zoomy_z_image_seg002_sfx_stem.flac",
+    )
+    assert repository.segment_stem_paths("z_image", 3) is None
+
+
+def test_next_video_stem_continues_the_main_sequence(tmp_path: Path) -> None:
+    """Assembly names follow the VHS counter, skipping twins and segments."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "Zoomy_z_image_00001.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_00002.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001-audio.mp4")
+    assert repository.next_video_stem("z_image") == "Zoomy_z_image_00003"
+
+
+def test_next_video_stem_starts_a_fresh_sequence(tmp_path: Path) -> None:
+    """No previous videos means the first counter, matching VHS numbering."""
+    repository = FrameRepository(tmp_path)
+    assert repository.next_video_stem("z_image") == "Zoomy_z_image_00001"
+
+
+def test_remove_segment_files_deletes_only_segments(tmp_path: Path) -> None:
+    """Post-mux cleanup removes every intermediate kind and reports the count."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001-audio.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_seg000_sfx_00001.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_seg000_music_stem.flac")
+    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001.png")
+    _write_file(tmp_path / "Zoomy_z_image_00001.mp4")
+    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4")
+    assert repository.remove_segment_files("z_image") == 4
+    assert (tmp_path / "Zoomy_z_image_00001.mp4").exists()
+    assert (tmp_path / "Zoomy_z_image_00001-audio.mp4").exists()
+
+
+def test_assembly_directory_lives_beside_the_sequence(tmp_path: Path) -> None:
+    """Scratch waves and concat lists stay inside the zoomy output tree."""
+    repository = FrameRepository(tmp_path)
+    assert repository.assembly_directory("z_image") == (tmp_path / "Zoomy" / "z_image_assembly")

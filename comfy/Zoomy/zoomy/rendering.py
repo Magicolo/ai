@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from zoomy.errors import (
+    AssemblyError,
     ComfyExecutionError,
     ComfyRejectedWorkflowError,
     EmptyFrameSequenceError,
@@ -29,7 +30,19 @@ from zoomy.errors import (
     RenderInterruptedError,
     ZoomyError,
 )
-from zoomy.finalize_workflow import build_finalize_workflow
+from zoomy.final_assembly import (
+    AssemblyRequest,
+    SegmentSoundtrack,
+    assemble_final_video,
+)
+from zoomy.finalize_workflow import (
+    build_finalize_segment_workflow,
+    build_finalize_workflow,
+    compute_segment_music_seconds,
+    compute_segment_sound_seconds,
+    compute_segment_windows,
+    needs_segmentation,
+)
 from zoomy.frame_workflow import build_frame_workflow
 
 if TYPE_CHECKING:
@@ -155,17 +168,25 @@ def finalize_video(
 ) -> Iterator[ProgressUpdate]:
     """Turn the sequence into a video and yield progress until it lands.
 
+    Short sequences finalize in one ComfyUI pass; long ones render window by
+    window (bounded VRAM per job) and assemble in Python — see
+    :func:`_finalize_segmented`.
+
     Raises:
         EmptyFrameSequenceError: The sequence has no frames to finalize.
         ComfyExecutionError: ComfyUI recorded an execution_error status.
         RenderInterruptedError: The job was interrupted.
         OperationTimeoutError: The job exceeded the environment timeout.
+        AssemblyError: Segment twins are missing or the ffmpeg assembly failed.
     """
     if request.frame_count < 1:
         raise EmptyFrameSequenceError(
             "Cannot finalize a video: the sequence has no frames yet. "
             "Render at least one frame first."
         )
+    if needs_segmentation(request.frame_count):
+        yield from _finalize_segmented(request, environment)
+        return
     sequence_key = request.family.sequence_key
     yield ProgressUpdate(message="Submitting finalize workflow to ComfyUI…")
     operation_started = time.monotonic()
@@ -187,6 +208,76 @@ def finalize_video(
     yield ProgressUpdate(
         message=f"Video complete in {elapsed_seconds:.0f} s.",
         video_path=video_path,
+        frame_count=request.frame_count,
+        elapsed_seconds=elapsed_seconds,
+    )
+
+
+def _finalize_segmented(
+    request: FinalizeRequest,
+    environment: RenderEnvironment,
+) -> Iterator[ProgressUpdate]:
+    """Finalize a long sequence window by window, then assemble in Python.
+
+    Each window queues its own bounded-VRAM ComfyUI job; the Python assembly
+    (cheap CPU ffmpeg work) is the only step that ever sees the whole
+    sequence, so VRAM stays flat no matter how many frames the video holds.
+    Segment intermediates are removed after a successful assembly.
+    """
+    sequence_key = request.family.sequence_key
+    repository = environment.repository
+    windows = compute_segment_windows(request.frame_count)
+    window_count = len(windows)
+    operation_started = time.monotonic()
+    soundtracks = []
+    for window in windows:
+        segment_label = f"Segment {window.index + 1}/{window_count}"
+        yield ProgressUpdate(message=f"Submitting {segment_label} to ComfyUI…")
+        segment_workflow = build_finalize_segment_workflow(request, window)
+        prompt_identifier = environment.connection.queue_workflow(segment_workflow)
+        yield from _await_completion(
+            environment,
+            prompt_identifier,
+            activity_message=f"Finalizing {segment_label}",
+        )
+        twins = repository.segment_twin_paths(sequence_key, window.index)
+        if twins is None:
+            message = f"Segment {window.index} twins are missing after its ComfyUI job completed"
+            raise AssemblyError(message)
+        stems = repository.segment_stem_paths(sequence_key, window.index)
+        if stems is None:
+            message = f"Segment {window.index} stems are missing after its ComfyUI job completed"
+            raise AssemblyError(message)
+        soundtracks.append(
+            SegmentSoundtrack(
+                music_video_path=twins[0],
+                music_stem_path=stems[0],
+                sound_effect_stem_path=stems[1],
+                music_seconds=compute_segment_music_seconds(window.frame_count),
+                sound_effect_seconds=compute_segment_sound_seconds(window.frame_count),
+            )
+        )
+    yield ProgressUpdate(
+        message=f"Assembling {window_count} segments into the {sequence_key} video…"
+    )
+    video_stem = repository.next_video_stem(sequence_key)
+    outputs = assemble_final_video(
+        AssemblyRequest(
+            segments=tuple(soundtracks),
+            work_directory=repository.assembly_directory(sequence_key),
+            output_video_path=repository.output_directory / f"{video_stem}.mp4",
+            output_audio_video_path=repository.output_directory / f"{video_stem}-audio.mp4",
+        )
+    )
+    removed_intermediates = repository.remove_segment_files(sequence_key)
+    elapsed_seconds = time.monotonic() - operation_started
+    yield ProgressUpdate(
+        message=(
+            f"Video complete in {elapsed_seconds:.0f} s "
+            f"({window_count} segments assembled, "
+            f"{removed_intermediates} intermediates removed)."
+        ),
+        video_path=outputs.audio_video_path,
         frame_count=request.frame_count,
         elapsed_seconds=elapsed_seconds,
     )

@@ -65,3 +65,7 @@ class OperationTimeoutError(ZoomyError):
 
 class EmptyFrameSequenceError(ZoomyError):
     """A video finalize was requested without any rendered frames."""
+
+
+class AssemblyError(ZoomyError):
+    """The Python-side assembly of segmented finalize outputs failed."""

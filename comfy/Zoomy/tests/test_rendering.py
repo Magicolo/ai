@@ -8,8 +8,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+import zoomy.rendering as rendering_module
 from zoomy.comfy_connection import HistoryEntry, SystemStatistics
 from zoomy.errors import (
+    AssemblyError,
     ComfyExecutionError,
     ComfyRejectedWorkflowError,
     EmptyFrameSequenceError,
@@ -18,6 +20,7 @@ from zoomy.errors import (
     ZoomyError,
 )
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
+from zoomy.final_assembly import AssemblyOutputs, AssemblyRequest
 from zoomy.finalize_workflow import FinalizeRequest
 from zoomy.frame_repository import FrameRepository
 from zoomy.frame_workflow import FrameRenderRequest
@@ -229,6 +232,91 @@ def test_finalize_video_success_yields_video(tmp_path: Path) -> None:
     final_update = updates[-1]
     assert final_update.video_path == video_path
     assert final_update.frame_count == 3
+
+
+def _write_segment_twins(output_directory: Path, *, window_count: int) -> None:
+    """Stub one music/effects twin pair plus stems per segment window."""
+    for index in range(window_count):
+        (output_directory / f"Zoomy_z_image_seg{index:03d}_music_00001-audio.mp4").write_bytes(
+            b"stub"
+        )
+        (output_directory / f"Zoomy_z_image_seg{index:03d}_sfx_00001-audio.mp4").write_bytes(
+            b"stub"
+        )
+        (output_directory / f"Zoomy_z_image_seg{index:03d}_music_stem.flac").write_bytes(b"stub")
+        (output_directory / f"Zoomy_z_image_seg{index:03d}_sfx_stem.flac").write_bytes(b"stub")
+
+
+def test_finalize_video_segments_long_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 100-frame sequence queues three windowed jobs, then assembles once."""
+    repository = _repository_with_frames(tmp_path, frame_count=100)
+    _write_segment_twins(tmp_path, window_count=3)
+    connection = ScriptedConnection([_completed_entry()] * 3)
+    assembled_requests: list[AssemblyRequest] = []
+
+    def fake_assemble(request: AssemblyRequest) -> AssemblyOutputs:
+        """Record the assembly request and stub the final pair."""
+        assembled_requests.append(request)
+        main_video = tmp_path / "Zoomy_z_image_00003.mp4"
+        twin_video = tmp_path / "Zoomy_z_image_00003-audio.mp4"
+        main_video.write_bytes(b"stub")
+        twin_video.write_bytes(b"stub")
+        return AssemblyOutputs(main_video_path=main_video, audio_video_path=twin_video)
+
+    monkeypatch.setattr(rendering_module, "assemble_final_video", fake_assemble)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FinalizeRequest(family=family, frame_count=100, output_directory="/output")
+    updates = list(
+        finalize_video(
+            request,
+            _test_environment(connection, repository),
+        )
+    )
+    assert len(connection.queued_workflows) == 3
+    prefixes = [
+        workflow["render_video_music"]["inputs"]["filename_prefix"]
+        for workflow in connection.queued_workflows
+    ]
+    assert prefixes == [
+        "Zoomy_z_image_seg000_music",
+        "Zoomy_z_image_seg001_music",
+        "Zoomy_z_image_seg002_music",
+    ]
+    loader_skips = [
+        workflow["load_frame_sequence"]["inputs"]["skip_first_images"]
+        for workflow in connection.queued_workflows
+    ]
+    assert loader_skips == [0, 48, 96]
+    assert len(assembled_requests) == 1
+    assert len(assembled_requests[0].segments) == 3
+    first_soundtrack = assembled_requests[0].segments[0]
+    assert first_soundtrack.music_seconds == pytest.approx(189 / 32 + 1.0)
+    assert first_soundtrack.sound_effect_seconds == pytest.approx(189 / 32 + 0.25)
+    assert first_soundtrack.music_stem_path.name == "Zoomy_z_image_seg000_music_stem.flac"
+    messages = [update.message for update in updates]
+    assert any("Segment 1/3" in message for message in messages)
+    assert any("Segment 3/3" in message for message in messages)
+    final_update = updates[-1]
+    assert final_update.video_path == tmp_path / "Zoomy_z_image_00003-audio.mp4"
+    assert final_update.frame_count == 100
+    assert not list(tmp_path.glob("Zoomy_z_image_seg*.mp4"))
+
+
+def test_finalize_video_refuses_half_rendered_segments(tmp_path: Path) -> None:
+    """A segment job without both twins fails loudly instead of mis-joining."""
+    repository = _repository_with_frames(tmp_path, frame_count=100)
+    connection = ScriptedConnection([_completed_entry()] * 3)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FinalizeRequest(family=family, frame_count=100, output_directory="/output")
+    with pytest.raises(AssemblyError, match="Segment 0"):
+        list(
+            finalize_video(
+                request,
+                _test_environment(connection, repository),
+            )
+        )
 
 
 def _counted_request_factory() -> Callable[[int], FrameRenderRequest]:

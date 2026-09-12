@@ -20,6 +20,9 @@ ZOOMY_DIRECTORY_NAME = "Zoomy"
 FRAME_FILE_PATTERN = "frame_*.png"
 VIDEO_FILE_TEMPLATE = "Zoomy_{sequence_key}*.mp4"
 AUDIO_FILE_MARKER = "-audio"
+SEGMENT_FILE_MARKER = "_seg"
+ASSEMBLY_DIRECTORY_SUFFIX = "_assembly"
+VIDEO_COUNTER_DIGITS = 5
 RECENT_FRAME_LIMIT = 8
 
 
@@ -82,6 +85,77 @@ class FrameRepository:
     def clear_frames(self, sequence_key: str) -> None:
         """Delete the sequence's entire frame directory."""
         shutil.rmtree(self.frame_directory(sequence_key), ignore_errors=True)
+
+    def assembly_directory(self, sequence_key: str) -> Path:
+        """Return the scratch directory for assembly waves and concat lists."""
+        leaf = f"{sequence_key}{ASSEMBLY_DIRECTORY_SUFFIX}"
+        return self.output_directory / ZOOMY_DIRECTORY_NAME / leaf
+
+    def segment_twin_paths(self, sequence_key: str, index: int) -> tuple[Path, Path] | None:
+        """Return a segment window's music and effects twins, newest each.
+
+        Returns ``None`` unless both twins landed, so the finalize loop never
+        assembles half a window. The twins carry the concatenated pixels;
+        the full-length soundtrack stems resolve separately.
+        """
+        music_twin = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_music*-audio.mp4")
+        effects_twin = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_sfx*-audio.mp4")
+        if music_twin is None or effects_twin is None:
+            return None
+        return (music_twin, effects_twin)
+
+    def segment_stem_paths(self, sequence_key: str, index: int) -> tuple[Path, Path] | None:
+        """Return a segment window's music and effects stems, newest each.
+
+        Stems keep the over-generated overlap tails the twins trim away, so
+        both must be present before the window joins the assembly.
+        """
+        music_stem = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_music_stem*.flac")
+        sound_stem = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_sfx_stem*.flac")
+        if music_stem is None or sound_stem is None:
+            return None
+        return (music_stem, sound_stem)
+
+    def next_video_stem(self, sequence_key: str) -> str:
+        """Return the next ``Zoomy_<sequence>_NNNNN`` stem, VHS-style.
+
+        Segment intermediates and audio twins never advance the counter, so
+        assembly names continue the main video sequence seamlessly.
+        """
+        prefix = f"Zoomy_{sequence_key}_"
+        counters = []
+        for candidate in self.output_directory.glob(f"{prefix}*.mp4"):
+            stem = candidate.stem
+            if AUDIO_FILE_MARKER in stem or SEGMENT_FILE_MARKER in stem:
+                continue
+            counter_text = stem[len(prefix) :]
+            if len(counter_text) == VIDEO_COUNTER_DIGITS and counter_text.isdigit():
+                counters.append(int(counter_text))
+        return f"{prefix}{max(counters, default=0) + 1:05d}"
+
+    def remove_segment_files(self, sequence_key: str) -> int:
+        """Delete a sequence's segment intermediates, returning the count.
+
+        Matches every segment artifact regardless of extension: videos,
+        twins, stems, and the metadata preview images VHS writes alongside.
+        """
+        removed = 0
+        for candidate in self.output_directory.glob(f"Zoomy_{sequence_key}_seg*"):
+            if candidate.is_dir():
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
+    def _newest_match(self, pattern: str) -> Path | None:
+        """Return the newest file matching a glob, or ``None`` when empty."""
+        candidates = list(self.output_directory.glob(pattern))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.stat().st_mtime)
 
     def latest_video_path(self, sequence_key: str) -> Path | None:
         """Return the newest finalized video, preferring the audio-muxed twin.
