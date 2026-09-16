@@ -58,6 +58,19 @@ def test_empty_sequence_reports_zero_and_none(tmp_path: Path) -> None:
     assert repository.latest_video_path("z_image") is None
 
 
+def test_save_next_frame_numbers_sequentially(tmp_path: Path) -> None:
+    """Saved frames land under incrementing counters in render order."""
+    from PIL import Image as PillowImage  # noqa: PLC0415
+
+    repository = FrameRepository(tmp_path)
+    first = repository.save_next_frame("z_image", PillowImage.new("RGB", (4, 4)))
+    second = repository.save_next_frame("z_image", PillowImage.new("RGB", (4, 4)))
+    assert first.name == "frame_00001_.png"
+    assert second.name == "frame_00002_.png"
+    assert repository.frame_count("z_image") == 2
+    assert repository.latest_frame_path("z_image") == second
+
+
 def test_clear_frames_removes_the_sequence_directory(tmp_path: Path) -> None:
     """Clearing deletes the whole sequence folder and resets the count."""
     repository = FrameRepository(tmp_path)

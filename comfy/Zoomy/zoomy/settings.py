@@ -2,45 +2,45 @@
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass
 
 from zoomy.errors import ZoomyError
 
-DEFAULT_COMFY_ADDRESS = "http://comfy:8188"
-DEFAULT_OUTPUT_DIRECTORY = "/comfy/output"
+DEFAULT_MODELS_DIRECTORY = "/models"
+DEFAULT_SEED_DIRECTORY = "/seed"
+DEFAULT_MUSIC_PROJECT_DIRECTORY = "/music-project"
+DEFAULT_OUTPUT_DIRECTORY = "/output"
 DEFAULT_INTERFACE_ADDRESS = "0.0.0.0"
 DEFAULT_INTERFACE_PORT = 7861
-DEFAULT_OPERATION_TIMEOUT_SECONDS = 1800.0
-DEFAULT_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_CUDA_DEVICE = "cuda:0"
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Runtime configuration for one zoomy process."""
 
-    comfy_address: str
+    models_directory: str
+    seed_directory: str
+    music_project_directory: str
     output_directory: str
     interface_address: str
     interface_port: int
-    operation_timeout_seconds: float
-    poll_interval_seconds: float
+    cuda_device: str
 
     @classmethod
     def from_environment(cls) -> Settings:
         """Build settings from ``ZOOMY_*`` environment variables."""
         return cls(
-            comfy_address=_read_text("ZOOMY_COMFY_ADDRESS", DEFAULT_COMFY_ADDRESS),
+            models_directory=_read_text("ZOOMY_MODELS_DIRECTORY", DEFAULT_MODELS_DIRECTORY),
+            seed_directory=_read_text("ZOOMY_SEED_DIRECTORY", DEFAULT_SEED_DIRECTORY),
+            music_project_directory=_read_text(
+                "ZOOMY_MUSIC_PROJECT_DIRECTORY", DEFAULT_MUSIC_PROJECT_DIRECTORY
+            ),
             output_directory=_read_text("ZOOMY_OUTPUT_DIRECTORY", DEFAULT_OUTPUT_DIRECTORY),
             interface_address=_read_text("ZOOMY_INTERFACE_ADDRESS", DEFAULT_INTERFACE_ADDRESS),
             interface_port=_read_integer("ZOOMY_INTERFACE_PORT", DEFAULT_INTERFACE_PORT),
-            operation_timeout_seconds=_read_float(
-                "ZOOMY_OPERATION_TIMEOUT_SECONDS", DEFAULT_OPERATION_TIMEOUT_SECONDS
-            ),
-            poll_interval_seconds=_read_float(
-                "ZOOMY_POLL_INTERVAL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS
-            ),
+            cuda_device=_read_text("ZOOMY_CUDA_DEVICE", DEFAULT_CUDA_DEVICE),
         )
 
 
@@ -63,26 +63,4 @@ def _read_integer(name: str, default: int) -> int:
     except ValueError as failure:
         message = f"Environment variable {name} must contain an integer, received {raw!r}"
         raise ZoomyError(message) from failure
-    return parsed
-
-
-def _read_float(name: str, default: float) -> float:
-    """Parse a floating-point environment value, raising a friendly error.
-
-    Blank means the default (see :func:`_read_integer`); non-finite values
-    like ``nan`` or ``inf`` are rejected because they silently poison timeout
-    arithmetic (any comparison against NaN is False, so a NaN budget would
-    never expire).
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        parsed = float(raw)
-    except ValueError as failure:
-        message = f"Environment variable {name} must contain a number, received {raw!r}"
-        raise ZoomyError(message) from failure
-    if not math.isfinite(parsed):
-        message = f"Environment variable {name} must contain a finite number, received {raw!r}"
-        raise ZoomyError(message)
     return parsed

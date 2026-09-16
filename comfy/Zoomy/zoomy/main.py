@@ -4,19 +4,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zoomy.comfy_connection import ComfyConnection
 from zoomy.family_catalog import FAMILY_CATALOG
 from zoomy.frame_repository import FrameRepository
 from zoomy.interface import build_application
+from zoomy.local_engine import LocalEngine
 from zoomy.settings import Settings
 
 
 def main() -> None:
     """Load settings, wire the collaborators, and launch the web interface."""
     settings = Settings.from_environment()
-    connection = ComfyConnection(settings.comfy_address)
     repository = FrameRepository(Path(settings.output_directory))
-    application = build_application(settings, connection, FAMILY_CATALOG, repository)
+    engine = LocalEngine(
+        models_directory=Path(settings.models_directory),
+        seed_directory=Path(settings.seed_directory),
+        repository=repository,
+        device=settings.cuda_device,
+        music_project_directory=Path(settings.music_project_directory),
+    )
+    application = build_application(settings, engine, FAMILY_CATALOG, repository)
     application.queue(default_concurrency_limit=1)
     application.launch(
         server_name=settings.interface_address,

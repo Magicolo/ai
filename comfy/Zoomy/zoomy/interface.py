@@ -15,7 +15,7 @@ Loop control: checking the Loop box starts :func:`render_loop`, which renders
 frame after frame until the optional target count, a graceful stop request
 (unchecking the box), or exhausted per-frame retries. Graceful stops flow
 through a module-level ``threading.Event`` (see :func:`request_loop_stop`);
-the forceful Interrupt button aborts the running ComfyUI job immediately,
+the forceful Interrupt button aborts the running engine job immediately,
 which ends the loop as a side effect.
 """
 
@@ -29,10 +29,9 @@ from typing import TYPE_CHECKING, cast
 
 import gradio as gr
 
-from zoomy.errors import ComfyConnectionError, ZoomyError
+from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest
+from zoomy.errors import ZoomyError
 from zoomy.family_catalog import find_family
-from zoomy.finalize_workflow import FinalizeRequest
-from zoomy.frame_workflow import FrameRenderRequest
 from zoomy.rendering import (
     RenderEnvironment,
     finalize_video,
@@ -45,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from typing import Any
 
-    from zoomy.comfy_connection import ConnectionProtocol, SystemStatistics
+    from zoomy.engine_protocol import EngineProtocol, EngineStatistics
     from zoomy.family_catalog import FamilyDefinition, LoraDefinition
     from zoomy.frame_repository import FrameRepository, SequenceStatistics
     from zoomy.settings import Settings
@@ -73,7 +72,7 @@ class FamilyPanelWiring:
     """Collaborators and outputs the per-family panel buttons target."""
 
     settings: Settings
-    connection: ConnectionProtocol
+    engine: EngineProtocol
     catalog: Sequence[FamilyDefinition]
     repository: FrameRepository
     environment: RenderEnvironment
@@ -101,7 +100,7 @@ class InterfaceContext:
     """Every collaborator and component the outer event wiring needs."""
 
     settings: Settings
-    connection: ConnectionProtocol
+    engine: EngineProtocol
     catalog: Sequence[FamilyDefinition]
     repository: FrameRepository
     environment: RenderEnvironment
@@ -124,30 +123,25 @@ class InterfaceContext:
 
 def build_application(
     settings: Settings,
-    connection: ConnectionProtocol,
+    engine: EngineProtocol,
     catalog: Sequence[FamilyDefinition],
     repository: FrameRepository,
 ) -> gr.Blocks:
     """Assemble the whole zoomy control panel as an unlaunched Gradio app."""
     with gr.Blocks(title="Zoomy") as application:
-        context = _create_components(settings, connection, catalog, repository)
+        context = _create_components(settings, engine, catalog, repository)
         _wire_events(context)
     return cast("gr.Blocks", application)
 
 
 def _create_components(
     settings: Settings,
-    connection: ConnectionProtocol,
+    engine: EngineProtocol,
     catalog: Sequence[FamilyDefinition],
     repository: FrameRepository,
 ) -> InterfaceContext:
     """Create every component in layout order and bundle the wiring context."""
-    environment = RenderEnvironment(
-        connection=connection,
-        repository=repository,
-        operation_timeout_seconds=settings.operation_timeout_seconds,
-        poll_interval_seconds=settings.poll_interval_seconds,
-    )
+    environment = RenderEnvironment(engine=engine, repository=repository)
     gr.Markdown("# Zoomy — infinite zoom control panel")
     with gr.Row():
         with gr.Column(scale=3):
@@ -157,10 +151,8 @@ def _create_components(
                 label="Model family",
             )
         with gr.Column(scale=1):
-            health_badge = gr.HTML(
-                value=_render_health_badge(is_reachable=connection.is_reachable())
-            )
-    stats_line = gr.Markdown(value=_initial_statistics(catalog[0], repository, connection))
+            health_badge = gr.HTML(value=_render_health_badge(is_reachable=engine.is_ready()))
+    stats_line = gr.Markdown(value=_initial_statistics(catalog[0], repository, engine))
     status_markdown = gr.Markdown("Ready.")
     log_textbox = gr.Textbox(label="Session log", lines=LOG_LINES_HEIGHT, interactive=False)
     log_state: gr.State = gr.State(value=[])
@@ -179,7 +171,7 @@ def _create_components(
         with gr.Column(scale=2):
             panel_wiring = FamilyPanelWiring(
                 settings=settings,
-                connection=connection,
+                engine=engine,
                 catalog=catalog,
                 repository=repository,
                 environment=environment,
@@ -204,7 +196,7 @@ def _create_components(
         clear_frames_button = gr.Button(CLEAR_FRAMES_LABEL)
     return InterfaceContext(
         settings=settings,
-        connection=connection,
+        engine=engine,
         catalog=catalog,
         repository=repository,
         environment=environment,
@@ -306,7 +298,7 @@ def _bind_refresh_status(
         """Poll reachability, memory, and sequence figures for the line."""
         family = find_family(context.catalog, family_key)
         durations = _as_durations(durations_value)
-        system = _safe_system_statistics(context.connection)
+        system = _safe_system_statistics(context.engine)
         statistics = context.repository.sequence_statistics(family.sequence_key)
         return (
             _render_health_badge(is_reachable=system is not None),
@@ -327,7 +319,7 @@ def _bind_refresh_previews(
         """Resolve the newest artifacts and disarm a pending clear-confirm."""
         family = find_family(context.catalog, family_key)
         durations = _as_durations(durations_value)
-        system = _safe_system_statistics(context.connection)
+        system = _safe_system_statistics(context.engine)
         statistics = context.repository.sequence_statistics(family.sequence_key)
         recent_paths = [str(path) for path in statistics.recent_frame_paths]
         return (
@@ -347,10 +339,10 @@ def _bind_interrupt(context: InterfaceContext) -> Callable[[], str]:
     """Create the handler that aborts the running job immediately."""
 
     def interrupt_running_job() -> str:
-        """Interrupt ComfyUI now and end any running loop with it."""
+        """Interrupt the engine now and end any running loop with it."""
         request_loop_stop()
         try:
-            context.connection.interrupt()
+            context.engine.request_interrupt()
         except ZoomyError as failure:
             return f"**Error:** {failure}"
         return "Interrupt requested; the running job stops immediately."
@@ -373,7 +365,6 @@ def _bind_finalize(
         request = FinalizeRequest(
             family=family,
             frame_count=context.repository.frame_count(family.sequence_key),
-            output_directory=context.settings.output_directory,
         )
         try:
             for update in finalize_video(
@@ -385,7 +376,7 @@ def _bind_finalize(
                     update.message,
                     log_text,
                     update.video_path if update.video_path is not None else gr.update(),
-                    _fresh_statistics(context.repository, context.connection, family, durations),
+                    _fresh_statistics(context.repository, context.engine, family, durations),
                     _fresh_gallery(context.repository, family),
                 )
         except ZoomyError as failure:
@@ -395,7 +386,7 @@ def _bind_finalize(
                 message,
                 log_text,
                 gr.update(),
-                _fresh_statistics(context.repository, context.connection, family, durations),
+                _fresh_statistics(context.repository, context.engine, family, durations),
                 _fresh_gallery(context.repository, family),
             )
 
@@ -423,7 +414,7 @@ def _bind_clear_frames(
                     f"of sequence *{family.sequence_key}*."
                 ),
                 gr.update(),
-                _fresh_statistics(context.repository, context.connection, family, durations),
+                _fresh_statistics(context.repository, context.engine, family, durations),
                 _fresh_gallery(context.repository, family),
             )
         context.repository.clear_frames(family.sequence_key)
@@ -432,7 +423,7 @@ def _bind_clear_frames(
             gr.update(value=CLEAR_FRAMES_LABEL),
             f"Cleared all frames of sequence *{family.sequence_key}*.",
             None,
-            _fresh_statistics(context.repository, context.connection, family, durations),
+            _fresh_statistics(context.repository, context.engine, family, durations),
             _fresh_gallery(context.repository, family),
         )
 
@@ -453,13 +444,13 @@ def _loop_toggled(*values: object) -> str:
 
 def _fresh_statistics(
     repository: FrameRepository,
-    connection: ConnectionProtocol,
+    engine: EngineProtocol,
     family: FamilyDefinition,
     durations: tuple[int, float, float],
 ) -> str:
     """Recompute the statistics line with live system figures."""
     statistics = repository.sequence_statistics(family.sequence_key)
-    return _render_statistics_line(statistics, _safe_system_statistics(connection), durations)
+    return _render_statistics_line(statistics, _safe_system_statistics(engine), durations)
 
 
 def _fresh_gallery(repository: FrameRepository, family: FamilyDefinition) -> list[str]:
@@ -575,7 +566,6 @@ def _create_render_handler(
             frame_count=wiring.repository.frame_count(family.sequence_key),
             lora_selections=submission.lora_selections,
             seed=_random_generator.randrange(MAXIMUM_SEED),
-            output_directory=wiring.settings.output_directory,
         )
         try:
             for update in render_next_frame(request, wiring.environment):
@@ -590,7 +580,7 @@ def _create_render_handler(
                     update.message,
                     log_text,
                     preview_value,
-                    _fresh_statistics(wiring.repository, wiring.connection, family, durations),
+                    _fresh_statistics(wiring.repository, wiring.engine, family, durations),
                     gallery_value,
                     durations,
                 )
@@ -601,7 +591,7 @@ def _create_render_handler(
                 message,
                 log_text,
                 gr.update(),
-                _fresh_statistics(wiring.repository, wiring.connection, family, durations),
+                _fresh_statistics(wiring.repository, wiring.engine, family, durations),
                 _fresh_gallery(wiring.repository, family),
                 durations,
             )
@@ -637,7 +627,7 @@ def _create_loop_handler(
                 message,
                 log_text,
                 gr.update(),
-                _fresh_statistics(wiring.repository, wiring.connection, family, durations),
+                _fresh_statistics(wiring.repository, wiring.engine, family, durations),
                 _fresh_gallery(wiring.repository, family),
                 durations,
                 gr.update(),
@@ -653,10 +643,9 @@ def _create_loop_handler(
                 frame_count=frame_count,
                 lora_selections=submission.lora_selections,
                 seed=_random_generator.randrange(MAXIMUM_SEED),
-                output_directory=wiring.settings.output_directory,
             )
 
-        system = _safe_system_statistics(wiring.connection)
+        system = _safe_system_statistics(wiring.engine)
         if frame_target is None:
             start_message = "Loop started — rendering until stopped…"
         else:
@@ -692,7 +681,7 @@ def _create_loop_handler(
                     update.message,
                     log_text,
                     preview_value,
-                    _fresh_statistics(wiring.repository, wiring.connection, family, durations),
+                    _fresh_statistics(wiring.repository, wiring.engine, family, durations),
                     gallery_value,
                     durations,
                     gr.update(),
@@ -756,24 +745,24 @@ def _parse_frame_target(value: object) -> int | None:
 
 
 def _initial_statistics(
-    family: FamilyDefinition, repository: FrameRepository, connection: ConnectionProtocol
+    family: FamilyDefinition, repository: FrameRepository, engine: EngineProtocol
 ) -> str:
     """Render the statistics line for the initial page load."""
     statistics = repository.sequence_statistics(family.sequence_key)
-    return _render_statistics_line(statistics, _safe_system_statistics(connection), (0, 0.0, 0.0))
+    return _render_statistics_line(statistics, _safe_system_statistics(engine), (0, 0.0, 0.0))
 
 
-def _safe_system_statistics(connection: ConnectionProtocol) -> SystemStatistics | None:
-    """Fetch system statistics, returning None when ComfyUI is unreachable."""
+def _safe_system_statistics(engine: EngineProtocol) -> EngineStatistics | None:
+    """Fetch engine statistics, returning None when the engine is offline."""
     try:
-        return connection.system_statistics()
-    except ComfyConnectionError:
+        return engine.engine_statistics()
+    except ZoomyError:
         return None
 
 
 def _render_statistics_line(
     statistics: SequenceStatistics,
-    system: SystemStatistics | None,
+    system: EngineStatistics | None,
     durations: tuple[int, float, float],
 ) -> str:
     """Format the live statistics line for one sequence."""
@@ -794,7 +783,7 @@ def _render_statistics_line(
     else:
         segments.append("no video yet")
     if system is None:
-        segments.append("ComfyUI unreachable")
+        segments.append("engine offline")
     else:
         segments.append(
             f"VRAM **{_gibibytes(system.video_memory_free_bytes)} / "
@@ -864,10 +853,10 @@ def _record_frame_duration(
 
 
 def _render_health_badge(*, is_reachable: bool) -> str:
-    """Format the ComfyUI reachability badge as a colored status line."""
+    """Format the engine readiness badge as a colored status line."""
     if is_reachable:
-        return '<span style="color: #16a34a; font-weight: bold;">ComfyUI online</span>'
-    return '<span style="color: #dc2626; font-weight: bold;">ComfyUI unreachable</span>'
+        return '<span style="color: #16a34a; font-weight: bold;">Engine ready</span>'
+    return '<span style="color: #dc2626; font-weight: bold;">Engine offline</span>'
 
 
 def _selected_lora_names(value: object) -> set[str]:

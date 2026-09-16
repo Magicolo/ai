@@ -38,20 +38,53 @@ ignore = [
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = [
+ "tests/*" = [
   # Tests intentionally assert against concrete magic numbers.
   "PLR2004",
   # Tests assert outcomes with plain asserts.
   "S101",
 ]
+"scripts/*" = [
+  # Provisioning scripts report progress to stdout; prints are the interface.
+  "T201",
+]
 
 [tool.mypy]
 strict = true
+mypy_path = ["scripts"]
 
 [[tool.mypy.overrides]]
 module = "imageio_ffmpeg"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# GPU-only generation dependencies live in the GPU image, not the slim
+# quality-gate image; the engine imports them lazily for exactly this reason.
+module = [
+  "torch.*",
+  "torchvision.*",
+  "diffusers.*",
+  "transformers.*",
+  "huggingface_hub.*",
+  "accelerate.*",
+  "safetensors.*",
+  "peft.*",
+  "ccvfi.*",
+  "acestep.*",
+  "mmaudio.*",
+  "open_clip.*",
+  "librosa.*",
+  "soundfile.*",
+  "torchdiffeq.*",
+  "timm.*",
+  "omegaconf.*",
+  "ftfy.*",
+  "einops.*",
+  "vector_quantize_pytorch.*",
+  "comfy.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "scripts"]

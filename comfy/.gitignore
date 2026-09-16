@@ -1,2 +1,4 @@
 civit-ai-api-key
 hugging-face-token
+Zoomy/output/*
+!Zoomy/output/.gitkeep

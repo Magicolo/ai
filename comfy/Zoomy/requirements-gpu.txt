@@ -1,0 +1,44 @@
+# GPU runtime for the in-process engine (zoomy/local_engine.py). The slim
+# requirements.txt stays installable without CUDA; this file adds the
+# generation stack on top of the pytorch/pytorch:2.10.0 base (torch 2.10.0 +
+# torchvision 0.25.0 come from the base image, never from pip).
+#
+# Provenance: every pin below matches the spike-unify image, where the Ernie
+# custom img2img loop, both Z-Image pipelines, ACE-Step music, and the MMAudio
+# stack all ran green on the RTX 4060 Ti.
+
+# Frame stack (Ernie + Z-Image). diffusers is exact-pinned: the Ernie img2img
+# loop calls private pipeline helpers (_patchify_latents, _pad_text,
+# _unpatchify_latents). transformers 5 is the floor for the Ministral 3 text
+# encoder; the ACE-Step transformers-4 code runs via zoomy/vendor_compat.py.
+diffusers==0.40.0
+transformers==5.17.0
+peft==0.18.1
+accelerate==1.12.0
+safetensors==0.8.0
+huggingface_hub>=0.34
+hf_transfer
+sentencepiece==0.2.2
+protobuf
+
+# Frame interpolation (RIFE recursive bisection).
+ccvfi
+
+# ACE-Step music (inference path only: handler, inference, llm_inference).
+einops==0.8.2
+loguru>=0.7.3
+soundfile>=0.13.1
+scipy>=1.10.1
+numba>=0.63.1
+vector-quantize-pytorch==1.27.20
+# ACE-Step inference transitives (imported by acestep.handler/inference).
+pyyaml
+tqdm
+
+# MMAudio sound effects (mirrors comfyui-mmaudio/requirements.txt).
+librosa>=0.10.1
+torchdiffeq>=0.2.3
+timm>=1.0.8
+omegaconf>=2.3.0
+open_clip_torch>=2.29.0
+ftfy>=6.1.1

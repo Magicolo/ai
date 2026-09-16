@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Literal
 
 import pytest
@@ -13,12 +12,13 @@ from zoomy.errors import ZoomyError
 from zoomy.settings import Settings
 
 SETTING_NAMES = (
-    "ZOOMY_COMFY_ADDRESS",
+    "ZOOMY_MODELS_DIRECTORY",
+    "ZOOMY_SEED_DIRECTORY",
+    "ZOOMY_MUSIC_PROJECT_DIRECTORY",
     "ZOOMY_OUTPUT_DIRECTORY",
     "ZOOMY_INTERFACE_ADDRESS",
     "ZOOMY_INTERFACE_PORT",
-    "ZOOMY_OPERATION_TIMEOUT_SECONDS",
-    "ZOOMY_POLL_INTERVAL_SECONDS",
+    "ZOOMY_CUDA_DEVICE",
 )
 
 # Operating systems forbid NUL bytes in environment variables, and lone
@@ -45,30 +45,33 @@ def test_from_environment_uses_defaults_when_unset(
     """Every ZOOMY_* variable unset yields the documented defaults."""
     for name in SETTING_NAMES:
         monkeypatch.delenv(name, raising=False)
-    settings = Settings.from_environment()
-    assert settings.comfy_address == "http://comfy:8188"
-    assert settings.output_directory == "/comfy/output"
-    assert settings.interface_address == "0.0.0.0"
-    assert settings.interface_port == 7861
-    assert settings.operation_timeout_seconds == 1800.0
-    assert settings.poll_interval_seconds == 2.0
+    parsed = Settings.from_environment()
+    assert parsed.models_directory == "/models"
+    assert parsed.seed_directory == "/seed"
+    assert parsed.music_project_directory == "/music-project"
+    assert parsed.output_directory == "/output"
+    assert parsed.interface_address == "0.0.0.0"
+    assert parsed.interface_port == 7861
+    assert parsed.cuda_device == "cuda:0"
 
 
 def test_from_environment_reads_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each ZOOMY_* variable overrides its setting."""
-    monkeypatch.setenv("ZOOMY_COMFY_ADDRESS", "http://comfy-service:8188")
+    monkeypatch.setenv("ZOOMY_MODELS_DIRECTORY", "/other/models")
+    monkeypatch.setenv("ZOOMY_SEED_DIRECTORY", "/other/seed")
+    monkeypatch.setenv("ZOOMY_MUSIC_PROJECT_DIRECTORY", "/other/music")
     monkeypatch.setenv("ZOOMY_OUTPUT_DIRECTORY", "/other/output")
     monkeypatch.setenv("ZOOMY_INTERFACE_ADDRESS", "127.0.0.1")
     monkeypatch.setenv("ZOOMY_INTERFACE_PORT", "7000")
-    monkeypatch.setenv("ZOOMY_OPERATION_TIMEOUT_SECONDS", "90")
-    monkeypatch.setenv("ZOOMY_POLL_INTERVAL_SECONDS", "0.5")
-    settings = Settings.from_environment()
-    assert settings.comfy_address == "http://comfy-service:8188"
-    assert settings.output_directory == "/other/output"
-    assert settings.interface_address == "127.0.0.1"
-    assert settings.interface_port == 7000
-    assert settings.operation_timeout_seconds == 90.0
-    assert settings.poll_interval_seconds == 0.5
+    monkeypatch.setenv("ZOOMY_CUDA_DEVICE", "cuda:1")
+    parsed = Settings.from_environment()
+    assert parsed.models_directory == "/other/models"
+    assert parsed.seed_directory == "/other/seed"
+    assert parsed.music_project_directory == "/other/music"
+    assert parsed.output_directory == "/other/output"
+    assert parsed.interface_address == "127.0.0.1"
+    assert parsed.interface_port == 7000
+    assert parsed.cuda_device == "cuda:1"
 
 
 def test_from_environment_rejects_non_integer_port(
@@ -80,59 +83,23 @@ def test_from_environment_rejects_non_integer_port(
         Settings.from_environment()
 
 
-def test_from_environment_rejects_non_numeric_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A non-numeric ZOOMY_OPERATION_TIMEOUT_SECONDS raises a friendly error."""
-    monkeypatch.setenv("ZOOMY_OPERATION_TIMEOUT_SECONDS", "soon")
-    with pytest.raises(ZoomyError, match="ZOOMY_OPERATION_TIMEOUT_SECONDS"):
-        Settings.from_environment()
-
-
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(raw_value=environment_text)
-def test_operation_timeout_is_finite_or_rejected(
-    monkeypatch: pytest.MonkeyPatch, raw_value: str
-) -> None:
-    """Any timeout string yields a finite setting or a friendly error."""
-    for name in SETTING_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ZOOMY_OPERATION_TIMEOUT_SECONDS", raw_value)
-    try:
-        parsed = Settings.from_environment()
-    except ZoomyError:
-        return
-    assert math.isfinite(parsed.operation_timeout_seconds)
-
-
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(raw_value=environment_text)
-def test_poll_interval_is_finite_or_rejected(
-    monkeypatch: pytest.MonkeyPatch, raw_value: str
-) -> None:
-    """Any interval string yields a finite setting or a friendly error."""
-    for name in SETTING_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ZOOMY_POLL_INTERVAL_SECONDS", raw_value)
-    try:
-        parsed = Settings.from_environment()
-    except ZoomyError:
-        return
-    assert math.isfinite(parsed.poll_interval_seconds)
-
-
 @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(raw_value=blank_text)
-def test_blank_numeric_values_fall_back_to_defaults(
-    monkeypatch: pytest.MonkeyPatch, raw_value: str
-) -> None:
-    """Blank numeric strings behave as unset (matching text settings)."""
+def test_blank_port_falls_back_to_default(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
+    """Blank port strings behave as unset (matching text settings)."""
     for name in SETTING_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZOOMY_INTERFACE_PORT", raw_value)
-    monkeypatch.setenv("ZOOMY_OPERATION_TIMEOUT_SECONDS", raw_value)
-    monkeypatch.setenv("ZOOMY_POLL_INTERVAL_SECONDS", raw_value)
     parsed = Settings.from_environment()
     assert parsed.interface_port == 7861
-    assert parsed.operation_timeout_seconds == 1800.0
-    assert parsed.poll_interval_seconds == 2.0
+
+
+def test_empty_text_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty directory strings behave as unset."""
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZOOMY_MODELS_DIRECTORY", "")
+    monkeypatch.setenv("ZOOMY_CUDA_DEVICE", "")
+    parsed = Settings.from_environment()
+    assert parsed.models_directory == "/models"
+    assert parsed.cuda_device == "cuda:0"

@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from PIL.Image import Image
+
 ZOOMY_DIRECTORY_NAME = "Zoomy"
 FRAME_FILE_PATTERN = "frame_*.png"
 VIDEO_FILE_TEMPLATE = "Zoomy_{sequence_key}*.mp4"
@@ -81,6 +83,19 @@ class FrameRepository:
         """Return the most recently rendered frame, or ``None`` when empty."""
         frame_paths = self.frame_paths(sequence_key)
         return frame_paths[-1] if frame_paths else None
+
+    def save_next_frame(self, sequence_key: str, frame_image: Image) -> Path:
+        """Save one rendered frame under the next counter name and return it.
+
+        Names mirror the former SaveImage prefix (``frame_00001_.png``, …),
+        so the lexical sort in :meth:`frame_paths` stays chronological.
+        """
+        directory = self.frame_directory(sequence_key)
+        directory.mkdir(parents=True, exist_ok=True)
+        frame_number = self.frame_count(sequence_key) + 1
+        frame_path = directory / f"frame_{frame_number:05d}_.png"
+        frame_image.save(frame_path)
+        return frame_path
 
     def clear_frames(self, sequence_key: str) -> None:
         """Delete the sequence's entire frame directory."""

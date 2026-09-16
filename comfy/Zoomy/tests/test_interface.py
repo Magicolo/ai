@@ -12,7 +12,8 @@ import httpx
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from zoomy.comfy_connection import ComfyConnection, SystemStatistics
+from zoomy.engine_protocol import EngineStatistics
+from zoomy.errors import ZoomyError
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository, SequenceStatistics
 from zoomy.interface import (
@@ -35,7 +36,12 @@ from zoomy.rendering import RenderEnvironment
 from zoomy.settings import Settings
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+
+    from PIL.Image import Image
+
+    from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest, ProgressUpdate
 
 BYTE_PATTERN = re.compile(r"^(\d+(?:\.\d+)?) (B|KiB|MiB|GiB|TiB)$")
 TIMESTAMP_PATTERN = re.compile(r"^\d{2}:\d{2}$")
@@ -59,9 +65,9 @@ def _example_statistics(tmp_path: Path) -> SequenceStatistics:
     )
 
 
-def _example_system() -> SystemStatistics:
-    """Build canned system statistics with RAM and VRAM figures."""
-    return SystemStatistics(
+def _example_system() -> EngineStatistics:
+    """Build canned engine statistics with RAM and VRAM figures."""
+    return EngineStatistics(
         system_memory_free_bytes=12000000000,
         system_memory_total_bytes=32000000000,
         video_memory_free_bytes=9000000000,
@@ -69,19 +75,52 @@ def _example_system() -> SystemStatistics:
     )
 
 
-def test_build_application_returns_blocks(tmp_path: Path) -> None:
-    """The full panel assembles without launching or touching the network."""
-    settings = Settings(
-        comfy_address="http://localhost:8188",
-        output_directory=str(tmp_path),
+class StubEngine:
+    """Test double standing in for the in-process generation engine."""
+
+    def render_frame(self, request: FrameRenderRequest) -> Image:  # noqa: ARG002
+        """Refuse frame renders; no test drives generation here."""
+        raise ZoomyError("StubEngine never renders")
+
+    def finalize_sequence(
+        self,
+        request: FinalizeRequest,  # noqa: ARG002
+    ) -> Iterator[ProgressUpdate]:
+        """Yield nothing; no test drives finalization here."""
+        return
+        yield  # Make this a generator even though it never yields.
+
+    def request_interrupt(self) -> None:
+        """Do nothing; no test drives interrupts through this double."""
+
+    def is_ready(self) -> bool:
+        """Report a ready engine."""
+        return True
+
+    def engine_statistics(self) -> EngineStatistics:
+        """Report canned memory figures."""
+        return _example_system()
+
+
+def _example_settings(output_directory: str) -> Settings:
+    """Build settings pointing at the test output directory."""
+    return Settings(
+        models_directory="/models",
+        seed_directory="/seed",
+        music_project_directory="/music-project",
+        output_directory=output_directory,
         interface_address="127.0.0.1",
         interface_port=7861,
-        operation_timeout_seconds=60.0,
-        poll_interval_seconds=1.0,
+        cuda_device="cuda:0",
     )
+
+
+def test_build_application_returns_blocks(tmp_path: Path) -> None:
+    """The full panel assembles without launching or touching the network."""
+    settings = _example_settings(str(tmp_path))
     application = build_application(
         settings=settings,
-        connection=ComfyConnection("http://localhost:8188"),
+        engine=StubEngine(),
         catalog=FAMILY_CATALOG,
         repository=FrameRepository(tmp_path),
     )
@@ -127,7 +166,7 @@ def test_render_statistics_line_handles_empty_state() -> None:
     line = _render_statistics_line(statistics, None, (0, 0.0, 0.0))
     assert "**0** frames" in line
     assert "no video yet" in line
-    assert "ComfyUI unreachable" in line
+    assert "engine offline" in line
     assert "last frame" not in line
 
 
@@ -233,7 +272,7 @@ def test_render_statistics_line_contract(tmp_path: Path, data: st.DataObject) ->
     assert str(frame_count) in line
     assert "frames" in line
     assert ("no video yet" in line) == (not has_video)
-    assert ("ComfyUI unreachable" in line) == (not has_system)
+    assert ("engine offline" in line) == (not has_system)
     assert ("last frame" in line) == (rendered_frames > 0)
 
 
@@ -316,27 +355,14 @@ def test_format_timestamp_matches_clock_pattern(epoch_seconds: float) -> None:
 
 def _test_wiring(tmp_path: Path) -> FamilyPanelWiring:
     """Build panel wiring with real components inside the active Blocks."""
-    connection = ComfyConnection("http://localhost:1")
+    engine = StubEngine()
     repository = FrameRepository(tmp_path)
-    settings = Settings(
-        comfy_address="http://localhost:1",
-        output_directory=str(tmp_path),
-        interface_address="127.0.0.1",
-        interface_port=7861,
-        operation_timeout_seconds=60.0,
-        poll_interval_seconds=1.0,
-    )
     return FamilyPanelWiring(
-        settings=settings,
-        connection=connection,
+        settings=_example_settings(str(tmp_path)),
+        engine=engine,
         catalog=FAMILY_CATALOG,
         repository=repository,
-        environment=RenderEnvironment(
-            connection=connection,
-            repository=repository,
-            operation_timeout_seconds=60.0,
-            poll_interval_seconds=1.0,
-        ),
+        environment=RenderEnvironment(engine=engine, repository=repository),
         status_markdown=gr.Markdown(),
         log_textbox=gr.Textbox(),
         log_state=gr.State(value=[]),
@@ -370,17 +396,10 @@ def _free_port() -> int:
 
 def test_application_serves_front_page(tmp_path: Path) -> None:
     """Launching serves HTTP 200 (catches launch/config regressions)."""
-    settings = Settings(
-        comfy_address="http://localhost:1",
-        output_directory=str(tmp_path),
-        interface_address="127.0.0.1",
-        interface_port=7861,
-        operation_timeout_seconds=60.0,
-        poll_interval_seconds=1.0,
-    )
+    settings = _example_settings(str(tmp_path))
     application = build_application(
         settings=settings,
-        connection=ComfyConnection("http://localhost:1"),
+        engine=StubEngine(),
         catalog=FAMILY_CATALOG,
         repository=FrameRepository(tmp_path),
     )

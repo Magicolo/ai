@@ -1,6 +1,7 @@
 volumes:
   comfy:
     external: true
+  zoomy_models:
 
 services:
   comfy:
@@ -35,16 +36,27 @@ services:
     ports:
       - 7861:7861
     volumes:
-      - ./Comfy/output:/comfy/output
-    # Declared dependency on comfy (startup is enforced by zoomy.sh through
-    # serve.sh). --no-deps in zoomy.sh skips compose-managed startup so a
-    # second, port-conflicting comfy instance is never auto-started.
-    depends_on:
-      - comfy
+      - ./Zoomy/output:/output
+      - zoomy_models:/models
+    # Standalone: no dependency on comfy. Models live in the zoomy_models
+    # volume (provisioned once via `python scripts/download_models.py`);
+    # hub files and ACE-Step checkpoints self-populate there on first use
+    # via HF_HOME and the music project directory below.
     environment:
-      ZOOMY_COMFY_ADDRESS: http://comfy:8188
-      ZOOMY_OUTPUT_DIRECTORY: /comfy/output
+      ZOOMY_OUTPUT_DIRECTORY: /output
+      ZOOMY_SEED_DIRECTORY: /models/seed
+      ZOOMY_MUSIC_PROJECT_DIRECTORY: /models/music-project
+      HF_HOME: /models/.hf-cache
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      CIVITAI_API_KEY: ${CIVITAI_API_KEY:-}
     init: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: curl --fail http://localhost:7861/
       interval: 30s

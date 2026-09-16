@@ -2,238 +2,291 @@
 
 > Maintained alongside the code. Any behavior change must update this file in
 > the same change. See also the wrapper doc `../AGENTS.md` §10.
+>
+> Standalone revision (2026-09-16): the ComfyUI backend is gone. Zoomy renders
+> with an in-process engine (diffusers + ACE-Step + MMAudio + RIFE) inside its
+> own container; models live in the `zoomy_models` volume. Comfy is kept only
+> as an untouched backup (see `../AGENTS.md`).
 
 ## 1. Overview
 
-Zoomy is a small Gradio web application that unifies the two verified
-infinite-zoom ComfyUI loop workflows (Ernie Image Turbo, Juggernaut Z) into
-one control panel. The user picks a model family, selects LoRA styles with
-strengths, edits the prompt, and clicks **Render next frame** once per frame;
+Zoomy is a small Gradio web application that renders the two verified
+infinite-zoom loops (Ernie Image Turbo, Juggernaut Z) without any external
+backend. The user picks a model family, selects LoRA styles with strengths,
+edits the prompt, and clicks **Render next frame** once per frame;
 **Finalize video** turns the accumulated frames into a music video with
 sound effects.
 
 Deliberate non-goals:
 
-- No workflow JSON is stored or edited. Graph logic that used to live in
-  `ComfySwitchNode` / `ComfyMathExpression` nodes (switches, conditions,
-  duration math) now lives in Python; only the heavyweight ComfyUI nodes
-  (loaders, samplers, interpolation, audio models, video encode) remain in
-  the submitted graphs.
-- No multi-user support, no auth. Single local user assumed; like ComfyUI
-  itself, the UI listens on all interfaces (no auth — never expose the host
-  beyond a trusted network).
+- No workflow JSON, no graph nodes. Switch/condition/duration logic lives in
+  Python; the heavy lifting (diffusion, interpolation, audio, video encode)
+  runs in-process via vendored libraries.
+- No multi-user support, no auth. Single local user assumed; the UI listens
+  on all interfaces (no auth — never expose the host beyond a trusted
+  network).
 - No host-side dependencies. Everything (runtime and dev tools) runs inside
-  the `zoomy` container.
+  the `zoomy` container; models live in a Docker volume, never on the host.
 
 ## 2. Runtime topology
 
 ```
-browser (host) ──http──> zoomy:7861 ──REST──> comfy:8188 ──files──> Comfy/output
-      localhost:7861      container              container           bind mount
+browser (host) ──http──> zoomy:7861 ──in-process──> LocalEngine ──files──> /output + /models
+      localhost:7861      container        diffusers/ACE/MMAudio/RIFE   bind mount + volume
 ```
 
-- `zoomy` service (`Zoomy/Dockerfile`, `python:3.12-slim`): Gradio app,
-  port `7861:7861`, volume `./Comfy/output:/comfy/output`. Declares
-  `depends_on: [comfy]`; the healthcheck is `curl --fail
-  http://localhost:7861/` (same tool/pattern as the comfy service).
-- The `comfy` container carries a fixed `--name comfy` (see `serve.sh`), so
-  the name resolves on the shared `comfy_default` bridge and zoomy reaches
-  ComfyUI at `http://comfy:8188` with no host-network access and no dependence
-  on published ports. Do not restart comfy or edit `serve.sh` beyond the name
-  for zoomy networking.
-- Lifecycle: `./zoomy.sh` spawns comfy via `serve.sh` when no container
-  named `comfy` is running, then launches zoomy itself
-  (`run --build --rm --detach --service-ports --no-deps zoomy`) as an
-  ephemeral `comfy-zoomy-run-*` container; `docker stop` removes it. The
-  `depends_on` in compose declares the relationship, but `--no-deps`
-  deliberately skips compose-managed startup so a second, port-conflicting
-  comfy instance is never auto-started.
+- `zoomy` service (`Zoomy/Dockerfile`, CUDA base — see §3): Gradio app, port
+  `7861:7861`, volumes `./Zoomy/output:/output` (bind mount, gitignored) and
+  `zoomy_models:/models` (named volume, ~26 GB provisioned). No `depends_on`,
+  no Comfy address anywhere. GPU reservations are kept — frames and finalize
+  both need CUDA.
+- Lifecycle: `./zoomy.sh` launches zoomy itself
+  (`run --build --rm --detach --service-ports zoomy`) as an ephemeral
+  `comfy-zoomy-run-*` container; `docker stop` removes it. It never touches
+  `serve.sh` or the `comfy` service.
+- First launch ever needs one provisioning run (models volume starts empty):
+  `CIVITAI_API_KEY=$(cat civit-ai-api-key) docker compose run --rm
+  -v ./Comfy/input:/seed-source:ro zoomy python scripts/download_models.py
+  --seed-source /seed-source` (full command lives in `zoomy.sh`).
 
-## 3. Repository layout (`Zoomy/`)
+## 3. Container (`Zoomy/Dockerfile`, one file for run/tests/tools)
+
+- Base `pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel` (torch 2.10.0+cu128,
+  torchvision 0.25.0 — matches the proven spike recipe). `PIP_BREAK_SYSTEM_PACKAGES=1`
+  (Debian-derived base would otherwise refuse).
+- `apt`: `git curl libgl1 libglib2.0-0 libxcb1` — the last three are headless
+  `cv2` support.
+- Vendors cloned to `/opt`: `ACE-Step-1.5` (music) and
+  `ComfyUI-MMAudio@8eaeb72` (SFX; pinned — the host checkout that proved the
+  recipe). `PYTHONPATH=/opt/ACE-Step-1.5:/opt/ComfyUI-MMAudio:/application/vendor`.
+- `pip install` covers `requirements.txt` (runtime: gradio, httpx, …) +
+  `requirements-gpu.txt` (diffusers/peft/hf_hub/imageio, ccvfi, librosa,
+  torchdiffeq/timm/omegaconf/open_clip/ftfy/soundfile) + dev tools
+  (ruff/mypy/pytest/hypothesis). Requirements are COPYed and installed
+  *before* the tree, so rebuilds after code edits reuse the pip layer.
+- Build-time smoke imports (frames/interp/acestep/mmaudio) fail the build
+  early if a vendor breaks. `CMD ["python", "-m", "zoomy"]`.
+- ACE import warnings (LyCORIS/Lightning/bitsandbytes) are training-only and
+  harmless.
+
+## 4. Repository layout (`Zoomy/`)
 
 ```
 Zoomy/
   DESIGN.md               # this file (excluded from the image via .dockerignore)
   pyproject.toml          # metadata + ruff (ALL, line-length 100) + mypy strict + pytest
-  requirements.txt        # runtime: gradio==6.26.0, httpx==0.28.1
-  requirements-dev.txt    # dev: ruff==0.16.6, mypy==2.3.1, pytest==9.1.1, hypothesis==6.168.0
-  Dockerfile              # python:3.12-slim, /application, CMD ["python", "-m", "zoomy"]
+  requirements.txt        # runtime
+  requirements-gpu.txt    # CUDA/vision/audio model deps
+  requirements-dev.txt    # dev: ruff/mypy/pytest/hypothesis
+  Dockerfile              # single GPU image (see §3)
   .dockerignore
+  output/                 # bind-mounted to /output (gitignored, holds .gitkeep)
+  scripts/
+    download_models.py    # one-shot provisioner filling /models (see §5)
+  vendor/
+    comfy/                # ProgressBar stand-in (MMAudio imports it)
   zoomy/                  # the application package
     __init__.py           # version only
     __main__.py           # `python -m zoomy` entry
-    main.py               # wiring: settings -> connection/repository -> app -> launch
+    main.py               # wiring: settings -> engine/repository -> app -> launch
     settings.py           # Settings.from_environment (ZOOMY_* variables)
-    errors.py             # ZoomyError hierarchy
+    errors.py             # ZoomyError hierarchy (engine-flavored)
     family_catalog.py     # frozen FamilyDefinition/LoraDefinition catalog of 3
-    graph.py              # ComfyWorkflow builder + NodeReference ([key, slot] links)
+    engine_protocol.py    # FrameRenderRequest/FinalizeRequest, duration math,
+                          # segmentation, EngineProtocol, EngineStatistics
+    local_engine.py       # LocalEngine: the whole render backend (see §7)
+    vendor_compat.py      # transformers-5 compatibility shim
+    final_assembly.py     # segmented-finalize ffmpeg assembly
     frame_repository.py   # frame/video discovery + clearing under the output dir
-    comfy_connection.py   # typed ComfyUI REST client + ConnectionProtocol
-    frame_workflow.py     # per-frame render graph builder
-    finalize_workflow.py  # frames-to-music-video graph builder + duration math
-    rendering.py          # queue -> poll -> progress generators
+    rendering.py          # render_next_frame/finalize_video/render_loop generators
     interface.py          # Gradio layout + event wiring
   tests/                  # one module per source module (see §11)
 ```
 
-## 4. Module reference
+## 5. Provisioning (`scripts/download_models.py` + `zoomy_models` volume)
 
-- `settings.Settings.from_environment()`: `ZOOMY_COMFY_ADDRESS`
-  (default `http://comfy:8188`), `ZOOMY_OUTPUT_DIRECTORY`
-  (`/comfy/output`), `ZOOMY_INTERFACE_ADDRESS` (`0.0.0.0` — inside the
-  container only), `ZOOMY_INTERFACE_PORT` (`7861`),
-  `ZOOMY_OPERATION_TIMEOUT_SECONDS` (`1800`), `ZOOMY_POLL_INTERVAL_SECONDS`
-  (`2`). Blank values fall back to defaults; garbage numbers raise
-  `ZoomyError`.
-- `errors`: `ZoomyError` base; `ComfyConnectionError` (transport/unexpected),
-  `ComfyRejectedWorkflowError` (HTTP 400, carries server `summary` +
-  `node_errors`), `ComfyExecutionError` (node_type + exception_message from
-  the `execution_error` status message), `RenderInterruptedError`,
-  `OperationTimeoutError`, `EmptyFrameSequenceError`. The interface catches
-  `ZoomyError` and shows it in the status line.
+The script is idempotent (skips files already present), stdlib `urllib` +
+`huggingface_hub`, and provisions a Comfy-style tree: `diffusion_models/`
+(ernie-image-turbo + 2 Juggernaut Z), `vae/ae.safetensors`, `loras/` (c64,
+chalkboard, clay-art), `mmaudio/` (4 files + BigVGAN snapshot minus the
+1.5 GB discriminator training state), `seed/` (both cold-start PNGs via
+`--seed-source`).
+
+Deliberately excluded (~30 GB of Comfy-format dead weight the engine never
+opens): ministral/qwen text encoders, flux2-vae, Comfy ACE weights, prompt
+enhancer — those components come from official HuggingFace repositories at
+first render into `HF_HOME=/models/.hf-cache`.
+
+Three provisioning gotchas, all encoded in the script + tests:
+
+- **CivitAI needs a browser User-Agent.** Plain `urllib` gets HTTP 403 with
+  body `error code: 1010` (Cloudflare browser-integrity block) at
+  `civitai.com` itself. `CIVITAI_USER_AGENT` + `build_civitai_request`
+  carry it (regression-tested).
+- **Never forward the API token to the CDN.** The download URL 302-redirects
+  to a signed file URL; the CDN rejects foreign `Authorization` headers
+  (403) and receiving it would leak the token. `_CivitaiRedirectHandler`
+  strips it on redirect (regression-tested; override signature mirrors the
+  stdlib base exactly — `req/fp/msg/newurl`, `http.client.HTTPMessage`).
+- **Pin the real HF sub-path.** `Comfy-Org/z_image` nests blobs under
+  `split_files/`, so the VAE is `split_files/vae/ae.safetensors` (a bare
+  `vae/` path 404s mid-provision; pinned by test).
+
+Juggernaut variant choice (user-approved 2026-09-16): the bare version URL
+serves each version's PRIMARY file — the fp8-pruned variant (5.7 GB, pure
+`F8_E4M3`) — rather than the full bf16/fp16 files Comfy ran (11.5 GB).
+Deliberate: half the VRAM on the 16 GB card, and e2e frames confirm the zoom
+still looks right. Full-precision fileIds are recorded in a script comment
+for a future swap (fast v3011968: fp16 = 2891192, bf16 = 2891189; quality
+v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
+~26 GB.
+
+## 6. Module reference
+
+- `settings.Settings.from_environment()`: `ZOOMY_MODELS_DIRECTORY`
+  (`/models`), `ZOOMY_SEED_DIRECTORY` (`/seed` — compose overrides to
+  `/models/seed`), `ZOOMY_MUSIC_PROJECT_DIRECTORY` (`/music-project` —
+  compose overrides to `/models/music-project`),
+  `ZOOMY_OUTPUT_DIRECTORY` (`/output`), `ZOOMY_INTERFACE_ADDRESS`
+  (`0.0.0.0` — inside the container only), `ZOOMY_INTERFACE_PORT`
+  (`7861`), `ZOOMY_CUDA_DEVICE` (`cuda:0`). Blank values fall back to
+  defaults; garbage integers raise `ZoomyError`. (`ZOOMY_COMFY_ADDRESS` is
+  gone — no backend to address.)
+- `errors`: `ZoomyError` base; `EngineConfigurationError` (missing models /
+  seeds — the music project directory is auto-created, seed inputs are not),
+  `EngineExecutionError` (carries the failing `stage`), plus the retained
+  `RenderInterruptedError`, `EmptyFrameSequenceError`, `AssemblyError`. The
+  interface catches `ZoomyError` and shows it in the status line.
 - `family_catalog`: `FAMILY_CATALOG` holds `ernie_turbo`, `z_fast`,
   `z_quality`. `find_family(catalog, key)` raises `ZoomyError` on miss.
   `LoraDefinition.selected_by_default` mirrors the source workflows (Ernie
   C64 on; Z styles off = photorealistic default).
-- `graph.ComfyWorkflow.add(key, class_type, inputs)`: converts
-  `NodeReference` values (including inside lists) to `[key, slot]` arrays;
-  rejects duplicate keys; `build()` returns a deep copy.
+- `engine_protocol`: `FrameRenderRequest(family, prompt, negative_prompt,
+  frame_count, lora_selections, seed)` / `FinalizeRequest` / `SegmentWindow`
+  / `ProgressUpdate` / `EngineStatistics`; pure duration math
+  (`compute_audio_seconds` = `max(interp / 32, 1.0)` — the ACE
+  `seconds >= 1.0` floor) and segmentation (`needs_segmentation`,
+  `compute_segment_windows`, 48-frame windows); `EngineProtocol` is the
+  structural contract rendering/interface depend on (tests use fakes);
+  `MINIMUM_SYNC_FRAMES = 17` feeds the SFX padder (§7).
 - `frame_repository.FrameRepository(output_directory)`: `frame_paths` globs
-  `Zoomy/<sequence>/frame_*.png` sorted (ComfyUI zero-pads counters, so name
+  `Zoomy/<sequence>/frame_*.png` sorted (counters are zero-padded, so name
   order is render order); `latest_video_path` returns the newest
-  `Zoomy_<sequence>*.mp4`, **preferring the `-audio` twin** (see §7);
+  `Zoomy_<sequence>*.mp4`, **preferring the `-audio` twin** (see §8);
   `sequence_statistics()` summarizes count, bytes, recent paths, and video
   details in one pass for the stats panel (tolerates files vanishing
   mid-read).
-- `comfy_connection.ComfyConnection`: persistent `httpx.Client`;
-  `queue_workflow` posts `{"prompt": workflow, "client_id": "zoomy"}` and
-  parses 400 bodies into `ComfyRejectedWorkflowError`;
-  `fetch_history` parses `GET /history/<id>` into `HistoryEntry(outputs,
-  status_messages, is_completed)`; `interrupt` posts `/interrupt`;
-  `system_statistics` parses `GET /system_stats` into typed RAM/VRAM figures
-  (first device; `is_reachable` shares the fetch).
-  `ConnectionProtocol` is the structural contract rendering/interface depend
-  on (lets tests use fakes).
+- `local_engine.LocalEngine`: see §7. Constructor
+  `(models_directory, seed_directory, repository, device,
+  music_project_directory)`; `render_frame` / `finalize_sequence` /
+  `request_interrupt` (a `threading.Event`, cleared per render) /
+  `is_ready` / `engine_statistics` (live RAM/VRAM).
+- `vendor_compat`: transformers-5 compatibility shim (attribute replacement
+  via a documented `setattr` helper — co-located `noqa` + `type: ignore`
+  pragmas are not honored on multi-line statements, so the helper carries
+  the suppression once).
 - `rendering`: `render_next_frame` / `finalize_video` / `render_loop` are
-  generators yielding `ProgressUpdate(message, frame_path, video_path,
-  frame_count, elapsed_seconds)`; all three take a `RenderEnvironment`
-  bundle (connection + repository + polling budgets). The poll loop fetches
-  history first and checks the timeout after, so fast jobs never trip a zero
-  budget; terminal failure messages are scanned *before* the completion flag
-  because interrupted/errored prompts keep `completed: False` (see §9).
-  `render_loop` renders until a frame target, a stop request (module-level
-  `threading.Event`, single-user justification documented), or exhausted
-  per-frame retries (3 attempts, transient errors only — interrupts and
-  rejections propagate immediately). Each frame attempt lives in
-  `_attempt_frame_with_retries`, which reports back whether the frame landed;
-  an attempt budget below 1 is rejected outright (zero attempts would spin
-  the loop forever).
-- `interface.build_application(...)`: see §8.
-- `main.main()`: builds settings/connection/repository, queues the app with
-  `default_concurrency_limit=1` (one ComfyUI job at a time), and launches
+  generators yielding `ProgressUpdate`; all three take a `RenderEnvironment`
+  bundle (engine + repository). Interrupts surface as
+  `RenderInterruptedError` from the engine flag; `render_loop` renders until
+  a frame target, a stop request (module-level `threading.Event`,
+  single-user justification documented), or exhausted per-frame retries
+  (3 attempts, transient errors only — interrupts propagate immediately).
+- `interface.build_application(...)`: see §9.
+- `main.main()`: builds settings/engine/repository, queues the app with
+  `default_concurrency_limit=1` (one render job at a time), and launches
   with `allowed_paths=[output_directory]`, `show_error=True`,
-  `inbrowser=False`, `ssr_mode=False` (no Node.js in the slim image).
+  `inbrowser=False`, `ssr_mode=False` (no Node.js in the image).
 
-## 5. Family catalog
+## 7. Frame backend (`local_engine.py`)
 
-| key | display | sequence | base model | text encoder | shift | sampler |
-|-----|---------|----------|------------|--------------|-------|---------|
-| `ernie_turbo` | Ernie Image Turbo | `ernie_turbo` | ernie-image-turbo | ministral-3-3b (`flux2`) | none | euler/simple/8/cfg 1.0 |
-| `z_fast` | Juggernaut Z (Fast) | `z_image` | juggernautZ_v10FastBy | qwen_3_4b_fp8_mixed (`lumina2`) | 3.0 | ddim/normal/6/cfg 1.0 |
-| `z_quality` | Juggernaut Z (Quality) | `z_image` | juggernautZ_v10ByRundiffusion | qwen_3_4b_fp8_mixed (`lumina2`) | 3.0 | res_multistep/beta/22/cfg 4.0 |
+Cold start (`frame_count == 0`) loads the family seed image from the seed
+directory; otherwise the newest sequence frame is cropped `1356×748` at
+`(10, 10)` → bicubic-rescaled to `1376×768` (zoom `1376 / 1356 ≈ 1.0147`
+per frame, ~1.5% dive; offset rule `(1376 − 1356) / 2 = 10` keeps it
+centered) → encoded → img2img at denoise 0.60 with the family recipe →
+saved as `Zoomy/<sequence>/frame_<counter>.png`.
 
-Shared: 1376×768 frames, img2img denoise 0.60, seed images
-`ernie_zoom_seed.png` / `z_zoom_seed.png` from ComfyUI's input dir, ACE-Step
-music + MMAudio SFX prompts per family (verbatim in `family_catalog.py`),
-SFX negative `speech, voice, vocals, singing, music, melody, drums, beat`.
-Ernie has no negative prompt (uses `ConditioningZeroOut`); Z uses a real
-negative `CLIPTextEncode`. Both Z variants share sequence `z_image`, so
-switching speed mid-sequence continues the same zoom.
+One frame pipeline stays resident per family (evicted on family change —
+each holds ~20 GB of CPU weights under sequential offload). `_apply_lora_selection`
+loads newly selected LoRAs once via `load_lora_weights` and activates
+exactly the selection with `set_adapters(names, weights)`; deselecting is a
+weight swap, no reload. (Empty selections skip `set_adapters` entirely, so
+an e2e A/B must use a fresh engine or sequence — a stale adapter would stay
+active. Caught once during verification, now documented.)
 
-**Adding a family**: append one `FamilyDefinition` to `FAMILY_CATALOG` (new
-`sequence_key` for a new sequence, existing one to join it). The interface
-picks it up with zero UI changes.
+- **Ernie** (`_load_ernie_pipeline`): `ErnieImagePipeline`; local fp8 DiT
+  via `from_single_file` + official text encoder, VAE, tokenizer, scheduler
+  from `baidu/ERNIE-Image-Turbo` (only `transformer/config.json` downloads —
+  never the official bf16 weights); euler/simple, 8 steps, cfg 1.0;
+  sequential CPU offload.
+- **Z** (`_load_z_pipeline`): `ZImageImg2ImgPipeline`; local fp8 DiT via
+  `from_single_file`; text encoder, tokenizer, scheduler from
+  `Tongyi-MAI/Z-Image-Turbo` (fast) or `Tongyi-MAI/Z-Image` (quality).
+  Fast: DDIM, 6 steps, cfg 1.0. Quality: `res_multistep`, `beta`,
+  22 steps, cfg 4.0. The scheduler is never reconfigured — the repo default
+  is used. Sequential CPU offload. The local `ae.safetensors` is tried via
+  `from_single_file` but **rejected** (its `conv_out` is 32-channel vs the
+  8-channel config → `ValueError`), so the Turbo family renders with the
+  official VAE through the fallback chain — the fallback is load-bearing,
+  not dead code (verified live).
+- **Interpolation**: RIFE via `ccvfi` (recursive bisection, depth 2 = ×4),
+  replacing the old FILM node.
+- **Music**: ACE-Step 1.5 (in-image clone), instrumental tags per family,
+  seed `31 + window.index` so long sequences evolve.
+- **SFX**: MMAudio (in-image clone @8eaeb72) conditioned on the interpolated
+  frames, seed 7 fixed. Two load-bearing guards: the interp batch is tiled
+  to ≥ `MINIMUM_SYNC_FRAMES` (17) by `_pad_frames_to_minimum` — the
+  synchformer needs ≥ 16 sync frames and short renders crash with
+  `torch.stack([])` (the old `BatchPadToMin` node, ported as a helper);
+  and `_render_music` / `_render_sound_effects` **evict their stack after
+  the stems land** (`_unload_music_stack` / `_unload_effects_stack` over the
+  shared `_collect_free_video_memory`: `gc` + `cuda.empty_cache`) — without
+  eviction the resident 14.5 GiB ACE stack OOMs the MMAudio load (verified
+  live; pinned by test).
 
-## 6. Frame workflow (`frame_workflow.py`)
+## 8. Finalize (`local_engine.py` + `final_assembly.py`)
 
-Cold start (`frame_count == 0`) loads `LoadImage(family.cold_start_image)`;
-otherwise `VHS_LoadImagesPath(directory, image_load_cap=1,
-skip_first_images=count-1, select_every_nth=1)` reads only the newest frame.
-Then: loaders → chained `apply_lora_<n>` (model slot 0 + clip slot 1 through
-every selected LoRA in order; skipped entirely when none) → optional
-`apply_model_shift` (only when `model_shift` is set) → prompt encode (+
-negative encode or zeroing) → `crop_previous_frame` (1356×748 at 10,10) →
-`rescale_cropped_frame` (bicubic to 1376×768, crop disabled) → `VAEEncode` →
-`KSampler` (fresh `SystemRandom` seed `< 2**48` per frame + family recipe) →
-`VAEDecode` → `SaveImage` prefix `Zoomy/<sequence>/frame` (lands as
-`frame_00001_.png`, …).
+Short sequences finalize in one window: interpolate → music + SFX →
+per-stem FLAC stems + twin videos → mux. Long ones — anything interpolating
+past what 48 source frames produce (`needs_segmentation`) — finalize window
+by window and assemble in Python, so VRAM per job depends only on the fixed
+48-frame window, never on the total frame count. The segmented path is
+covered by unit tests (`_finalize_window`, `compute_segment_windows`
+including a Hypothesis tiling property, crossfade assembly) but
+deliberately **not run live** (a 49-frame verification render is uneconomical);
+only the single-window path is verified live (see §12).
 
-Zoom math: `1376 / 1356 ≈ 1.0147` per frame (~1.5% dive); offset rule
-`(1376 − 1356) / 2 = 10` keeps the dive centered. Geometry constants
-(`FRAME_WIDTH_PIXELS`, `FRAME_HEIGHT_PIXELS`, `CROP_BORDER_PIXELS`) are
-module-level and covered by tests.
+Assembly (`final_assembly.py`, ffmpeg via the `imageio-ffmpeg` binary —
+`imageio`/`moviepy` are not installed): stems are joined with manual
+fades/delays from known durations (music 0 dB + SFX −6 dB) → video streams
+concatenated (stream copy) → AAC twin muxed. Never `acrossfade`: it
+collapses on short tails. Every step verifies non-empty outputs, raising
+`AssemblyError` at the culprit step; segment intermediates are removed after
+a successful mux. The silent main mp4 + `-audio` twin convention is kept —
+the twin (muxed AAC stereo) is the real artifact and what
+`latest_video_path` prefers.
 
-## 7. Finalize (`finalize_workflow.py` + `final_assembly.py` + `rendering`)
+Known litter: the ACE-Step handler drops tiny UUID-named `.flac` droppings
+into the output directory on each finalize (third-party behavior, a few
+hundred KB); safe to delete, not referenced by any artifact.
 
-Short sequences finalize in one pass (the same interpolate → music + SFX →
-mux graph over the full frame range, merged soundtrack, `Zoomy_<sequence>`
-prefix). Long ones — anything interpolating past what 48 source frames
-produce (`needs_segmentation`) — finalize window by window and assemble in
-Python, so VRAM per job depends only on the fixed 48-frame window, never on
-the total frame count (a 300-frame single pass OOMs MMAudio at 13.9 GB; a
-48-frame window peaks at ~13.0 of 15.57 GiB, verified live).
+## 9. Interface behavior (`interface.py`)
 
-Per-window graph (mirrors the single pass, windowed loader + indexed stems):
-windowed `VHS_LoadImagesPath(skip_first_images, image_load_cap)` → FILM `×4`
-→ `BatchPadToMin` (17) → ACE-Step music chain (seed `31 + window.index`, so
-music evolves while tags/bpm/key stay shared) → MMAudio SFX chain (seed 7,
-fixed — conditioning frames already vary) → twin videos
-(`..._seg<i>_music` ← decode_music, `..._seg<i>_sfx` ← soften) + FLAC stems
-(`SaveAudioAdvanced`, `..._seg<i>_{music,sfx}_stem`).
-
-Each stem over-generates beyond its video span by exactly the assembly
-overlap (music +1.0 s, SFX +0.25 s; pinned equal to the assembly crossfades
-by test). The assembly then blends neighbors over the overlap, so every stem
-stays sample-locked to its video — no cumulative drift — and the final mux
-trims the last tail. (The twins trim audio to the video span via `-shortest`,
-which is why the overlaps only survive in the stems.)
-
-Assembly (`final_assembly.py`, ffmpeg via `imageio-ffmpeg`, quiet flags):
-extract stems → join each stem with deterministic fades/delays placed from
-the known durations (fade out, delayed fade in, one `amix`) → mix music 0 dB
-+ SFX −6 dB (the graph's balance) → concat video streams (stream copy) →
-mux AAC twin. Never `acrossfade`: it collapses on short tails (verified
-live — a 0.84 s tail truncated a whole join to silence). Every step verifies
-its outputs are present and non-empty, raising `AssemblyError` at the culprit
-step; intermediates (videos, twins, stems, VHS preview PNGs) are removed
-after a successful mux.
-
-Verified live on 295 frames: 7 windows in 281 s, peak VRAM 13.8 GiB flat
-across segments, final `Zoomy_z_image_00004.mp4` + `-audio` twin at 36.2 s
-(1159 frames) with full-length stereo AAC (RMS ≥ 0.02 in every 0.5 s window,
-no boundary dropouts).
-
-**VHS twin behavior** (read from the installed VHS source): with audio
-connected, the node writes a silent main file `Zoomy_<seq>_00001.mp4` *plus*
-an `-audio` twin `Zoomy_<seq>_00001-audio.mp4` carrying the muxed AAC track
-(plus a preview PNG). The twin is the real artifact — `latest_video_path`
-prefers it.
-
-## 8. Interface behavior (`interface.py`)
-
-Header row (family dropdown + reachability badge), live statistics line
-(frames · disk · last/avg durations · video · VRAM/RAM), short status line,
-session log (append-only, last 8 of 200 lines), then a main row with previews
-on the left (latest frame, 8-frame gallery strip, finalized video) and the
-per-family panel on the right. The panel is drawn by
-`@gr.render(inputs=[family_dropdown])`: LoRA `CheckboxGroup` + one strength
-slider (0–2, step 0.05) per family LoRA, prompt box, negative box only for
-families that define one, Render button, Loop checkbox, and frame-target
-number (blank = run until stopped; blank submits 0, so the Number carries no
-`minimum=` — Gradio validates minimums in preprocess, before the handler
-runs, and would reject every blank-target loop outright). Components the
-panel wiring touches are created *before* the render block (the decorator
-executes immediately at build).
+Unchanged from the Comfy era except the backend: header row (family dropdown
++ reachability badge, now backed by `engine.is_ready()` / statistics),
+live statistics line (frames · disk · last/avg durations · video ·
+VRAM/RAM), short status line, session log (append-only, last 8 of 200
+lines), then a main row with previews on the left (latest frame, 8-frame
+gallery strip, finalized video) and the per-family panel on the right. The
+panel is drawn by `@gr.render(inputs=[family_dropdown])`: LoRA
+`CheckboxGroup` + one strength slider (0–2, step 0.05) per family LoRA,
+prompt box, negative box only for families that define one, Render button,
+Loop checkbox, and frame-target number (blank = run until stopped; blank
+submits 0, so the Number carries no `minimum=` — Gradio validates minimums
+in preprocess, before the handler runs, and would reject every blank-target
+loop outright). Components the panel wiring touches are created *before*
+the render block (the decorator executes immediately at build).
 
 Events: render/loop/finalize generators stream status + log + previews +
 stats (gallery/preview refresh only on frame completion to avoid flicker;
@@ -244,11 +297,12 @@ and an unqueued plain handler (no-op when checked, sets the stop flag when
 unchecked — this is what ends a running loop). The final yield unchecks the
 box programmatically, which fires no event, so no phantom loop can start.
 Health badge + stats refresh on a 10 s `Timer` and on dropdown
-change/refresh (`queue=False` so they never block behind a render); Interrupt
-posts `/interrupt` and also sets the loop-stop flag so it ends loops even
-between frames; clear-frames uses a two-click confirm (`gr.State` armed flag
-+ button label change) and refreshes disarm it (no cross-family accidents);
-`blocks.queue(default_concurrency_limit=1)` serializes ComfyUI jobs. Wiring
+change/refresh (`queue=False` so they never block behind a render);
+Interrupt sets the engine flag (checked between stages, so it lands
+promptly) and also sets the loop-stop flag so it ends loops even between
+frames; clear-frames uses a two-click confirm (`gr.State` armed flag +
+button label change) and refreshes disarm it (no cross-family accidents);
+`blocks.queue(default_concurrency_limit=1)` serializes render jobs. Wiring
 lives in `FamilyPanelWiring` / `InterfaceContext` dataclasses with small
 `_bind_*`/`_create_*` factories plus pure, unit-tested format/parse helpers
 to keep every function under the complexity budget.
@@ -265,35 +319,21 @@ dynamically, so the stubs omit them — each call site carries a targeted
 `# type: ignore[attr-defined]` (see §11). Launch URLs carry a trailing
 slash — strip it before joining paths in tests, or every probe 404s.
 
-## 9. ComfyUI API contract
-
-- `POST /prompt` `{"prompt": <api-format dict>, "client_id": "zoomy"}` →
-  `{"prompt_id": ...}`; HTTP 400 body `{"error": {...}, "node_errors": {...}}`
-  becomes `ComfyRejectedWorkflowError` (a spec bug, never retried).
-- `GET /history/<id>` → `{id: {"outputs": {...}, "status": {"completed":
-  bool, "messages": [[name, payload], ...]}}}`. `execution_error` payload
-  carries `node_type`/`exception_message`; `execution_interrupted` means the
-  user (or someone) stopped the job.
-- `POST /interrupt`, `GET /system_stats` (memory figures + reachability).
-- Artifacts are resolved through the repository (mtime/name), not through
-  history outputs — SaveImage/VHS naming is deterministic.
-- **GOTCHA — interrupted/errored prompts keep `completed: False`.** A prompt
-  killed via `/interrupt` stays `{status_str: error, completed: False}` with
-  its `execution_interrupted` message (verified live); an earlier poll loop
-  that only honored the flag polled such entries forever. The loop now scans
-  status messages for terminal failures *before* consulting the flag
-  (regression-tested with `completed: False` entries).
-
 ## 10. Configuration
 
 | variable | default | used by |
 |----------|---------|---------|
-| `ZOOMY_COMFY_ADDRESS` | `http://comfy:8188` | connection |
-| `ZOOMY_OUTPUT_DIRECTORY` | `/comfy/output` | repository, loaders, save prefixes |
+| `ZOOMY_MODELS_DIRECTORY` | `/models` | engine loaders |
+| `ZOOMY_SEED_DIRECTORY` | `/seed` (compose: `/models/seed`) | cold starts |
+| `ZOOMY_MUSIC_PROJECT_DIRECTORY` | `/music-project` (compose: `/models/music-project`) | ACE-Step + stems |
+| `ZOOMY_OUTPUT_DIRECTORY` | `/output` | repository, frames, videos |
 | `ZOOMY_INTERFACE_ADDRESS` | `0.0.0.0` (container-local) | launch |
 | `ZOOMY_INTERFACE_PORT` | `7861` | launch |
-| `ZOOMY_OPERATION_TIMEOUT_SECONDS` | `1800` | poll loops |
-| `ZOOMY_POLL_INTERVAL_SECONDS` | `2` | poll loops |
+| `ZOOMY_CUDA_DEVICE` | `cuda:0` | engine device |
+
+`HF_HOME=/models/.hf-cache` and `HF_HUB_ENABLE_HF_TRANSFER=1` are set on
+the service (the latter is deprecated upstream — expect a `FutureWarning`,
+transfers still work). `CIVITAI_API_KEY` is only needed for provisioning.
 
 ## 11. Quality loop (all in-container, zero host deps)
 
@@ -309,56 +349,66 @@ Config summary (`pyproject.toml`): ruff `select = ["ALL"]`, line-length 100,
 `target py312`, pydocstyle google; ignores are documented inline (`ANN401`
 untyped JSON payloads, `CPY001` no header policy, `COM812`/`ISC001` formatter
 conflicts, `D203`/`D213` convention conflict, `S104` container bind,
-`TRY003`/`EM101`/`EM102` user-facing messages; tests additionally ignore
-`S101`/`PLR2004`). mypy `strict = true`. pytest `testpaths = ["tests"]`,
-`pythonpath = ["."]`.
+`TRY003`/`EM101`/`EM102` user-facing messages, `T201` prints (scripts only,
+via per-file ignore); tests additionally ignore `S101`/`PLR2004`).
+mypy `strict = true` with `mypy_path = ["scripts"]` (the provisioner is
+type-checked through its test imports). pytest `testpaths = ["tests"]`,
+`pythonpath = [".", "scripts"]`.
 
-Test layout mirrors the package (`test_settings/graph/family_catalog/
-frame_workflow/finalize_workflow/frame_repository/rendering/interface`, plus
-`test_comfy_connection` for the statistics parser); rendering uses a scripted
-`ConnectionProtocol` fake; workflow tests assert cold/warm starts, LoRA
-chaining, shift/negative conditionals, crop math, the duration formula, and
-that every `[key, slot]` link resolves; engine tests cover elapsed timing,
-loop targets, graceful stops, retry exhaustion/success, and interrupt +
-rejection propagation; interface tests cover the pure format/parse helpers
-(bytes, stats line, panel submission, frame target, log trim, durations).
-Two rigor gates go beyond construction: headless `_draw_family_panel` for
-every family (executes all component constructors and event-method bindings
-— the only thing that catches draw-time `AttributeError`s before page load)
-and an ephemeral launch serving HTTP 200 (catches launch/config regressions).
+Test layout mirrors the package (`test_settings/engine_protocol/
+family_catalog/final_assembly/frame_repository/local_engine/rendering/
+interface/vendor_compat/download_manifest/download_redirect`, plus
+`conftest.py` with the Hypothesis profile disabling the example database so
+no `.hypothesis/` residue lands in the bind mount). Rendering/engine tests
+use fakes over `EngineProtocol`; workflow-equivalent tests assert
+cold/warm starts, LoRA load-once/activate-exactly, crop math, the duration
+formula, and segmentation tiling; interface tests cover the pure
+format/parse helpers. Two rigor gates go beyond construction: headless
+`_draw_family_panel` for every family (executes all component constructors
+and event-method bindings) and an ephemeral launch serving HTTP 200.
 
-Known stub gaps (gradio 6.26 ships incomplete types for its dynamically
-generated API): `Timer`/`Dropdown`/`Button` event methods
-(`# type: ignore[attr-defined]` per call site), `@gr.render`
-(`# type: ignore[untyped-decorator]`), `Blocks` context-manager return
-(`typing.cast`). Each is verified present at runtime.
+Extra discipline carried over: property-based tests over arbitrary-value
+examples (Hypothesis generators with domain constraints, `st.data()` over
+6+-argument `@given`, fresh `TemporaryDirectory` per filesystem example);
+UI changes need draw-path coverage; every Gradio API assumption verified
+against the installed runtime; TDD for behavior/bugfix work.
 
-## 12. End-to-end procedure (verified 2026-09-09)
+## 12. End-to-end procedure (verified 2026-09-16, standalone)
 
 ```bash
 ./zoomy.sh                      # rebuild + launch, UI at http://localhost:7861/
-# inside the zoomy container (docker exec <zoomy-container> python):
-#   z_fast frame 1 cold start (~15 s) -> Zoomy/z_image/frame_00001_.png 1376x768 RGB
-#   z_fast frame 2 warm start (~9 s)
-#   finalize 2 frames (~20 s) -> Zoomy_z_image_00001.mp4 (0.157 s) + AAC -audio twin
-#   ernie_turbo frame 1 with C64 LoRA @1.0 (~23 s, exercises the LoRA chain live)
-# cleanup inside the container: rm -rf /comfy/output/Zoomy /comfy/output/Zoomy_<seq>*
+# e2e drivers are ephemeral /tmp scripts (RenderEnvironment + render_next_frame /
+# finalize_video through docker exec, never committed): frame contract is
+# (family, prompt, negative_prompt, frame_count, lora_selections, seed),
+# engine ctor is (models_directory, seed_directory, repository, device,
+# music_project_directory), and exec needs PYTHONPATH=/application.
+#   z_fast frame 1 cold start (~140 s incl. Qwen/Z hub fetch, then ~33 s warm)
+#     -> /output/Zoomy/z_image/frame_00001_.png, 1376x768, coherent zoom
+#     (continuity: mean|f2-zoom(f1)|=35.29 < mean|f2-f1|=39.32)
+#   z_quality frame (~202 s res_multistep/beta/22/cfg 4 vs Comfy 65 s — slower)
+#   ernie_turbo frame 1 + C64 LoRA @1.0 (~234 s cold): full C64 pixel-art style
+#   finalize 2 frames -> Zoomy_z_image_00001.mp4 (0.16 s, 5 interp frames,
+#     h264 32 fps) + AAC stereo -audio twin, RMS 0.27/peak 1.0 (real mix)
+# cleanup inside the container: rm -f /output/cold_* /output/ab2_* /output/*.flac
+#   + any test-sequence frames beyond the real chain
 ```
 
-The 400-path was verified live too: the first finalize attempt (0.7 s floor)
-was rejected with per-node detail, which exposed the ACE `seconds >= 1.0`
-minimum and led to the 1.0 floor (§7).
-
-Loop verification (same procedure): z_fast N=2 loop completed both frames
-with measured times (16 s, 10 s) and the exact target message; infinite loop
-with a mid-run stop request finished the running frame then exited with the
-stop message; a mid-frame interrupt raised `RenderInterruptedError` on the
-next 1 s poll (this run exposed the `completed: False` gotcha above — the
-pre-fix client polled the dead entry for 299 s); `/system_stats` returned
-live VRAM 15.0/15.6 GiB and RAM 53.9/62.6 GiB through the new parser.
+LoRA verification (all Z-Image, all viewed): Comfy-format
+`diffusion_model.*` keys attach exactly (chalkboard 240/3097 transformer
+modules, C64 control 252/3078, no unused-key warnings, healthy B@A norms).
+Chalkboard @1.0 from seed renders a strong black-board + chalk-linework
+look; @0.85 (the ported catalog default) it is partial — a possible mild
+sensitivity gap vs the Comfy confirmation (whose exact strength/seed are
+lost to history; not a bug: attachment, norms, and dose-response all check
+out). Clay-art @1.0 reads sculptural but moderate, not full claymation.
+Style flips mid-sequence transition slowly: at denoise 0.60 the predecessor
+dominates, so a new style needs a fresh sequence or several consecutive
+frames (same mechanics as Comfy — document, don't fix).
 
 ## 13. Future work
 
 - More families = more catalog entries (nothing else changes).
 - Optional seed control / per-frame prompt history in the UI.
+- Z LoRA default strengths: consider 1.0 (chalkboard renders partial at the
+  ported 0.85; user decision).
 - If the UI is ever exposed beyond localhost, add auth in front of it.

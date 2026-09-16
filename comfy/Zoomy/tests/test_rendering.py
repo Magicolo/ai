@@ -1,32 +1,25 @@
-"""Tests for the render orchestration against a scripted connection."""
+"""Tests for the render orchestration against a scripted engine."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import pytest
-from hypothesis import given
-from hypothesis import strategies as st
+from PIL import Image
 
 import zoomy.rendering as rendering_module
-from zoomy.comfy_connection import HistoryEntry, SystemStatistics
+from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest, ProgressUpdate
 from zoomy.errors import (
-    AssemblyError,
-    ComfyExecutionError,
-    ComfyRejectedWorkflowError,
     EmptyFrameSequenceError,
-    OperationTimeoutError,
+    EngineConfigurationError,
+    EngineExecutionError,
     RenderInterruptedError,
     ZoomyError,
 )
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
-from zoomy.final_assembly import AssemblyOutputs, AssemblyRequest
-from zoomy.finalize_workflow import FinalizeRequest
 from zoomy.frame_repository import FrameRepository
-from zoomy.frame_workflow import FrameRenderRequest
 from zoomy.rendering import (
     RenderEnvironment,
-    _raise_if_execution_failed,
     clear_loop_stop,
     finalize_video,
     render_loop,
@@ -35,63 +28,59 @@ from zoomy.rendering import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
     from typing import Any
 
-SCRIPTED_PROMPT_IDENTIFIER = "scripted-prompt"
 
-
-class ScriptedConnection:
-    """Test double that replays scripted history transitions in order."""
+class ScriptedEngine:
+    """Test double that replays scripted frame and finalize outcomes."""
 
     def __init__(
         self,
-        entries: Sequence[HistoryEntry | None],
         *,
-        queue_failure: ZoomyError | None = None,
+        frame_results: Sequence[Image.Image | ZoomyError] | None = None,
+        finalize_updates: Sequence[Sequence[ProgressUpdate] | ZoomyError] | None = None,
     ) -> None:
-        """Store the scripted history transitions and start with no calls."""
-        self.entries = list(entries)
-        self.queue_failure = queue_failure
-        self.queued_workflows: list[Mapping[str, Any]] = []
+        """Store the scripted outcomes and start with no calls."""
+        self.frame_results = list(frame_results or [])
+        self.finalize_updates = list(finalize_updates or [])
+        self.render_requests: list[FrameRenderRequest] = []
+        self.finalize_requests: list[FinalizeRequest] = []
+        self.interrupt_calls = 0
 
-    def is_reachable(self) -> bool:
-        """Report a healthy connection."""
+    def render_frame(self, request: FrameRenderRequest) -> Image.Image:
+        """Record the request, then return the next image or raise it."""
+        self.render_requests.append(request)
+        if not self.frame_results:
+            return Image.new("RGB", (8, 8))
+        outcome = self.frame_results.pop(0)
+        if isinstance(outcome, ZoomyError):
+            raise outcome
+        return outcome
+
+    def finalize_sequence(self, request: FinalizeRequest) -> Iterator[ProgressUpdate]:
+        """Record the request, then replay the next updates or raise."""
+        self.finalize_requests.append(request)
+        if not self.finalize_updates:
+            return
+            yield  # Make this a generator even when nothing is scripted.
+        outcome = self.finalize_updates.pop(0)
+        if isinstance(outcome, ZoomyError):
+            raise outcome
+        yield from outcome
+
+    def request_interrupt(self) -> None:
+        """Count interrupt calls; no test drives engine aborts here."""
+        self.interrupt_calls += 1
+
+    def is_ready(self) -> bool:
+        """Report a ready engine."""
         return True
 
-    def system_statistics(self) -> SystemStatistics:
-        """Report canned memory figures."""
-        return SystemStatistics(
-            system_memory_free_bytes=12000000000,
-            system_memory_total_bytes=32000000000,
-            video_memory_free_bytes=9000000000,
-            video_memory_total_bytes=16000000000,
-        )
-
-    def queue_workflow(self, workflow: Mapping[str, Any]) -> str:
-        """Record the submitted workflow and return the scripted id."""
-        if self.queue_failure is not None:
-            raise self.queue_failure
-        self.queued_workflows.append(workflow)
-        return SCRIPTED_PROMPT_IDENTIFIER
-
-    def fetch_history(self, prompt_identifier: str) -> HistoryEntry | None:
-        """Hand back the next scripted entry, then the last one forever."""
-        assert prompt_identifier == SCRIPTED_PROMPT_IDENTIFIER
-        if self.entries:
-            return self.entries.pop(0)
+    def engine_statistics(self) -> Any:
+        """Report nothing; statistics never flow through this double."""
         return None
-
-    def interrupt(self) -> None:
-        """Do nothing; no test drives interrupts through this double."""
-
-
-def _completed_entry(
-    status_messages: list[list[Any]] | None = None,
-) -> HistoryEntry:
-    """Build a completed history entry with optional status messages."""
-    return HistoryEntry(outputs={}, status_messages=status_messages or [], is_completed=True)
 
 
 def _repository_with_frames(tmp_path: Path, frame_count: int) -> FrameRepository:
@@ -113,210 +102,95 @@ def _frame_request(repository: FrameRepository) -> FrameRenderRequest:
         frame_count=repository.frame_count(family.sequence_key),
         lora_selections=(),
         seed=42,
-        output_directory="/unused/by/fakes",
     )
 
 
-def _test_environment(
-    connection: ScriptedConnection,
-    repository: FrameRepository,
-    *,
-    operation_timeout_seconds: float = 5.0,
-) -> RenderEnvironment:
-    """Build standard fast-polling execution budgets for one test."""
-    return RenderEnvironment(
-        connection=connection,
-        repository=repository,
-        operation_timeout_seconds=operation_timeout_seconds,
-        poll_interval_seconds=0.0,
-    )
+def _test_environment(engine: ScriptedEngine, repository: FrameRepository) -> RenderEnvironment:
+    """Build the engine plus repository bundle one test needs."""
+    return RenderEnvironment(engine=engine, repository=repository)
 
 
-def test_render_next_frame_success_yields_final_frame(tmp_path: Path) -> None:
-    """A completed job yields a final update with the newest frame."""
+def test_render_next_frame_success_saves_new_frame(tmp_path: Path) -> None:
+    """A rendered image lands under the next counter name with its count."""
     repository = _repository_with_frames(tmp_path, frame_count=2)
-    connection = ScriptedConnection([None, _completed_entry()])
+    engine = ScriptedEngine()
     updates = list(
         render_next_frame(
             _frame_request(repository),
-            _test_environment(connection, repository),
+            _test_environment(engine, repository),
         )
     )
     final_update = updates[-1]
-    # The scripted connection produces no new file, so the implementation
-    # re-reads the repository and still sees the two stub frames.
-    assert final_update.frame_count == 2
+    assert final_update.frame_count == 3
     assert final_update.frame_path is not None
-    assert final_update.frame_path.name == "frame_00002_.png"
-    assert len(connection.queued_workflows) == 1
+    assert final_update.frame_path.name == "frame_00003_.png"
+    assert final_update.frame_path.is_file()
+    assert len(engine.render_requests) == 1
 
 
-def test_render_next_frame_raises_execution_error(tmp_path: Path) -> None:
-    """An execution_error status becomes a ComfyExecutionError with detail."""
+def test_render_next_frame_raises_engine_error(tmp_path: Path) -> None:
+    """An engine stage failure propagates with its stage detail."""
     repository = _repository_with_frames(tmp_path, frame_count=1)
-    failure_entry = _completed_entry(
-        [
-            [
-                "execution_error",
-                {"node_type": "KSampler", "exception_message": "out of memory"},
-            ]
-        ]
-    )
-    connection = ScriptedConnection([failure_entry])
-    with pytest.raises(ComfyExecutionError, match="KSampler"):
+    engine = ScriptedEngine(frame_results=[EngineExecutionError("z-frame", "out of memory")])
+    with pytest.raises(EngineExecutionError, match="z-frame"):
         list(
             render_next_frame(
                 _frame_request(repository),
-                _test_environment(connection, repository),
+                _test_environment(engine, repository),
             )
         )
 
 
 def test_render_next_frame_raises_interrupted(tmp_path: Path) -> None:
-    """An execution_interrupted status becomes a RenderInterruptedError."""
+    """An engine interrupt propagates instead of saving anything."""
     repository = _repository_with_frames(tmp_path, frame_count=1)
-    interrupted_entry = _completed_entry([["execution_interrupted", None]])
-    connection = ScriptedConnection([interrupted_entry])
+    engine = ScriptedEngine(frame_results=[RenderInterruptedError("stopped")])
     with pytest.raises(RenderInterruptedError):
         list(
             render_next_frame(
                 _frame_request(repository),
-                _test_environment(connection, repository),
+                _test_environment(engine, repository),
             )
         )
-
-
-def test_render_next_frame_times_out(tmp_path: Path) -> None:
-    """A job that never completes raises OperationTimeoutError."""
-    repository = _repository_with_frames(tmp_path, frame_count=1)
-    connection = ScriptedConnection([])
-    with pytest.raises(OperationTimeoutError):
-        list(
-            render_next_frame(
-                _frame_request(repository),
-                _test_environment(connection, repository, operation_timeout_seconds=0.0),
-            )
-        )
+    assert repository.frame_count("z_image") == 1
 
 
 def test_finalize_video_requires_frames(tmp_path: Path) -> None:
-    """Finalizing an empty sequence raises before anything is queued."""
+    """Finalizing an empty sequence raises before the engine runs."""
     repository = FrameRepository(tmp_path)
-    connection = ScriptedConnection([])
+    engine = ScriptedEngine()
     family = find_family(FAMILY_CATALOG, "z_fast")
-    request = FinalizeRequest(family=family, frame_count=0, output_directory="/output")
+    request = FinalizeRequest(family=family, frame_count=0)
     with pytest.raises(EmptyFrameSequenceError, match="no frames"):
-        list(
-            finalize_video(
-                request,
-                _test_environment(connection, repository),
-            )
-        )
-    assert not connection.queued_workflows
+        list(finalize_video(request, _test_environment(engine, repository)))
+    assert not engine.finalize_requests
 
 
-def test_finalize_video_success_yields_video(tmp_path: Path) -> None:
-    """A completed finalize yields the newest sequence video."""
+def test_finalize_video_replays_engine_updates(tmp_path: Path) -> None:
+    """Finalize streams the engine's updates, ending with its video."""
     repository = _repository_with_frames(tmp_path, frame_count=3)
-    video_path = tmp_path / "Zoomy_z_image_00001.mp4"
-    video_path.write_bytes(b"stub")
-    connection = ScriptedConnection([_completed_entry()])
-    family = find_family(FAMILY_CATALOG, "z_fast")
-    request = FinalizeRequest(family=family, frame_count=3, output_directory="/output")
-    updates = list(
-        finalize_video(
-            request,
-            _test_environment(connection, repository),
-        )
+    video_path = tmp_path / "Zoomy_z_image_00001-audio.mp4"
+    engine = ScriptedEngine(
+        finalize_updates=[
+            [
+                ProgressUpdate(message="Segment 1/1 complete.", frame_count=3),
+                ProgressUpdate(
+                    message="Video complete.",
+                    video_path=video_path,
+                    frame_count=3,
+                    elapsed_seconds=4.0,
+                ),
+            ]
+        ]
     )
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FinalizeRequest(family=family, frame_count=3)
+    updates = list(finalize_video(request, _test_environment(engine, repository)))
+    assert next(update.message for update in updates if "Submitting finalize" in update.message)
     final_update = updates[-1]
     assert final_update.video_path == video_path
     assert final_update.frame_count == 3
-
-
-def _write_segment_twins(output_directory: Path, *, window_count: int) -> None:
-    """Stub one music/effects twin pair plus stems per segment window."""
-    for index in range(window_count):
-        (output_directory / f"Zoomy_z_image_seg{index:03d}_music_00001-audio.mp4").write_bytes(
-            b"stub"
-        )
-        (output_directory / f"Zoomy_z_image_seg{index:03d}_sfx_00001-audio.mp4").write_bytes(
-            b"stub"
-        )
-        (output_directory / f"Zoomy_z_image_seg{index:03d}_music_stem.flac").write_bytes(b"stub")
-        (output_directory / f"Zoomy_z_image_seg{index:03d}_sfx_stem.flac").write_bytes(b"stub")
-
-
-def test_finalize_video_segments_long_sequences(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A 100-frame sequence queues three windowed jobs, then assembles once."""
-    repository = _repository_with_frames(tmp_path, frame_count=100)
-    _write_segment_twins(tmp_path, window_count=3)
-    connection = ScriptedConnection([_completed_entry()] * 3)
-    assembled_requests: list[AssemblyRequest] = []
-
-    def fake_assemble(request: AssemblyRequest) -> AssemblyOutputs:
-        """Record the assembly request and stub the final pair."""
-        assembled_requests.append(request)
-        main_video = tmp_path / "Zoomy_z_image_00003.mp4"
-        twin_video = tmp_path / "Zoomy_z_image_00003-audio.mp4"
-        main_video.write_bytes(b"stub")
-        twin_video.write_bytes(b"stub")
-        return AssemblyOutputs(main_video_path=main_video, audio_video_path=twin_video)
-
-    monkeypatch.setattr(rendering_module, "assemble_final_video", fake_assemble)
-    family = find_family(FAMILY_CATALOG, "z_fast")
-    request = FinalizeRequest(family=family, frame_count=100, output_directory="/output")
-    updates = list(
-        finalize_video(
-            request,
-            _test_environment(connection, repository),
-        )
-    )
-    assert len(connection.queued_workflows) == 3
-    prefixes = [
-        workflow["render_video_music"]["inputs"]["filename_prefix"]
-        for workflow in connection.queued_workflows
-    ]
-    assert prefixes == [
-        "Zoomy_z_image_seg000_music",
-        "Zoomy_z_image_seg001_music",
-        "Zoomy_z_image_seg002_music",
-    ]
-    loader_skips = [
-        workflow["load_frame_sequence"]["inputs"]["skip_first_images"]
-        for workflow in connection.queued_workflows
-    ]
-    assert loader_skips == [0, 48, 96]
-    assert len(assembled_requests) == 1
-    assert len(assembled_requests[0].segments) == 3
-    first_soundtrack = assembled_requests[0].segments[0]
-    assert first_soundtrack.music_seconds == pytest.approx(189 / 32 + 1.0)
-    assert first_soundtrack.sound_effect_seconds == pytest.approx(189 / 32 + 0.25)
-    assert first_soundtrack.music_stem_path.name == "Zoomy_z_image_seg000_music_stem.flac"
-    messages = [update.message for update in updates]
-    assert any("Segment 1/3" in message for message in messages)
-    assert any("Segment 3/3" in message for message in messages)
-    final_update = updates[-1]
-    assert final_update.video_path == tmp_path / "Zoomy_z_image_00003-audio.mp4"
-    assert final_update.frame_count == 100
-    assert not list(tmp_path.glob("Zoomy_z_image_seg*.mp4"))
-
-
-def test_finalize_video_refuses_half_rendered_segments(tmp_path: Path) -> None:
-    """A segment job without both twins fails loudly instead of mis-joining."""
-    repository = _repository_with_frames(tmp_path, frame_count=100)
-    connection = ScriptedConnection([_completed_entry()] * 3)
-    family = find_family(FAMILY_CATALOG, "z_fast")
-    request = FinalizeRequest(family=family, frame_count=100, output_directory="/output")
-    with pytest.raises(AssemblyError, match="Segment 0"):
-        list(
-            finalize_video(
-                request,
-                _test_environment(connection, repository),
-            )
-        )
+    assert len(engine.finalize_requests) == 1
 
 
 def _counted_request_factory() -> Callable[[int], FrameRenderRequest]:
@@ -332,26 +206,20 @@ def _counted_request_factory() -> Callable[[int], FrameRenderRequest]:
             frame_count=frame_count,
             lora_selections=(),
             seed=frame_count,
-            output_directory="/unused/by/fakes",
         )
 
     return build_request
 
 
 def _drain_loop(
-    connection: ScriptedConnection,
+    engine: ScriptedEngine,
     repository: FrameRepository,
     *,
     frame_target: int | None,
     max_attempts_per_frame: int = 3,
 ) -> list[str]:
     """Run a loop to completion and return every yielded message."""
-    environment = RenderEnvironment(
-        connection=connection,
-        repository=repository,
-        operation_timeout_seconds=5.0,
-        poll_interval_seconds=0.0,
-    )
+    environment = RenderEnvironment(engine=engine, repository=repository)
     updates = render_loop(
         _counted_request_factory(),
         "z_image",
@@ -365,13 +233,8 @@ def _drain_loop(
 def test_render_loop_rejects_zero_attempts(tmp_path: Path) -> None:
     """Zero per-frame attempts would spin forever, so the loop refuses them."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    connection = ScriptedConnection([])
-    environment = RenderEnvironment(
-        connection=connection,
-        repository=repository,
-        operation_timeout_seconds=5.0,
-        poll_interval_seconds=0.0,
-    )
+    engine = ScriptedEngine()
+    environment = RenderEnvironment(engine=engine, repository=repository)
     with pytest.raises(ValueError, match="max_attempts_per_frame"):
         list(
             render_loop(
@@ -385,13 +248,13 @@ def test_render_loop_rejects_zero_attempts(tmp_path: Path) -> None:
 
 
 def test_render_next_frame_reports_elapsed_seconds(tmp_path: Path) -> None:
-    """Terminal updates carry the measured queue-to-completion time."""
+    """Terminal updates carry the measured render time."""
     repository = _repository_with_frames(tmp_path, frame_count=1)
-    connection = ScriptedConnection([_completed_entry()])
+    engine = ScriptedEngine()
     updates = list(
         render_next_frame(
             _frame_request(repository),
-            _test_environment(connection, repository),
+            _test_environment(engine, repository),
         )
     )
     assert updates[-1].elapsed_seconds is not None
@@ -401,16 +264,16 @@ def test_render_next_frame_reports_elapsed_seconds(tmp_path: Path) -> None:
 def test_render_loop_stops_at_the_frame_target(tmp_path: Path) -> None:
     """A numeric target ends the loop after exactly that many frames."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    connection = ScriptedConnection([None, _completed_entry()] * 2)
-    messages = _drain_loop(connection, repository, frame_target=2)
-    assert len(connection.queued_workflows) == 2
+    engine = ScriptedEngine()
+    messages = _drain_loop(engine, repository, frame_target=2)
+    assert len(engine.render_requests) == 2
     assert messages[-1] == "Loop target reached after 2 frames."
 
 
 def test_render_loop_stops_gracefully_on_request(tmp_path: Path) -> None:
     """A stop requested mid-loop finishes the running frame, then exits."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    connection = ScriptedConnection([None, _completed_entry()] * 5)
+    engine = ScriptedEngine()
     factory_calls = 0
 
     def stopping_factory(frame_count: int) -> FrameRenderRequest:
@@ -421,12 +284,7 @@ def test_render_loop_stops_gracefully_on_request(tmp_path: Path) -> None:
             request_loop_stop()
         return _counted_request_factory()(frame_count)
 
-    environment = RenderEnvironment(
-        connection=connection,
-        repository=repository,
-        operation_timeout_seconds=5.0,
-        poll_interval_seconds=0.0,
-    )
+    environment = RenderEnvironment(engine=engine, repository=repository)
     messages = list(
         render_loop(
             stopping_factory,
@@ -436,19 +294,17 @@ def test_render_loop_stops_gracefully_on_request(tmp_path: Path) -> None:
         )
     )
     clear_loop_stop()
-    assert len(connection.queued_workflows) == 2
+    assert len(engine.render_requests) == 2
     assert messages[-1].message == "Loop stopped after 2 frames."
 
 
 def test_render_loop_retries_then_gives_up(tmp_path: Path) -> None:
     """Transient failures retry per frame; exhaustion ends the loop."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    failure = _completed_entry(
-        [["execution_error", {"node_type": "KSampler", "exception_message": "boom"}]]
-    )
-    connection = ScriptedConnection([failure, failure, failure])
-    messages = _drain_loop(connection, repository, frame_target=None, max_attempts_per_frame=3)
-    assert len(connection.queued_workflows) == 3
+    failure = EngineExecutionError("z-frame", "boom")
+    engine = ScriptedEngine(frame_results=[failure, failure, failure])
+    messages = _drain_loop(engine, repository, frame_target=None, max_attempts_per_frame=3)
+    assert len(engine.render_requests) == 3
     assert "failed after 3 attempts" in messages[-1]
     assert "Ending loop" in messages[-1]
 
@@ -456,104 +312,34 @@ def test_render_loop_retries_then_gives_up(tmp_path: Path) -> None:
 def test_render_loop_succeeds_on_retry(tmp_path: Path) -> None:
     """A frame that fails once still completes the loop on its retry."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    failure = _completed_entry(
-        [["execution_error", {"node_type": "KSampler", "exception_message": "boom"}]]
-    )
-    connection = ScriptedConnection([failure, None, _completed_entry()])
-    messages = _drain_loop(connection, repository, frame_target=1, max_attempts_per_frame=3)
-    assert len(connection.queued_workflows) == 2
+    engine = ScriptedEngine(frame_results=[EngineExecutionError("z-frame", "boom")])
+    messages = _drain_loop(engine, repository, frame_target=1, max_attempts_per_frame=3)
+    assert len(engine.render_requests) == 2
     assert messages[-1] == "Loop target reached after 1 frame."
 
 
 def test_render_loop_propagates_interrupts_without_retry(tmp_path: Path) -> None:
     """A user interrupt ends the loop immediately on the first attempt."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    interrupted = _completed_entry([["execution_interrupted", None]])
-    connection = ScriptedConnection([interrupted, None, _completed_entry()])
+    engine = ScriptedEngine(frame_results=[RenderInterruptedError("stopped")])
     with pytest.raises(RenderInterruptedError):
-        _drain_loop(connection, repository, frame_target=None)
-    assert len(connection.queued_workflows) == 1
+        _drain_loop(engine, repository, frame_target=None)
+    assert len(engine.render_requests) == 1
 
 
-def test_render_loop_propagates_rejections_without_retry(tmp_path: Path) -> None:
-    """A validation rejection is a spec bug, so the loop never retries it."""
+def test_render_loop_propagates_configuration_errors_without_retry(tmp_path: Path) -> None:
+    """A configuration error is a spec bug, so the loop never retries it."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
-    rejection = ComfyRejectedWorkflowError(summary="bad node", node_errors={})
-    connection = ScriptedConnection([], queue_failure=rejection)
-    with pytest.raises(ComfyRejectedWorkflowError, match="bad node"):
-        _drain_loop(connection, repository, frame_target=None)
-    assert not connection.queued_workflows
+    engine = ScriptedEngine(frame_results=[EngineConfigurationError("bad request")])
+    with pytest.raises(EngineConfigurationError, match="bad request"):
+        _drain_loop(engine, repository, frame_target=None)
+    assert len(engine.render_requests) == 1
 
 
-def _open_entry(
-    status_messages: list[list[Any]] | None = None,
-) -> HistoryEntry:
-    """Build a not-completed entry, the shape live interrupts use."""
-    return HistoryEntry(outputs={}, status_messages=status_messages or [], is_completed=False)
-
-
-# Arbitrary JSON for status messages: NUL-free text (matching the settings
-# domain) with bounded nesting so cases stay small and fast.
-json_atom = (
-    st.none()
-    | st.booleans()
-    | st.integers()
-    | st.text(alphabet=st.characters(blacklist_characters="\x00"), max_size=20)
-)
-json_value = st.recursive(
-    json_atom | st.floats(allow_nan=False, allow_infinity=False),
-    lambda children: (
-        st.lists(children, max_size=4) | st.dictionaries(st.text(max_size=8), children, max_size=3)
-    ),
-    max_leaves=8,
-)
-
-
-def _scan_outcome(entry: HistoryEntry) -> str:
-    """Run the status scanner, translating its result to a testable label."""
-    try:
-        _raise_if_execution_failed(entry)
-    except ComfyExecutionError:
-        return "execution_error"
-    except RenderInterruptedError:
-        return "interrupted"
-    return "silent"
-
-
-@given(messages=st.lists(json_value, max_size=4))
-def test_status_message_scan_only_raises_typed_errors(messages: list[Any]) -> None:
-    """Arbitrary message shapes surface as typed errors or silence, never a crash."""
-    entry = HistoryEntry(outputs={}, status_messages=messages, is_completed=False)
-    assert _scan_outcome(entry) in ("silent", "execution_error", "interrupted")
-
-
-def test_interrupted_entry_without_completed_flag_raises_immediately(
-    tmp_path: Path,
-) -> None:
-    """Live interrupts stay completed=False; the loop must not poll forever."""
-    repository = _repository_with_frames(tmp_path, frame_count=1)
-    interrupted = _open_entry([["execution_interrupted", {"node_id": "54"}]])
-    connection = ScriptedConnection([interrupted])
-    with pytest.raises(RenderInterruptedError):
-        list(
-            render_next_frame(
-                _frame_request(repository),
-                _test_environment(connection, repository),
-            )
-        )
-
-
-def test_error_entry_without_completed_flag_raises_immediately(tmp_path: Path) -> None:
-    """Live errors stay completed=False; they surface instead of timing out."""
-    repository = _repository_with_frames(tmp_path, frame_count=1)
-    failure = _open_entry(
-        [["execution_error", {"node_type": "KSampler", "exception_message": "boom"}]]
-    )
-    connection = ScriptedConnection([failure])
-    with pytest.raises(ComfyExecutionError, match="KSampler"):
-        list(
-            render_next_frame(
-                _frame_request(repository),
-                _test_environment(connection, repository),
-            )
-        )
+def test_interrupt_module_flag_is_independent_of_engine() -> None:
+    """The loop stop flag still toggles without any engine involved."""
+    clear_loop_stop()
+    assert rendering_module.is_loop_stop_requested() is False
+    request_loop_stop()
+    assert rendering_module.is_loop_stop_requested() is True
+    clear_loop_stop()
