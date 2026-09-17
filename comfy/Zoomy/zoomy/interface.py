@@ -462,7 +462,18 @@ def _bind_clear_frames(
                 _fresh_statistics(context.repository, context.engine, family, durations),
                 _fresh_gallery(context.repository, family),
             )
-        context.repository.clear_frames(family.sequence_key)
+        try:
+            context.repository.clear_frames(family.sequence_key)
+        except (OSError, ZoomyError) as failure:
+            message = f"**Error:** Could not clear sequence *{family.sequence_key}*: {failure}"
+            return (
+                False,
+                gr.update(value=CLEAR_FRAMES_LABEL),
+                message,
+                None,
+                message,
+                [],
+            )
         return (
             False,
             gr.update(value=CLEAR_FRAMES_LABEL),

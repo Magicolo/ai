@@ -8,9 +8,12 @@ muxed soundtrack, and the twin is what previews should show.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from zoomy.errors import ZoomyError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,6 +27,21 @@ SEGMENT_FILE_MARKER = "_seg"
 ASSEMBLY_DIRECTORY_SUFFIX = "_assembly"
 VIDEO_COUNTER_DIGITS = 5
 RECENT_FRAME_LIMIT = 8
+_SAFE_SEQUENCE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _check_sequence_key(sequence_key: str) -> None:
+    """Reject keys that could escape the output directory or inject globs.
+
+    Every repository path derives from the sequence key, and two methods
+    delete (``clear_frames``, ``remove_segment_files``), so every keyed
+    entry point validates: only letters, digits, underscore, and hyphen —
+    the catalog's key shape — which admits no separators, ``..``, empties,
+    absolute paths, or glob metacharacters.
+    """
+    if not _SAFE_SEQUENCE_KEY.fullmatch(sequence_key):
+        message = f"Invalid sequence key: {sequence_key!r}"
+        raise ZoomyError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +78,7 @@ class FrameRepository:
 
     def frame_directory(self, sequence_key: str) -> Path:
         """Return the directory holding the sequence's rendered frames."""
+        _check_sequence_key(sequence_key)
         return self.output_directory / sequence_key
 
     def frame_paths(self, sequence_key: str) -> list[Path]:
@@ -96,11 +115,23 @@ class FrameRepository:
         return frame_path
 
     def clear_frames(self, sequence_key: str) -> None:
-        """Delete the sequence's entire frame directory."""
-        shutil.rmtree(self.frame_directory(sequence_key), ignore_errors=True)
+        """Delete the sequence's entire frame directory.
+
+        A missing directory is a no-op; a failed delete raises ZoomyError
+        so callers never report a clear they did not perform.
+        """
+        directory = self.frame_directory(sequence_key)
+        if not directory.exists() and not directory.is_symlink():
+            return
+        try:
+            shutil.rmtree(directory)
+        except OSError as failure:
+            message = f"Could not clear frames of sequence {sequence_key!r}: {failure}"
+            raise ZoomyError(message) from failure
 
     def assembly_directory(self, sequence_key: str) -> Path:
         """Return the scratch directory for assembly waves and concat lists."""
+        _check_sequence_key(sequence_key)
         leaf = f"{sequence_key}{ASSEMBLY_DIRECTORY_SUFFIX}"
         return self.output_directory / leaf
 
@@ -111,6 +142,7 @@ class FrameRepository:
         assembles half a window. The twins carry the concatenated pixels;
         the full-length soundtrack stems resolve separately.
         """
+        _check_sequence_key(sequence_key)
         music_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_music*-audio.mp4")
         effects_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx*-audio.mp4")
         if music_twin is None or effects_twin is None:
@@ -123,6 +155,7 @@ class FrameRepository:
         Stems keep the over-generated overlap tails the twins trim away, so
         both must be present before the window joins the assembly.
         """
+        _check_sequence_key(sequence_key)
         music_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_music_stem*.flac")
         sound_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx_stem*.flac")
         if music_stem is None or sound_stem is None:
@@ -135,6 +168,7 @@ class FrameRepository:
         Segment intermediates and audio twins never advance the counter, so
         assembly names continue the main video sequence seamlessly.
         """
+        _check_sequence_key(sequence_key)
         prefix = f"{sequence_key}_"
         counters = []
         for candidate in self.output_directory.glob(f"{prefix}*.mp4"):
@@ -152,6 +186,7 @@ class FrameRepository:
         Matches every segment artifact regardless of extension: videos,
         twins, stems, and the metadata preview images written alongside.
         """
+        _check_sequence_key(sequence_key)
         removed = 0
         for candidate in self.output_directory.glob(f"{sequence_key}_seg*"):
             if candidate.is_dir():
@@ -180,6 +215,7 @@ class FrameRepository:
         videos exist the newest by modification time wins, which is the one
         the latest finalize just wrote.
         """
+        _check_sequence_key(sequence_key)
         pattern = VIDEO_FILE_TEMPLATE.format(sequence_key=sequence_key)
         candidates = [
             path

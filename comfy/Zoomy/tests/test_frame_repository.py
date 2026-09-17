@@ -8,9 +8,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from zoomy.errors import ZoomyError
 from zoomy.frame_repository import RECENT_FRAME_LIMIT, FrameRepository
 
 if TYPE_CHECKING:
@@ -76,6 +78,29 @@ def test_clear_frames_removes_the_sequence_directory(tmp_path: Path) -> None:
     repository.clear_frames("z_image")
     assert repository.frame_count("z_image") == 0
     assert not (tmp_path / "z_image").exists()
+
+
+@pytest.mark.parametrize("bad_key", ["../evil", "..", "", "/absolute", "sub/dir", "*", "has space"])
+def test_sequence_keys_reject_directory_escape(tmp_path: Path, bad_key: str) -> None:
+    """Traversal, absolute, empty, and glob-injection keys never become paths."""
+    repository = FrameRepository(tmp_path)
+    with pytest.raises(ZoomyError, match="Invalid sequence key"):
+        repository.frame_directory(bad_key)
+
+
+def test_clear_frames_missing_directory_is_fine(tmp_path: Path) -> None:
+    """Clearing a sequence with no directory is a no-op, not an error."""
+    repository = FrameRepository(tmp_path)
+    repository.clear_frames("never_rendered")
+    assert not (tmp_path / "never_rendered").exists()
+
+
+def test_clear_frames_reports_undeletable_directory(tmp_path: Path) -> None:
+    """A failed delete raises instead of reporting a phantom clear."""
+    repository = FrameRepository(tmp_path)
+    (tmp_path / "z_image").write_bytes(b"not a directory")
+    with pytest.raises(ZoomyError, match="Could not clear frames"):
+        repository.clear_frames("z_image")
 
 
 def test_latest_video_prefers_the_audio_muxed_twin(tmp_path: Path) -> None:

@@ -1,7 +1,16 @@
 # `clear_frames` / `frame_directory`: unsanitized key + silent delete failures
 
 - Severity: medium (validation + misleading success message).
-- Status: verified open. `zoomy/frame_repository.py:61-63,98-100`.
+- Status: FIXED. `_check_sequence_key` allowlist (`[A-Za-z0-9_-]+`, the
+  catalog's key shape) enforced in all seven path-producing methods
+  (`frame_directory`, `assembly_directory`, `segment_twin_paths`,
+  `segment_stem_paths`, `next_video_stem`, `remove_segment_files`,
+  `latest_video_path` — every other keyed method routes through these, and
+  the allowlist also neutralizes glob injection). `clear_frames` returns on
+  missing dirs and raises `ZoomyError` on failed deletes; the handler
+  catches `(OSError, ZoomyError)` into the `**Error:**` shape. Tests:
+  7-param traversal rejection, missing-dir no-op, file-at-dir failure at
+  both repo and handler level.
 
 ## Evidence
 

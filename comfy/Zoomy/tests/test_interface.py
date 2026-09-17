@@ -210,6 +210,20 @@ def test_clear_frames_reports_unknown_family(tmp_path: Path) -> None:
     assert "no-such-family" in message
 
 
+def test_clear_frames_reports_undeletable_directory(tmp_path: Path) -> None:
+    """A failed delete yields an error update, never a traceback."""
+    context = _wiring_context(tmp_path)
+    (tmp_path / "z_image").write_bytes(b"not a directory")
+    _armed, _button, message, _preview, _stats, _gallery = _bind_clear_frames(context)(
+        True,  # noqa: FBT003
+        "z_fast",
+        (0, 0.0, 0.0),
+    )
+    assert isinstance(message, str)
+    assert message.startswith("**Error:**")
+    assert "z_image" in message
+
+
 def test_format_bytes_uses_binary_units() -> None:
     """Byte counts render with the right unit and one decimal."""
     assert _format_bytes(0) == "0 B"
