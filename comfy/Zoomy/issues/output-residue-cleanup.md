@@ -2,8 +2,12 @@
 
 - Severity: low (chore — gitignored, but hides real artifacts and bloats
   the bind mount).
-- Status: verified open. `Zoomy/output/` holds `Zoomy_z_image_00001.mp4`,
-  `Zoomy_z_image_00001-audio.mp4`, plus sequence frames.
+- Status: FIXED. Sep-16 demo residue (81 `z_image/` frames + both
+  `z_image_00001*.mp4`, ~50 MB) deleted from inside the container via the
+  new `Zoomy/scripts/clean-output.sh` (explicit relative names/patterns
+  only; refuses empty runs, absolute paths, `..`, and `.gitkeep`; globs
+  expand in-container so host-side typos cannot reach `Comfy/output`).
+  `/output` now holds only `.gitkeep`; `git status` clean.
 
 ## Evidence
 
