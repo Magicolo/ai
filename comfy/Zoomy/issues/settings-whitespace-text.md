@@ -1,7 +1,11 @@
 # `_read_text` treats whitespace-only env vars as configured
 
 - Severity: medium (config correctness — asymmetric with `_read_integer`).
-- Status: verified open. `zoomy/settings.py:47-49`.
+- Status: FIXED. `_read_text` now falls back on blank and returns the
+  stripped value (documented choice: directories never want padding).
+  Tests: `test_blank_text_values_fall_back_to_defaults` (Hypothesis
+  `blank_text` over three settings) + `test_padded_text_values_are_stripped`.
+  `zoomy/settings.py:47-56`.
 
 ## Evidence
 

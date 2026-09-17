@@ -103,3 +103,29 @@ def test_empty_text_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch
     parsed = Settings.from_environment()
     assert parsed.models_directory == "/models"
     assert parsed.cuda_device == "cuda:0"
+
+
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(raw_value=blank_text)
+def test_blank_text_values_fall_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """Whitespace-only text values behave as unset (matching the port)."""
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZOOMY_MODELS_DIRECTORY", raw_value)
+    monkeypatch.setenv("ZOOMY_OUTPUT_DIRECTORY", raw_value)
+    monkeypatch.setenv("ZOOMY_CUDA_DEVICE", raw_value)
+    parsed = Settings.from_environment()
+    assert parsed.models_directory == "/models"
+    assert parsed.output_directory == "/output"
+    assert parsed.cuda_device == "cuda:0"
+
+
+def test_padded_text_values_are_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Surrounding padding is not part of a directory or device name."""
+    for name in SETTING_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZOOMY_MODELS_DIRECTORY", "  /other/models\t")
+    parsed = Settings.from_environment()
+    assert parsed.models_directory == "/other/models"

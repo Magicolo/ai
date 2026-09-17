@@ -45,8 +45,16 @@ class Settings:
 
 
 def _read_text(name: str, default: str) -> str:
-    """Return the environment value or the default when unset or blank."""
-    return os.environ.get(name, default) or default
+    """Return the stripped environment value, or the default when unset or blank.
+
+    Directories, addresses, and device names never want surrounding padding,
+    so the returned value is stripped; a whitespace-only value means
+    "not configured", matching :func:`_read_integer`.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip()
 
 
 def _read_integer(name: str, default: int) -> int:
