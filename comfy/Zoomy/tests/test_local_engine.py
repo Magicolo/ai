@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import subprocess
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import pytest
 from hypothesis import given
@@ -330,6 +330,107 @@ def test_failed_window_removes_partial_artifacts(
         path for path in output_directory.rglob("*") if "seg000" in path.name and path.is_file()
     ]
     assert leftovers == []
+
+
+def _stub_window_heavy_stages(monkeypatch: pytest.MonkeyPatch, engine: LocalEngine) -> None:
+    """Replace ffmpeg/music/SFX/mux with file-touching fakes for window tests."""
+
+    def fake_write_silent_video(frames: list[object], destination: Path) -> None:
+        assert len(frames) == 1
+        destination.write_bytes(b"silent")
+
+    def fake_render_music(
+        _caption: str, _duration_seconds: float, stem_path: Path, *, seed: int
+    ) -> None:
+        del seed
+        stem_path.write_bytes(b"music")
+
+    def fake_render_sound_effects(
+        _prompt: str,
+        _negative_prompt: str | None,
+        _interpolated_frames: list[object],
+        _duration_seconds: float,
+        stem_path: Path,
+    ) -> None:
+        stem_path.write_bytes(b"effects")
+
+    def fake_mux_audio_twin(_silent_video: Path, _stem: Path, twin: Path) -> None:
+        twin.write_bytes(b"twin")
+
+    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
+    monkeypatch.setattr("zoomy.local_engine._mux_audio_twin", fake_mux_audio_twin)
+    monkeypatch.setattr(engine, "_render_music", fake_render_music)
+    monkeypatch.setattr(engine, "_render_sound_effects", fake_render_sound_effects)
+
+
+class _CloseTrackingImage:
+    """Stand-in for an opened PNG: records close, converts to a blank frame."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close_calls += 1
+
+    def convert(self, _mode: str) -> PillowImage.Image:
+        return PillowImage.new("RGB", (16, 16))
+
+
+def _record_image_opens(monkeypatch: pytest.MonkeyPatch) -> list[_CloseTrackingImage]:
+    """Replace ``PIL.Image.open`` with a close-recording fake; return opens."""
+    instances: list[_CloseTrackingImage] = []
+
+    def tracking_open(_path: object, *_args: object, **_kwargs: object) -> _CloseTrackingImage:
+        instance = _CloseTrackingImage()
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(PillowImage, "open", tracking_open)
+    return instances
+
+
+def test_window_render_closes_source_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every opened source PNG is closed after its pixels are converted."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "ernie_turbo")
+    repository = FrameRepository(tmp_path / "output")
+    repository.save_next_frame(family.sequence_key, PillowImage.new("RGB", (16, 16)))
+    _stub_window_heavy_stages(monkeypatch, engine)
+    opened = _record_image_opens(monkeypatch)
+    window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
+    engine._finalize_window(family, family.sequence_key, window, extension=False)  # noqa: SLF001
+    assert len(opened) == 1
+    assert [image.close_calls for image in opened] == [1]
+
+
+def test_load_source_image_closes_seed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold- and warm-start loads close their PNGs after converting."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    seed_path = tmp_path / "seed" / family.cold_start_image
+    PillowImage.new("RGB", (16, 16)).save(seed_path)
+    FrameRepository(tmp_path / "output").save_next_frame(
+        family.sequence_key, PillowImage.new("RGB", (16, 16))
+    )
+    opened = _record_image_opens(monkeypatch)
+    for frame_count in (0, 1):
+        request = FrameRenderRequest(
+            family=family,
+            prompt="a prompt",
+            negative_prompt=None,
+            frame_count=frame_count,
+            lora_selections=(),
+            seed=1,
+        )
+        image = engine._load_source_image(request)  # noqa: SLF001
+        del image
+    assert len(opened) == 2
+    assert [image.close_calls for image in opened] == [1, 1]
 
 
 class _FailingEncodeStdin:

@@ -393,9 +393,7 @@ class LocalEngine:
             )
             completed = False
             try:
-                from PIL import Image as PillowImage  # noqa: PLC0415
-
-                source_frames = [PillowImage.open(path).convert("RGB") for path in frame_paths]
+                source_frames = [_converted_frame(path) for path in frame_paths]
                 interpolated_frames = self._interpolate_frames(source_frames)
                 _write_silent_video(interpolated_frames, silent_video_path)
                 self._render_music(
@@ -448,14 +446,12 @@ class LocalEngine:
 
     def _load_source_image(self, request: FrameRenderRequest) -> Image:
         """Return the cold-start seed (frame zero) or the latest frame."""
-        from PIL import Image as PillowImage  # noqa: PLC0415
-
         if request.frame_count == 0:
             seed_path = self._seed_directory / request.family.cold_start_image
             if not seed_path.is_file():
                 message = f"Cold-start seed image is missing: {seed_path}"
                 raise EngineConfigurationError(message)
-            return PillowImage.open(seed_path).convert("RGB")
+            return _converted_frame(seed_path)
         latest_path = self._repository.latest_frame_path(request.family.sequence_key)
         if latest_path is None:
             message = (
@@ -463,7 +459,7 @@ class LocalEngine:
                 f"{request.frame_count} frames but none are on disk"
             )
             raise EngineConfigurationError(message)
-        return PillowImage.open(latest_path).convert("RGB")
+        return _converted_frame(latest_path)
 
     @staticmethod
     def _zoomed_frame(source_image: Image, frame_width: int, frame_height: int) -> Image:
@@ -1304,6 +1300,21 @@ def run_stage_with_retries[StageResultT](
             evict_resident_stacks()
     message = f"Stage {stage_name!r} failed after {max_attempts} attempts"
     raise EngineExecutionError(stage_name, message)
+
+
+def _converted_frame(source_path: Path) -> Image:
+    """Open one PNG, copy its pixels to RGB, and close the file handle.
+
+    ``Image.open`` is lazy — the handle stays open until the image is
+    closed — so converting without closing leaks one descriptor per source
+    frame on interpreters without refcounting (and depends on decoder
+    internals everywhere else). ``convert`` copies the pixels, making it
+    safe to close the original before returning.
+    """
+    from PIL import Image as PillowImage  # noqa: PLC0415
+
+    with PillowImage.open(source_path) as source_image:
+        return cast("Image", source_image.convert("RGB"))
 
 
 def _pad_frames_to_minimum(frames: list[Any], minimum_frames: int) -> list[Any]:

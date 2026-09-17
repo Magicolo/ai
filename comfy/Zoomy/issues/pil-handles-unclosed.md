@@ -1,7 +1,15 @@
 # Source frames opened without closing in `_finalize_window`
 
 - Severity: medium (FD exhaustion on long segmented finalizes).
-- Status: verified open. `zoomy/local_engine.py:386`.
+- Status: FIXED. New `_converted_frame` helper opens each PNG as a
+  context manager and returns the converted copy; all three call sites
+  (`render_window` frames, `_load_source_image` cold + warm) use it.
+  Empirical note: probing showed current Pillow releases the handle during
+  `load()` (FD count flat at 4 holding 48 converted copies, no
+  `ResourceWarning` ever fires), so this is defense-in-depth against
+  decoder internals, not a live leak — the tests pin *our* discipline via
+  a close-recording `open` fake (`test_window_render_closes_source_files`,
+  `test_load_source_image_closes_seed_files`), not Pillow behavior.
 
 ## Evidence
 
