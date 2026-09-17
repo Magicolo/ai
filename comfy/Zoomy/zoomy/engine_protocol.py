@@ -85,6 +85,12 @@ SOUND_EFFECT_STEPS = 25
 SOUND_EFFECT_CLASSIFIER_FREE_GUIDANCE = 4.5
 SOUND_EFFECT_MASK_AWAY_CLIP = True
 SOUND_EFFECT_VOLUME_DECIBELS = -6
+# Sync-video frame rate the synchformer encodes at. Unrelated to
+# SOUND_EFFECT_STEPS (diffusion steps that happen to share the value): the
+# SFX slice math must divide by this, never a literal.
+SOUND_EFFECT_SYNC_FRAMES_PER_SECOND = 25
+# Sync-frame edge length the vendor recipe normalizes to before encoding.
+SOUND_EFFECT_SYNC_FRAME_PIXELS = 224
 
 
 @dataclass(frozen=True, slots=True)

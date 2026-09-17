@@ -17,6 +17,8 @@ from zoomy.engine_protocol import (
     SEGMENT_MUSIC_EXTENSION_SECONDS,
     SEGMENT_SOUND_EXTENSION_SECONDS,
     SEGMENT_SOURCE_FRAMES,
+    SOUND_EFFECT_SYNC_FRAME_PIXELS,
+    SOUND_EFFECT_SYNC_FRAMES_PER_SECOND,
     VIDEO_FRAMES_PER_SECOND,
     ZOOM_FACTOR_PER_FRAME,
     FinalizeRequest,
@@ -32,12 +34,20 @@ from zoomy.engine_protocol import (
     needs_segmentation,
 )
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
+from zoomy.final_assembly import OUTPUT_SAMPLE_RATE
 
 
 def test_geometry_matches_the_zoom_dive() -> None:
     """The crop rule centers the dive: (1376 - 1356) / 2 = 10 px per side."""
     assert CROP_WIDTH_PIXELS == FRAME_WIDTH_PIXELS - 2 * CROP_BORDER_PIXELS
     assert CROP_HEIGHT_PIXELS == FRAME_HEIGHT_PIXELS - 2 * CROP_BORDER_PIXELS
+
+
+def test_sound_effect_sync_constants_are_named_once() -> None:
+    """Sync fps/pixels/rate live in one place; slice math and mux share them."""
+    assert SOUND_EFFECT_SYNC_FRAMES_PER_SECOND == 25
+    assert SOUND_EFFECT_SYNC_FRAME_PIXELS == 224
+    assert OUTPUT_SAMPLE_RATE == 44100
     assert pytest.approx(FRAME_WIDTH_PIXELS / CROP_WIDTH_PIXELS) == ZOOM_FACTOR_PER_FRAME
     assert pytest.approx(1.0147, rel=1e-3) == ZOOM_FACTOR_PER_FRAME
 

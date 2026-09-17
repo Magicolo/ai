@@ -51,6 +51,8 @@ from zoomy.engine_protocol import (
     SOUND_EFFECT_MODEL_FILE,
     SOUND_EFFECT_SEED,
     SOUND_EFFECT_STEPS,
+    SOUND_EFFECT_SYNC_FRAME_PIXELS,
+    SOUND_EFFECT_SYNC_FRAMES_PER_SECOND,
     SOUND_EFFECT_SYNCHFORMER_CONFIG,
     SOUND_EFFECT_SYNCHFORMER_FILE,
     SOUND_EFFECT_VAE_FILE,
@@ -922,8 +924,8 @@ class LocalEngine:
             frames_channel_first = video.permute(0, 3, 1, 2)
             sync_frames = torch.stack(
                 [stack["sync_transform"](frame) for frame in frames_channel_first]
-            )[: int(25 * duration_seconds)]
-            duration_seconds = sync_frames.shape[0] / 25.0
+            )[: int(SOUND_EFFECT_SYNC_FRAMES_PER_SECOND * duration_seconds)]
+            duration_seconds = sync_frames.shape[0] / SOUND_EFFECT_SYNC_FRAMES_PER_SECOND
             model = stack["model"]
             model.seq_cfg.duration = duration_seconds
             model.update_seq_lengths(
@@ -950,7 +952,9 @@ class LocalEngine:
             import soundfile  # noqa: PLC0415
 
             waveform = audios.float().cpu()
-            soundfile.write(str(stem_path), waveform[0].T.numpy(), 44100)
+            soundfile.write(
+                str(stem_path), waveform[0].T.numpy(), final_assembly.OUTPUT_SAMPLE_RATE
+            )
         except RenderInterruptedError:
             raise
         except Exception as failure:
@@ -1184,15 +1188,16 @@ def _load_effects_clip_model(loaders: _EffectsLoaders) -> Any:
 
 
 def _build_effects_sync_transform(torch_module: Any, transforms_module: Any) -> Any:
-    """Build the 224px normalized sync-frame transform for MMAudio video."""
+    """Build the normalized sync-frame transform for MMAudio video."""
     # Only the sync transform runs: mask_away_clip stays enabled, so the
     # video CLIP features it would mask are never computed.
     return transforms_module.Compose(
         [
             transforms_module.Resize(
-                224, interpolation=transforms_module.InterpolationMode.BICUBIC
+                SOUND_EFFECT_SYNC_FRAME_PIXELS,
+                interpolation=transforms_module.InterpolationMode.BICUBIC,
             ),
-            transforms_module.CenterCrop(224),
+            transforms_module.CenterCrop(SOUND_EFFECT_SYNC_FRAME_PIXELS),
             transforms_module.ToPILImage(),
             transforms_module.ToTensor(),
             transforms_module.ConvertImageDtype(torch_module.float32),

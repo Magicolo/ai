@@ -1,8 +1,13 @@
 # Magic sync constants duplicate `OUTPUT_SAMPLE_RATE`
 
 - Severity: low (drift risk between SFX slice math and mux rate).
-- Status: verified open. `zoomy/local_engine.py:892-893,920`,
-  `zoomy/final_assembly.py:40`.
+- Status: FIXED. `SOUND_EFFECT_SYNC_FRAMES_PER_SECOND = 25` (documented
+  as unrelated to the coincidental `SOUND_EFFECT_STEPS = 25`) and
+  `SOUND_EFFECT_SYNC_FRAME_PIXELS = 224` named in `engine_protocol.py`;
+  both slice lines, both transform sizes, and the `soundfile.write` rate
+  (now `final_assembly.OUTPUT_SAMPLE_RATE`) use them. Test:
+  `test_sound_effect_sync_constants_are_named_once` pins all three values
+  cross-module. The `1e-5` epsilon stays vendor-mirror inline, as noted.
 
 ## Evidence
 
