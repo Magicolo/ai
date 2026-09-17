@@ -1,7 +1,15 @@
 # `pyproject.toml` is missing cheap enforcement
 
 - Severity: medium (process — gates live only in prose and scripts).
-- Status: verified open. `Zoomy/pyproject.toml:52-90`.
+- Status: FIXED. `warn_unused_ignores` + `addopts` landed earlier;
+  this change adds the coverage gate (`pytest-cov==7.1.0` exact pin in
+  `requirements-dev.txt`, `[tool.coverage.run]` with `source=["zoomy"]`
+  and `/tmp` `data_file`, `[tool.coverage.report]` `fail_under = 67`
+  ratcheting upward from the measured 68%) wired into `quality-gates.sh`
+  only (targeted runs stay floor-free), plus the `scripts/` seam decision
+  (stays unpackaged; redundant `sys.path` test inserts removed in favor of
+  the `pythonpath` seam). Measured baseline: 174 passed, TOTAL 68%
+  (interface 73%, local_engine 42% — the rest is GPU-live code by design).
 
 ## Evidence
 

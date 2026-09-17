@@ -92,3 +92,15 @@ pythonpath = [".", "scripts"]
 # Keep bare `pytest` residue-free and strict: no .pytest_cache writes into the
 # bind-mounted tree, unknown markers are errors rather than silent typos.
 addopts = ["-p", "no:cacheprovider", "--strict-markers"]
+
+[tool.coverage.run]
+source = ["zoomy"]
+# Coverage data must never land in the bind-mounted tree (a bare --cov run
+# once wrote a root-owned .coverage there); /tmp always exists in the image.
+data_file = "/tmp/zoomy-coverage-data"
+
+[tool.coverage.report]
+show_missing = true
+# Ratchet upward as GPU-independent coverage grows (68% at 174 tests,
+# 2026-09-17): the floor fails the full gate on any regression.
+fail_under = 67

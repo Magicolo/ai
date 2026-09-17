@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import io
-import sys
 import urllib.request
 from http.client import HTTPMessage
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from download_models import _CivitaiRedirectHandler, build_civitai_request
 

@@ -397,7 +397,16 @@ via per-file ignore); tests additionally ignore `S101`/`PLR2004`).
 mypy `strict = true` plus `warn_unused_ignores = true`, with
 `mypy_path = ["scripts"]` (the provisioner is type-checked through its test
 imports). pytest `testpaths = ["tests"]`, `pythonpath = [".", "scripts"]`,
-`addopts = ["-p", "no:cacheprovider", "--strict-markers"]`.
+`addopts = ["-p", "no:cacheprovider", "--strict-markers"]`. Decision on the
+`scripts/` seam: the provisioner stays unpackaged — `pythonpath` already
+puts `scripts/` on `sys.path`, so the test modules import `download_models`
+directly with no path hacks. Coverage (`pytest-cov`, exact pin in
+`requirements-dev.txt`) runs in the full gate only
+(`--cov=zoomy --cov-report=term-missing` in `quality-gates.sh`, floor
+`fail_under = 67` ratcheting upward as GPU-independent coverage grows);
+targeted `run-tests.sh` invocations stay floor-free so iteration never fails
+on a partial run. Coverage data lands in `/tmp` via `data_file`, never the
+bind-mounted tree.
 
 Test layout mirrors the package (`test_settings/engine_protocol/
 family_catalog/final_assembly/frame_repository/local_engine/rendering/

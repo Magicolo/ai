@@ -14,4 +14,4 @@ docker compose --file "$ROOT/docker-compose.yml" run --rm --no-deps \
     -e RUFF_CACHE_DIR=/tmp/ruff-cache \
     -e MYPY_CACHE_DIR=/tmp/mypy-cache \
     -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis \
-    zoomy sh -c "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider"
+    zoomy sh -c "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider --cov=zoomy --cov-report=term-missing"
