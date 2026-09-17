@@ -20,6 +20,7 @@ so the module (and the slim test image) loads without torch installed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import shutil
@@ -383,6 +384,14 @@ class LocalEngine:
 
         def render_window() -> SegmentSoundtrack:
             """Run this window's interpolation, stems, and twins."""
+            window_artifacts = (
+                silent_video_path,
+                music_stem_path,
+                sound_stem_path,
+                music_twin_path,
+                sound_twin_path,
+            )
+            completed = False
             try:
                 from PIL import Image as PillowImage  # noqa: PLC0415
 
@@ -405,6 +414,11 @@ class LocalEngine:
                 _mux_audio_twin(silent_video_path, music_stem_path, music_twin_path)
                 _mux_audio_twin(silent_video_path, sound_stem_path, sound_twin_path)
                 silent_video_path.unlink(missing_ok=True)
+                _verify_segment_artifacts(
+                    window.index,
+                    (music_twin_path, sound_twin_path, music_stem_path, sound_stem_path),
+                )
+                completed = True
             except (
                 RenderInterruptedError,
                 EngineConfigurationError,
@@ -415,10 +429,9 @@ class LocalEngine:
             except Exception as failure:
                 message = f"Segment {window.index} failed: {failure}"
                 raise EngineExecutionError(f"segment-{window.index}", message) from failure
-            _verify_segment_artifacts(
-                window.index,
-                (music_twin_path, sound_twin_path, music_stem_path, sound_stem_path),
-            )
+            finally:
+                if not completed:
+                    _discard_partial_artifacts(window_artifacts)
             return SegmentSoundtrack(
                 music_video_path=music_twin_path,
                 music_stem_path=music_stem_path,
@@ -1176,6 +1189,20 @@ def _build_effects_sync_transform(torch_module: Any, transforms_module: Any) -> 
             transforms_module.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ]
     )
+
+
+def _discard_partial_artifacts(artifacts: tuple[Path, ...]) -> None:
+    """Best-effort delete of one window's partial outputs after a failure.
+
+    A failed attempt must not orphan its silent video or landed stems: the
+    retry renders the same window paths again, and anything left behind
+    would survive until a fully successful finalize. Unlink failures are
+    suppressed — cleanup runs on the failure path and must never mask the
+    error that caused it.
+    """
+    for artifact in artifacts:
+        with contextlib.suppress(OSError):
+            artifact.unlink(missing_ok=True)
 
 
 def _verify_segment_artifacts(window_index: int, artifacts: tuple[Path, ...]) -> None:

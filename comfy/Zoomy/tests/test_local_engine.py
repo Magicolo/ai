@@ -298,6 +298,40 @@ def test_single_frame_window_finalizes_with_stubbed_audio(
     assert soundtrack.sound_effect_stem_path.is_file()
 
 
+def test_failed_window_removes_partial_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing music stage leaves no seg000 files; the error is unchanged."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "ernie_turbo")
+    output_directory = tmp_path / "output"
+    repository = FrameRepository(output_directory)
+    repository.save_next_frame(family.sequence_key, PillowImage.new("RGB", (16, 16)))
+
+    def fake_write_silent_video(frames: list[object], destination: Path) -> None:
+        del frames
+        destination.write_bytes(b"silent")
+
+    def broken_render_music(
+        _caption: str, _duration_seconds: float, stem_path: Path, *, seed: int
+    ) -> None:
+        del seed
+        stem_path.write_bytes(b"partial-music")
+        raise EngineExecutionError("music", "boiler exploded")
+
+    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
+    monkeypatch.setattr(engine, "_render_music", broken_render_music)
+    window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
+    with pytest.raises(EngineExecutionError, match="boiler exploded"):
+        engine._finalize_window(  # noqa: SLF001
+            family, family.sequence_key, window, extension=False
+        )
+    leftovers = [
+        path for path in output_directory.rglob("*") if "seg000" in path.name and path.is_file()
+    ]
+    assert leftovers == []
+
+
 class _FailingEncodeStdin:
     """Pretend ffmpeg died mid-stream: writes fail, close records itself."""
 

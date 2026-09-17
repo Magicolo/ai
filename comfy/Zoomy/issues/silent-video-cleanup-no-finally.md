@@ -2,7 +2,12 @@
 
 - Severity: medium (disk leak on exactly the failure paths that need
   retried renders).
-- Status: verified open. `zoomy/local_engine.py:381-404`.
+- Status: FIXED. `render_window` now tracks completion and discards the
+  window's silent video + both stems + both twins via
+  `_discard_partial_artifacts` (best-effort, never masks the original
+  error) on any failure path; `_verify_segment_artifacts` moved inside the
+  guarded region. Test: `test_failed_window_removes_partial_artifacts`.
+  `zoomy/local_engine.py` (`render_window`, `_discard_partial_artifacts`).
 
 ## Evidence
 
