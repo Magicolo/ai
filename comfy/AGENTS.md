@@ -16,7 +16,7 @@ comfy/                          # wrapper repo (this file's scope)
     pyproject.toml              # ruff ALL (line-length 100) + mypy strict + pytest config
     requirements.txt            # runtime: gradio==6.26.0, httpx==0.28.1 (dev: ruff/mypy/pytest)
     requirements-gpu.txt        # CUDA deps: diffusers/peft/hf_hub/imageio, ccvfi, librosa/MMAudio stack
-    Dockerfile                  # FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel, /opt ACE-Step + pinned MMAudio, COPY tree, smoke imports
+    Dockerfile                  # FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel@sha256:b574d4cc…, /opt ACE-Step (pinned ca1e85fe) + MMAudio (pinned 8eaeb72e), COPY tree, smoke imports
     DESIGN.md                   # app design doc — update with every behavior change
     scripts/download_models.py  # one-shot provisioner: CivitAI (browser UA, no token leakage) + HF into zoomy_models
     vendor/comfy/               # ProgressBar stand-in (MMAudio imports it)

@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
+FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel@sha256:b574d4ccf6d8856a5d87dcadc667aa4f95dc18d337ef3a28d02b7b01897d7081
 
 # Standalone zoomy image: the full in-process generation stack
 # (diffusers frames, RIFE interpolation, ACE-Step music, MMAudio effects)
@@ -35,12 +35,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl \
     libgl1 libglib2.0-0 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned vendor clones (shallow where history is irrelevant, full where the
-# engine pins an exact commit). Upstream files stay pristine: our shims live
-# in zoomy/vendor_compat.py and vendor/comfy/, never in these checkouts.
-RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+# Pinned vendor clones (full history, exact commit — a moving default
+# branch broke us silently before). Upstream files stay pristine: our shims
+# live in zoomy/vendor_compat.py and vendor/comfy/, never in these checkouts.
+# ACE-Step 1.5 @ ca1e85fe (2026-08-29), MMAudio @ 8eaeb72e (2026-02-01).
+RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+    && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
     && git clone https://github.com/kijai/ComfyUI-MMAudio.git /opt/ComfyUI-MMAudio \
-    && git -C /opt/ComfyUI-MMAudio checkout 8eaeb72
+    && git -C /opt/ComfyUI-MMAudio checkout 8eaeb72edc3aaf2059b57f2d96a1f6f689f19ae2
 
 WORKDIR /application
 
@@ -56,8 +58,11 @@ COPY tests ./tests
 
 # Build-time smoke test: every heavy third-party import the engine performs
 # lazily must resolve in this image, so a missing transitive dependency fails
-# the build instead of a 3 a.m. render.
-RUN python -c "import torch; assert torch.cuda.is_available() is False or True" \
+# the build instead of a 3 a.m. render. Vendor pins are re-verified here so a
+# layer-cache surprise can never move the stack silently.
+RUN test "$(git -C /opt/ACE-Step-1.5 rev-parse HEAD)" = "ca1e85fe9430179831e6bc6be790c332190a3866" \
+    && test "$(git -C /opt/ComfyUI-MMAudio rev-parse HEAD)" = "8eaeb72edc3aaf2059b57f2d96a1f6f689f19ae2" \
+    && python -c "import torch; print('cuda available:', torch.cuda.is_available())" \
     && python -c "import diffusers, transformers, peft; print('frames', diffusers.__version__, transformers.__version__)" \
     && python -c "import ccvfi; print('interp ok')" \
     && python -c "import acestep.handler, acestep.inference, acestep.llm_inference; print('acestep ok')" \

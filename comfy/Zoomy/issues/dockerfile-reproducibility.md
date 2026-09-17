@@ -1,7 +1,18 @@
 # Dockerfile reproducibility gaps
 
 - Severity: medium (every rebuild can silently move the stack).
-- Status: verified open. `Zoomy/Dockerfile`.
+- Status: FIXED (verified by full rebuild 2026-09-17). `Zoomy/Dockerfile`:
+  base pinned with digest
+  (`2.10.0-cuda12.8-cudnn9-devel@sha256:b574d4cc…`, resolved live via
+  `buildx imagetools inspect`); ACE-Step pinned to `ca1e85fe` (HEAD resolved
+  via `ls-remote`, commit verified via GitHub API, 2026-08-29) symmetric
+  with MMAudio `8eaeb72e` (full hash, API-verified 2026-02-01); smoke block
+  re-verifies both `rev-parse HEAD` values at build time; tautological
+  `assert … or True` replaced with an informational CUDA print (the `import
+  torch` itself remains the smoke check). Apt left floating as a documented
+  choice (Debian stable libs; the issue's snapshot suggestion stays
+  optional). AGENTS.md Quick Map line fixed (`2.9.0` → `2.10.0` for the
+  Zoomy Dockerfile).
 
 ## Evidence
 
