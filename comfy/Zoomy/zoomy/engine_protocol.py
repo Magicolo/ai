@@ -177,16 +177,18 @@ class EngineStatistics:
     """Live memory figures reported by the in-process engine.
 
     Attributes:
-        system_memory_free_bytes: Free system RAM in bytes.
-        system_memory_total_bytes: Total system RAM in bytes.
+        system_memory_free_bytes: Free system RAM in bytes, or ``None``
+            when /proc is unreadable.
+        system_memory_total_bytes: Total system RAM in bytes, or ``None``
+            when /proc is unreadable.
         video_memory_free_bytes: Free VRAM of the render device, or ``None``
             when no CUDA device is available.
         video_memory_total_bytes: Total VRAM of the render device, or ``None``
             when no CUDA device is available.
     """
 
-    system_memory_free_bytes: int
-    system_memory_total_bytes: int
+    system_memory_free_bytes: int | None
+    system_memory_total_bytes: int | None
     video_memory_free_bytes: int | None
     video_memory_total_bytes: int | None
 

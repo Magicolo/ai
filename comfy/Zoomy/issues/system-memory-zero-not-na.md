@@ -1,8 +1,13 @@
 # System-RAM failure reports `0.0 GiB`, not `n/a`
 
 - Severity: low (misleading stats line on non-Linux / `/proc` failure).
-- Status: verified open, narrowed (VRAM half already fixed).
-  `zoomy/local_engine.py:1194-1208`, `zoomy/interface.py:834-838`.
+- Status: FIXED. `_read_system_memory_bytes` returns `(None, None)` on
+  /proc failure (missing keys also yield `None` now, not `0`);
+  `EngineStatistics` RAM fields widened to `int | None`; the stats line
+  already rendered `None` as `n/a` via `_gibibytes`, so no interface
+  change. Tests: `test_system_memory_failure_reports_unknown`,
+  `test_render_statistics_line_shows_unknown_ram_as_not_available`,
+  narrowed asserts in `test_engine_statistics_reports_memory_figures`.
 
 ## Evidence
 

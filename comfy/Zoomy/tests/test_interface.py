@@ -249,6 +249,20 @@ def test_render_statistics_line_shows_everything(tmp_path: Path) -> None:
     assert "11.2 / 29.8 GiB" in line
 
 
+def test_render_statistics_line_shows_unknown_ram_as_not_available(
+    tmp_path: Path,
+) -> None:
+    """Unreadable /proc renders RAM as n/a, never as a lying zero."""
+    system = EngineStatistics(
+        system_memory_free_bytes=None,
+        system_memory_total_bytes=None,
+        video_memory_free_bytes=None,
+        video_memory_total_bytes=None,
+    )
+    line = _render_statistics_line(_example_statistics(tmp_path), system, (0, 0.0, 0.0))
+    assert "RAM n/a / n/a GiB" in line
+
+
 def test_render_statistics_line_handles_empty_state() -> None:
     """No frames, video, or system yields placeholders, never crashes."""
     statistics = SequenceStatistics(

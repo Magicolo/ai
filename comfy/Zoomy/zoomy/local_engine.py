@@ -1243,12 +1243,17 @@ def _mmaudio_config_path(file_name: str) -> Path:
     raise EngineConfigurationError(message)
 
 
-def _read_system_memory_bytes() -> tuple[int, int]:
-    """Return free and total system RAM, parsed from /proc on Linux."""
+def _read_system_memory_bytes() -> tuple[int | None, int | None]:
+    """Return free and total system RAM, or Nones when /proc is unreadable.
+
+    A total /proc failure (non-Linux host, sandboxed container) reports
+    unknown rather than a zero reading the stats line could mistake for
+    real figures; per-line parse tolerance below is unchanged.
+    """
     try:
         meminfo = Path("/proc/meminfo").read_text()
     except OSError:
-        return (0, 0)
+        return (None, None)
     values: dict[str, int] = {}
     for line in meminfo.splitlines():
         parts = line.split()
@@ -1257,7 +1262,7 @@ def _read_system_memory_bytes() -> tuple[int, int]:
                 values[parts[0].rstrip(":")] = int(parts[1]) * 1024
             except ValueError:
                 continue
-    return (values.get("MemAvailable", 0), values.get("MemTotal", 0))
+    return (values.get("MemAvailable"), values.get("MemTotal"))
 
 
 def _collect_free_video_memory() -> None:

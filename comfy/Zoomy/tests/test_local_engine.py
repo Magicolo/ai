@@ -31,6 +31,7 @@ from zoomy.frame_repository import FrameRepository
 from zoomy.local_engine import (
     LocalEngine,
     _pad_frames_to_minimum,
+    _read_system_memory_bytes,
     _write_silent_video,
     run_stage_with_retries,
 )
@@ -172,6 +173,8 @@ def test_request_interrupt_sets_the_abort_flag(tmp_path: Path) -> None:
 def test_engine_statistics_reports_memory_figures(tmp_path: Path) -> None:
     """Statistics carry system RAM and VRAM figures when a GPU is visible."""
     statistics = _engine(tmp_path).engine_statistics()
+    assert statistics.system_memory_total_bytes is not None
+    assert statistics.system_memory_free_bytes is not None
     assert statistics.system_memory_total_bytes >= 0
     assert statistics.system_memory_free_bytes >= 0
     if _cuda_visible():
@@ -181,6 +184,20 @@ def test_engine_statistics_reports_memory_figures(tmp_path: Path) -> None:
     else:
         assert statistics.video_memory_free_bytes is None
         assert statistics.video_memory_total_bytes is None
+
+
+def test_system_memory_failure_reports_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable /proc/meminfo yields Nones, not a lying zero reading."""
+
+    class _NoProcPath:
+        def __init__(self, *_parts: object) -> None:
+            pass
+
+        def read_text(self, *_args: object, **_kwargs: object) -> str:
+            raise OSError("no /proc here")
+
+    monkeypatch.setattr("zoomy.local_engine.Path", _NoProcPath)
+    assert _read_system_memory_bytes() == (None, None)
 
 
 def _cuda_visible() -> bool:
