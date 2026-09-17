@@ -1,8 +1,15 @@
 # `self._interrupt.clear()` can wipe a concurrently set interrupt
 
 - Severity: low (race window; safe under Gradio's single worker).
-- Status: verified open. `zoomy/local_engine.py:216` (`render_frame`),
-  `:285` (`finalize_sequence`), `:172` (flag), `:1010-1013` (check).
+- Status: FIXED. The `threading.Event` is gone, replaced by
+  consume-on-observe under a lock: `request_interrupt` sets
+  `_interrupt_pending`, `_begin_job` takes ownership into
+  `_abort_job_at_start`, and `_raise_if_interrupted` aborts once while
+  clearing both flags — so a press racing job start is never wiped, an
+  idle press aborts the next job at its first checkpoint, and one press
+  aborts exactly one job. Tests: idle-abort, consumed-never-kills-next,
+  and generator-level idle abort (the old Event-pinning test was replaced —
+  it asserted the removed mechanism).
 
 ## Evidence
 

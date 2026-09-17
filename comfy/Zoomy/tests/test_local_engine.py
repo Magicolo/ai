@@ -159,15 +159,32 @@ def test_finalize_sequence_rejects_empty_sequences(tmp_path: Path) -> None:
         list(engine.finalize_sequence(FinalizeRequest(family=family, frame_count=0)))
 
 
-def test_request_interrupt_sets_the_abort_flag(tmp_path: Path) -> None:
-    """The interrupt flag trips and clears around public operations."""
+def test_idle_interrupt_aborts_at_the_first_checkpoint(tmp_path: Path) -> None:
+    """A press with no running job applies to the next job, never lost."""
     engine = _engine(tmp_path)
     engine.request_interrupt()
-    assert engine._interrupt.is_set()  # noqa: SLF001
+    engine._begin_job()  # noqa: SLF001
+    with pytest.raises(RenderInterruptedError, match="interrupted"):
+        engine._raise_if_interrupted()  # noqa: SLF001
+
+
+def test_consumed_interrupt_never_kills_the_next_job(tmp_path: Path) -> None:
+    """One press aborts exactly one job; the next job starts clean."""
+    engine = _engine(tmp_path)
+    engine.request_interrupt()
+    with pytest.raises(RenderInterruptedError):
+        engine._raise_if_interrupted()  # noqa: SLF001
+    engine._begin_job()  # noqa: SLF001
+    engine._raise_if_interrupted()  # noqa: SLF001
+
+
+def test_idle_interrupt_aborts_a_finalize_sequence(tmp_path: Path) -> None:
+    """The generator path observes an idle press before touching any window."""
+    engine = _engine(tmp_path)
     family = find_family(FAMILY_CATALOG, "z_fast")
-    with pytest.raises(EmptyFrameSequenceError):
-        list(engine.finalize_sequence(FinalizeRequest(family=family, frame_count=0)))
-    assert not engine._interrupt.is_set()  # noqa: SLF001
+    engine.request_interrupt()
+    with pytest.raises(RenderInterruptedError, match="interrupted"):
+        list(engine.finalize_sequence(FinalizeRequest(family=family, frame_count=1)))
 
 
 def test_engine_statistics_reports_memory_figures(tmp_path: Path) -> None:

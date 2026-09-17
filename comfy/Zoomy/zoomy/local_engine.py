@@ -176,15 +176,30 @@ class LocalEngine:
         self._repository = repository
         self._device = device
         self._music_project_directory = music_project_directory
-        self._interrupt = threading.Event()
+        self._interrupt_lock = threading.Lock()
+        self._interrupt_pending = False
+        self._abort_job_at_start = False
         self._frame_pipeline: _LoadedFramePipeline | None = None
         self._rife_model: Any | None = None
         self._effects_stack: dict[str, Any] | None = None
         self._music_stack: dict[str, Any] | None = None
 
     def request_interrupt(self) -> None:
-        """Flag the running job to abort at its next checkpoint."""
-        self._interrupt.set()
+        """Flag the running job — or the next one — to abort at its next checkpoint.
+
+        The flag is consume-on-observe under a lock, so a request racing a
+        job's start is never wiped: it either lands before the job takes
+        ownership (and aborts it at the first checkpoint) or after (and
+        aborts it at the next one).
+        """
+        with self._interrupt_lock:
+            self._interrupt_pending = True
+
+    def _begin_job(self) -> None:
+        """Take ownership of any idle interrupt request for the starting job."""
+        with self._interrupt_lock:
+            self._abort_job_at_start = self._interrupt_pending
+            self._interrupt_pending = False
 
     def is_ready(self) -> bool:
         """Return True when the model and seed directories are reachable."""
@@ -220,7 +235,7 @@ class LocalEngine:
             EngineExecutionError: A generation stage failed.
             RenderInterruptedError: An interrupt was requested mid-render.
         """
-        self._interrupt.clear()
+        self._begin_job()
         self._validate_frame_size(request)
         renderer = self._frame_renderer(request.family.key)
         try:
@@ -289,7 +304,7 @@ class LocalEngine:
             RenderInterruptedError: An interrupt was requested mid-finalize.
             AssemblyError: Segment outputs are missing or ffmpeg failed.
         """
-        self._interrupt.clear()
+        self._begin_job()
         sequence_key = request.family.sequence_key
         if request.frame_count < 1:
             raise EmptyFrameSequenceError(
@@ -1045,8 +1060,16 @@ class LocalEngine:
                 raise EngineConfigurationError(message)
 
     def _raise_if_interrupted(self) -> None:
-        """Abort the running job when an interrupt was requested."""
-        if self._interrupt.is_set():
+        """Abort the running job when an interrupt was requested.
+
+        Observation consumes the request, so one press aborts exactly one
+        job: a stale press from a previous job can never kill the next one.
+        """
+        with self._interrupt_lock:
+            abort = self._abort_job_at_start or self._interrupt_pending
+            self._abort_job_at_start = False
+            self._interrupt_pending = False
+        if abort:
             raise RenderInterruptedError("The engine job was interrupted.")
 
 
