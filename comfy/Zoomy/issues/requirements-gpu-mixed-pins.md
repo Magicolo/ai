@@ -1,7 +1,11 @@
 # `requirements-gpu.txt` mixes bare, floor, and exact pins
 
 - Severity: medium (dependency drift on the GPU stack).
-- Status: verified open. `Zoomy/requirements-gpu.txt:19-44`.
+- Status: FIXED (verified by rebuild 2026-09-17). All 24 entries exact-pinned,
+  frozen from the green image's `pip freeze`; header records the freeze date
+  and the regenerate procedure. Post-rebuild freeze diff vs the file: empty.
+  No live e2e re-run: the pins equal the exact installed set the last e2e
+  ran on, so the rebuild installs bit-identical versions by construction.
 
 ## Evidence
 

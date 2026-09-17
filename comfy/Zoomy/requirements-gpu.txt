@@ -3,42 +3,44 @@
 # generation stack on top of the pytorch/pytorch:2.10.0 base (torch 2.10.0 +
 # torchvision 0.25.0 come from the base image, never from pip).
 #
-# Provenance: every pin below matches the spike-unify image, where the Ernie
-# custom img2img loop, both Z-Image pipelines, ACE-Step music, and the MMAudio
-# stack all ran green on the RTX 4060 Ti.
+# Provenance: every pin below is exact, frozen from the green zoomy image
+# (pip freeze, 2026-09-17) that renders Ernie + both Z-Image pipelines,
+# ACE-Step music, and the MMAudio stack on the RTX 4060 Ti. To regenerate
+# after a deliberate upgrade: rebuild, run pip freeze in the image, and copy
+# the resolved versions back here — never float a pin without recording it.
 
 # Frame stack (Ernie + Z-Image). diffusers is exact-pinned: the Ernie img2img
 # loop calls private pipeline helpers (_patchify_latents, _pad_text,
-# _unpatchify_latents). transformers 5 is the floor for the Ministral 3 text
-# encoder; the ACE-Step transformers-4 code runs via zoomy/vendor_compat.py.
+# _unpatchify_latents). transformers 5 carries the Ministral 3 text encoder;
+# the ACE-Step transformers-4 code runs via zoomy/vendor_compat.py.
 diffusers==0.40.0
 transformers==5.17.0
 peft==0.18.1
 accelerate==1.12.0
 safetensors==0.8.0
-huggingface_hub>=0.34
-hf_transfer
+huggingface_hub==1.31.0
+hf_transfer==0.1.9
 sentencepiece==0.2.2
-protobuf
+protobuf==7.36.1
 
 # Frame interpolation (RIFE recursive bisection).
-ccvfi
+ccvfi==0.0.3
 
 # ACE-Step music (inference path only: handler, inference, llm_inference).
 einops==0.8.2
-loguru>=0.7.3
-soundfile>=0.13.1
-scipy>=1.10.1
-numba>=0.63.1
+loguru==0.7.3
+soundfile==0.14.0
+scipy==1.18.1
+numba==0.67.0
 vector-quantize-pytorch==1.27.20
 # ACE-Step inference transitives (imported by acestep.handler/inference).
-pyyaml
-tqdm
+pyyaml==6.0.3
+tqdm==4.70.1
 
 # MMAudio sound effects (mirrors comfyui-mmaudio/requirements.txt).
-librosa>=0.10.1
-torchdiffeq>=0.2.3
-timm>=1.0.8
-omegaconf>=2.3.0
-open_clip_torch>=2.29.0
-ftfy>=6.1.1
+librosa==1.0.0
+torchdiffeq==0.2.5
+timm==1.0.29
+omegaconf==2.3.1
+open_clip_torch==3.3.0
+ftfy==6.1.1
