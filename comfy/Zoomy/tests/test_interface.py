@@ -18,9 +18,14 @@ from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository, SequenceStatistics
 from zoomy.interface import (
     FamilyPanelWiring,
+    InterfaceContext,
     _append_log_entry,
     _as_durations,
     _as_string_list,
+    _bind_clear_frames,
+    _bind_finalize,
+    _bind_refresh_previews,
+    _bind_refresh_status,
     _coerce_frame_size,
     _coerce_to_float,
     _draw_family_panel,
@@ -126,6 +131,74 @@ def test_build_application_returns_blocks(tmp_path: Path) -> None:
         repository=FrameRepository(tmp_path),
     )
     assert isinstance(application, gr.Blocks)
+
+
+def _wiring_context(tmp_path: Path) -> InterfaceContext:
+    """Build handler wiring over stub components inside a Blocks scope."""
+    engine = StubEngine()
+    repository = FrameRepository(tmp_path)
+    environment = RenderEnvironment(engine=engine, repository=repository)
+    with gr.Blocks():
+        return InterfaceContext(
+            settings=_example_settings(str(tmp_path)),
+            engine=engine,
+            catalog=FAMILY_CATALOG,
+            repository=repository,
+            environment=environment,
+            family_dropdown=gr.Dropdown(choices=["z_fast"], value="z_fast"),
+            health_badge=gr.HTML(value="badge"),
+            stats_line=gr.Markdown(value="stats"),
+            status_markdown=gr.Markdown(value="status"),
+            log_textbox=gr.Textbox(value="log"),
+            log_state=gr.State(value=[]),
+            durations_state=gr.State(value=(0, 0.0, 0.0)),
+            confirmation_state=gr.State(value=False),
+            preview_image=gr.Image(),
+            gallery=gr.Gallery(),
+            preview_video=gr.Video(),
+            finalize_button=gr.Button(value="Finalize"),
+            interrupt_button=gr.Button(value="Interrupt"),
+            refresh_button=gr.Button(value="Refresh"),
+            clear_frames_button=gr.Button(value="Clear"),
+        )
+
+
+def test_refresh_status_reports_unknown_family(tmp_path: Path) -> None:
+    """A bad dropdown key yields an error line, never a traceback."""
+    badge, line = _bind_refresh_status(_wiring_context(tmp_path))("no-such-family", (0, 0.0, 0.0))
+    assert "Engine offline" in badge
+    assert line.startswith("**Error:**")
+    assert "no-such-family" in line
+
+
+def test_refresh_previews_reports_unknown_family(tmp_path: Path) -> None:
+    """A bad dropdown key disarms previews with an error, never a raise."""
+    message, *_rest = _bind_refresh_previews(_wiring_context(tmp_path))(
+        "no-such-family", (0, 0.0, 0.0)
+    )
+    assert message.startswith("**Error:**")
+    assert "no-such-family" in message
+
+
+def test_finalize_reports_unknown_family(tmp_path: Path) -> None:
+    """A bad dropdown key yields one error update, never a traceback."""
+    updates = list(_bind_finalize(_wiring_context(tmp_path))("no-such-family", [], (0, 0.0, 0.0)))
+    assert len(updates) == 1
+    (message, _log, _video, _stats, _gallery) = updates[0]
+    assert isinstance(message, str)
+    assert message.startswith("**Error:**")
+    assert "no-such-family" in message
+
+
+def test_clear_frames_reports_unknown_family(tmp_path: Path) -> None:
+    """A bad dropdown key refuses the delete with an error, never a raise."""
+    _armed, _button, message, _preview, _stats, _gallery = _bind_clear_frames(
+        _wiring_context(tmp_path)
+    )(False, "no-such-family", (0, 0.0, 0.0))  # noqa: FBT003
+    # Positional: clear_frames takes *values, mirroring Gradio's payload order.
+    assert isinstance(message, str)
+    assert message.startswith("**Error:**")
+    assert "no-such-family" in message
 
 
 def test_format_bytes_uses_binary_units() -> None:

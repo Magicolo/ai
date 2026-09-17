@@ -306,7 +306,13 @@ def _bind_refresh_status(
 
     def refresh_status(family_key: str, durations_value: object) -> tuple[str, str]:
         """Poll reachability, memory, and sequence figures for the line."""
-        family = find_family(context.catalog, family_key)
+        try:
+            family = find_family(context.catalog, family_key)
+        except ZoomyError as failure:
+            return (
+                _render_health_badge(is_reachable=False),
+                f"**Error:** {failure}",
+            )
         durations = _as_durations(durations_value)
         system = _safe_system_statistics(context.engine)
         statistics = context.repository.sequence_statistics(family.sequence_key)
@@ -327,7 +333,19 @@ def _bind_refresh_previews(
         family_key: str, durations_value: object
     ) -> tuple[str, object, object, str, object, bool, object]:
         """Resolve the newest artifacts and disarm a pending clear-confirm."""
-        family = find_family(context.catalog, family_key)
+        try:
+            family = find_family(context.catalog, family_key)
+        except ZoomyError as failure:
+            message = f"**Error:** {failure}"
+            return (
+                message,
+                None,
+                None,
+                message,
+                [],
+                False,
+                gr.update(value=CLEAR_FRAMES_LABEL),
+            )
         durations = _as_durations(durations_value)
         system = _safe_system_statistics(context.engine)
         statistics = context.repository.sequence_statistics(family.sequence_key)
@@ -369,7 +387,13 @@ def _bind_finalize(
         family_key: str, log_value: object, durations_value: object
     ) -> Iterator[tuple[object, object, object, str, object]]:
         """Render the finalized video and stream status updates."""
-        family = find_family(context.catalog, family_key)
+        try:
+            family = find_family(context.catalog, family_key)
+        except ZoomyError as failure:
+            message = f"**Error:** {failure}"
+            log_entries, log_text = _append_log_entry(_as_string_list(log_value), message)
+            yield (message, log_text, gr.update(), message, [])
+            return
         log_entries = _as_string_list(log_value)
         durations = _as_durations(durations_value)
         request = FinalizeRequest(
@@ -413,7 +437,18 @@ def _bind_clear_frames(
     ) -> tuple[object, object, object, object, str, object]:
         """Arm on the first click, delete the sequence directory on the second."""
         confirmation_armed = isinstance(values[0], bool) and values[0]
-        family = find_family(context.catalog, str(values[1]))
+        try:
+            family = find_family(context.catalog, str(values[1]))
+        except ZoomyError as failure:
+            message = f"**Error:** {failure}"
+            return (
+                False,
+                gr.update(value=CLEAR_FRAMES_LABEL),
+                message,
+                None,
+                message,
+                [],
+            )
         durations = _as_durations(values[2])
         if not confirmation_armed:
             return (

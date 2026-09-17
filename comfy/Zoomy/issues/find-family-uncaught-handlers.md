@@ -1,8 +1,15 @@
 # `find_family` failures escape UI handlers as tracebacks
 
 - Severity: medium (validation + info disclosure via `show_error=True`).
-- Status: verified open. `zoomy/interface.py:309,330,372,416,474`,
-  `zoomy/family_catalog.py:262-272`, `zoomy/main.py:31`.
+- Status: FIXED. `find_family` now sits inside a guarded region in all
+  four handlers, each returning/yielding its native `**Error:**` shape on
+  an unknown key (offline badge + error line for status; cleared-preview
+  error tuple; single error yield reusing the finalize error path; refused
+  delete for clear). Tests submit `no-such-family` to every handler
+  (`test_*_reports_unknown_family`, via a `_wiring_context` helper that
+  builds `InterfaceContext` over stub components). `_draw_family_panel`
+  still raises at build time — correct fail-fast for a programming error.
+  `zoomy/interface.py` (`_bind_refresh_status/_bind_refresh_previews/_bind_finalize/_bind_clear_frames`).
 
 ## Evidence
 
