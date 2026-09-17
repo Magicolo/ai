@@ -2,7 +2,10 @@
 
 - Severity: high (hang — the finalize generator never yields, the Gradio
   queue slot blocks until server restart).
-- Status: verified open. `zoomy/local_engine.py:1272-1283`.
+- Status: FIXED. Guard (`EngineConfigurationError` on empty) landed in
+  the concurrent `a3aa393` with `test_effects_frame_padding_rejects_empty_batches`;
+  this change adds the tiling length/identity property
+  (`test_effects_frame_padding_covers_the_minimum`). `zoomy/local_engine.py:1289-1291`.
 
 ## Evidence
 

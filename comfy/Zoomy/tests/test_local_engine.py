@@ -11,9 +11,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from PIL import Image as PillowImage
 
-from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest
+from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest, SegmentWindow
 from zoomy.errors import (
     EmptyFrameSequenceError,
     EngineConfigurationError,
@@ -229,6 +231,63 @@ def test_interpolation_passes_single_frame_through(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     frame = PillowImage.new("RGB", (16, 16))
     assert engine._interpolate_frames([frame]) == [frame]  # noqa: SLF001
+
+
+@given(
+    batch_size=st.integers(min_value=1, max_value=40),
+    minimum_frames=st.integers(min_value=1, max_value=64),
+)
+def test_effects_frame_padding_covers_the_minimum(batch_size: int, minimum_frames: int) -> None:
+    """Tiling repeats whole batches: length lands in [minimum, minimum + batch)."""
+    frames = [object() for _ in range(batch_size)]
+    padded = _pad_frames_to_minimum(frames, minimum_frames)
+    assert len(padded) >= max(batch_size, minimum_frames)
+    assert len(padded) < max(batch_size, minimum_frames) + batch_size
+    assert all(padded[index] is frames[index % batch_size] for index in range(len(padded)))
+
+
+def test_single_frame_window_finalizes_with_stubbed_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One frame has no pairs to interpolate; the window still lands twins."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "ernie_turbo")
+    repository = FrameRepository(tmp_path / "output")
+    repository.save_next_frame(family.sequence_key, PillowImage.new("RGB", (16, 16)))
+
+    def fake_write_silent_video(frames: list[object], destination: Path) -> None:
+        assert len(frames) == 1
+        destination.write_bytes(b"silent")
+
+    def fake_render_music(
+        _caption: str, _duration_seconds: float, stem_path: Path, *, seed: int
+    ) -> None:
+        del seed
+        stem_path.write_bytes(b"music")
+
+    def fake_render_sound_effects(
+        _prompt: str,
+        _negative_prompt: str | None,
+        _interpolated_frames: list[object],
+        _duration_seconds: float,
+        stem_path: Path,
+    ) -> None:
+        stem_path.write_bytes(b"effects")
+
+    def fake_mux_audio_twin(_silent_video: Path, _stem: Path, twin: Path) -> None:
+        twin.write_bytes(b"twin")
+
+    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
+    monkeypatch.setattr("zoomy.local_engine._mux_audio_twin", fake_mux_audio_twin)
+    monkeypatch.setattr(engine, "_render_music", fake_render_music)
+    monkeypatch.setattr(engine, "_render_sound_effects", fake_render_sound_effects)
+    window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
+    soundtrack = engine._finalize_window(  # noqa: SLF001
+        family, family.sequence_key, window, extension=False
+    )
+    assert soundtrack.music_video_path.is_file()
+    assert soundtrack.music_stem_path.is_file()
+    assert soundtrack.sound_effect_stem_path.is_file()
 
 
 def _out_of_memory_error() -> RuntimeError:

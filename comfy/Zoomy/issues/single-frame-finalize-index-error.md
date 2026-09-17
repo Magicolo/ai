@@ -1,9 +1,11 @@
 # Single-frame finalize crashes with a cryptic `IndexError`
 
 - Severity: high (correctness — the smallest legal sequence cannot finalize).
-- Status: verified open. `zoomy/local_engine.py:756-783`
-  (`_interpolate_frames`), `zoomy/local_engine.py:1286-1291`
-  (`_write_silent_video`).
+- Status: FIXED. `<2`-frame passthrough landed in the concurrent
+  `a3aa393` with `test_interpolation_passes_single_frame_through`; this
+  change adds the 1-frame window e2e with stubbed audio
+  (`test_single_frame_window_finalizes_with_stubbed_audio`, twins land on
+  disk). `zoomy/local_engine.py:764-765`.
 
 ## Evidence
 
