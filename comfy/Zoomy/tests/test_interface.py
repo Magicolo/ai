@@ -13,29 +13,36 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from zoomy.engine_protocol import EngineStatistics
+from zoomy.engine_protocol import DEFAULT_COHERENCE, EngineStatistics
 from zoomy.errors import ZoomyError
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository, SequenceStatistics
 from zoomy.interface import (
+    MAXIMUM_SEED,
     FamilyPanelWiring,
     InterfaceContext,
     _append_log_entry,
+    _apply_resolution_preset,
     _as_durations,
     _as_string_list,
     _bind_clear_frames,
     _bind_finalize,
     _bind_refresh_previews,
     _bind_refresh_status,
+    _coerce_coherence,
     _coerce_frame_size,
+    _coerce_seed,
     _coerce_to_float,
+    _default_preset_name,
     _draw_family_panel,
     _format_bytes,
     _format_timestamp,
     _parse_panel_submission,
     _parse_target_seconds,
+    _preset_dimensions,
     _record_frame_duration,
     _render_statistics_line,
+    _resolve_frame_seed,
     _safe_system_statistics,
     _selected_lora_names,
     build_application,
@@ -493,6 +500,95 @@ def test_coerce_to_float_keeps_finite_numbers() -> None:
     """Genuine slider values pass through untouched."""
     assert _coerce_to_float(3) == 3.0
     assert _coerce_to_float(0.85) == 0.85
+
+
+def test_coerce_coherence_keeps_in_range_values() -> None:
+    """The slider default and edges pass through untouched."""
+    assert _coerce_coherence(DEFAULT_COHERENCE) == DEFAULT_COHERENCE
+    assert _coerce_coherence(0.05) == 0.05
+    assert _coerce_coherence(0.90) == 0.90
+    assert _coerce_coherence(0.7) == 0.7
+
+
+@pytest.mark.parametrize(
+    "garbage", [None, "high", True, float("nan"), float("inf"), 0.0, 0.04, 0.91, 1.0]
+)
+def test_coerce_coherence_falls_back_to_default(garbage: object) -> None:
+    """Blank, garbage, or out-of-range coherence restores the default."""
+    assert _coerce_coherence(garbage) == DEFAULT_COHERENCE
+
+
+def test_coerce_seed_accepts_valid_seeds() -> None:
+    """Non-negative integers below the maximum are genuine fixed seeds."""
+    assert _coerce_seed(0) == 0
+    assert _coerce_seed(42) == 42
+    assert _coerce_seed(42.9) == 42
+    assert _coerce_seed(MAXIMUM_SEED - 1) == MAXIMUM_SEED - 1
+
+
+@pytest.mark.parametrize("garbage", [None, "seed", True, float("nan"), float("inf"), -1, -5.5])
+def test_coerce_seed_rejects_garbage(garbage: object) -> None:
+    """Blank, negative, or non-numeric seeds mean no fixed seed."""
+    assert _coerce_seed(garbage) is None
+
+
+def test_coerce_seed_rejects_seeds_at_or_above_maximum() -> None:
+    """Seeds at the exclusive upper bound are unusable, never wrapped."""
+    assert _coerce_seed(MAXIMUM_SEED) is None
+    assert _coerce_seed(MAXIMUM_SEED + 100) is None
+
+
+def test_resolve_frame_seed_returns_fixed_seed_when_locked() -> None:
+    """A locked valid seed reproduces exactly for frame-to-frame stability."""
+    assert _resolve_frame_seed(seed_value=12345, lock_value=True) == 12345
+
+
+def test_resolve_frame_seed_draws_fresh_seed_when_unlocked() -> None:
+    """An unlocked panel draws a fresh in-range seed every frame."""
+    first = _resolve_frame_seed(seed_value=12345, lock_value=False)
+    second = _resolve_frame_seed(seed_value=12345, lock_value=False)
+    assert 0 <= first < MAXIMUM_SEED
+    assert 0 <= second < MAXIMUM_SEED
+
+
+def test_resolve_frame_seed_draws_fresh_seed_when_locked_garbage() -> None:
+    """A locked but blank seed box falls back to fresh instead of crashing."""
+    assert 0 <= _resolve_frame_seed(seed_value=None, lock_value=True) < MAXIMUM_SEED
+
+
+def test_preset_dimensions_resolve_by_display_name() -> None:
+    """Each preset name maps to its cataloged frame dimensions."""
+    for family in FAMILY_CATALOG:
+        for preset in family.resolution_presets:
+            assert _preset_dimensions(family, preset.display_name) == (
+                preset.width,
+                preset.height,
+            )
+
+
+def test_preset_dimensions_fall_back_to_default() -> None:
+    """Unknown or garbage preset names restore the default HD geometry."""
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    assert _preset_dimensions(family, "no-such-preset") == (1376, 768)
+    assert _preset_dimensions(family, None) == (1376, 768)
+    assert _preset_dimensions(family, 512) == (1376, 768)
+
+
+def test_default_preset_matches_default_geometry() -> None:
+    """The preselected preset is the HD default every family ships."""
+    for family in FAMILY_CATALOG:
+        name = _default_preset_name(family)
+        assert name is not None
+        assert _preset_dimensions(family, name) == (1376, 768)
+
+
+def test_apply_resolution_preset_fills_geometry() -> None:
+    """Choosing a preset fills the width/height boxes with its dimensions."""
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    apply_preset = _apply_resolution_preset(family)
+    first = family.resolution_presets[0]
+    assert apply_preset(first.display_name) == (first.width, first.height)
+    assert apply_preset("no-such-preset") == (1376, 768)
 
 
 @given(epoch_seconds=st.floats(min_value=0, max_value=4102444800, allow_nan=False))

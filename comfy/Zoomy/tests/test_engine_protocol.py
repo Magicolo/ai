@@ -10,10 +10,16 @@ from zoomy.engine_protocol import (
     CROP_BORDER_PIXELS,
     CROP_HEIGHT_PIXELS,
     CROP_WIDTH_PIXELS,
+    DEFAULT_COHERENCE,
+    DEFAULT_DENOISE_STRENGTH,
     FRAME_HEIGHT_PIXELS,
     FRAME_WIDTH_PIXELS,
     INTERPOLATION_MULTIPLIER,
+    MAXIMUM_COHERENCE,
+    MAXIMUM_DENOISE_STRENGTH,
     MINIMUM_AUDIO_SECONDS,
+    MINIMUM_COHERENCE,
+    MINIMUM_DENOISE_STRENGTH,
     SEGMENT_MUSIC_EXTENSION_SECONDS,
     SEGMENT_SOUND_EXTENSION_SECONDS,
     SEGMENT_SOURCE_FRAMES,
@@ -24,6 +30,7 @@ from zoomy.engine_protocol import (
     FinalizeRequest,
     FrameRenderRequest,
     ProgressUpdate,
+    coherence_to_denoise,
     compute_audio_seconds,
     compute_frames_for_seconds,
     compute_interpolated_frame_count,
@@ -31,6 +38,7 @@ from zoomy.engine_protocol import (
     compute_segment_sound_seconds,
     compute_segment_video_seconds,
     compute_segment_windows,
+    denoise_to_coherence,
     needs_segmentation,
 )
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
@@ -191,3 +199,47 @@ def test_frames_for_seconds_is_minimal(target_seconds: float) -> None:
             compute_interpolated_frame_count(frame_count - 1) / VIDEO_FRAMES_PER_SECOND
             < target_seconds
         )
+
+
+def test_coherence_maps_to_denoise_by_complement() -> None:
+    """Coherence 0.40 means denoise 0.60: the verified zoom recipe default."""
+    assert coherence_to_denoise(DEFAULT_COHERENCE) == pytest.approx(DEFAULT_DENOISE_STRENGTH)
+    assert coherence_to_denoise(0.40) == pytest.approx(0.60)
+    assert coherence_to_denoise(MINIMUM_COHERENCE) == pytest.approx(MAXIMUM_DENOISE_STRENGTH)
+    assert coherence_to_denoise(MAXIMUM_COHERENCE) == pytest.approx(MINIMUM_DENOISE_STRENGTH)
+
+
+@pytest.mark.parametrize("bad_coherence", [0.0, 0.04, 0.91, 1.0, -0.5, 2.0])
+def test_coherence_rejects_out_of_range_values(bad_coherence: float) -> None:
+    """Coherence outside 0.05..0.90 would freeze motion or reinvent frames."""
+    with pytest.raises(ValueError, match="Coherence"):
+        coherence_to_denoise(bad_coherence)
+
+
+@pytest.mark.parametrize("bad_denoise", [0.0, 0.09, 0.96, 1.0, -0.1])
+def test_denoise_rejects_out_of_range_values(bad_denoise: float) -> None:
+    """Denoise outside 0.10..0.95 never reaches the engine."""
+    with pytest.raises(ValueError, match="Denoise"):
+        denoise_to_coherence(bad_denoise)
+
+
+@given(coherence=st.floats(min_value=0.05, max_value=0.90))
+def test_coherence_denoise_roundtrip(coherence: float) -> None:
+    """Mapping coherence to denoise and back returns the starting value."""
+    assert denoise_to_coherence(coherence_to_denoise(coherence)) == pytest.approx(coherence)
+
+
+def test_frame_request_defaults_to_verified_denoise() -> None:
+    """A request without explicit denoise carries the 0.60 zoom recipe."""
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FrameRenderRequest(
+        family=family,
+        prompt="a prompt",
+        negative_prompt="a negative",
+        frame_count=0,
+        lora_selections=(),
+        seed=1,
+    )
+    assert request.denoise_strength == DEFAULT_DENOISE_STRENGTH == 0.60
+    assert MINIMUM_DENOISE_STRENGTH == 0.10
+    assert MAXIMUM_DENOISE_STRENGTH == 0.95

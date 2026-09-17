@@ -41,6 +41,8 @@ from zoomy.engine_protocol import (
     CROP_BORDER_PIXELS,
     FRAME_SIZE_ALIGNMENT_PIXELS,
     INTERPOLATION_MULTIPLIER,
+    MAXIMUM_DENOISE_STRENGTH,
+    MINIMUM_DENOISE_STRENGTH,
     MINIMUM_FRAMES_FOR_INTERPOLATION,
     MINIMUM_SYNC_FRAMES,
     MUSIC_BEATS_PER_MINUTE,
@@ -237,6 +239,7 @@ class LocalEngine:
         """
         self._begin_job()
         self._validate_frame_size(request)
+        self._validate_denoise_strength(request)
         renderer = self._frame_renderer(request.family.key)
         try:
             source_image = self._load_source_image(request)
@@ -265,6 +268,22 @@ class LocalEngine:
                     f"{FRAME_SIZE_ALIGNMENT_PIXELS}, received {size}"
                 )
                 raise EngineConfigurationError(message)
+
+    @staticmethod
+    def _validate_denoise_strength(request: FrameRenderRequest) -> None:
+        """Refuse denoise strengths outside the verified img2img span.
+
+        The interface coerces its coherence slider into range, so a failure
+        here is a programmatic caller bug, not a slider edge.
+        """
+        denoise = request.denoise_strength
+        if not MINIMUM_DENOISE_STRENGTH <= denoise <= MAXIMUM_DENOISE_STRENGTH:
+            message = (
+                "Denoise strength must be within "
+                f"{MINIMUM_DENOISE_STRENGTH}..{MAXIMUM_DENOISE_STRENGTH}, "
+                f"received {denoise}"
+            )
+            raise EngineConfigurationError(message)
 
     def _evict_all_stacks(self) -> None:
         """Drop every resident stack so a retried stage finds a free card.
@@ -543,7 +562,7 @@ class LocalEngine:
                 ).to(torch.bfloat16)
                 total_steps = request.family.sampler_steps
                 sigmas = torch.linspace(1.0, 0.0, total_steps + 1)
-                start_index = total_steps - int(total_steps * request.family.denoise_strength)
+                start_index = total_steps - int(total_steps * request.denoise_strength)
                 pipeline.scheduler.set_timesteps(sigmas=sigmas[:-1], device=device)
                 pipeline.scheduler.set_begin_index(start_index)
                 noise = torch.randn(
@@ -591,7 +610,7 @@ class LocalEngine:
         call: dict[str, Any] = {
             "prompt": request.prompt,
             "image": frame,
-            "strength": request.family.denoise_strength,
+            "strength": request.denoise_strength,
             "height": request.frame_height,
             "width": request.frame_width,
             "num_inference_steps": request.family.sampler_steps,

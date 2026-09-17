@@ -32,6 +32,17 @@ FRAME_HEIGHT_PIXELS = 768
 # Diffusion autoencoders downsample in powers of two, so odd frame sizes
 # break the encode/decode round trip — every render size must be a multiple.
 FRAME_SIZE_ALIGNMENT_PIXELS = 16
+# Per-frame img2img strength: the UI exposes temporal coherence (higher keeps
+# more of the previous frame) and maps it as denoise = 1 - coherence. The
+# wide 0.10-0.95 span covers near-copy (0.95 coherence would freeze motion)
+# down to near-redraw (0.05 coherence reinvents each frame); the 0.60 default
+# is the verified zoom recipe both loops shipped with.
+MINIMUM_DENOISE_STRENGTH = 0.10
+MAXIMUM_DENOISE_STRENGTH = 0.95
+DEFAULT_DENOISE_STRENGTH = 0.60
+MINIMUM_COHERENCE = 0.05
+MAXIMUM_COHERENCE = 0.90
+DEFAULT_COHERENCE = 0.40
 CROP_BORDER_PIXELS = 10
 CROP_WIDTH_PIXELS = FRAME_WIDTH_PIXELS - 2 * CROP_BORDER_PIXELS
 CROP_HEIGHT_PIXELS = FRAME_HEIGHT_PIXELS - 2 * CROP_BORDER_PIXELS
@@ -106,10 +117,13 @@ class FrameRenderRequest:
         lora_selections: Selected LoRA styles with strengths, applied in this
             order.
         seed: Seed for the diffusion pass; the interface draws a fresh one
-            per frame.
+            per frame unless the seed lock holds a fixed value.
         frame_width: Frame width in pixels; must be a positive multiple of
             :data:`FRAME_SIZE_ALIGNMENT_PIXELS`.
         frame_height: Frame height in pixels, same constraint as the width.
+        denoise_strength: Img2img strength for this frame (``1 - coherence``);
+            must lie within ``MINIMUM_DENOISE_STRENGTH``..
+            ``MAXIMUM_DENOISE_STRENGTH``.
     """
 
     family: FamilyDefinition
@@ -120,6 +134,7 @@ class FrameRenderRequest:
     seed: int
     frame_width: int = FRAME_WIDTH_PIXELS
     frame_height: int = FRAME_HEIGHT_PIXELS
+    denoise_strength: float = DEFAULT_DENOISE_STRENGTH
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +233,47 @@ class EngineProtocol(Protocol):
     def engine_statistics(self) -> EngineStatistics:
         """Return live memory figures for the stats line and health badge."""
         ...
+
+
+def coherence_to_denoise(coherence: float) -> float:
+    """Map a UI coherence value (higher keeps more) to img2img denoise.
+
+    The complement is clamped into the denoise span: binary floating
+    point makes ``1.0 - 0.90`` land a hair below ``0.10``, which the
+    engine would otherwise refuse at the slider's own maximum.
+
+    Raises:
+        ValueError: If ``coherence`` lies outside ``MINIMUM_COHERENCE``..
+            ``MAXIMUM_COHERENCE``.
+    """
+    if not MINIMUM_COHERENCE <= coherence <= MAXIMUM_COHERENCE:
+        message = (
+            f"Coherence must be within {MINIMUM_COHERENCE}..{MAXIMUM_COHERENCE}, "
+            f"received {coherence}"
+        )
+        raise ValueError(message)
+    denoise = 1.0 - coherence
+    return min(max(denoise, MINIMUM_DENOISE_STRENGTH), MAXIMUM_DENOISE_STRENGTH)
+
+
+def denoise_to_coherence(denoise_strength: float) -> float:
+    """Map an img2img denoise strength back to the UI coherence scale.
+
+    Clamped like :func:`coherence_to_denoise` for the same float reason.
+
+    Raises:
+        ValueError: If ``denoise_strength`` lies outside
+            ``MINIMUM_DENOISE_STRENGTH``..``MAXIMUM_DENOISE_STRENGTH``.
+    """
+    if not MINIMUM_DENOISE_STRENGTH <= denoise_strength <= MAXIMUM_DENOISE_STRENGTH:
+        message = (
+            "Denoise strength must be within "
+            f"{MINIMUM_DENOISE_STRENGTH}..{MAXIMUM_DENOISE_STRENGTH}, "
+            f"received {denoise_strength}"
+        )
+        raise ValueError(message)
+    coherence = 1.0 - denoise_strength
+    return min(max(coherence, MINIMUM_COHERENCE), MAXIMUM_COHERENCE)
 
 
 def compute_interpolated_frame_count(frame_count: int) -> int:

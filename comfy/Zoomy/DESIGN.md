@@ -163,10 +163,14 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
 - `family_catalog`: `FAMILY_CATALOG` holds `ernie_turbo`, `z_fast`,
   `z_quality`. `find_family(catalog, key)` raises `ZoomyError` on miss.
   `LoraDefinition.selected_by_default` mirrors the source workflows (Ernie
-  C64 on; Z styles off = photorealistic default).
+  C64 on; Z styles off = photorealistic default). Each family carries
+  `resolution_presets`: Ernie offers the seven official Baidu sizes
+  (1024x1024, 1264x848, 848x1264, 1376x768, 768x1376, 1200x896,
+  896x1200); both Z variants offer a flexible 512-2048 list with a fast
+  512x512 draft plus HD sizes. Every preset is a positive multiple of 16.
 - `engine_protocol`: `FrameRenderRequest(family, prompt, negative_prompt,
   frame_count, lora_selections, seed, frame_width = 1376,
-  frame_height = 768)` / `FinalizeRequest` / `SegmentWindow`
+  frame_height = 768, denoise_strength = 0.60)` / `FinalizeRequest` / `SegmentWindow`
   / `ProgressUpdate` / `EngineStatistics`; pure duration math
   (`compute_audio_seconds` = `max(interp / 32, 1.0)` — the ACE
   `seconds >= 1.0` floor; `compute_frames_for_seconds` inverts the ×4
@@ -225,8 +229,11 @@ size minus a 20 px border at `(10, 10)` → bicubic-rescaled back to the
 request size (the border is `min(10, width // 4, height // 4)`, so HD is
 `1356×748 → 1376×768`, zoom `1376 / 1356 ≈ 1.0147` per frame, ~1.5% dive;
 `512×512` uses a `492×492` crop, `512 / 492 ≈ 1.0407`, the old 512-era
-dive) → encoded → img2img at denoise 0.60 with the family recipe →
-saved as `<sequence>/frame_<counter>.png`. Requested sizes come from
+  dive) → encoded → img2img with the family recipe at the request's
+  denoise strength (the UI coherence slider maps `denoise = 1 - coherence`,
+  coherence 0.05-0.90, default 0.40 = denoise 0.60; the complement is
+  clamped so float dust at the edges never fails engine validation) →
+  saved as `<sequence>/frame_<counter>.png`. Requested sizes come from
 `FrameRenderRequest.frame_width/frame_height` (UI-editable, blank falls
 back to 1376×768) and must be positive multiples of 16
 (`_validate_frame_size`, else `EngineConfigurationError`); the sampler
@@ -313,19 +320,25 @@ panel is drawn by `@gr.render(inputs=[family_dropdown])`: LoRA
 `CheckboxGroup` + one strength slider (0–2, step 0.05) per family LoRA,
 prompt box, negative box only for families that define one, Render button,
 Loop checkbox, target-duration number (blank = unlimited loop until
-stopped), finalize-when-loop-ends checkbox (default on), and width/height
+stopped), finalize-when-loop-ends checkbox (default on), resolution
+preset dropdown (fills width/height; defaults to the 1376x768 HD entry),
+and width/height
 numbers (prefilled 1376/768; blank or garbage falls back to the default —
 both Numbers carry no `minimum=`, for the same preprocess-rejection
 reason as the old frame target: Gradio validates minimums before the
-handler runs and would reject every blank input outright). Components the
+handler runs and would reject every blank input outright), temporal
+coherence slider (0.05-0.90, step 0.05, default 0.40 — higher keeps more
+of the previous frame; garbage restores the default), and a seed row
+(seed number + lock checkbox: locked reuses the fixed seed every frame,
+unlocked or blank draws fresh random per frame). Components the
 panel wiring touches are created *before* the render block (the decorator
 executes immediately at build).
 
 Events: render/loop/finalize generators stream status + log + previews +
 stats (gallery/preview refresh only on frame completion to avoid flicker;
 durations accumulate in session `State`); the loop handler dogfoods
-`generate_video` with a request factory carrying the panel dims (fresh
-random seed per call) and also surfaces the finalized video preview, so
+`generate_video` with a request factory carrying the panel dims, denoise,
+and seed-lock choice (fresh random seed per call unless locked) and also surfaces the finalized video preview, so
 the UI loop and the programmatic API (`VideoGenerationOptions`) can never
 drift apart. The Loop checkbox carries TWO
 `change` listeners because generators must queue while stops must not wait:

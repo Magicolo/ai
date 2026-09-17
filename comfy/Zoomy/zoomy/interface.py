@@ -32,10 +32,14 @@ from typing import TYPE_CHECKING, cast
 import gradio as gr
 
 from zoomy.engine_protocol import (
+    DEFAULT_COHERENCE,
     FRAME_HEIGHT_PIXELS,
     FRAME_WIDTH_PIXELS,
+    MAXIMUM_COHERENCE,
+    MINIMUM_COHERENCE,
     FinalizeRequest,
     FrameRenderRequest,
+    coherence_to_denoise,
 )
 from zoomy.errors import ZoomyError
 from zoomy.family_catalog import find_family
@@ -60,6 +64,7 @@ if TYPE_CHECKING:
 MAXIMUM_LORA_STRENGTH = 2.0
 LORA_STRENGTH_STEP = 0.05
 MAXIMUM_SEED = 2**48
+COHERENCE_SLIDER_STEP = 0.05
 STATUS_TIMER_SECONDS = 10.0
 CLEAR_FRAMES_LABEL = "Clear frames"
 CONFIRM_CLEAR_FRAMES_LABEL = "Confirm: clear all frames"
@@ -553,9 +558,33 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
         label="Target video duration, seconds (blank = run until stopped)", precision=1
     )
     finalize_checkbox = gr.Checkbox(label="Finalize video when the loop ends", value=True)
+    preset_dropdown: gr.Dropdown | None = None
+    if family.resolution_presets:
+        preset_dropdown = gr.Dropdown(
+            choices=[preset.display_name for preset in family.resolution_presets],
+            value=_default_preset_name(family),
+            label="Resolution preset",
+        )
     with gr.Row():
         frame_width = gr.Number(value=FRAME_WIDTH_PIXELS, label="Frame width", precision=0)
         frame_height = gr.Number(value=FRAME_HEIGHT_PIXELS, label="Frame height", precision=0)
+    if preset_dropdown is not None:
+        preset_dropdown.change(  # type: ignore[attr-defined]
+            _apply_resolution_preset(family),
+            inputs=[preset_dropdown],
+            outputs=[frame_width, frame_height],
+            queue=False,
+        )
+    coherence_slider = gr.Slider(
+        minimum=MINIMUM_COHERENCE,
+        maximum=MAXIMUM_COHERENCE,
+        step=COHERENCE_SLIDER_STEP,
+        value=DEFAULT_COHERENCE,
+        label="Temporal coherence (higher keeps more of the previous frame)",
+    )
+    with gr.Row():
+        seed_number = gr.Number(label="Seed (used when locked)", precision=0)
+        seed_lock = gr.Checkbox(label="Lock seed (reuse one seed every frame)", value=False)
     render_inputs: list[Any] = [selected_loras, *strength_sliders, prompt_textbox]
     if negative_textbox is not None:
         render_inputs.append(negative_textbox)
@@ -567,6 +596,9 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
             *render_inputs,
             wiring.log_state,
             wiring.durations_state,
+            coherence_slider,
+            seed_number,
+            seed_lock,
             frame_width,
             frame_height,
         ],
@@ -590,6 +622,9 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
             *render_inputs,
             duration_seconds,
             finalize_checkbox,
+            coherence_slider,
+            seed_number,
+            seed_lock,
             frame_width,
             frame_height,
             wiring.log_state,
@@ -632,17 +667,20 @@ def _create_render_handler(
         rest = values[submission.consumed_count :]
         log_entries = _as_string_list(rest[0])
         durations = _as_durations(rest[1])
-        frame_width = _coerce_frame_size(rest[2], FRAME_WIDTH_PIXELS)
-        frame_height = _coerce_frame_size(rest[3], FRAME_HEIGHT_PIXELS)
+        denoise_strength = coherence_to_denoise(_coerce_coherence(rest[2]))
+        seed = _resolve_frame_seed(rest[3], rest[4])
+        frame_width = _coerce_frame_size(rest[5], FRAME_WIDTH_PIXELS)
+        frame_height = _coerce_frame_size(rest[6], FRAME_HEIGHT_PIXELS)
         request = FrameRenderRequest(
             family=family,
             prompt=submission.prompt_text,
             negative_prompt=submission.negative_text,
             frame_count=wiring.repository.frame_count(family.sequence_key),
             lora_selections=submission.lora_selections,
-            seed=_random_generator.randrange(MAXIMUM_SEED),
+            seed=seed,
             frame_width=frame_width,
             frame_height=frame_height,
+            denoise_strength=denoise_strength,
         )
         try:
             for update in render_next_frame(request, wiring.environment):
@@ -696,10 +734,13 @@ def _create_loop_handler(
         rest = values[1 + submission.consumed_count :]
         target_seconds = _parse_target_seconds(rest[0])
         finalize_on_stop = rest[1] is True
-        frame_width = _coerce_frame_size(rest[2], FRAME_WIDTH_PIXELS)
-        frame_height = _coerce_frame_size(rest[3], FRAME_HEIGHT_PIXELS)
-        log_entries = _as_string_list(rest[4])
-        durations = _as_durations(rest[5])
+        denoise_strength = coherence_to_denoise(_coerce_coherence(rest[2]))
+        seed_number_value = rest[3]
+        seed_lock_value = rest[4]
+        frame_width = _coerce_frame_size(rest[5], FRAME_WIDTH_PIXELS)
+        frame_height = _coerce_frame_size(rest[6], FRAME_HEIGHT_PIXELS)
+        log_entries = _as_string_list(rest[7])
+        durations = _as_durations(rest[8])
         if not (isinstance(values[0], bool) and values[0]):
             message = "Loop is off — check the box to start rendering."
             _, log_text = _append_log_entry(log_entries, message)
@@ -716,16 +757,17 @@ def _create_loop_handler(
             return
 
         def request_factory(frame_count: int) -> FrameRenderRequest:
-            """Build one loop frame request with a fresh seed."""
+            """Build one loop frame request, honoring the seed lock."""
             return FrameRenderRequest(
                 family=family,
                 prompt=submission.prompt_text,
                 negative_prompt=submission.negative_text,
                 frame_count=frame_count,
                 lora_selections=submission.lora_selections,
-                seed=_random_generator.randrange(MAXIMUM_SEED),
+                seed=_resolve_frame_seed(seed_number_value, seed_lock_value),
                 frame_width=frame_width,
                 frame_height=frame_height,
+                denoise_strength=denoise_strength,
             )
 
         options = VideoGenerationOptions(
@@ -842,6 +884,80 @@ def _coerce_frame_size(value: object, default_pixels: int) -> int:
     if isinstance(value, float) and math.isfinite(value) and value >= 1:
         return int(value)
     return default_pixels
+
+
+def _coerce_coherence(value: object) -> float:
+    """Interpret a coherence slider payload, falling back to the default.
+
+    Out-of-range, blank, or garbage payloads restore ``DEFAULT_COHERENCE``
+    so ``coherence_to_denoise`` never sees a value it must reject.
+    """
+    if isinstance(value, bool):
+        return DEFAULT_COHERENCE
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        coerced = float(value)
+        if MINIMUM_COHERENCE <= coerced <= MAXIMUM_COHERENCE:
+            return coerced
+    return DEFAULT_COHERENCE
+
+
+def _coerce_seed(value: object) -> int | None:
+    """Interpret a seed box payload, returning None when unusable.
+
+    Blank boxes submit 0/None/text depending on Gradio's state; only
+    non-negative integers below ``MAXIMUM_SEED`` are genuine fixed seeds.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 0 <= value < MAXIMUM_SEED:
+        return value
+    if isinstance(value, float) and math.isfinite(value) and 0 <= value < MAXIMUM_SEED:
+        return int(value)
+    return None
+
+
+def _resolve_frame_seed(seed_value: object, lock_value: object) -> int:
+    """Return the fixed seed when locked, otherwise a fresh random seed."""
+    if lock_value is True:
+        fixed_seed = _coerce_seed(seed_value)
+        if fixed_seed is not None:
+            return fixed_seed
+    return _random_generator.randrange(MAXIMUM_SEED)
+
+
+def _preset_dimensions(family: FamilyDefinition, preset_name: object) -> tuple[int, int]:
+    """Return the (width, height) for a preset display name.
+
+    Unknown or garbage names fall back to the default frame size so the
+    preset change handler never leaves the geometry boxes empty.
+    """
+    if isinstance(preset_name, str):
+        for preset in family.resolution_presets:
+            if preset.display_name == preset_name:
+                return (preset.width, preset.height)
+    return (FRAME_WIDTH_PIXELS, FRAME_HEIGHT_PIXELS)
+
+
+def _default_preset_name(family: FamilyDefinition) -> str | None:
+    """Return the preset matching the default size, else the first preset."""
+    for preset in family.resolution_presets:
+        if preset.width == FRAME_WIDTH_PIXELS and preset.height == FRAME_HEIGHT_PIXELS:
+            return preset.display_name
+    if family.resolution_presets:
+        return family.resolution_presets[0].display_name
+    return None
+
+
+def _apply_resolution_preset(
+    family: FamilyDefinition,
+) -> Callable[[object], tuple[int, int]]:
+    """Create the handler that fills width/height from a preset choice."""
+
+    def apply_preset(preset_name: object) -> tuple[int, int]:
+        """Map the chosen preset name to its frame dimensions."""
+        return _preset_dimensions(family, preset_name)
+
+    return apply_preset
 
 
 def _initial_statistics(

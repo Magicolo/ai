@@ -6,6 +6,7 @@ import pytest
 from hypothesis import assume, given
 from hypothesis import strategies as st
 
+from zoomy.engine_protocol import FRAME_SIZE_ALIGNMENT_PIXELS
 from zoomy.errors import ZoomyError
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
 
@@ -106,3 +107,46 @@ def test_lora_strengths_are_positive() -> None:
     for family in FAMILY_CATALOG:
         for lora in family.loras:
             assert lora.default_strength > 0
+
+
+def test_ernie_presets_match_official_sizes() -> None:
+    """Ernie offers exactly the seven official Baidu frame sizes."""
+    ernie = find_family(FAMILY_CATALOG, "ernie_turbo")
+    assert [(preset.width, preset.height) for preset in ernie.resolution_presets] == [
+        (1024, 1024),
+        (1264, 848),
+        (848, 1264),
+        (1376, 768),
+        (768, 1376),
+        (1200, 896),
+        (896, 1200),
+    ]
+
+
+def test_z_presets_offer_draft_and_hd_sizes() -> None:
+    """Z offers a fast 512 draft plus HD sizes for quick experiments."""
+    for family_key in ("z_fast", "z_quality"):
+        family = find_family(FAMILY_CATALOG, family_key)
+        sizes = [(preset.width, preset.height) for preset in family.resolution_presets]
+        assert (512, 512) in sizes
+        assert (1376, 768) in sizes
+        assert (768, 1376) in sizes
+
+
+def test_every_preset_is_engine_aligned() -> None:
+    """Every preset is a positive multiple of 16, so the VAE accepts it."""
+    for family in FAMILY_CATALOG:
+        assert family.resolution_presets
+        for preset in family.resolution_presets:
+            assert preset.display_name
+            assert preset.width > 0
+            assert preset.height > 0
+            assert preset.width % FRAME_SIZE_ALIGNMENT_PIXELS == 0
+            assert preset.height % FRAME_SIZE_ALIGNMENT_PIXELS == 0
+
+
+def test_preset_display_names_are_unique_per_family() -> None:
+    """Duplicate preset labels would make the dropdown ambiguous."""
+    for family in FAMILY_CATALOG:
+        names = [preset.display_name for preset in family.resolution_presets]
+        assert len(names) == len(set(names))

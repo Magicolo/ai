@@ -754,3 +754,37 @@ def test_render_frame_rejects_misaligned_sizes(tmp_path: Path) -> None:
         )
         with pytest.raises(EngineConfigurationError, match="multiple of 16"):
             engine.render_frame(request)
+
+
+@pytest.mark.parametrize("bad_denoise", [0.0, 0.09, 0.96, 1.0, -0.5])
+def test_render_frame_rejects_out_of_range_denoise(tmp_path: Path, bad_denoise: float) -> None:
+    """Denoise outside 0.10..0.95 fails before any model loads."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FrameRenderRequest(
+        family=family,
+        prompt="a prompt",
+        negative_prompt="a negative",
+        frame_count=0,
+        lora_selections=(),
+        seed=1,
+        denoise_strength=bad_denoise,
+    )
+    with pytest.raises(EngineConfigurationError, match="Denoise strength"):
+        engine.render_frame(request)
+
+
+@given(denoise=st.floats(min_value=0.10, max_value=0.95))
+def test_denoise_validation_accepts_the_full_span(denoise: float) -> None:
+    """Every in-range denoise passes validation (render still needs a seed)."""
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    request = FrameRenderRequest(
+        family=family,
+        prompt="a prompt",
+        negative_prompt="a negative",
+        frame_count=0,
+        lora_selections=(),
+        seed=1,
+        denoise_strength=denoise,
+    )
+    LocalEngine._validate_denoise_strength(request)  # noqa: SLF001

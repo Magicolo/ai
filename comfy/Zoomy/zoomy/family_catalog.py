@@ -102,6 +102,15 @@ class LoraDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolutionPreset:
+    """One named frame size offered for a model family."""
+
+    display_name: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class FamilyDefinition:
     """One model family plus every parameter its render and finalize runs need.
 
@@ -132,6 +141,8 @@ class FamilyDefinition:
         sound_effect_prompt: MMAudio prompt for video-synced sound effects.
         sound_effect_negative_prompt: MMAudio negative prompt.
         loras: LoRA styles offered for this family, applied in selection order.
+        resolution_presets: Named frame sizes offered in the interface; the
+            first entry matching the default frame size is preselected.
     """
 
     key: str
@@ -154,6 +165,29 @@ class FamilyDefinition:
     sound_effect_prompt: str
     sound_effect_negative_prompt: str
     loras: tuple[LoraDefinition, ...]
+    resolution_presets: tuple[ResolutionPreset, ...] = ()
+
+
+ERNIE_RESOLUTION_PRESETS: tuple[ResolutionPreset, ...] = (
+    ResolutionPreset(display_name="Square 1024 x 1024", width=1024, height=1024),
+    ResolutionPreset(display_name="Landscape 1264 x 848", width=1264, height=848),
+    ResolutionPreset(display_name="Portrait 848 x 1264", width=848, height=1264),
+    ResolutionPreset(display_name="Landscape HD 1376 x 768", width=1376, height=768),
+    ResolutionPreset(display_name="Portrait HD 768 x 1376", width=768, height=1376),
+    ResolutionPreset(display_name="Landscape 1200 x 896", width=1200, height=896),
+    ResolutionPreset(display_name="Portrait 896 x 1200", width=896, height=1200),
+)
+
+Z_RESOLUTION_PRESETS: tuple[ResolutionPreset, ...] = (
+    ResolutionPreset(display_name="Draft 512 x 512", width=512, height=512),
+    ResolutionPreset(display_name="Square 768 x 768", width=768, height=768),
+    ResolutionPreset(display_name="Square 1024 x 1024", width=1024, height=1024),
+    ResolutionPreset(display_name="Landscape 1280 x 720", width=1280, height=720),
+    ResolutionPreset(display_name="Portrait 720 x 1280", width=720, height=1280),
+    ResolutionPreset(display_name="Landscape HD 1376 x 768", width=1376, height=768),
+    ResolutionPreset(display_name="Portrait HD 768 x 1376", width=768, height=1376),
+    ResolutionPreset(display_name="Landscape 1536 x 864", width=1536, height=864),
+)
 
 
 FAMILY_CATALOG: tuple[FamilyDefinition, ...] = (
@@ -185,6 +219,7 @@ FAMILY_CATALOG: tuple[FamilyDefinition, ...] = (
                 selected_by_default=True,
             ),
         ),
+        resolution_presets=ERNIE_RESOLUTION_PRESETS,
     ),
     FamilyDefinition(
         key="z_fast",
@@ -220,6 +255,7 @@ FAMILY_CATALOG: tuple[FamilyDefinition, ...] = (
                 selected_by_default=False,
             ),
         ),
+        resolution_presets=Z_RESOLUTION_PRESETS,
     ),
     FamilyDefinition(
         key="z_quality",
@@ -255,6 +291,7 @@ FAMILY_CATALOG: tuple[FamilyDefinition, ...] = (
                 selected_by_default=False,
             ),
         ),
+        resolution_presets=Z_RESOLUTION_PRESETS,
     ),
 )
 
