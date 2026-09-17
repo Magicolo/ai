@@ -49,6 +49,32 @@ def test_interpolation_count_matches_film_math() -> None:
     assert compute_interpolated_frame_count(48) == 189
 
 
+@pytest.mark.parametrize("bad_count", [0, -1, -100])
+def test_interpolated_frame_count_rejects_non_positive_counts(bad_count: int) -> None:
+    """Zero frames cannot interpolate; negative counts are caller bugs."""
+    with pytest.raises(ValueError, match="at least 1"):
+        compute_interpolated_frame_count(bad_count)
+
+
+@pytest.mark.parametrize("bad_count", [0, -1, -100])
+def test_audio_seconds_rejects_non_positive_counts(bad_count: int) -> None:
+    """A floored duration must not mask a nonsense frame count."""
+    with pytest.raises(ValueError, match="at least 1"):
+        compute_audio_seconds(bad_count)
+
+
+@given(frame_count=st.integers(min_value=1, max_value=2000))
+def test_interpolation_grows_with_the_sequence(frame_count: int) -> None:
+    """Frames → interp → seconds is monotone: longer never shrinks."""
+    interpolated = compute_interpolated_frame_count(frame_count)
+    assert interpolated >= 1
+    assert compute_audio_seconds(interpolated) >= MINIMUM_AUDIO_SECONDS
+    if frame_count > 1:
+        previous = compute_interpolated_frame_count(frame_count - 1)
+        assert interpolated > previous
+        assert compute_audio_seconds(interpolated) >= compute_audio_seconds(previous)
+
+
 def test_audio_seconds_floors_at_the_latent_minimum() -> None:
     """Short sequences still clear the 1.0 s ACE-Step latent floor."""
     assert compute_audio_seconds(1) == MINIMUM_AUDIO_SECONDS

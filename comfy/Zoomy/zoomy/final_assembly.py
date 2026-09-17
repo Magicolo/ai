@@ -111,7 +111,21 @@ def resolve_crossfade_seconds(
 
     An overlap can never exceed half of either input; short floor-length
     tails simply blend over a shorter window instead of failing.
+
+    Raises:
+        ValueError: If the overlap is negative, or either neighbor is not
+            positive. NaN fails the comparisons, so it raises too instead
+            of poisoning the ffmpeg filter downstream.
     """
+    if not requested_seconds >= 0:
+        message = f"Crossfade overlap must be non-negative, received {requested_seconds}"
+        raise ValueError(message)
+    if not first_seconds > 0 or not second_seconds > 0:
+        message = (
+            "Crossfade neighbors must be positive durations, "
+            f"received {first_seconds} and {second_seconds}"
+        )
+        raise ValueError(message)
     return min(requested_seconds, first_seconds / 2, second_seconds / 2)
 
 

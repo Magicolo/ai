@@ -192,6 +192,23 @@ def test_join_command_clamps_each_boundary_overlap() -> None:
     assert resolve_crossfade_seconds(0.25, 0.77, 0.77) == 0.25
 
 
+@pytest.mark.parametrize("bad_overlap", [float("nan"), -1.0, -0.5])
+def test_crossfade_rejects_non_finite_or_negative_overlap(bad_overlap: float) -> None:
+    """NaN/negative overlaps must fail here, not inside the ffmpeg filter."""
+    with pytest.raises(ValueError, match="Crossfade"):
+        resolve_crossfade_seconds(bad_overlap, 5.89, 5.89)
+
+
+@pytest.mark.parametrize(
+    "bad_neighbors",
+    [(0.0, 5.89), (5.89, 0.0), (5.89, -2.0), (float("nan"), 5.89)],
+)
+def test_crossfade_rejects_non_positive_neighbors(bad_neighbors: tuple[float, float]) -> None:
+    """Zero/negative/NaN neighbors cannot host an overlap."""
+    with pytest.raises(ValueError, match="neighbor"):
+        resolve_crossfade_seconds(1.0, *bad_neighbors)
+
+
 def test_mix_command_attenuates_effects_like_the_graph() -> None:
     """The Python mix preserves the graph's balance: music 0 dB, SFX -6 dB."""
     command = build_mix_command(

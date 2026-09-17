@@ -213,7 +213,14 @@ class EngineProtocol(Protocol):
 
 
 def compute_interpolated_frame_count(frame_count: int) -> int:
-    """Return the frame count after interpolation: ``(n - 1) * 4 + 1``."""
+    """Return the frame count after interpolation: ``(n - 1) * 4 + 1``.
+
+    Raises:
+        ValueError: If ``frame_count`` is below one.
+    """
+    if not frame_count >= 1:
+        message = f"Interpolation needs at least 1 source frame, received {frame_count}"
+        raise ValueError(message)
     return (frame_count - 1) * INTERPOLATION_MULTIPLIER + 1
 
 
@@ -241,7 +248,13 @@ def compute_audio_seconds(interpolated_frame_count: int) -> float:
     Floored at :data:`MINIMUM_AUDIO_SECONDS`, the lowest value the ACE-Step
     latent stage accepts, so short sequences still give MMAudio enough
     material for its 16-frame sync segments.
+
+    Raises:
+        ValueError: If ``interpolated_frame_count`` is below one.
     """
+    if not interpolated_frame_count >= 1:
+        message = f"Audio needs at least 1 frame, received {interpolated_frame_count}"
+        raise ValueError(message)
     raw_seconds = interpolated_frame_count / VIDEO_FRAMES_PER_SECOND
     return max(raw_seconds, MINIMUM_AUDIO_SECONDS)
 

@@ -2,8 +2,16 @@
 
 - Severity: medium (validation — negative/NaN inputs produce nonsense
   durations deep in the pipeline).
-- Status: verified open, narrowed. `zoomy/engine_protocol.py:212-214`,
-  `:235-243`, `zoomy/final_assembly.py:107-115`.
+- Status: FIXED. All three guards mirror the established `ValueError`
+  pattern (NaN-safe `not x >= ...` comparisons, same as
+  `compute_frames_for_seconds`): `compute_interpolated_frame_count` and
+  `compute_audio_seconds` reject counts below 1;
+  `resolve_crossfade_seconds` rejects negative overlaps and non-positive
+  neighbors (NaN fails the comparisons and raises instead of poisoning the
+  ffmpeg filter). `compute_segment_video/music/sound_seconds` inherit the
+  base guard. Tests: 3+3+3+4 rejection params plus a frames→interp→seconds
+  monotonicity property. `zoomy/engine_protocol.py:215-271`,
+  `zoomy/final_assembly.py:107-133`.
 
 ## Evidence
 
