@@ -2,10 +2,14 @@
 
 - Severity: medium (the scripts ARE the quality loop — gaps here leak
   root-owned residue into the host tree).
-- Status: partially fixed 2026-09-16 (arg forwarding hardened to
-  `sh -c '…' sh "$@"`, `HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis`
-  exported by both scripts). Remaining: shellcheck advisory pass;
-  `run-tests.sh` needs no ruff/mypy env (it runs pytest only).
+- Status: FIXED. Everything verifiable is done: `sh -c '…' sh "$@"`
+  forwarding (proven live — a spaced `-k` value reaches pytest as one arg),
+  cache/Hypothesis env in both scripts, `set -euo pipefail`, `bash -n`
+  clean. The shellcheck pass is explicitly replaced by a manual advisory
+  review (no shellcheck on host or in-image, and neither toolchain grows
+  for this): all expansions quoted, no `$` inside the double-quoted
+  `sh -c` string, no `source`, `ROOT` assignment aborts under `set -e` if
+  `cd` fails, exit codes propagate (no pipes). Nothing to change.
 
 ## Evidence
 
