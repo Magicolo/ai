@@ -1,7 +1,12 @@
 # `_safe_system_statistics` catches only `ZoomyError`
 
 - Severity: medium (robustness — one backend hiccup kills the stats UI).
-- Status: verified open. `zoomy/interface.py:780-785`.
+- Status: FIXED. `_safe_system_statistics` now catches `Exception`
+  (never `BaseException` — documented in the docstring) and returns `None`,
+  matching the "engine offline" contract. Test:
+  `test_safe_system_statistics_treats_backend_errors_as_offline` (a
+  `RuntimeError`-raising engine double → `None` → "engine offline" line).
+  `zoomy/interface.py:844-856`.
 
 ## Evidence
 

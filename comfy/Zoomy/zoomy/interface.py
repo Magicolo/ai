@@ -842,10 +842,17 @@ def _initial_statistics(
 
 
 def _safe_system_statistics(engine: EngineProtocol) -> EngineStatistics | None:
-    """Fetch engine statistics, returning None when the engine is offline."""
+    """Fetch engine statistics, returning None when the engine is offline.
+
+    ``EngineProtocol`` is structural, so any implementation may raise errors
+    outside the ``ZoomyError`` hierarchy (torch ``RuntimeError``,
+    ``OSError``, ...); all of them mean "no figures right now". Only
+    ``Exception`` is caught — ``BaseException`` still propagates, so
+    interrupts and cancellations are never swallowed.
+    """
     try:
         return engine.engine_statistics()
-    except ZoomyError:
+    except Exception:  # noqa: BLE001
         return None
 
 

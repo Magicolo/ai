@@ -35,6 +35,7 @@ from zoomy.interface import (
     _parse_target_seconds,
     _record_frame_duration,
     _render_statistics_line,
+    _safe_system_statistics,
     _selected_lora_names,
     build_application,
 )
@@ -106,6 +107,14 @@ class StubEngine:
     def engine_statistics(self) -> EngineStatistics:
         """Report canned memory figures."""
         return _example_system()
+
+
+class _FailingStatisticsEngine(StubEngine):
+    """Test double whose statistics call blows up like a sick backend."""
+
+    def engine_statistics(self) -> EngineStatistics:
+        """Raise outside the ZoomyError hierarchy, as torch errors do."""
+        raise RuntimeError("CUDA error: out of memory")
 
 
 def _example_settings(output_directory: str) -> Settings:
@@ -242,6 +251,16 @@ def test_render_statistics_line_handles_empty_state() -> None:
     assert "no video yet" in line
     assert "engine offline" in line
     assert "last frame" not in line
+
+
+def test_safe_system_statistics_treats_backend_errors_as_offline(
+    tmp_path: Path,
+) -> None:
+    """A non-ZoomyError from the engine yields an offline line, never a raise."""
+    system = _safe_system_statistics(_FailingStatisticsEngine())
+    assert system is None
+    line = _render_statistics_line(_example_statistics(tmp_path), system, (0, 0.0, 0.0))
+    assert "engine offline" in line
 
 
 def test_parse_panel_submission_with_negative_prompt() -> None:
