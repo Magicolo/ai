@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -679,20 +680,22 @@ class LocalEngine:
             raise EngineConfigurationError(message)
         try:
             transformer_config = hf_hub_download(ERNIE_HUB_REPOSITORY, "transformer/config.json")
-            transformer: Any | None = None
             try:
                 transformer = ErnieImageTransformer2DModel.from_single_file(
                     str(diffusion_path),
                     config=transformer_config,
                     torch_dtype=torch.bfloat16,
                 )
-            except Exception:  # noqa: BLE001
-                # Any load failure (missing keys, dtype mismatch) falls back
-                # to the official weights below; the error resurfaces there.
-                transformer = None
-            pipeline_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
-            if transformer is not None:
-                pipeline_kwargs["transformer"] = transformer
+            except Exception as failure:
+                # A corrupt local DiT must fail loud: rendering the same
+                # prompt with the official bf16 weights instead would swap
+                # models silently (plus a surprise multi-GB download).
+                message = f"Local transformer failed to load ({diffusion_path}): {failure}"
+                raise EngineConfigurationError(message) from failure
+            pipeline_kwargs: dict[str, Any] = {
+                "torch_dtype": torch.bfloat16,
+                "transformer": transformer,
+            }
             pipeline = ErnieImagePipeline.from_pretrained(  # type: ignore[no-untyped-call]
                 ERNIE_HUB_REPOSITORY, **pipeline_kwargs
             )
@@ -731,14 +734,14 @@ class LocalEngine:
             message = f"Diffusion model file is missing: {diffusion_path}"
             raise EngineConfigurationError(message)
         try:
-            transformer: Any | None = None
             try:
                 transformer = ZImageTransformer2DModel.from_single_file(
                     str(diffusion_path), torch_dtype=torch.bfloat16
                 )
-            except Exception:  # noqa: BLE001
-                # Any load failure falls back to the official weights below.
-                transformer = None
+            except Exception as failure:
+                # Same fail-loud policy as the Ernie loader above.
+                message = f"Local transformer failed to load ({diffusion_path}): {failure}"
+                raise EngineConfigurationError(message) from failure
             autoencoder: Any | None = None
             autoencoder_path = (
                 self._models_directory / AUTOENCODERS_DIRECTORY_NAME / family.autoencoder_file
@@ -748,18 +751,29 @@ class LocalEngine:
                     autoencoder = AutoencoderKL.from_single_file(
                         str(autoencoder_path), torch_dtype=torch.bfloat16
                     )
-                except Exception:  # noqa: BLE001
-                    # Channel-count mismatches fall back to the official VAE.
+                except Exception as failure:  # noqa: BLE001
+                    # The shipped ae.safetensors is known-unloadable (32ch
+                    # weights vs the 8ch config), so any local VAE failure
+                    # keeps the documented official-VAE fallback — announced
+                    # in the server log instead of vanishing silently.
+                    warnings.warn(
+                        f"Local autoencoder failed to load ({autoencoder_path}): "
+                        f"{failure}; using the official VAE instead.",
+                        stacklevel=2,
+                    )
                     autoencoder = None
-            pipeline_kwargs: dict[str, Any] = {"torch_dtype": torch.bfloat16}
-            if transformer is not None:
-                pipeline_kwargs["transformer"] = transformer
+            pipeline_kwargs: dict[str, Any] = {
+                "torch_dtype": torch.bfloat16,
+                "transformer": transformer,
+            }
             if autoencoder is not None:
                 pipeline_kwargs["vae"] = autoencoder
             pipeline = ZImageImg2ImgPipeline.from_pretrained(  # type: ignore[no-untyped-call]
                 repository, **pipeline_kwargs
             )
             pipeline.enable_sequential_cpu_offload()
+        except EngineConfigurationError:
+            raise
         except Exception as failure:
             message = f"Z-Image pipeline load failed: {failure}"
             raise EngineExecutionError("z-load", message) from failure

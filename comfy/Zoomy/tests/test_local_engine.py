@@ -9,8 +9,9 @@ live verification instead.
 from __future__ import annotations
 
 import subprocess
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Self
+import sys
+from types import ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING, Self, cast
 
 import pytest
 from hypothesis import given
@@ -431,6 +432,105 @@ def test_load_source_image_closes_seed_files(
         del image
     assert len(opened) == 2
     assert [image.close_calls for image in opened] == [1, 1]
+
+
+class _BrokenTransformer:
+    """Single-file DiT load fails (truncated weights, dtype mismatch)."""
+
+    @staticmethod
+    def from_single_file(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("truncated tensor file")
+
+
+class _WorkingTransformer:
+    """Single-file DiT load succeeds without touching any weights."""
+
+    @staticmethod
+    def from_single_file(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+
+class _BrokenAutoencoder:
+    """Local VAE load fails (the known 32ch-vs-8ch config gap)."""
+
+    @staticmethod
+    def from_single_file(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("unexpected channel count")
+
+
+class _StubPipeline:
+    """Stand-in for a loaded diffusers pipeline."""
+
+    @classmethod
+    def from_pretrained(cls, *_args: object, **_kwargs: object) -> _StubPipeline:
+        return cls()
+
+    def enable_sequential_cpu_offload(self) -> None:
+        """Accept the offload call the loaders always make."""
+
+
+def _stub_hub_download(*_args: object, **_kwargs: object) -> str:
+    """Pretend the transformer config already sits in the hub cache."""
+    return "stub-transformer-config.json"
+
+
+def _stub_heavy_module(**attributes: object) -> ModuleType:
+    """Build a fake heavy module (torch/diffusers/hub) for loader tests."""
+    return cast("ModuleType", SimpleNamespace(**attributes))
+
+
+def test_broken_local_transformer_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt local DiT errors naming the file; weights are never swapped."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "ernie_turbo")
+    diffusion_path = tmp_path / "models" / "diffusion_models" / family.base_model_file
+    diffusion_path.parent.mkdir(parents=True, exist_ok=True)
+    diffusion_path.write_bytes(b"truncated")
+    monkeypatch.setitem(sys.modules, "torch", _stub_heavy_module(bfloat16="bf16"))
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        _stub_heavy_module(
+            ErnieImagePipeline=_StubPipeline,
+            ErnieImageTransformer2DModel=_BrokenTransformer,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        _stub_heavy_module(hf_hub_download=_stub_hub_download),
+    )
+    with pytest.raises(EngineConfigurationError, match=r"ernie-image-turbo\.safetensors"):
+        engine._load_ernie_pipeline(family)  # noqa: SLF001
+
+
+def test_broken_local_autoencoder_warns_and_uses_official(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad local VAE warns naming the file, then falls back to official."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    diffusion_path = tmp_path / "models" / "diffusion_models" / family.base_model_file
+    diffusion_path.parent.mkdir(parents=True, exist_ok=True)
+    diffusion_path.write_bytes(b"weights")
+    autoencoder_path = tmp_path / "models" / "vae" / family.autoencoder_file
+    autoencoder_path.parent.mkdir(parents=True, exist_ok=True)
+    autoencoder_path.write_bytes(b"wrong channels")
+    monkeypatch.setitem(sys.modules, "torch", _stub_heavy_module(bfloat16="bf16"))
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        _stub_heavy_module(
+            AutoencoderKL=_BrokenAutoencoder,
+            ZImageImg2ImgPipeline=_StubPipeline,
+            ZImageTransformer2DModel=_WorkingTransformer,
+        ),
+    )
+    with pytest.warns(UserWarning, match=r"ae\.safetensors"):
+        pipeline = engine._load_z_pipeline(family)  # noqa: SLF001
+    assert isinstance(pipeline, _StubPipeline)
 
 
 class _FailingEncodeStdin:

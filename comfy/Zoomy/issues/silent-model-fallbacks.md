@@ -1,8 +1,18 @@
 # Local-model failures silently fall back to official weights
 
 - Severity: medium (observability — the user is never told their file failed).
-- Status: verified open. `zoomy/local_engine.py:677-680` (Ernie
-  transformer), `:727-729` (Z transformer), `:739-741` (autoencoder).
+- Status: FIXED. Local transformer failures (Ernie + Z) now raise
+  `EngineConfigurationError` naming the file and the caught error — no
+  silent swap to official weights (the Z loader also gained the
+  `EngineConfigurationError` pass-through the Ernie loader already had).
+  Local VAE failures keep the documented official-VAE fallback but announce
+  it with `warnings.warn` naming file, error, and fallback. Design note:
+  progress-stream surfacing was deferred — `render_frame` returns a plain
+  `Image` by protocol, so no progress stream exists in the frame path;
+  fail-loud errors reach the UI via the existing error path and warnings
+  land in the server log. Tests (sys.modules fakes, no heavy imports):
+  `test_broken_local_transformer_fails_loud`,
+  `test_broken_local_autoencoder_warns_and_uses_official`.
 
 ## Evidence
 
