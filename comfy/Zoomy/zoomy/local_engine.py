@@ -104,6 +104,8 @@ _INTERPOLATION_BISECTION_DEPTH = int(math.log2(INTERPOLATION_MULTIPLIER))
 _MMAUDIO_V2_TEXT_WIDTH = 896
 # A /proc/meminfo line always holds name, value, and unit ("kB").
 _MEMINFO_PART_COUNT = 3
+# Grace period for a failed ffmpeg child to exit after terminate, before kill.
+_ENCODE_TERMINATE_TIMEOUT_SECONDS = 5.0
 
 _MUSIC_STEM_SUFFIX = "_music_stem.flac"
 _SOUND_STEM_SUFFIX = "_sfx_stem.flac"
@@ -1295,6 +1297,27 @@ def _pad_frames_to_minimum(frames: list[Any], minimum_frames: int) -> list[Any]:
     return padded
 
 
+def _reap_encode_process(process: subprocess.Popen[bytes]) -> None:
+    """Best-effort cleanup of a failed ffmpeg child: close, terminate, wait.
+
+    Escalates to kill when the child ignores terminate past the grace
+    period, so a mid-stream encode failure never leaves a zombie plus an
+    open pipe behind (the window retry would otherwise orphan one per
+    attempt).
+    """
+    try:
+        if process.stdin is not None:
+            process.stdin.close()
+    except (OSError, ValueError):
+        pass
+    process.terminate()
+    try:
+        process.wait(timeout=_ENCODE_TERMINATE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _write_silent_video(frames: list[Any], destination: Path) -> None:
     """Encode interpolated frames as h264 (crf 19, yuv420p, 32 fps)."""
     import numpy as np  # noqa: PLC0415
@@ -1332,6 +1355,7 @@ def _write_silent_video(frames: list[Any], destination: Path) -> None:
         message = f"Silent video encode failed for {destination}: {failure}"
         raise AssemblyError(message) from failure
     if process.stdin is None:
+        _reap_encode_process(process)
         message = f"Silent video encode failed for {destination}: no input pipe"
         raise AssemblyError(message)
     try:
@@ -1340,6 +1364,7 @@ def _write_silent_video(frames: list[Any], destination: Path) -> None:
         process.stdin.close()
         process.wait()
     except (OSError, ValueError) as failure:
+        _reap_encode_process(process)
         message = f"Silent video encode failed for {destination}: {failure}"
         raise AssemblyError(message) from failure
     if process.returncode != 0:

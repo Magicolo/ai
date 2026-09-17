@@ -1,7 +1,11 @@
 # ffmpeg child process and pipe leaked on stdin write failure
 
 - Severity: medium (resource leak + zombie process on the GPU host).
-- Status: verified open. `zoomy/local_engine.py:1316-1332`.
+- Status: FIXED. `_write_silent_video` now reaps the child on every
+  failure path via `_reap_encode_process` (close pipe → terminate → wait
+  5 s → kill → wait); the `stdin is None` branch reaps too. Pinned by
+  `test_failed_encode_terminates_the_child_and_closes_the_pipe` and
+  `test_hung_encode_is_killed_after_terminate_timeout` (stubbed Popen).
 
 ## Evidence
 

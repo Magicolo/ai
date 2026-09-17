@@ -8,6 +8,8 @@ live verification instead.
 
 from __future__ import annotations
 
+import subprocess
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +19,7 @@ from PIL import Image as PillowImage
 
 from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest, SegmentWindow
 from zoomy.errors import (
+    AssemblyError,
     EmptyFrameSequenceError,
     EngineConfigurationError,
     EngineExecutionError,
@@ -24,7 +27,12 @@ from zoomy.errors import (
 )
 from zoomy.family_catalog import FAMILY_CATALOG, FamilyDefinition, find_family
 from zoomy.frame_repository import FrameRepository
-from zoomy.local_engine import LocalEngine, _pad_frames_to_minimum, run_stage_with_retries
+from zoomy.local_engine import (
+    LocalEngine,
+    _pad_frames_to_minimum,
+    _write_silent_video,
+    run_stage_with_retries,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -288,6 +296,93 @@ def test_single_frame_window_finalizes_with_stubbed_audio(
     assert soundtrack.music_video_path.is_file()
     assert soundtrack.music_stem_path.is_file()
     assert soundtrack.sound_effect_stem_path.is_file()
+
+
+class _FailingEncodeStdin:
+    """Pretend ffmpeg died mid-stream: writes fail, close records itself."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def write(self, _data: bytes) -> int:
+        raise OSError("broken pipe")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StubEncodeProcess:
+    """Record terminate/wait/kill so tests prove failed encodes are reaped."""
+
+    def __init__(self, *, hang_on_wait: bool = False) -> None:
+        self.stdin: _FailingEncodeStdin | None = _FailingEncodeStdin()
+        self.returncode: int | None = None
+        self.terminated = False
+        self.waited = False
+        self.killed = False
+        self._hang_on_wait = hang_on_wait
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waited = True
+        if self._hang_on_wait:
+            self._hang_on_wait = False
+            raise subprocess.TimeoutExpired("ffmpeg", timeout or 0)
+        self.returncode = -15
+        return -15
+
+
+def _stub_encode_subprocess(
+    processes: list[_StubEncodeProcess], *, hang_on_wait: bool = False
+) -> SimpleNamespace:
+    """Return a subprocess stand-in recording every spawned encode child."""
+
+    def fake_popen(command: object, *, stdin: object = None) -> _StubEncodeProcess:
+        del command, stdin
+        process = _StubEncodeProcess(hang_on_wait=hang_on_wait)
+        processes.append(process)
+        return process
+
+    return SimpleNamespace(Popen=fake_popen, PIPE=-1, TimeoutExpired=subprocess.TimeoutExpired)
+
+
+def test_failed_encode_terminates_the_child_and_closes_the_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mid-stream stdin failure must reap the ffmpeg child, then raise."""
+    processes: list[_StubEncodeProcess] = []
+    monkeypatch.setattr("zoomy.local_engine.subprocess", _stub_encode_subprocess(processes))
+    frame = PillowImage.new("RGB", (16, 16))
+    with pytest.raises(AssemblyError, match="Silent video encode failed"):
+        _write_silent_video([frame], tmp_path / "silent.mp4")
+    (process,) = processes
+    assert process.stdin is not None
+    assert process.stdin.closed
+    assert process.terminated
+    assert process.waited
+
+
+def test_hung_encode_is_killed_after_terminate_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child ignoring terminate must be killed, never left behind."""
+    processes: list[_StubEncodeProcess] = []
+    monkeypatch.setattr(
+        "zoomy.local_engine.subprocess",
+        _stub_encode_subprocess(processes, hang_on_wait=True),
+    )
+    frame = PillowImage.new("RGB", (16, 16))
+    with pytest.raises(AssemblyError, match="Silent video encode failed"):
+        _write_silent_video([frame], tmp_path / "silent.mp4")
+    (process,) = processes
+    assert process.terminated
+    assert process.killed
+    assert process.waited
 
 
 def _out_of_memory_error() -> RuntimeError:
