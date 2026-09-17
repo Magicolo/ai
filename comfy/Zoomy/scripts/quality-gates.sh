@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 docker compose --file "$ROOT/docker-compose.yml" run --rm --no-deps \
     -v "$ROOT/Zoomy:/workspace" \
+    -v zoomy_mypy_cache:/tmp/mypy-cache \
     -e RUFF_CACHE_DIR=/tmp/ruff-cache \
     -e MYPY_CACHE_DIR=/tmp/mypy-cache \
     -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis \

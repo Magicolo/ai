@@ -2,6 +2,11 @@ volumes:
   comfy:
     external: true
   zoomy_models:
+  # Persisted mypy cache: quality-gates.sh mounts this at /tmp/mypy-cache so
+  # repeat runs reuse type-check results (~1 s warm vs ~36 s cold). The cache
+  # is content+mtime keyed and lives outside the tree, so it never pollutes
+  # the repo. Safe to drop any time (docker volume rm).
+  zoomy_mypy_cache:
 
 services:
   comfy:

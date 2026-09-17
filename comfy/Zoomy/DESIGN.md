@@ -382,7 +382,11 @@ transfers still work). `CIVITAI_API_KEY` is only needed for provisioning.
 Both scripts run the gates in-container against the host tree via the
 `./Zoomy` bind mount (image files are throwaway copies) and export
 `RUFF_CACHE_DIR`, `MYPY_CACHE_DIR`, and `HYPOTHESIS_STORAGE_DIRECTORY` to
-`/tmp/...` so no tool residue ever lands in the tree.
+`/tmp/...` so no tool residue ever lands in the tree. `quality-gates.sh`
+additionally mounts the named `zoomy_mypy_cache` volume at `/tmp/mypy-cache`,
+so repeat runs reuse type-check results (~8 s warm vs ~44 s cold; verified
+2026-09-17, 139 tests). The cache is content+mtime keyed — safe to drop any
+time (`docker volume rm zoomy_mypy_cache`).
 
 Config summary (`pyproject.toml`): ruff `select = ["ALL"]`, line-length 100,
 `target py312`, pydocstyle google; ignores are documented inline (`ANN401`
