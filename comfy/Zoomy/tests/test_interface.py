@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import gradio as gr
 import httpx
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -474,6 +475,24 @@ def test_ui_payload_coercions_never_crash(value: object) -> None:
     assert isinstance(_coerce_to_float(value), float)
     assert all(isinstance(name, str) for name in _selected_lora_names(value))
     assert isinstance(_as_string_list(value), list)
+
+
+def test_selected_lora_names_keeps_only_strings() -> None:
+    """Non-string checkbox items match no LoRA, so they are dropped."""
+    assert _selected_lora_names(["chalkboard", None, 3]) == {"chalkboard"}
+    assert _selected_lora_names("not-a-list") == set()
+
+
+@pytest.mark.parametrize("garbage", [None, "strength", float("nan"), True, float("inf")])
+def test_coerce_to_float_defaults_on_garbage(garbage: object) -> None:
+    """Non-numeric, boolean, and non-finite slider payloads mean zero."""
+    assert _coerce_to_float(garbage) == 0.0
+
+
+def test_coerce_to_float_keeps_finite_numbers() -> None:
+    """Genuine slider values pass through untouched."""
+    assert _coerce_to_float(3) == 3.0
+    assert _coerce_to_float(0.85) == 0.85
 
 
 @given(epoch_seconds=st.floats(min_value=0, max_value=4102444800, allow_nan=False))

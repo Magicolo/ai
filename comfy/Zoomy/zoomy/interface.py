@@ -967,14 +967,25 @@ def _render_health_badge(*, is_reachable: bool) -> str:
 
 
 def _selected_lora_names(value: object) -> set[str]:
-    """Extract the checked LoRA display names from a CheckboxGroup payload."""
+    """Extract the checked LoRA display names from a CheckboxGroup payload.
+
+    Only genuine strings are kept: anything else matches no LoRA, so it is
+    dropped rather than stringified into a phantom selection.
+    """
     if isinstance(value, list):
-        return {str(item) for item in value}
+        return {item for item in value if isinstance(item, str)}
     return set()
 
 
 def _coerce_to_float(value: object) -> float:
-    """Coerce a Gradio slider payload to a float, defaulting to zero."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    return 0.0
+    """Coerce a Gradio slider payload to a float, defaulting to zero.
+
+    Booleans and non-finite numbers are payload garbage, not strengths, so
+    they take the documented zero default like every other non-numeric
+    value.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    return float(value)

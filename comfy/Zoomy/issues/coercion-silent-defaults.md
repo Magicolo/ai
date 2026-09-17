@@ -2,7 +2,16 @@
 
 - Severity: low (misconfiguration renders with wrong LoRAs/strengths,
   no error).
-- Status: verified open. `zoomy/interface.py:918-929`.
+- Status: FIXED. Chose the issue's 'documented-default' branch: the pinned
+  property `test_ui_payload_coercions_never_crash` requires both coercions
+  stay total, so semantics were tightened instead of raising —
+  `_selected_lora_names` filters `isinstance(item, str)` (no more
+  `str(None)`/`str(3)` phantom names), `_coerce_to_float` returns the
+  documented 0.0 for bool/non-numeric/non-finite input. Tests:
+  `test_selected_lora_names_keeps_only_strings`,
+  `test_coerce_to_float_defaults_on_garbage`,
+  `test_coerce_to_float_keeps_finite_numbers` (red first on str-ification,
+  NaN/True/inf). `zoomy/interface.py:969-990`.
 
 ## Evidence
 
