@@ -2,7 +2,12 @@
 
 - Severity: low (race on concurrent first-music-render; single-user
   service in practice).
-- Status: verified open. `zoomy/vendor_compat.py:30,44-60,106`.
+- Status: FIXED. `apply_transformers5_compat` now double-checks under a
+  module-level `_APPLIED_PATCHES_LOCK` (fast path avoids the lock once
+  applied); the body moved to `_apply_transformers5_compat_locked`.
+  Test: `test_concurrent_first_calls_wrap_exactly_once` storms the window
+  (start barrier + 1 ms attribute fetches — unwound, the race showed 8
+  wrapper layers in round 0) and asserts exactly one layer every round.
 
 ## Evidence
 

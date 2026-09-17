@@ -24,10 +24,12 @@ clones stay pristine):
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 _TRANSFORMERS_MAJOR_VERSION = 5
 _APPLIED_PATCHES: set[str] = set()
+_APPLIED_PATCHES_LOCK = threading.Lock()
 _CPU_INIT_PATCH = "cpu-init"
 
 
@@ -39,10 +41,20 @@ def apply_transformers5_compat() -> None:
     materialized buffer around ``_move_missing_keys_from_meta_to_device``
     (so valid ``__init__``-computed buffers survive the unconditional
     ``torch.empty_like`` wipe). No-op on transformers 4 or when already
-    applied; safe to call before every music render.
+    applied; safe to call before every music render, including from
+    concurrent first renders (double-checked locking serializes application
+    so the init context is wrapped exactly once).
     """
     if _CPU_INIT_PATCH in _APPLIED_PATCHES:
         return
+    with _APPLIED_PATCHES_LOCK:
+        if _CPU_INIT_PATCH in _APPLIED_PATCHES:
+            return
+        _apply_transformers5_compat_locked()
+
+
+def _apply_transformers5_compat_locked() -> None:
+    """Apply the transformers-5 shims; caller must hold ``_APPLIED_PATCHES_LOCK``."""
     try:
         import transformers  # noqa: PLC0415
         from transformers import PreTrainedModel  # noqa: PLC0415
