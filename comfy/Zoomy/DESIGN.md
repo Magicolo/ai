@@ -338,12 +338,14 @@ transfers still work). `CIVITAI_API_KEY` is only needed for provisioning.
 ## 11. Quality loop (all in-container, zero host deps)
 
 ```bash
-# fix + verify host files through a bind mount (image files are throwaway copies):
-docker compose run --rm --no-deps -v ./Zoomy:/workspace \
-  -e RUFF_CACHE_DIR=/tmp/ruff-cache -e MYPY_CACHE_DIR=/tmp/mypy-cache zoomy sh -c \
-  "cd /workspace && ruff check --fix zoomy tests && ruff format zoomy tests \
-   && ruff check zoomy tests && mypy zoomy tests && python -m pytest -p no:cacheprovider"
+./Zoomy/scripts/quality-gates.sh           # full gates: ruff fix + format + ruff + mypy + pytest
+./Zoomy/scripts/run-tests.sh [-q path]     # test-only iteration, args pass through to pytest
 ```
+
+Both scripts run the gates in-container against the host tree via the
+`./Zoomy` bind mount (image files are throwaway copies) and export
+`RUFF_CACHE_DIR`, `MYPY_CACHE_DIR`, and `HYPOTHESIS_STORAGE_DIRECTORY` to
+`/tmp/...` so no tool residue ever lands in the tree.
 
 Config summary (`pyproject.toml`): ruff `select = ["ALL"]`, line-length 100,
 `target py312`, pydocstyle google; ignores are documented inline (`ANN401`
@@ -351,15 +353,18 @@ untyped JSON payloads, `CPY001` no header policy, `COM812`/`ISC001` formatter
 conflicts, `D203`/`D213` convention conflict, `S104` container bind,
 `TRY003`/`EM101`/`EM102` user-facing messages, `T201` prints (scripts only,
 via per-file ignore); tests additionally ignore `S101`/`PLR2004`).
-mypy `strict = true` with `mypy_path = ["scripts"]` (the provisioner is
-type-checked through its test imports). pytest `testpaths = ["tests"]`,
-`pythonpath = [".", "scripts"]`.
+mypy `strict = true` plus `warn_unused_ignores = true`, with
+`mypy_path = ["scripts"]` (the provisioner is type-checked through its test
+imports). pytest `testpaths = ["tests"]`, `pythonpath = [".", "scripts"]`,
+`addopts = ["-p", "no:cacheprovider", "--strict-markers"]`.
 
 Test layout mirrors the package (`test_settings/engine_protocol/
 family_catalog/final_assembly/frame_repository/local_engine/rendering/
 interface/vendor_compat/download_manifest/download_redirect`, plus
-`conftest.py` with the Hypothesis profile disabling the example database so
-no `.hypothesis/` residue lands in the bind mount). Rendering/engine tests
+`conftest.py` with the Hypothesis profile disabling the example database
+(failures are reported, not replayed; the `constants`/`unicode_data` cache
+still needs `HYPOTHESIS_STORAGE_DIRECTORY=/tmp/...`, which the scripts
+export). Rendering/engine tests
 use fakes over `EngineProtocol`; workflow-equivalent tests assert
 cold/warm starts, LoRA load-once/activate-exactly, crop math, the duration
 formula, and segmentation tiling; interface tests cover the pure

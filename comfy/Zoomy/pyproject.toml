@@ -51,6 +51,7 @@ convention = "google"
 
 [tool.mypy]
 strict = true
+warn_unused_ignores = true
 mypy_path = ["scripts"]
 
 [[tool.mypy.overrides]]
@@ -88,3 +89,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "scripts"]
+# Keep bare `pytest` residue-free and strict: no .pytest_cache writes into the
+# bind-mounted tree, unknown markers are errors rather than silent typos.
+addopts = ["-p", "no:cacheprovider", "--strict-markers"]

@@ -3,4 +3,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.git/
+output/
+*.mp4
+*.flac
+*.wav
+.venv/
+.coverage
 DESIGN.md

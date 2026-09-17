@@ -2,3 +2,12 @@ civit-ai-api-key
 hugging-face-token
 Zoomy/output/*
 !Zoomy/output/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.coverage
+.DS_Store
+Zoomy/.hypothesis/
