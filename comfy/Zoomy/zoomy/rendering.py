@@ -79,6 +79,25 @@ class VideoGenerationOptions:
     max_attempts_per_frame: int = DEFAULT_MAX_ATTEMPTS_PER_FRAME
 
 
+@dataclass(frozen=True, slots=True)
+class LoopOptions:
+    """How :func:`render_loop` bounds one frame loop.
+
+    Attributes:
+        frame_target: Frames to render before stopping; ``None`` renders
+            until a stop request.
+        max_attempts_per_frame: Per-frame retry budget for transient
+            failures; interrupts and configuration errors never retry.
+        stop_event: Flag ending this loop after the current frame;
+            ``None`` keeps the single-session global flag, so loops on
+            separate flags stop independently.
+    """
+
+    frame_target: int | None
+    max_attempts_per_frame: int = DEFAULT_MAX_ATTEMPTS_PER_FRAME
+    stop_event: threading.Event | None = None
+
+
 def request_loop_stop() -> None:
     """Signal a running frame loop to stop after the current frame.
 
@@ -97,6 +116,13 @@ def clear_loop_stop() -> None:
 def is_loop_stop_requested() -> bool:
     """Return True when a graceful loop stop was requested."""
     return _loop_stop_requested.is_set()
+
+
+def _resolve_stop_event(stop_event: threading.Event | None) -> threading.Event:
+    """Return the loop's own stop flag, defaulting to the single-session global."""
+    if stop_event is None:
+        return _loop_stop_requested
+    return stop_event
 
 
 def render_next_frame(
@@ -169,16 +195,14 @@ def render_loop(
     request_factory: Callable[[int], FrameRenderRequest],
     sequence_key: str,
     environment: RenderEnvironment,
-    *,
-    frame_target: int | None,
-    max_attempts_per_frame: int = DEFAULT_MAX_ATTEMPTS_PER_FRAME,
+    options: LoopOptions,
 ) -> Iterator[ProgressUpdate]:
     """Render frames until the target, a stop request, or exhausted retries.
 
     Each iteration builds a fresh request through ``request_factory`` (called
     with the current frame count, so sequences grow across iterations) with a
     fresh random seed. A frame that fails with a transient error is retried
-    up to ``max_attempts_per_frame`` times; user interrupts and engine
+    up to the options' attempt budget; user interrupts and engine
     configuration errors end the loop immediately because retrying them is
     pointless.
 
@@ -191,29 +215,34 @@ def render_loop(
         ValueError: ``max_attempts_per_frame`` is below 1 (zero attempts
             would spin the outer loop forever without rendering).
     """
-    if max_attempts_per_frame < 1:
-        message = f"max_attempts_per_frame must be at least 1, received {max_attempts_per_frame}"
+    if options.max_attempts_per_frame < 1:
+        message = (
+            f"max_attempts_per_frame must be at least 1, received {options.max_attempts_per_frame}"
+        )
         raise ValueError(message)
-    clear_loop_stop()
+    loop_stop = _resolve_stop_event(options.stop_event)
+    loop_stop.clear()
     rendered_frame_count = 0
-    if frame_target is None:
+    if options.frame_target is None:
         yield ProgressUpdate(message="Loop started — rendering until stopped…")
     else:
-        yield ProgressUpdate(message=f"Loop started — rendering {frame_target} frames…")
+        yield ProgressUpdate(message=f"Loop started — rendering {options.frame_target} frames…")
     while True:
-        if is_loop_stop_requested():
+        if loop_stop.is_set():
             yield ProgressUpdate(
                 message=f"Loop stopped after {_pluralize(rendered_frame_count, 'frame')}."
             )
             return
-        if frame_target is not None and rendered_frame_count >= frame_target:
+        if options.frame_target is not None and rendered_frame_count >= options.frame_target:
             yield ProgressUpdate(
                 message=f"Loop target reached after {_pluralize(rendered_frame_count, 'frame')}."
             )
             return
         request = request_factory(environment.repository.frame_count(sequence_key))
         if not (
-            yield from _attempt_frame_with_retries(request, environment, max_attempts_per_frame)
+            yield from _attempt_frame_with_retries(
+                request, environment, options.max_attempts_per_frame
+            )
         ):
             return
         rendered_frame_count += 1
@@ -259,6 +288,8 @@ def generate_video(
     request_factory: Callable[[int], FrameRenderRequest],
     environment: RenderEnvironment,
     options: VideoGenerationOptions,
+    *,
+    stop_event: threading.Event | None = None,
 ) -> Iterator[ProgressUpdate]:
     """Render frames until a duration target or a stop, then finalize.
 
@@ -267,6 +298,8 @@ def generate_video(
     loop so the interpolated video covers the duration (``None`` renders
     until stopped), and the finalize stages run automatically — after a
     reached target always, after a manual stop only when the options ask.
+    ``stop_event`` scopes the graceful stop to this generation; ``None``
+    keeps the single-session global flag.
 
     Yields:
         ProgressUpdate: The nested loop updates followed by the nested
@@ -297,14 +330,17 @@ def generate_video(
         request_factory,
         sequence_key,
         environment,
-        frame_target=frame_target,
-        max_attempts_per_frame=options.max_attempts_per_frame,
+        LoopOptions(
+            frame_target=frame_target,
+            max_attempts_per_frame=options.max_attempts_per_frame,
+            stop_event=stop_event,
+        ),
     )
     frame_count = environment.repository.frame_count(sequence_key)
     if frame_count < 1:
         yield ProgressUpdate(message="No frames rendered — nothing to finalize.")
         return
-    if is_loop_stop_requested() and not options.finalize_on_stop:
+    if _resolve_stop_event(stop_event).is_set() and not options.finalize_on_stop:
         yield ProgressUpdate(
             message=(
                 f"Loop stopped with {frame_count} frames — video not "

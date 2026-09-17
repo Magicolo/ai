@@ -1,8 +1,11 @@
 # Loop stop flag is global across sessions
 
 - Severity: low (documented single-user assumption; breaks multi-user).
-- Status: verified open, documented. `zoomy/rendering.py:48,82-99`,
-  `zoomy/main.py:26`, `zoomy/interface.py` loop wiring.
+- Status: FIXED. `render_loop`/`generate_video` take an optional
+  keyword-only `stop_event` (resolved via `_resolve_stop_event`, defaulting
+  to the single-session global, so the interface is untouched and behavior
+  is unchanged). Test: `test_concurrent_loops_stop_independently` drives
+  two loops on separate flags — stopping one leaves the other rendering.
 
 ## Evidence
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,6 +20,7 @@ from zoomy.errors import (
 from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository
 from zoomy.rendering import (
+    LoopOptions,
     RenderEnvironment,
     VideoGenerationOptions,
     clear_loop_stop,
@@ -226,8 +228,10 @@ def _drain_loop(
         _counted_request_factory(),
         "z_image",
         environment,
-        frame_target=frame_target,
-        max_attempts_per_frame=max_attempts_per_frame,
+        LoopOptions(
+            frame_target=frame_target,
+            max_attempts_per_frame=max_attempts_per_frame,
+        ),
     )
     return [update.message for update in updates]
 
@@ -243,8 +247,7 @@ def test_render_loop_rejects_zero_attempts(tmp_path: Path) -> None:
                 _counted_request_factory(),
                 "z_image",
                 environment,
-                frame_target=1,
-                max_attempts_per_frame=0,
+                LoopOptions(frame_target=1, max_attempts_per_frame=0),
             )
         )
 
@@ -272,6 +275,35 @@ def test_render_loop_stops_at_the_frame_target(tmp_path: Path) -> None:
     assert messages[-1] == "Loop target reached after 2 frames."
 
 
+def test_concurrent_loops_stop_independently(tmp_path: Path) -> None:
+    """Stopping one loop's flag leaves a loop on another flag running."""
+    first_environment = _test_environment(ScriptedEngine(), FrameRepository(tmp_path / "first"))
+    second_environment = _test_environment(ScriptedEngine(), FrameRepository(tmp_path / "second"))
+    factory = _counted_request_factory()
+    first_stop = threading.Event()
+    second_stop = threading.Event()
+    first_loop = render_loop(
+        factory, "z_image", first_environment, LoopOptions(frame_target=None, stop_event=first_stop)
+    )
+    second_loop = render_loop(
+        factory,
+        "z_image",
+        second_environment,
+        LoopOptions(frame_target=None, stop_event=second_stop),
+    )
+    assert next(first_loop).message == "Loop started — rendering until stopped…"
+    assert next(second_loop).message == "Loop started — rendering until stopped…"
+    for _ in range(3):
+        next(first_loop)
+        next(second_loop)
+    first_stop.set()
+    first_messages = [update.message for update in first_loop]
+    assert first_messages[-1] == "Loop stopped after 1 frame."
+    second_messages = [next(second_loop).message for _ in range(3)]
+    assert not any("Loop stopped" in message for message in second_messages)
+    assert second_environment.repository.frame_count("z_image") == 2
+
+
 def test_render_loop_stops_gracefully_on_request(tmp_path: Path) -> None:
     """A stop requested mid-loop finishes the running frame, then exits."""
     repository = _repository_with_frames(tmp_path, frame_count=0)
@@ -292,7 +324,7 @@ def test_render_loop_stops_gracefully_on_request(tmp_path: Path) -> None:
             stopping_factory,
             "z_image",
             environment,
-            frame_target=None,
+            LoopOptions(frame_target=None),
         )
     )
     clear_loop_stop()
