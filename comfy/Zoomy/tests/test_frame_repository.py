@@ -42,12 +42,10 @@ def _write_file(path: Path, *, modification_time: float | None = None) -> None:
 def test_frame_count_and_latest_frame(tmp_path: Path) -> None:
     """Counts and newest frame follow zero-padded filename order."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00001_.png")
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00002_.png")
+    _write_file(tmp_path / "z_image" / "frame_00001_.png")
+    _write_file(tmp_path / "z_image" / "frame_00002_.png")
     assert repository.frame_count("z_image") == 2
-    assert repository.latest_frame_path("z_image") == (
-        tmp_path / "Zoomy" / "z_image" / "frame_00002_.png"
-    )
+    assert repository.latest_frame_path("z_image") == (tmp_path / "z_image" / "frame_00002_.png")
 
 
 def test_empty_sequence_reports_zero_and_none(tmp_path: Path) -> None:
@@ -74,35 +72,44 @@ def test_save_next_frame_numbers_sequentially(tmp_path: Path) -> None:
 def test_clear_frames_removes_the_sequence_directory(tmp_path: Path) -> None:
     """Clearing deletes the whole sequence folder and resets the count."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00001_.png")
+    _write_file(tmp_path / "z_image" / "frame_00001_.png")
     repository.clear_frames("z_image")
     assert repository.frame_count("z_image") == 0
-    assert not (tmp_path / "Zoomy" / "z_image").exists()
+    assert not (tmp_path / "z_image").exists()
 
 
 def test_latest_video_prefers_the_audio_muxed_twin(tmp_path: Path) -> None:
     """The twin carries the soundtrack, so it wins over a newer silent file."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_00001.mp4", modification_time=100.0)
-    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4", modification_time=150.0)
-    _write_file(tmp_path / "Zoomy_z_image_00002.mp4", modification_time=200.0)
-    assert repository.latest_video_path("z_image") == (tmp_path / "Zoomy_z_image_00001-audio.mp4")
+    _write_file(tmp_path / "z_image_00001.mp4", modification_time=100.0)
+    _write_file(tmp_path / "z_image_00001-audio.mp4", modification_time=150.0)
+    _write_file(tmp_path / "z_image_00002.mp4", modification_time=200.0)
+    assert repository.latest_video_path("z_image") == (tmp_path / "z_image_00001-audio.mp4")
 
 
 def test_latest_video_falls_back_to_the_silent_file(tmp_path: Path) -> None:
     """Without any twin the newest main file is returned."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_00001.mp4", modification_time=100.0)
-    _write_file(tmp_path / "Zoomy_z_image_00002.mp4", modification_time=200.0)
-    assert repository.latest_video_path("z_image") == tmp_path / "Zoomy_z_image_00002.mp4"
+    _write_file(tmp_path / "z_image_00001.mp4", modification_time=100.0)
+    _write_file(tmp_path / "z_image_00002.mp4", modification_time=200.0)
+    assert repository.latest_video_path("z_image") == tmp_path / "z_image_00002.mp4"
+
+
+def test_latest_video_ignores_segment_twins(tmp_path: Path) -> None:
+    """Segment window twins never pose as the finished video."""
+    repository = FrameRepository(tmp_path)
+    _write_file(tmp_path / "z_image_00001.mp4", modification_time=100.0)
+    _write_file(tmp_path / "z_image_00001-audio.mp4", modification_time=150.0)
+    _write_file(tmp_path / "z_image_seg000_music_00001-audio.mp4", modification_time=300.0)
+    assert repository.latest_video_path("z_image") == (tmp_path / "z_image_00001-audio.mp4")
 
 
 def test_sequences_are_isolated_by_key(tmp_path: Path) -> None:
     """Frames of one sequence never count toward another."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy" / "ernie_turbo" / "frame_00001_.png")
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00001_.png")
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00002_.png")
+    _write_file(tmp_path / "ernie_turbo" / "frame_00001_.png")
+    _write_file(tmp_path / "z_image" / "frame_00001_.png")
+    _write_file(tmp_path / "z_image" / "frame_00002_.png")
     assert repository.frame_count("ernie_turbo") == 1
     assert repository.frame_count("z_image") == 2
 
@@ -112,7 +119,7 @@ def test_frame_inventory_scales(frame_count: int) -> None:
     """Any number of zero-padded frames counts and reports consistently."""
     with temporary_repository() as (repository, output_directory):
         for number in range(1, frame_count + 1):
-            _write_file(output_directory / "Zoomy" / "z_image" / f"frame_{number:05d}_.png")
+            _write_file(output_directory / "z_image" / f"frame_{number:05d}_.png")
         assert repository.frame_count("z_image") == frame_count
         statistics = repository.sequence_statistics("z_image")
         assert statistics.frame_count == frame_count
@@ -130,7 +137,7 @@ def test_recent_frame_limit_is_honored(frame_count: int, limit: int) -> None:
     """The recent strip holds at most the requested limit, newest last."""
     with temporary_repository() as (repository, output_directory):
         for number in range(1, frame_count + 1):
-            _write_file(output_directory / "Zoomy" / "z_image" / f"frame_{number:05d}_.png")
+            _write_file(output_directory / "z_image" / f"frame_{number:05d}_.png")
         statistics = repository.sequence_statistics("z_image", recent_frame_limit=limit)
         assert len(statistics.recent_frame_paths) == min(frame_count, limit)
         names = [path.name for path in statistics.recent_frame_paths]
@@ -152,22 +159,22 @@ def test_newest_video_wins(modification_times: list[int]) -> None:
     with temporary_repository() as (repository, output_directory):
         for index, modified in enumerate(modification_times):
             _write_file(
-                output_directory / f"Zoomy_z_image_{index:05d}.mp4",
+                output_directory / f"z_image_{index:05d}.mp4",
                 modification_time=modified,
             )
         expected = max(range(len(modification_times)), key=modification_times.__getitem__)
         assert repository.latest_video_path("z_image") == (
-            output_directory / f"Zoomy_z_image_{expected:05d}.mp4"
+            output_directory / f"z_image_{expected:05d}.mp4"
         )
 
 
 def test_sequence_statistics_summarizes_frames_and_video(tmp_path: Path) -> None:
     """One call reports counts, bytes, recent paths, and video details."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00001_.png")
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00002_.png")
-    _write_file(tmp_path / "Zoomy" / "z_image" / "frame_00003_.png")
-    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4", modification_time=200.0)
+    _write_file(tmp_path / "z_image" / "frame_00001_.png")
+    _write_file(tmp_path / "z_image" / "frame_00002_.png")
+    _write_file(tmp_path / "z_image" / "frame_00003_.png")
+    _write_file(tmp_path / "z_image_00001-audio.mp4", modification_time=200.0)
     statistics = repository.sequence_statistics("z_image", recent_frame_limit=2)
     assert statistics.sequence_key == "z_image"
     assert statistics.frame_count == 3
@@ -176,7 +183,7 @@ def test_sequence_statistics_summarizes_frames_and_video(tmp_path: Path) -> None
         "frame_00002_.png",
         "frame_00003_.png",
     ]
-    assert statistics.video_path == tmp_path / "Zoomy_z_image_00001-audio.mp4"
+    assert statistics.video_path == tmp_path / "z_image_00001-audio.mp4"
     assert statistics.video_bytes == len(b"stub")
     assert statistics.video_modified_timestamp == 200.0
 
@@ -198,20 +205,20 @@ def test_segment_twin_paths_resolves_the_newest_music_and_effects_twins(
 ) -> None:
     """Each window's two soundtrack twins resolve independently by recency."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00001-audio.mp4", modification_time=100.0)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00002-audio.mp4", modification_time=200.0)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_sfx_00001-audio.mp4", modification_time=150.0)
+    _write_file(tmp_path / "z_image_seg002_music_00001-audio.mp4", modification_time=100.0)
+    _write_file(tmp_path / "z_image_seg002_music_00002-audio.mp4", modification_time=200.0)
+    _write_file(tmp_path / "z_image_seg002_sfx_00001-audio.mp4", modification_time=150.0)
     twins = repository.segment_twin_paths("z_image", 2)
     assert twins == (
-        tmp_path / "Zoomy_z_image_seg002_music_00002-audio.mp4",
-        tmp_path / "Zoomy_z_image_seg002_sfx_00001-audio.mp4",
+        tmp_path / "z_image_seg002_music_00002-audio.mp4",
+        tmp_path / "z_image_seg002_sfx_00001-audio.mp4",
     )
 
 
 def test_segment_twin_paths_needs_both_stems(tmp_path: Path) -> None:
     """A window with only one rendered twin is not ready for assembly."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_music_00001-audio.mp4")
+    _write_file(tmp_path / "z_image_seg002_music_00001-audio.mp4")
     assert repository.segment_twin_paths("z_image", 2) is None
     assert repository.segment_twin_paths("z_image", 3) is None
 
@@ -219,13 +226,13 @@ def test_segment_twin_paths_needs_both_stems(tmp_path: Path) -> None:
 def test_segment_stem_paths_resolves_the_newest_flac_stems(tmp_path: Path) -> None:
     """Each window's two overlap stems resolve independently by recency."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_music_stem.flac", modification_time=100.0)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_music_stem_00001.flac", modification_time=200.0)
-    _write_file(tmp_path / "Zoomy_z_image_seg002_sfx_stem.flac", modification_time=150.0)
+    _write_file(tmp_path / "z_image_seg002_music_stem.flac", modification_time=100.0)
+    _write_file(tmp_path / "z_image_seg002_music_stem_00001.flac", modification_time=200.0)
+    _write_file(tmp_path / "z_image_seg002_sfx_stem.flac", modification_time=150.0)
     stems = repository.segment_stem_paths("z_image", 2)
     assert stems == (
-        tmp_path / "Zoomy_z_image_seg002_music_stem_00001.flac",
-        tmp_path / "Zoomy_z_image_seg002_sfx_stem.flac",
+        tmp_path / "z_image_seg002_music_stem_00001.flac",
+        tmp_path / "z_image_seg002_sfx_stem.flac",
     )
     assert repository.segment_stem_paths("z_image", 3) is None
 
@@ -233,34 +240,34 @@ def test_segment_stem_paths_resolves_the_newest_flac_stems(tmp_path: Path) -> No
 def test_next_video_stem_continues_the_main_sequence(tmp_path: Path) -> None:
     """Assembly names follow the VHS counter, skipping twins and segments."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_00001.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_00002.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001-audio.mp4")
-    assert repository.next_video_stem("z_image") == "Zoomy_z_image_00003"
+    _write_file(tmp_path / "z_image_00001.mp4")
+    _write_file(tmp_path / "z_image_00001-audio.mp4")
+    _write_file(tmp_path / "z_image_00002.mp4")
+    _write_file(tmp_path / "z_image_seg000_music_00001-audio.mp4")
+    assert repository.next_video_stem("z_image") == "z_image_00003"
 
 
 def test_next_video_stem_starts_a_fresh_sequence(tmp_path: Path) -> None:
     """No previous videos means the first counter, matching VHS numbering."""
     repository = FrameRepository(tmp_path)
-    assert repository.next_video_stem("z_image") == "Zoomy_z_image_00001"
+    assert repository.next_video_stem("z_image") == "z_image_00001"
 
 
 def test_remove_segment_files_deletes_only_segments(tmp_path: Path) -> None:
     """Post-mux cleanup removes every intermediate kind and reports the count."""
     repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001-audio.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_seg000_sfx_00001.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_seg000_music_stem.flac")
-    _write_file(tmp_path / "Zoomy_z_image_seg000_music_00001.png")
-    _write_file(tmp_path / "Zoomy_z_image_00001.mp4")
-    _write_file(tmp_path / "Zoomy_z_image_00001-audio.mp4")
+    _write_file(tmp_path / "z_image_seg000_music_00001-audio.mp4")
+    _write_file(tmp_path / "z_image_seg000_sfx_00001.mp4")
+    _write_file(tmp_path / "z_image_seg000_music_stem.flac")
+    _write_file(tmp_path / "z_image_seg000_music_00001.png")
+    _write_file(tmp_path / "z_image_00001.mp4")
+    _write_file(tmp_path / "z_image_00001-audio.mp4")
     assert repository.remove_segment_files("z_image") == 4
-    assert (tmp_path / "Zoomy_z_image_00001.mp4").exists()
-    assert (tmp_path / "Zoomy_z_image_00001-audio.mp4").exists()
+    assert (tmp_path / "z_image_00001.mp4").exists()
+    assert (tmp_path / "z_image_00001-audio.mp4").exists()
 
 
 def test_assembly_directory_lives_beside_the_sequence(tmp_path: Path) -> None:
     """Scratch waves and concat lists stay inside the zoomy output tree."""
     repository = FrameRepository(tmp_path)
-    assert repository.assembly_directory("z_image") == (tmp_path / "Zoomy" / "z_image_assembly")
+    assert repository.assembly_directory("z_image") == (tmp_path / "z_image_assembly")

@@ -23,6 +23,7 @@ from zoomy.engine_protocol import (
     FrameRenderRequest,
     ProgressUpdate,
     compute_audio_seconds,
+    compute_frames_for_seconds,
     compute_interpolated_frame_count,
     compute_segment_music_seconds,
     compute_segment_sound_seconds,
@@ -118,6 +119,8 @@ def test_request_dataclasses_carry_no_backend_fields() -> None:
         seed=7,
     )
     assert frame_request.frame_count == 3
+    assert frame_request.frame_width == FRAME_WIDTH_PIXELS
+    assert frame_request.frame_height == FRAME_HEIGHT_PIXELS
     finalize_request = FinalizeRequest(family=family, frame_count=3)
     assert finalize_request.frame_count == 3
     update = ProgressUpdate(message="done")
@@ -125,3 +128,30 @@ def test_request_dataclasses_carry_no_backend_fields() -> None:
     assert update.video_path is None
     assert update.elapsed_seconds is None
     assert INTERPOLATION_MULTIPLIER == 4
+
+
+def test_frames_for_seconds_hits_the_duration() -> None:
+    """81 source frames interpolate to 321 frames: 10.03 s at 32 fps."""
+    assert compute_frames_for_seconds(10.0) == 81
+    assert compute_frames_for_seconds(1.0) == 9
+    assert compute_frames_for_seconds(0.5) == 5
+
+
+def test_frames_for_seconds_rejects_non_positive_durations() -> None:
+    """Zero or negative durations cannot size a sequence."""
+    with pytest.raises(ValueError, match="positive"):
+        compute_frames_for_seconds(0.0)
+    with pytest.raises(ValueError, match="positive"):
+        compute_frames_for_seconds(-2.5)
+
+
+@given(target_seconds=st.floats(min_value=0.001, max_value=3600, allow_nan=False))
+def test_frames_for_seconds_is_minimal(target_seconds: float) -> None:
+    """The count is the smallest whose interpolated video covers the target."""
+    frame_count = compute_frames_for_seconds(target_seconds)
+    assert compute_interpolated_frame_count(frame_count) / VIDEO_FRAMES_PER_SECOND >= target_seconds
+    if frame_count > 1:
+        assert (
+            compute_interpolated_frame_count(frame_count - 1) / VIDEO_FRAMES_PER_SECOND
+            < target_seconds
+        )

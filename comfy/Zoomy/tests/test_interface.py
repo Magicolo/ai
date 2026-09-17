@@ -21,12 +21,13 @@ from zoomy.interface import (
     _append_log_entry,
     _as_durations,
     _as_string_list,
+    _coerce_frame_size,
     _coerce_to_float,
     _draw_family_panel,
     _format_bytes,
     _format_timestamp,
-    _parse_frame_target,
     _parse_panel_submission,
+    _parse_target_seconds,
     _record_frame_duration,
     _render_statistics_line,
     _selected_lora_names,
@@ -59,7 +60,7 @@ def _example_statistics(tmp_path: Path) -> SequenceStatistics:
         frame_count=2,
         frames_bytes=2048,
         recent_frame_paths=(),
-        video_path=tmp_path / "Zoomy_z_image_00001-audio.mp4",
+        video_path=tmp_path / "z_image_00001-audio.mp4",
         video_bytes=4096,
         video_modified_timestamp=200.0,
     )
@@ -146,7 +147,7 @@ def test_render_statistics_line_shows_everything(tmp_path: Path) -> None:
     assert "2.0 KiB" in line
     assert "last frame 13 s" in line
     assert "avg 13.5 s" in line
-    assert "Zoomy_z_image_00001-audio.mp4" in line
+    assert "z_image_00001-audio.mp4" in line
     assert "4.0 KiB" in line
     assert "8.4 / 14.9 GiB" in line
     assert "11.2 / 29.8 GiB" in line
@@ -193,22 +194,32 @@ def test_parse_panel_submission_without_negative_prompt() -> None:
     assert submission.consumed_count == 3
 
 
-def test_parse_frame_target_accepts_only_positive_counts() -> None:
-    """Blank, zero, negative, and non-numeric targets all mean infinite."""
-    assert _parse_frame_target(None) is None
-    assert _parse_frame_target(0) is None
-    assert _parse_frame_target(-3) is None
-    assert _parse_frame_target(value=True) is None
-    assert _parse_frame_target("many") is None
-    assert _parse_frame_target(2.7) == 2
-    assert _parse_frame_target(3) == 3
+def test_parse_target_seconds_accepts_only_positive_durations() -> None:
+    """Blank, zero, negative, and non-numeric durations all mean unlimited."""
+    assert _parse_target_seconds(None) is None
+    assert _parse_target_seconds(0) is None
+    assert _parse_target_seconds(-2.5) is None
+    assert _parse_target_seconds(value=True) is None
+    assert _parse_target_seconds("long") is None
+    assert _parse_target_seconds(2.5) == 2.5
+    assert _parse_target_seconds(10) == 10.0
 
 
-def test_parse_frame_target_rejects_non_finite_numbers() -> None:
-    """Infinities and NaN mean infinite instead of crashing int()."""
-    assert _parse_frame_target(float("inf")) is None
-    assert _parse_frame_target(float("-inf")) is None
-    assert _parse_frame_target(float("nan")) is None
+def test_parse_target_seconds_rejects_non_finite_numbers() -> None:
+    """Infinities and NaN mean unlimited instead of sizing an endless loop."""
+    assert _parse_target_seconds(float("inf")) is None
+    assert _parse_target_seconds(float("-inf")) is None
+    assert _parse_target_seconds(float("nan")) is None
+
+
+def test_coerce_frame_size_falls_back_to_the_default() -> None:
+    """Blank or garbage geometry restores the default; counts pass through."""
+    assert _coerce_frame_size(None, 1376) == 1376
+    assert _coerce_frame_size(0, 1376) == 1376
+    assert _coerce_frame_size("wide", 1376) == 1376
+    assert _coerce_frame_size(value=True, default_pixels=1376) == 1376
+    assert _coerce_frame_size(512, 1376) == 512
+    assert _coerce_frame_size(512.9, 1376) == 512
 
 
 def test_append_log_entry_trims_and_shows_the_tail() -> None:
@@ -305,15 +316,13 @@ def test_panel_submission_roundtrip(data: st.DataObject) -> None:
 
 
 @given(value=st.integers() | st.floats() | st.text(max_size=30) | st.booleans() | st.none())
-def test_parse_frame_target_contract(value: object) -> None:
-    """Targets are positive ints or None; nothing else escapes, nothing crashes."""
-    target = _parse_frame_target(value)
+def test_parse_target_seconds_contract(value: object) -> None:
+    """Durations are positive floats or None; nothing else escapes, nothing crashes."""
+    target = _parse_target_seconds(value)
     if isinstance(value, bool):
         assert target is None
-    elif isinstance(value, int) and value >= 1:
-        assert target == value
-    elif isinstance(value, float) and math.isfinite(value) and value >= 1:
-        assert target == int(value)
+    elif isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+        assert target == float(value)
     else:
         assert target is None
 
@@ -369,6 +378,7 @@ def _test_wiring(tmp_path: Path) -> FamilyPanelWiring:
         preview_image=gr.Image(),
         stats_line=gr.Markdown(),
         gallery=gr.Gallery(),
+        preview_video=gr.Video(),
         durations_state=gr.State(value=(0, 0.0, 0.0)),
     )
 

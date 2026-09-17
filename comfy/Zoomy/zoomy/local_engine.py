@@ -37,11 +37,9 @@ from zoomy.engine_protocol import (
     ACE_LANGUAGE_BACKEND,
     ACE_LANGUAGE_MODEL_NAME,
     CROP_BORDER_PIXELS,
-    CROP_HEIGHT_PIXELS,
-    CROP_WIDTH_PIXELS,
-    FRAME_HEIGHT_PIXELS,
-    FRAME_WIDTH_PIXELS,
+    FRAME_SIZE_ALIGNMENT_PIXELS,
     INTERPOLATION_MULTIPLIER,
+    MINIMUM_FRAMES_FOR_INTERPOLATION,
     MINIMUM_SYNC_FRAMES,
     MUSIC_BEATS_PER_MINUTE,
     MUSIC_SEED,
@@ -211,20 +209,54 @@ class LocalEngine:
 
         Raises:
             EngineConfigurationError: A model, seed, or source file is
-                missing, or the family has no engine recipe.
+                missing, the frame size breaks alignment, or the family has
+                no engine recipe.
             EngineExecutionError: A generation stage failed.
             RenderInterruptedError: An interrupt was requested mid-render.
         """
         self._interrupt.clear()
+        self._validate_frame_size(request)
         renderer = self._frame_renderer(request.family.key)
         try:
             source_image = self._load_source_image(request)
-            return renderer(request, source_image)
+            return run_stage_with_retries(
+                "frame",
+                lambda: renderer(request, source_image),
+                evict_resident_stacks=self._evict_all_stacks,
+            )
         except (RenderInterruptedError, EngineConfigurationError, EngineExecutionError):
             raise
         except Exception as failure:
             message = f"Frame render failed: {failure}"
             raise EngineExecutionError("frame", message) from failure
+
+    @staticmethod
+    def _validate_frame_size(request: FrameRenderRequest) -> None:
+        """Refuse frame sizes the autoencoders cannot encode.
+
+        Both VAE families downsample in powers of two, so each side must be
+        a positive multiple of 16 (the HD default and 512-coding sizes pass).
+        """
+        for label, size in (("width", request.frame_width), ("height", request.frame_height)):
+            if size <= 0 or size % FRAME_SIZE_ALIGNMENT_PIXELS != 0:
+                message = (
+                    f"Frame {label} must be a positive multiple of "
+                    f"{FRAME_SIZE_ALIGNMENT_PIXELS}, received {size}"
+                )
+                raise EngineConfigurationError(message)
+
+    def _evict_all_stacks(self) -> None:
+        """Drop every resident stack so a retried stage finds a free card.
+
+        The frame pipeline rebuilds lazily on the next render; evicting it
+        too covers OOMs where the diffusion weights themselves fragment the
+        allocator.
+        """
+        self._frame_pipeline = None
+        self._rife_model = None
+        self._music_stack = None
+        self._effects_stack = None
+        _collect_free_video_memory()
 
     def _frame_renderer(self, family_key: str) -> Callable[[FrameRenderRequest, Image], Image]:
         """Return the frame recipe for a family, refusing unknown keys."""
@@ -338,7 +370,7 @@ class LocalEngine:
         else:
             music_seconds = video_seconds
             sound_seconds = video_seconds
-        segment_stem = f"Zoomy_{sequence_key}_seg{window.index:03d}"
+        segment_stem = f"{sequence_key}_seg{window.index:03d}"
         work_directory = self._repository.assembly_directory(sequence_key)
         work_directory.mkdir(parents=True, exist_ok=True)
         silent_video_path = work_directory / f"seg{window.index:03d}_silent.mp4"
@@ -346,48 +378,57 @@ class LocalEngine:
         sound_stem_path = self._repository.output_directory / f"{segment_stem}{_SOUND_STEM_SUFFIX}"
         music_twin_path = self._repository.output_directory / f"{segment_stem}{_MUSIC_TWIN_SUFFIX}"
         sound_twin_path = self._repository.output_directory / f"{segment_stem}{_SOUND_TWIN_SUFFIX}"
-        try:
-            from PIL import Image as PillowImage  # noqa: PLC0415
 
-            source_frames = [PillowImage.open(path).convert("RGB") for path in frame_paths]
-            interpolated_frames = self._interpolate_frames(source_frames)
-            _write_silent_video(interpolated_frames, silent_video_path)
-            self._render_music(
-                family.music_prompt,
-                music_seconds,
-                music_stem_path,
-                seed=MUSIC_SEED + window.index,
+        def render_window() -> SegmentSoundtrack:
+            """Run this window's interpolation, stems, and twins."""
+            try:
+                from PIL import Image as PillowImage  # noqa: PLC0415
+
+                source_frames = [PillowImage.open(path).convert("RGB") for path in frame_paths]
+                interpolated_frames = self._interpolate_frames(source_frames)
+                _write_silent_video(interpolated_frames, silent_video_path)
+                self._render_music(
+                    family.music_prompt,
+                    music_seconds,
+                    music_stem_path,
+                    seed=MUSIC_SEED + window.index,
+                )
+                self._render_sound_effects(
+                    family.sound_effect_prompt,
+                    family.sound_effect_negative_prompt,
+                    interpolated_frames,
+                    sound_seconds,
+                    sound_stem_path,
+                )
+                _mux_audio_twin(silent_video_path, music_stem_path, music_twin_path)
+                _mux_audio_twin(silent_video_path, sound_stem_path, sound_twin_path)
+                silent_video_path.unlink(missing_ok=True)
+            except (
+                RenderInterruptedError,
+                EngineConfigurationError,
+                EngineExecutionError,
+                AssemblyError,
+            ):
+                raise
+            except Exception as failure:
+                message = f"Segment {window.index} failed: {failure}"
+                raise EngineExecutionError(f"segment-{window.index}", message) from failure
+            _verify_segment_artifacts(
+                window.index,
+                (music_twin_path, sound_twin_path, music_stem_path, sound_stem_path),
             )
-            self._render_sound_effects(
-                family.sound_effect_prompt,
-                family.sound_effect_negative_prompt,
-                interpolated_frames,
-                sound_seconds,
-                sound_stem_path,
+            return SegmentSoundtrack(
+                music_video_path=music_twin_path,
+                music_stem_path=music_stem_path,
+                sound_effect_stem_path=sound_stem_path,
+                music_seconds=music_seconds,
+                sound_effect_seconds=sound_seconds,
             )
-            _mux_audio_twin(silent_video_path, music_stem_path, music_twin_path)
-            _mux_audio_twin(silent_video_path, sound_stem_path, sound_twin_path)
-            silent_video_path.unlink(missing_ok=True)
-        except (
-            RenderInterruptedError,
-            EngineConfigurationError,
-            EngineExecutionError,
-            AssemblyError,
-        ):
-            raise
-        except Exception as failure:
-            message = f"Segment {window.index} failed: {failure}"
-            raise EngineExecutionError(f"segment-{window.index}", message) from failure
-        _verify_segment_artifacts(
-            window.index,
-            (music_twin_path, sound_twin_path, music_stem_path, sound_stem_path),
-        )
-        return SegmentSoundtrack(
-            music_video_path=music_twin_path,
-            music_stem_path=music_stem_path,
-            sound_effect_stem_path=sound_stem_path,
-            music_seconds=music_seconds,
-            sound_effect_seconds=sound_seconds,
+
+        return run_stage_with_retries(
+            f"segment-{window.index}",
+            render_window,
+            evict_resident_stacks=self._evict_all_stacks,
         )
 
     def _load_source_image(self, request: FrameRenderRequest) -> Image:
@@ -410,20 +451,24 @@ class LocalEngine:
         return PillowImage.open(latest_path).convert("RGB")
 
     @staticmethod
-    def _zoomed_frame(source_image: Image) -> Image:
-        """Crop the centered dive window and rescale it back to full size."""
+    def _zoomed_frame(source_image: Image, frame_width: int, frame_height: int) -> Image:
+        """Crop the centered dive window and rescale it back to full size.
+
+        The 10 px border rule that centers the dive at HD scales down with
+        the request: the crop keeps a 10 px margin while the frame stays
+        larger than twice the margin, shrinking proportionally below that.
+        """
+        border = min(CROP_BORDER_PIXELS, frame_width // 4, frame_height // 4)
         crop_box = (
-            CROP_BORDER_PIXELS,
-            CROP_BORDER_PIXELS,
-            CROP_BORDER_PIXELS + CROP_WIDTH_PIXELS,
-            CROP_BORDER_PIXELS + CROP_HEIGHT_PIXELS,
+            border,
+            border,
+            frame_width - border,
+            frame_height - border,
         )
         cropped = source_image.crop(crop_box)
         from PIL import Image as PillowImage  # noqa: PLC0415
 
-        return cropped.resize(
-            (FRAME_WIDTH_PIXELS, FRAME_HEIGHT_PIXELS), PillowImage.Resampling.BICUBIC
-        )
+        return cropped.resize((frame_width, frame_height), PillowImage.Resampling.BICUBIC)
 
     def _render_ernie_frame(self, request: FrameRenderRequest, source_image: Image) -> Image:
         """Run the Ernie custom img2img loop (TXT2IMG-only pipeline).
@@ -441,7 +486,7 @@ class LocalEngine:
         pipeline = loaded.pipeline
         device = torch.device(self._device)
         generator = torch.Generator(device=self._device).manual_seed(request.seed)
-        frame = self._zoomed_frame(source_image)
+        frame = self._zoomed_frame(source_image, request.frame_width, request.frame_height)
         try:
             with torch.no_grad():
                 # Private diffusers helpers: the Ernie pipeline exposes no
@@ -513,13 +558,13 @@ class LocalEngine:
         loaded = self._frame_pipeline_for(request)
         pipeline = loaded.pipeline
         generator = torch.Generator(device=self._device).manual_seed(request.seed)
-        frame = self._zoomed_frame(source_image)
+        frame = self._zoomed_frame(source_image, request.frame_width, request.frame_height)
         call: dict[str, Any] = {
             "prompt": request.prompt,
             "image": frame,
             "strength": request.family.denoise_strength,
-            "height": FRAME_HEIGHT_PIXELS,
-            "width": FRAME_WIDTH_PIXELS,
+            "height": request.frame_height,
+            "width": request.frame_width,
             "num_inference_steps": request.family.sampler_steps,
             "guidance_scale": request.family.classifier_free_guidance,
             "generator": generator,
@@ -710,7 +755,14 @@ class LocalEngine:
         return pipeline
 
     def _interpolate_frames(self, source_frames: list[Image]) -> list[Any]:
-        """Expand frames 4x with RIFE recursive bisection (depth 2)."""
+        """Expand frames 4x with RIFE recursive bisection (depth 2).
+
+        Fewer than two frames have no pairs to bisect, so they pass through
+        unchanged (the retired FILM node behaved the same); this also skips
+        the pointless RIFE download for single-frame sequences.
+        """
+        if len(source_frames) < MINIMUM_FRAMES_FOR_INTERPOLATION:
+            return list(source_frames)
         import numpy as np  # noqa: PLC0415
         from ccvfi import AutoModel, ConfigType  # noqa: PLC0415
 
@@ -1175,14 +1227,68 @@ def _collect_free_video_memory() -> None:
         torch.cuda.empty_cache()
 
 
+# Attempts per generation stage before a CUDA out-of-memory gives up: each
+# retry first evicts every resident stack, so transient fragmentation clears
+# while a genuinely oversized job still fails fast enough to read about.
+MAXIMUM_STAGE_ATTEMPTS = 3
+
+
+def _is_out_of_memory(failure: Exception) -> bool:
+    """Detect a CUDA OOM without importing torch.
+
+    The heavy stack stays behind lazy imports (the slim test image has no
+    torch), so detection matches the exception shape instead: torch raises
+    ``OutOfMemoryError`` with an "out of memory" message on every backend.
+    """
+    return type(failure).__name__ == "OutOfMemoryError" or ("out of memory" in str(failure).lower())
+
+
+def run_stage_with_retries[StageResultT](
+    stage_name: str,
+    operation: Callable[[], StageResultT],
+    *,
+    max_attempts: int = MAXIMUM_STAGE_ATTEMPTS,
+    evict_resident_stacks: Callable[[], None],
+) -> StageResultT:
+    """Run one generation stage, retrying CUDA out-of-memory after eviction.
+
+    Every attempt runs ``operation``; when it dies with an OOM the resident
+    stacks are evicted (returning their VRAM) and the stage runs again.
+    Interrupts and configuration errors propagate immediately — retrying a
+    stop request or a bad request is pointless — as does any non-memory
+    failure, which eviction cannot fix.
+
+    Raises:
+        ValueError: ``max_attempts`` is below 1.
+    """
+    if max_attempts < 1:
+        message = f"max_attempts must be at least 1, received {max_attempts}"
+        raise ValueError(message)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return operation()
+        except (RenderInterruptedError, EngineConfigurationError):
+            raise
+        except Exception as failure:
+            if not _is_out_of_memory(failure) or attempt >= max_attempts:
+                raise
+            evict_resident_stacks()
+    message = f"Stage {stage_name!r} failed after {max_attempts} attempts"
+    raise EngineExecutionError(stage_name, message)
+
+
 def _pad_frames_to_minimum(frames: list[Any], minimum_frames: int) -> list[Any]:
     """Tile a short frame batch up to ``minimum_frames`` (passthrough above).
 
     MMAudio's synchformer encodes video in 16-frame sync segments and crashes
     on an empty segment list, so short renders repeat the whole batch (the
-    retired BatchPadToMin custom node did exactly this). Callers guarantee a
-    non-empty batch: there is nothing sensible to tile from zero frames.
+    retired BatchPadToMin custom node did exactly this). Callers must pass a
+    non-empty batch: there is nothing sensible to tile from zero frames, and
+    extending an empty list would spin forever.
     """
+    if not frames:
+        message = "Cannot pad an empty frame batch to the sync minimum"
+        raise EngineConfigurationError(message)
     padded = list(frames)
     while len(padded) < minimum_frames:
         padded.extend(frames)

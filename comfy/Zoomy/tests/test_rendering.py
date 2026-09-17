@@ -20,8 +20,10 @@ from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository
 from zoomy.rendering import (
     RenderEnvironment,
+    VideoGenerationOptions,
     clear_loop_stop,
     finalize_video,
+    generate_video,
     render_loop,
     render_next_frame,
     request_loop_stop,
@@ -85,7 +87,7 @@ class ScriptedEngine:
 
 def _repository_with_frames(tmp_path: Path, frame_count: int) -> FrameRepository:
     """Create a repository whose sequence already holds stub frames."""
-    sequence_directory = tmp_path / "Zoomy" / "z_image"
+    sequence_directory = tmp_path / "z_image"
     sequence_directory.mkdir(parents=True, exist_ok=True)
     for frame_number in range(1, frame_count + 1):
         (sequence_directory / f"frame_{frame_number:05d}_.png").write_bytes(b"stub")
@@ -169,7 +171,7 @@ def test_finalize_video_requires_frames(tmp_path: Path) -> None:
 def test_finalize_video_replays_engine_updates(tmp_path: Path) -> None:
     """Finalize streams the engine's updates, ending with its video."""
     repository = _repository_with_frames(tmp_path, frame_count=3)
-    video_path = tmp_path / "Zoomy_z_image_00001-audio.mp4"
+    video_path = tmp_path / "z_image_00001-audio.mp4"
     engine = ScriptedEngine(
         finalize_updates=[
             [
@@ -343,3 +345,146 @@ def test_interrupt_module_flag_is_independent_of_engine() -> None:
     request_loop_stop()
     assert rendering_module.is_loop_stop_requested() is True
     clear_loop_stop()
+
+
+def test_generate_video_renders_until_duration_then_finalizes(tmp_path: Path) -> None:
+    """Ten seconds need 81 frames; the video lands after the last one."""
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    video_path = tmp_path / "z_image_00001-audio.mp4"
+    engine = ScriptedEngine(
+        finalize_updates=[
+            [
+                ProgressUpdate(
+                    message="Video complete.",
+                    video_path=video_path,
+                    frame_count=81,
+                    elapsed_seconds=4.0,
+                ),
+            ]
+        ]
+    )
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    updates = list(
+        generate_video(
+            family,
+            _counted_request_factory(),
+            _test_environment(engine, repository),
+            options=VideoGenerationOptions(target_seconds=10.0),
+        )
+    )
+    assert len(engine.render_requests) == 81
+    assert len(engine.finalize_requests) == 1
+    assert engine.finalize_requests[0].frame_count == 81
+    assert updates[-1].video_path == video_path
+
+
+def test_generate_video_skips_the_loop_when_long_enough(tmp_path: Path) -> None:
+    """A sequence that already covers the target goes straight to finalize."""
+    repository = _repository_with_frames(tmp_path, frame_count=81)
+    engine = ScriptedEngine(finalize_updates=[[]])
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    updates = list(
+        generate_video(
+            family,
+            _counted_request_factory(),
+            _test_environment(engine, repository),
+            options=VideoGenerationOptions(target_seconds=10.0),
+        )
+    )
+    assert not engine.render_requests
+    assert len(engine.finalize_requests) == 1
+    assert any("already" in update.message for update in updates)
+
+
+def test_generate_video_manual_stop_finalizes_when_enabled(tmp_path: Path) -> None:
+    """An unlimited run that is stopped still gets its video by default."""
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    engine = ScriptedEngine(finalize_updates=[[]])
+    factory_calls = 0
+
+    def stopping_factory(frame_count: int) -> FrameRenderRequest:
+        """Stop while the second frame is being built."""
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 2:
+            request_loop_stop()
+        return _counted_request_factory()(frame_count)
+
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    list(
+        generate_video(
+            family,
+            stopping_factory,
+            _test_environment(engine, repository),
+            options=VideoGenerationOptions(target_seconds=None),
+        )
+    )
+    clear_loop_stop()
+    assert len(engine.render_requests) == 2
+    assert len(engine.finalize_requests) == 1
+
+
+def test_generate_video_manual_stop_skips_finalize_when_disabled(tmp_path: Path) -> None:
+    """With auto-finalize off, a stopped run keeps its frames only."""
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    engine = ScriptedEngine()
+    factory_calls = 0
+
+    def stopping_factory(frame_count: int) -> FrameRenderRequest:
+        """Stop while the second frame is being built."""
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 2:
+            request_loop_stop()
+        return _counted_request_factory()(frame_count)
+
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    messages = [
+        update.message
+        for update in generate_video(
+            family,
+            stopping_factory,
+            _test_environment(engine, repository),
+            options=VideoGenerationOptions(target_seconds=None, finalize_on_stop=False),
+        )
+    ]
+    clear_loop_stop()
+    assert len(engine.render_requests) == 2
+    assert not engine.finalize_requests
+    assert any("not finalized" in message for message in messages)
+
+
+def test_generate_video_reports_without_finalizing_when_empty(tmp_path: Path) -> None:
+    """A loop that renders nothing never reaches the finalize stage."""
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    failure = EngineExecutionError("z-frame", "boom")
+    engine = ScriptedEngine(frame_results=[failure, failure, failure])
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    messages = [
+        update.message
+        for update in generate_video(
+            family,
+            _counted_request_factory(),
+            _test_environment(engine, repository),
+            options=VideoGenerationOptions(target_seconds=10.0, max_attempts_per_frame=3),
+        )
+    ]
+    assert not engine.finalize_requests
+    assert any("nothing to finalize" in message for message in messages)
+
+
+def test_generate_video_rejects_non_positive_durations(tmp_path: Path) -> None:
+    """Zero or negative durations cannot size the frame loop."""
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    engine = ScriptedEngine()
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    with pytest.raises(ValueError, match="positive"):
+        list(
+            generate_video(
+                family,
+                _counted_request_factory(),
+                _test_environment(engine, repository),
+                options=VideoGenerationOptions(target_seconds=0.0),
+            )
+        )
+    assert not engine.render_requests

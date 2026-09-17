@@ -1,10 +1,9 @@
 """Access to the rendered frame sequence and finalized videos on disk.
 
-Frames land in ``<output_directory>/Zoomy/<sequence_key>/frame_*.png`` because
-the frame workflow saves with the prefix ``Zoomy/<sequence_key>/frame``. Videos
-land directly in ``<output_directory>`` as ``Zoomy_<sequence_key>_*.mp4`` — the
-VideoHelperSuite combine node writes a silent main file plus a ``-audio`` twin
-carrying the muxed soundtrack, and the twin is what previews should show.
+Frames land directly in ``<output_directory>/<sequence_key>/frame_*.png``.
+Videos land directly in ``<output_directory>`` as ``<sequence_key>_*.mp4`` —
+the finalize writes a silent main file plus a ``-audio`` twin carrying the
+muxed soundtrack, and the twin is what previews should show.
 """
 
 from __future__ import annotations
@@ -18,9 +17,8 @@ if TYPE_CHECKING:
 
     from PIL.Image import Image
 
-ZOOMY_DIRECTORY_NAME = "Zoomy"
 FRAME_FILE_PATTERN = "frame_*.png"
-VIDEO_FILE_TEMPLATE = "Zoomy_{sequence_key}*.mp4"
+VIDEO_FILE_TEMPLATE = "{sequence_key}_*.mp4"
 AUDIO_FILE_MARKER = "-audio"
 SEGMENT_FILE_MARKER = "_seg"
 ASSEMBLY_DIRECTORY_SUFFIX = "_assembly"
@@ -54,20 +52,20 @@ class SequenceStatistics:
 
 
 class FrameRepository:
-    """Reads and clears zoomy artifacts under one ComfyUI output directory."""
+    """Reads and clears zoomy artifacts under one output directory."""
 
     def __init__(self, output_directory: Path) -> None:
-        """Remember the ComfyUI output directory that holds zoomy artifacts."""
+        """Remember the output directory that holds zoomy artifacts."""
         self.output_directory = output_directory
 
     def frame_directory(self, sequence_key: str) -> Path:
         """Return the directory holding the sequence's rendered frames."""
-        return self.output_directory / ZOOMY_DIRECTORY_NAME / sequence_key
+        return self.output_directory / sequence_key
 
     def frame_paths(self, sequence_key: str) -> list[Path]:
         """Return the sequence's frames in render order.
 
-        ComfyUI zero-pads frame counters, so a plain name sort equals
+        Frame counters are zero-padded, so a plain name sort equals
         chronological order.
         """
         directory = self.frame_directory(sequence_key)
@@ -87,8 +85,8 @@ class FrameRepository:
     def save_next_frame(self, sequence_key: str, frame_image: Image) -> Path:
         """Save one rendered frame under the next counter name and return it.
 
-        Names mirror the former SaveImage prefix (``frame_00001_.png``, …),
-        so the lexical sort in :meth:`frame_paths` stays chronological.
+        Names keep the ``frame_00001_.png`` counter shape, so the lexical
+        sort in :meth:`frame_paths` stays chronological.
         """
         directory = self.frame_directory(sequence_key)
         directory.mkdir(parents=True, exist_ok=True)
@@ -104,7 +102,7 @@ class FrameRepository:
     def assembly_directory(self, sequence_key: str) -> Path:
         """Return the scratch directory for assembly waves and concat lists."""
         leaf = f"{sequence_key}{ASSEMBLY_DIRECTORY_SUFFIX}"
-        return self.output_directory / ZOOMY_DIRECTORY_NAME / leaf
+        return self.output_directory / leaf
 
     def segment_twin_paths(self, sequence_key: str, index: int) -> tuple[Path, Path] | None:
         """Return a segment window's music and effects twins, newest each.
@@ -113,8 +111,8 @@ class FrameRepository:
         assembles half a window. The twins carry the concatenated pixels;
         the full-length soundtrack stems resolve separately.
         """
-        music_twin = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_music*-audio.mp4")
-        effects_twin = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_sfx*-audio.mp4")
+        music_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_music*-audio.mp4")
+        effects_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx*-audio.mp4")
         if music_twin is None or effects_twin is None:
             return None
         return (music_twin, effects_twin)
@@ -125,19 +123,19 @@ class FrameRepository:
         Stems keep the over-generated overlap tails the twins trim away, so
         both must be present before the window joins the assembly.
         """
-        music_stem = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_music_stem*.flac")
-        sound_stem = self._newest_match(f"Zoomy_{sequence_key}_seg{index:03d}_sfx_stem*.flac")
+        music_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_music_stem*.flac")
+        sound_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx_stem*.flac")
         if music_stem is None or sound_stem is None:
             return None
         return (music_stem, sound_stem)
 
     def next_video_stem(self, sequence_key: str) -> str:
-        """Return the next ``Zoomy_<sequence>_NNNNN`` stem, VHS-style.
+        """Return the next ``<sequence>_NNNNN`` stem.
 
         Segment intermediates and audio twins never advance the counter, so
         assembly names continue the main video sequence seamlessly.
         """
-        prefix = f"Zoomy_{sequence_key}_"
+        prefix = f"{sequence_key}_"
         counters = []
         for candidate in self.output_directory.glob(f"{prefix}*.mp4"):
             stem = candidate.stem
@@ -152,10 +150,10 @@ class FrameRepository:
         """Delete a sequence's segment intermediates, returning the count.
 
         Matches every segment artifact regardless of extension: videos,
-        twins, stems, and the metadata preview images VHS writes alongside.
+        twins, stems, and the metadata preview images written alongside.
         """
         removed = 0
-        for candidate in self.output_directory.glob(f"Zoomy_{sequence_key}_seg*"):
+        for candidate in self.output_directory.glob(f"{sequence_key}_seg*"):
             if candidate.is_dir():
                 continue
             try:
@@ -175,14 +173,19 @@ class FrameRepository:
     def latest_video_path(self, sequence_key: str) -> Path | None:
         """Return the newest finalized video, preferring the audio-muxed twin.
 
-        The video node always writes a silent main file plus, when an audio
+        The finalize always writes a silent main file plus, when an audio
         track is connected, a ``-audio`` twin carrying the muxed soundtrack;
-        the twin is the artifact users want to preview. When several videos
-        exist the newest by modification time wins, which is the one the
-        latest finalize just wrote.
+        the twin is the artifact users want to preview. Segment windows write
+        their own twins, which never count as finished videos. When several
+        videos exist the newest by modification time wins, which is the one
+        the latest finalize just wrote.
         """
         pattern = VIDEO_FILE_TEMPLATE.format(sequence_key=sequence_key)
-        candidates = list(self.output_directory.glob(pattern))
+        candidates = [
+            path
+            for path in self.output_directory.glob(pattern)
+            if SEGMENT_FILE_MARKER not in path.stem
+        ]
         if not candidates:
             return None
         twins = [path for path in candidates if AUDIO_FILE_MARKER in path.stem]
@@ -194,8 +197,8 @@ class FrameRepository:
     ) -> SequenceStatistics:
         """Summarize one sequence in a single pass for the stats panel.
 
-        File sizes tolerate files vanishing mid-read (ComfyUI may be writing
-        while the interface refreshes); such files simply count as empty.
+        File sizes tolerate files vanishing mid-read (a finalize may be
+        writing while the interface refreshes); such files count as empty.
         """
         frame_paths = self.frame_paths(sequence_key)
         recent_frame_paths = (

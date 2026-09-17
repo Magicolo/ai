@@ -15,6 +15,7 @@ finalize paths share without referencing any execution backend:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
 
 FRAME_WIDTH_PIXELS = 1376
 FRAME_HEIGHT_PIXELS = 768
+# Diffusion autoencoders downsample in powers of two, so odd frame sizes
+# break the encode/decode round trip — every render size must be a multiple.
+FRAME_SIZE_ALIGNMENT_PIXELS = 16
 CROP_BORDER_PIXELS = 10
 CROP_WIDTH_PIXELS = FRAME_WIDTH_PIXELS - 2 * CROP_BORDER_PIXELS
 CROP_HEIGHT_PIXELS = FRAME_HEIGHT_PIXELS - 2 * CROP_BORDER_PIXELS
@@ -37,6 +41,9 @@ ZOOM_FACTOR_PER_FRAME = FRAME_WIDTH_PIXELS / CROP_WIDTH_PIXELS
 
 INTERPOLATION_MULTIPLIER = 4
 VIDEO_FRAMES_PER_SECOND = 32
+# Source frames below this have no pairs to bisect, so they pass through
+# interpolation unchanged (the retired FILM node behaved the same).
+MINIMUM_FRAMES_FOR_INTERPOLATION = 2
 # Lowest audio duration any audio stage accepts: the ACE-Step latent stage
 # enforces seconds >= 1.0, and the floor also keeps MMAudio's synchformer
 # happy on short sequences (it needs at least 16 sync frames). Overshoot is
@@ -94,6 +101,9 @@ class FrameRenderRequest:
             order.
         seed: Seed for the diffusion pass; the interface draws a fresh one
             per frame.
+        frame_width: Frame width in pixels; must be a positive multiple of
+            :data:`FRAME_SIZE_ALIGNMENT_PIXELS`.
+        frame_height: Frame height in pixels, same constraint as the width.
     """
 
     family: FamilyDefinition
@@ -102,6 +112,8 @@ class FrameRenderRequest:
     frame_count: int
     lora_selections: Sequence[tuple[LoraDefinition, float]]
     seed: int
+    frame_width: int = FRAME_WIDTH_PIXELS
+    frame_height: int = FRAME_HEIGHT_PIXELS
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +215,24 @@ class EngineProtocol(Protocol):
 def compute_interpolated_frame_count(frame_count: int) -> int:
     """Return the frame count after interpolation: ``(n - 1) * 4 + 1``."""
     return (frame_count - 1) * INTERPOLATION_MULTIPLIER + 1
+
+
+def compute_frames_for_seconds(target_seconds: float) -> int:
+    """Return the smallest source count whose video covers ``target_seconds``.
+
+    Inverts :func:`compute_interpolated_frame_count` against the video frame
+    rate, so a fixed-length run knows how many frames to render before the
+    interpolation and audio stages run.
+
+    Raises:
+        ValueError: If ``target_seconds`` is not positive.
+    """
+    if not target_seconds > 0:
+        message = f"Video duration must be positive, received {target_seconds}"
+        raise ValueError(message)
+    needed_interpolated = math.ceil(target_seconds * VIDEO_FRAMES_PER_SECOND)
+    frames = math.ceil((needed_interpolated - 1) / INTERPOLATION_MULTIPLIER) + 1
+    return max(1, frames)
 
 
 def compute_audio_seconds(interpolated_frame_count: int) -> float:

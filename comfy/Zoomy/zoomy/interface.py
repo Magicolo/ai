@@ -11,12 +11,14 @@ family dropdown changes. That decorated function executes immediately at app
 build time, so every component its event wiring references is created before
 the render block in source order — hence the two wiring dataclasses.
 
-Loop control: checking the Loop box starts :func:`render_loop`, which renders
-frame after frame until the optional target count, a graceful stop request
-(unchecking the box), or exhausted per-frame retries. Graceful stops flow
-through a module-level ``threading.Event`` (see :func:`request_loop_stop`);
-the forceful Interrupt button aborts the running engine job immediately,
-which ends the loop as a side effect.
+Loop control: checking the Loop box starts :func:`generate_video`, which
+renders frame after frame until the optional target duration, a graceful
+stop request (unchecking the box), or exhausted per-frame retries, then
+runs the finalize stages automatically (after a reached target always,
+after a manual stop when the auto-finalize box is checked). Graceful stops
+flow through a module-level ``threading.Event`` (see
+:func:`request_loop_stop`); the forceful Interrupt button aborts the
+running engine job immediately, which ends the loop as a side effect.
 """
 
 from __future__ import annotations
@@ -29,13 +31,19 @@ from typing import TYPE_CHECKING, cast
 
 import gradio as gr
 
-from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest
+from zoomy.engine_protocol import (
+    FRAME_HEIGHT_PIXELS,
+    FRAME_WIDTH_PIXELS,
+    FinalizeRequest,
+    FrameRenderRequest,
+)
 from zoomy.errors import ZoomyError
 from zoomy.family_catalog import find_family
 from zoomy.rendering import (
     RenderEnvironment,
+    VideoGenerationOptions,
     finalize_video,
-    render_loop,
+    generate_video,
     render_next_frame,
     request_loop_stop,
 )
@@ -82,6 +90,7 @@ class FamilyPanelWiring:
     preview_image: gr.Image
     stats_line: gr.Markdown
     gallery: gr.Gallery
+    preview_video: gr.Video
     durations_state: gr.State
 
 
@@ -181,6 +190,7 @@ def _create_components(
                 preview_image=preview_image,
                 stats_line=stats_line,
                 gallery=gallery,
+                preview_video=preview_video,
                 durations_state=durations_state,
             )
 
@@ -489,10 +499,17 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
     with gr.Row():
         render_button = gr.Button("Render next frame", variant="primary")
         loop_checkbox = gr.Checkbox(label="Loop frames (uncheck to stop after current frame)")
-    # NOTE: no minimum= on the target below. A blank box submits 0 (which
-    # means infinite), and Gradio validates minimum= in preprocess — before
-    # the handler runs — so any minimum would reject blank targets outright.
-    frame_target = gr.Number(label="Frame target (blank = run until stopped)", precision=0)
+    # NOTE: no minimum= on the numbers below. A blank box submits 0 (which
+    # means unlimited for the duration, or the default size for the frame
+    # geometry), and Gradio validates minimum= in preprocess — before the
+    # handler runs — so any minimum would reject blank inputs outright.
+    duration_seconds = gr.Number(
+        label="Target video duration, seconds (blank = run until stopped)", precision=1
+    )
+    finalize_checkbox = gr.Checkbox(label="Finalize video when the loop ends", value=True)
+    with gr.Row():
+        frame_width = gr.Number(value=FRAME_WIDTH_PIXELS, label="Frame width", precision=0)
+        frame_height = gr.Number(value=FRAME_HEIGHT_PIXELS, label="Frame height", precision=0)
     render_inputs: list[Any] = [selected_loras, *strength_sliders, prompt_textbox]
     if negative_textbox is not None:
         render_inputs.append(negative_textbox)
@@ -500,7 +517,13 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
         _create_render_handler(
             wiring=wiring, family=family, has_negative_prompt=has_negative_prompt
         ),
-        inputs=[*render_inputs, wiring.log_state, wiring.durations_state],
+        inputs=[
+            *render_inputs,
+            wiring.log_state,
+            wiring.durations_state,
+            frame_width,
+            frame_height,
+        ],
         outputs=[
             wiring.status_markdown,
             wiring.log_textbox,
@@ -519,7 +542,10 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
         inputs=[
             loop_checkbox,
             *render_inputs,
-            frame_target,
+            duration_seconds,
+            finalize_checkbox,
+            frame_width,
+            frame_height,
             wiring.log_state,
             wiring.durations_state,
         ],
@@ -531,6 +557,7 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
             wiring.gallery,
             wiring.durations_state,
             loop_checkbox,
+            wiring.preview_video,
         ],
     )
     loop_checkbox.change(  # type: ignore[attr-defined]
@@ -559,6 +586,8 @@ def _create_render_handler(
         rest = values[submission.consumed_count :]
         log_entries = _as_string_list(rest[0])
         durations = _as_durations(rest[1])
+        frame_width = _coerce_frame_size(rest[2], FRAME_WIDTH_PIXELS)
+        frame_height = _coerce_frame_size(rest[3], FRAME_HEIGHT_PIXELS)
         request = FrameRenderRequest(
             family=family,
             prompt=submission.prompt_text,
@@ -566,6 +595,8 @@ def _create_render_handler(
             frame_count=wiring.repository.frame_count(family.sequence_key),
             lora_selections=submission.lora_selections,
             seed=_random_generator.randrange(MAXIMUM_SEED),
+            frame_width=frame_width,
+            frame_height=frame_height,
         )
         try:
             for update in render_next_frame(request, wiring.environment):
@@ -605,21 +636,24 @@ def _create_loop_handler(
     family: FamilyDefinition,
     has_negative_prompt: bool,
 ) -> Callable[
-    ..., Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object]]
+    ..., Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object, object]]
 ]:
-    """Build the generator Gradio calls for one Loop-frames click."""
+    """Build the generator Gradio calls for one Loop-frames change."""
 
     def loop_frames(
         *values: object,
-    ) -> Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object]]:
-        """Render frames until the target, a stop request, or failed retries."""
+    ) -> Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object, object]]:
+        """Render frames until the duration, a stop, or failed retries, then finalize."""
         submission = _parse_panel_submission(
             family, values[1:], has_negative_prompt=has_negative_prompt
         )
         rest = values[1 + submission.consumed_count :]
-        frame_target = _parse_frame_target(rest[0])
-        log_entries = _as_string_list(rest[1])
-        durations = _as_durations(rest[2])
+        target_seconds = _parse_target_seconds(rest[0])
+        finalize_on_stop = rest[1] is True
+        frame_width = _coerce_frame_size(rest[2], FRAME_WIDTH_PIXELS)
+        frame_height = _coerce_frame_size(rest[3], FRAME_HEIGHT_PIXELS)
+        log_entries = _as_string_list(rest[4])
+        durations = _as_durations(rest[5])
         if not (isinstance(values[0], bool) and values[0]):
             message = "Loop is off — check the box to start rendering."
             _, log_text = _append_log_entry(log_entries, message)
@@ -630,6 +664,7 @@ def _create_loop_handler(
                 _fresh_statistics(wiring.repository, wiring.engine, family, durations),
                 _fresh_gallery(wiring.repository, family),
                 durations,
+                gr.update(),
                 gr.update(),
             )
             return
@@ -643,13 +678,18 @@ def _create_loop_handler(
                 frame_count=frame_count,
                 lora_selections=submission.lora_selections,
                 seed=_random_generator.randrange(MAXIMUM_SEED),
+                frame_width=frame_width,
+                frame_height=frame_height,
             )
 
+        options = VideoGenerationOptions(
+            target_seconds=target_seconds, finalize_on_stop=finalize_on_stop
+        )
         system = _safe_system_statistics(wiring.engine)
-        if frame_target is None:
+        if target_seconds is None:
             start_message = "Loop started — rendering until stopped…"
         else:
-            start_message = f"Loop started — rendering {frame_target} frames…"
+            start_message = f"Loop started — rendering a {target_seconds:.1f} s video…"
         last_message = start_message
         log_entries, log_text = _append_log_entry(log_entries, start_message)
         statistics = wiring.repository.sequence_statistics(family.sequence_key)
@@ -661,22 +701,21 @@ def _create_loop_handler(
             [str(path) for path in statistics.recent_frame_paths],
             durations,
             gr.update(),
+            gr.update(),
         )
         try:
-            for update in render_loop(
-                request_factory,
-                family.sequence_key,
-                wiring.environment,
-                frame_target=frame_target,
-            ):
+            for update in generate_video(family, request_factory, wiring.environment, options):
                 last_message = update.message
                 log_entries, log_text = _append_log_entry(log_entries, update.message)
                 preview_value: object = gr.update()
                 gallery_value: object = gr.update()
+                video_value: object = gr.update()
                 if update.frame_path is not None and update.elapsed_seconds is not None:
                     durations = _record_frame_duration(durations, update.elapsed_seconds)
                     preview_value = update.frame_path
                     gallery_value = _fresh_gallery(wiring.repository, family)
+                if update.video_path is not None:
+                    video_value = update.video_path
                 yield (
                     update.message,
                     log_text,
@@ -685,6 +724,7 @@ def _create_loop_handler(
                     gallery_value,
                     durations,
                     gr.update(),
+                    video_value,
                 )
         except ZoomyError as failure:
             last_message = f"**Error:** {failure}"
@@ -698,6 +738,7 @@ def _create_loop_handler(
             [str(path) for path in final_statistics.recent_frame_paths],
             durations,
             gr.update(value=False),
+            gr.update(),
         )
 
     return loop_frames
@@ -729,19 +770,32 @@ def _parse_panel_submission(
     )
 
 
-def _parse_frame_target(value: object) -> int | None:
-    """Interpret the loop target input; blank, zero, or negative is infinite.
+def _parse_target_seconds(value: object) -> float | None:
+    """Interpret the loop duration input; blank, zero, or negative is unlimited.
 
-    Non-finite floats fall in the infinite bucket too: ``int()`` would leak
-    an ``OverflowError`` for infinity instead of answering the question.
+    Non-finite floats fall in the unlimited bucket too: arithmetic on
+    infinity would size an unbounded frame loop instead of answering.
     """
     if isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+        return float(value)
+    return None
+
+
+def _coerce_frame_size(value: object, default_pixels: int) -> int:
+    """Interpret a frame geometry input, falling back to the default size.
+
+    Blank or unusable boxes submit 0 or text; the engine's alignment check
+    still refuses sizes like 511, so this only restores the default.
+    """
+    if isinstance(value, bool):
+        return default_pixels
     if isinstance(value, int) and value >= 1:
         return value
     if isinstance(value, float) and math.isfinite(value) and value >= 1:
         return int(value)
-    return None
+    return default_pixels
 
 
 def _initial_statistics(

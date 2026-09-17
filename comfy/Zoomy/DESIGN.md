@@ -83,6 +83,8 @@ Zoomy/
   output/                 # bind-mounted to /output (gitignored, holds .gitkeep)
   scripts/
     download_models.py    # one-shot provisioner filling /models (see §5)
+    quality-gates.sh      # full gates in-container (see §11)
+    run-tests.sh          # pytest-only iteration (see §11)
   vendor/
     comfy/                # ProgressBar stand-in (MMAudio imports it)
   zoomy/                  # the application package
@@ -98,7 +100,8 @@ Zoomy/
     vendor_compat.py      # transformers-5 compatibility shim
     final_assembly.py     # segmented-finalize ffmpeg assembly
     frame_repository.py   # frame/video discovery + clearing under the output dir
-    rendering.py          # render_next_frame/finalize_video/render_loop generators
+    rendering.py          # generate_video + render_next_frame/finalize_video/
+                          # render_loop generators
     interface.py          # Gradio layout + event wiring
   tests/                  # one module per source module (see §11)
 ```
@@ -162,20 +165,26 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
   `LoraDefinition.selected_by_default` mirrors the source workflows (Ernie
   C64 on; Z styles off = photorealistic default).
 - `engine_protocol`: `FrameRenderRequest(family, prompt, negative_prompt,
-  frame_count, lora_selections, seed)` / `FinalizeRequest` / `SegmentWindow`
+  frame_count, lora_selections, seed, frame_width = 1376,
+  frame_height = 768)` / `FinalizeRequest` / `SegmentWindow`
   / `ProgressUpdate` / `EngineStatistics`; pure duration math
   (`compute_audio_seconds` = `max(interp / 32, 1.0)` — the ACE
-  `seconds >= 1.0` floor) and segmentation (`needs_segmentation`,
+  `seconds >= 1.0` floor; `compute_frames_for_seconds` inverts the ×4
+  interpolation: `(frames - 1) * 4 + 1` interp frames at 32 fps, so 10 s →
+  81 frames); requested sizes must be positive multiples of
+  `FRAME_SIZE_ALIGNMENT_PIXELS` (16) and segmentation (`needs_segmentation`,
   `compute_segment_windows`, 48-frame windows); `EngineProtocol` is the
   structural contract rendering/interface depend on (tests use fakes);
   `MINIMUM_SYNC_FRAMES = 17` feeds the SFX padder (§7).
 - `frame_repository.FrameRepository(output_directory)`: `frame_paths` globs
-  `Zoomy/<sequence>/frame_*.png` sorted (counters are zero-padded, so name
-  order is render order); `latest_video_path` returns the newest
-  `Zoomy_<sequence>*.mp4`, **preferring the `-audio` twin** (see §8);
-  `sequence_statistics()` summarizes count, bytes, recent paths, and video
-  details in one pass for the stats panel (tolerates files vanishing
-  mid-read).
+  `<sequence>/frame_*.png` sorted (counters are zero-padded, so name
+  order is render order — the layout is flat since 2026-09-16: no `Zoomy/`
+  nesting, old nested artifacts were orphaned without migration);
+  `latest_video_path` returns the newest `<sequence>*.mp4`, **preferring
+  the `-audio` twin** (see §8) and excluding segment twins (which could
+  otherwise win as newest); `sequence_statistics()` summarizes count,
+  bytes, recent paths, and video details in one pass for the stats panel
+  (tolerates files vanishing mid-read).
 - `local_engine.LocalEngine`: see §7. Constructor
   `(models_directory, seed_directory, repository, device,
   music_project_directory)`; `render_frame` / `finalize_sequence` /
@@ -185,13 +194,23 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
   via a documented `setattr` helper — co-located `noqa` + `type: ignore`
   pragmas are not honored on multi-line statements, so the helper carries
   the suppression once).
-- `rendering`: `render_next_frame` / `finalize_video` / `render_loop` are
-  generators yielding `ProgressUpdate`; all three take a `RenderEnvironment`
-  bundle (engine + repository). Interrupts surface as
-  `RenderInterruptedError` from the engine flag; `render_loop` renders until
-  a frame target, a stop request (module-level `threading.Event`,
-  single-user justification documented), or exhausted per-frame retries
-  (3 attempts, transient errors only — interrupts propagate immediately).
+- `rendering`: `generate_video(family, request_factory, environment,
+  options)` is the one call making a whole video — the duration loop with
+  auto-finalize (see below); `render_next_frame` / `finalize_video` /
+  `render_loop` are generators yielding `ProgressUpdate`; all take a
+  `RenderEnvironment` bundle (engine + repository). `generate_video` sizes
+  the loop with `compute_frames_for_seconds` minus existing frames (0 new
+  → an "already covers" note), renders until a stop request when
+  `target_seconds` is `None`, always finalizes on target-reached but only
+  with `finalize_on_stop` on manual stop, and yields "nothing to finalize"
+  instead of raising on zero frames. `VideoGenerationOptions` bundles
+  `target_seconds` / `finalize_on_stop` / `max_attempts_per_frame` (a
+  dataclass because the lint cap is 5 params per function). Interrupts
+  surface as `RenderInterruptedError` from the engine flag; `render_loop`
+  renders until a frame target, a stop request (module-level
+  `threading.Event`, single-user justification documented), or exhausted
+  per-frame retries (3 attempts, transient errors only — interrupts
+  propagate immediately).
 - `interface.build_application(...)`: see §9.
 - `main.main()`: builds settings/engine/repository, queues the app with
   `default_concurrency_limit=1` (one render job at a time), and launches
@@ -201,11 +220,17 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
 ## 7. Frame backend (`local_engine.py`)
 
 Cold start (`frame_count == 0`) loads the family seed image from the seed
-directory; otherwise the newest sequence frame is cropped `1356×748` at
-`(10, 10)` → bicubic-rescaled to `1376×768` (zoom `1376 / 1356 ≈ 1.0147`
-per frame, ~1.5% dive; offset rule `(1376 − 1356) / 2 = 10` keeps it
-centered) → encoded → img2img at denoise 0.60 with the family recipe →
-saved as `Zoomy/<sequence>/frame_<counter>.png`.
+directory; otherwise the newest sequence frame is cropped to the request
+size minus a 20 px border at `(10, 10)` → bicubic-rescaled back to the
+request size (the border is `min(10, width // 4, height // 4)`, so HD is
+`1356×748 → 1376×768`, zoom `1376 / 1356 ≈ 1.0147` per frame, ~1.5% dive;
+`512×512` uses a `492×492` crop, `512 / 492 ≈ 1.0407`, the old 512-era
+dive) → encoded → img2img at denoise 0.60 with the family recipe →
+saved as `<sequence>/frame_<counter>.png`. Requested sizes come from
+`FrameRenderRequest.frame_width/frame_height` (UI-editable, blank falls
+back to 1376×768) and must be positive multiples of 16
+(`_validate_frame_size`, else `EngineConfigurationError`); the sampler
+call uses the request dims, so families render at any aligned size.
 
 One frame pipeline stays resident per family (evicted on family change —
 each holds ~20 GB of CPU weights under sequential offload). `_apply_lora_selection`
@@ -235,15 +260,20 @@ active. Caught once during verification, now documented.)
 - **Music**: ACE-Step 1.5 (in-image clone), instrumental tags per family,
   seed `31 + window.index` so long sequences evolve.
 - **SFX**: MMAudio (in-image clone @8eaeb72) conditioned on the interpolated
-  frames, seed 7 fixed. Two load-bearing guards: the interp batch is tiled
-  to ≥ `MINIMUM_SYNC_FRAMES` (17) by `_pad_frames_to_minimum` — the
-  synchformer needs ≥ 16 sync frames and short renders crash with
-  `torch.stack([])` (the old `BatchPadToMin` node, ported as a helper);
-  and `_render_music` / `_render_sound_effects` **evict their stack after
-  the stems land** (`_unload_music_stack` / `_unload_effects_stack` over the
-  shared `_collect_free_video_memory`: `gc` + `cuda.empty_cache`) — without
-  eviction the resident 14.5 GiB ACE stack OOMs the MMAudio load (verified
-  live; pinned by test).
+frames, seed 7 fixed. Three load-bearing guards: the interp batch is tiled
+to ≥ `MINIMUM_SYNC_FRAMES` (17) by `_pad_frames_to_minimum` — the
+synchformer needs ≥ 16 sync frames and short renders crash with
+`torch.stack([])` (the old `BatchPadToMin` node, ported as a helper);
+`_render_music` / `_render_sound_effects` **evict their stack after
+the stems land** (`_unload_music_stack` / `_unload_effects_stack` over the
+shared `_collect_free_video_memory`: `gc` + `cuda.empty_cache`) — without
+eviction the resident 14.5 GiB ACE stack OOMs the MMAudio load (verified
+live; pinned by test); and **every fallible stage runs under
+`run_stage_with_retries`** (3 attempts, evict-all-stacks + empty-cache
+between tries — OOM is matched on the error shape without importing
+torch, so the slim image stays light; interrupts, config errors, and
+non-OOM failures propagate immediately; a budget below 1 raises
+`ValueError`).
 
 ## 8. Finalize (`local_engine.py` + `final_assembly.py`)
 
@@ -282,15 +312,22 @@ gallery strip, finalized video) and the per-family panel on the right. The
 panel is drawn by `@gr.render(inputs=[family_dropdown])`: LoRA
 `CheckboxGroup` + one strength slider (0–2, step 0.05) per family LoRA,
 prompt box, negative box only for families that define one, Render button,
-Loop checkbox, and frame-target number (blank = run until stopped; blank
-submits 0, so the Number carries no `minimum=` — Gradio validates minimums
-in preprocess, before the handler runs, and would reject every blank-target
-loop outright). Components the panel wiring touches are created *before*
-the render block (the decorator executes immediately at build).
+Loop checkbox, target-duration number (blank = unlimited loop until
+stopped), finalize-when-loop-ends checkbox (default on), and width/height
+numbers (prefilled 1376/768; blank or garbage falls back to the default —
+both Numbers carry no `minimum=`, for the same preprocess-rejection
+reason as the old frame target: Gradio validates minimums before the
+handler runs and would reject every blank input outright). Components the
+panel wiring touches are created *before* the render block (the decorator
+executes immediately at build).
 
 Events: render/loop/finalize generators stream status + log + previews +
 stats (gallery/preview refresh only on frame completion to avoid flicker;
-durations accumulate in session `State`); the Loop checkbox carries TWO
+durations accumulate in session `State`); the loop handler dogfoods
+`generate_video` with a request factory carrying the panel dims (fresh
+random seed per call) and also surfaces the finalized video preview, so
+the UI loop and the programmatic API (`VideoGenerationOptions`) can never
+drift apart. The Loop checkbox carries TWO
 `change` listeners because generators must queue while stops must not wait:
 the queued generator (starts the loop when checked, no-ops when unchecked)
 and an unqueued plain handler (no-op when checked, sets the stop flag when
@@ -382,11 +419,17 @@ against the installed runtime; TDD for behavior/bugfix work.
 
 ```bash
 ./zoomy.sh                      # rebuild + launch, UI at http://localhost:7861/
-# e2e drivers are ephemeral /tmp scripts (RenderEnvironment + render_next_frame /
-# finalize_video through docker exec, never committed): frame contract is
-# (family, prompt, negative_prompt, frame_count, lora_selections, seed),
-# engine ctor is (models_directory, seed_directory, repository, device,
-# music_project_directory), and exec needs PYTHONPATH=/application.
+# e2e drivers are ephemeral /tmp scripts (RenderEnvironment + generate_video /
+# render_next_frame / finalize_video through docker exec, never committed):
+# frame contract is (family, prompt, negative_prompt, frame_count,
+# lora_selections, seed, frame_width, frame_height), engine ctor is
+# (models_directory, seed_directory, repository, device,
+# music_project_directory), and exec needs the FULL image PYTHONPATH extended
+# with /application — replacing it (``-e PYTHONPATH=/application``) hides the
+# /opt ACE/MMAudio clones and finalize dies with ModuleNotFoundError. Drivers
+# must also run with the host tree shadowed over the image
+# (``-v ./Zoomy:/application``); otherwise they import the stale baked code
+# (e.g. the pre-flatten nested-layout lookup → phantom EmptyFrameSequence).
 #   z_fast frame 1 cold start (~140 s incl. Qwen/Z hub fetch, then ~33 s warm)
 #     -> /output/Zoomy/z_image/frame_00001_.png, 1376x768, coherent zoom
 #     (continuity: mean|f2-zoom(f1)|=35.29 < mean|f2-f1|=39.32)
@@ -394,6 +437,10 @@ against the installed runtime; TDD for behavior/bugfix work.
 #   ernie_turbo frame 1 + C64 LoRA @1.0 (~234 s cold): full C64 pixel-art style
 #   finalize 2 frames -> Zoomy_z_image_00001.mp4 (0.16 s, 5 interp frames,
 #     h264 32 fps) + AAC stereo -audio twin, RMS 0.27/peak 1.0 (real mix)
+#   10 s demo (flat layout): 81 z_fast frames @512x512 (~12 s/frame) +
+#     finalize -> z_image_00001.mp4 (9.94 s, 512x512 h264 32 fps, silent
+#     main) + AAC stereo -audio twin (RMS -12 dB, real full-length mix);
+#     frame 41 viewed: coherent rainbow-path zoom, no artifacts
 # cleanup inside the container: rm -f /output/cold_* /output/ab2_* /output/*.flac
 #   + any test-sequence frames beyond the real chain
 ```

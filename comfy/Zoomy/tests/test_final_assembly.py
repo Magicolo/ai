@@ -73,8 +73,8 @@ def _assembly_request(work_directory: Path) -> AssemblyRequest:
     return AssemblyRequest(
         segments=tuple(soundtracks),
         work_directory=work_directory / "assembly_work",
-        output_video_path=work_directory / "Zoomy_z_image_00001.mp4",
-        output_audio_video_path=work_directory / "Zoomy_z_image_00001-audio.mp4",
+        output_video_path=work_directory / "z_image_00001.mp4",
+        output_audio_video_path=work_directory / "z_image_00001-audio.mp4",
     )
 
 

@@ -14,10 +14,15 @@ import pytest
 from PIL import Image as PillowImage
 
 from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest
-from zoomy.errors import EmptyFrameSequenceError, EngineConfigurationError
+from zoomy.errors import (
+    EmptyFrameSequenceError,
+    EngineConfigurationError,
+    EngineExecutionError,
+    RenderInterruptedError,
+)
 from zoomy.family_catalog import FAMILY_CATALOG, FamilyDefinition, find_family
 from zoomy.frame_repository import FrameRepository
-from zoomy.local_engine import LocalEngine, _pad_frames_to_minimum
+from zoomy.local_engine import LocalEngine, _pad_frames_to_minimum, run_stage_with_retries
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -211,3 +216,118 @@ def test_effects_frame_padding_passes_long_batches_through() -> None:
     """Batches already at the minimum are returned untouched."""
     frames = [object() for _ in range(20)]
     assert _pad_frames_to_minimum(frames, 17) == frames
+
+
+def test_effects_frame_padding_rejects_empty_batches() -> None:
+    """Tiling from zero frames would spin forever; fail fast instead."""
+    with pytest.raises(EngineConfigurationError, match="empty frame batch"):
+        _pad_frames_to_minimum([], 17)
+
+
+def test_interpolation_passes_single_frame_through(tmp_path: Path) -> None:
+    """One frame has no pairs; it finalizes as-is (Comfy FILM behavior)."""
+    engine = _engine(tmp_path)
+    frame = PillowImage.new("RGB", (16, 16))
+    assert engine._interpolate_frames([frame]) == [frame]  # noqa: SLF001
+
+
+def _out_of_memory_error() -> RuntimeError:
+    """Build a CUDA OOM failure without importing torch (slim-image safe)."""
+    return RuntimeError("CUDA out of memory. Tried to allocate 1.2 GiB.")
+
+
+def test_stage_runner_retries_out_of_memory_after_evicting(tmp_path: Path) -> None:
+    """An OOM evicts resident stacks and retries the stage."""
+    del tmp_path
+    evictions: list[str] = []
+    attempts: list[int] = []
+
+    def flaky() -> str:
+        attempts.append(len(attempts))
+        if len(attempts) < 3:
+            raise _out_of_memory_error()
+        return "rendered"
+
+    result = run_stage_with_retries(
+        "frame", flaky, evict_resident_stacks=lambda: evictions.append("evicted")
+    )
+    assert result == "rendered"
+    assert len(attempts) == 3
+    assert evictions == ["evicted", "evicted"]
+
+
+def test_stage_runner_raises_non_memory_errors_immediately() -> None:
+    """Ordinary stage failures never trigger an eviction retry."""
+    evictions: list[str] = []
+
+    def broken() -> str:
+        raise EngineExecutionError("frame", "broken weights")
+
+    with pytest.raises(EngineExecutionError, match="broken weights"):
+        run_stage_with_retries(
+            "frame", broken, evict_resident_stacks=lambda: evictions.append("evicted")
+        )
+    assert evictions == []
+
+
+interrupt_or_config_failure = pytest.mark.parametrize(
+    "failure",
+    [RenderInterruptedError("stop now"), EngineConfigurationError("bad size")],
+)
+
+
+@interrupt_or_config_failure
+def test_stage_runner_never_retries_interrupts_or_bad_config(failure: Exception) -> None:
+    """Interrupts and configuration errors propagate on the first attempt."""
+    attempts = 0
+
+    def doomed() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    with pytest.raises(type(failure)):
+        run_stage_with_retries("frame", doomed, evict_resident_stacks=lambda: None)
+    assert attempts == 1
+
+
+def test_stage_runner_exhausts_the_attempt_budget() -> None:
+    """Persistent OOM raises the last failure after the final attempt."""
+    attempts: list[int] = []
+
+    def always_out_of_memory() -> str:
+        attempts.append(len(attempts))
+        raise _out_of_memory_error()
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        run_stage_with_retries(
+            "music", always_out_of_memory, max_attempts=2, evict_resident_stacks=lambda: None
+        )
+    assert attempts == [0, 1]
+
+
+def test_stage_runner_rejects_an_empty_attempt_budget() -> None:
+    """Zero attempts would skip the stage silently, so it is refused."""
+    with pytest.raises(ValueError, match="at least 1"):
+        run_stage_with_retries(
+            "frame", lambda: "never", max_attempts=0, evict_resident_stacks=lambda: None
+        )
+
+
+def test_render_frame_rejects_misaligned_sizes(tmp_path: Path) -> None:
+    """Frame sizes must be positive multiples of 16 for the autoencoders."""
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "z_fast")
+    for width, height in ((512, 511), (0, 512), (-16, 512), (513, 512)):
+        request = FrameRenderRequest(
+            family=family,
+            prompt="a prompt",
+            negative_prompt="a negative",
+            frame_count=0,
+            lora_selections=(),
+            seed=1,
+            frame_width=width,
+            frame_height=height,
+        )
+        with pytest.raises(EngineConfigurationError, match="multiple of 16"):
+            engine.render_frame(request)

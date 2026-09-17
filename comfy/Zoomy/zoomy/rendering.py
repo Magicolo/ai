@@ -7,6 +7,9 @@ updates while the in-process engine works:
     finalize_video(...)     -> yields ProgressUpdate with the finished video
     render_loop(...)        -> yields ProgressUpdate per frame until the target
         count, a stop request, or exhausted per-frame retries
+    generate_video(...)     -> loops frames until a duration target or a stop
+        request, then finalizes — the one call that makes a whole video,
+        shared by the interface and programmatic (test) drivers
 
 Frame renders call the engine once (a blocking diffusion pass), save the
 returned image through the frame repository, and report the measured time.
@@ -21,7 +24,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from zoomy.engine_protocol import ProgressUpdate
+from zoomy.engine_protocol import (
+    FinalizeRequest,
+    ProgressUpdate,
+    compute_frames_for_seconds,
+)
 from zoomy.errors import (
     EmptyFrameSequenceError,
     EngineConfigurationError,
@@ -32,7 +39,8 @@ from zoomy.errors import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
 
-    from zoomy.engine_protocol import EngineProtocol, FinalizeRequest, FrameRenderRequest
+    from zoomy.engine_protocol import EngineProtocol, FrameRenderRequest
+    from zoomy.family_catalog import FamilyDefinition
     from zoomy.frame_repository import FrameRepository
 
 DEFAULT_MAX_ATTEMPTS_PER_FRAME = 3
@@ -51,6 +59,24 @@ class RenderEnvironment:
 
     engine: EngineProtocol
     repository: FrameRepository
+
+
+@dataclass(frozen=True, slots=True)
+class VideoGenerationOptions:
+    """How :func:`generate_video` turns a frame loop into a finished video.
+
+    Attributes:
+        target_seconds: Interpolated video duration to reach before the
+            finalize stages run; ``None`` renders until stopped.
+        finalize_on_stop: Finalize after a manual stop too (a reached
+            target always finalizes).
+        max_attempts_per_frame: Per-frame retry budget for transient
+            failures; interrupts and configuration errors never retry.
+    """
+
+    target_seconds: float | None
+    finalize_on_stop: bool = True
+    max_attempts_per_frame: int = DEFAULT_MAX_ATTEMPTS_PER_FRAME
 
 
 def request_loop_stop() -> None:
@@ -226,6 +252,67 @@ def _attempt_frame_with_retries(
         else:
             return True
     return True
+
+
+def generate_video(
+    family: FamilyDefinition,
+    request_factory: Callable[[int], FrameRenderRequest],
+    environment: RenderEnvironment,
+    options: VideoGenerationOptions,
+) -> Iterator[ProgressUpdate]:
+    """Render frames until a duration target or a stop, then finalize.
+
+    This is the one call that makes a whole video, shared by the interface
+    loop handler and programmatic (test) drivers: the options size the frame
+    loop so the interpolated video covers the duration (``None`` renders
+    until stopped), and the finalize stages run automatically — after a
+    reached target always, after a manual stop only when the options ask.
+
+    Yields:
+        ProgressUpdate: The nested loop updates followed by the nested
+        finalize updates (or a short note when there is nothing to do).
+
+    Raises:
+        ValueError: The target duration is not positive, or the per-frame
+            attempt budget is below 1.
+        RenderInterruptedError: The running job was interrupted.
+        EngineConfigurationError: The engine rejected a frame request.
+    """
+    sequence_key = family.sequence_key
+    if options.target_seconds is not None:
+        missing_frames = compute_frames_for_seconds(options.target_seconds) - (
+            environment.repository.frame_count(sequence_key)
+        )
+        frame_target: int | None = max(0, missing_frames)
+        if frame_target == 0:
+            yield ProgressUpdate(
+                message=(
+                    f"Sequence already covers {options.target_seconds:.1f} s — "
+                    "finalizing without rendering."
+                )
+            )
+    else:
+        frame_target = None
+    yield from render_loop(
+        request_factory,
+        sequence_key,
+        environment,
+        frame_target=frame_target,
+        max_attempts_per_frame=options.max_attempts_per_frame,
+    )
+    frame_count = environment.repository.frame_count(sequence_key)
+    if frame_count < 1:
+        yield ProgressUpdate(message="No frames rendered — nothing to finalize.")
+        return
+    if is_loop_stop_requested() and not options.finalize_on_stop:
+        yield ProgressUpdate(
+            message=(
+                f"Loop stopped with {frame_count} frames — video not "
+                "finalized (auto-finalize is off)."
+            )
+        )
+        return
+    yield from finalize_video(FinalizeRequest(family=family, frame_count=frame_count), environment)
 
 
 def _pluralize(count: int, singular: str) -> str:

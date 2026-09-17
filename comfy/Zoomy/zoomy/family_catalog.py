@@ -109,8 +109,8 @@ class FamilyDefinition:
         key: Stable identifier used in environment-like contexts (dropdown
             values, logs).
         display_name: Human-friendly label shown in the interface.
-        sequence_key: Names the frame directory under ``Zoomy/`` and the video
-            prefix ``Zoomy_<sequence_key>``; families sharing this value
+        sequence_key: Names the frame directory under the output directory
+            and the video prefix ``<sequence_key>``; families sharing this value
             contribute to one zoom sequence.
         base_model_file: Diffusion model file for ``UNETLoader``.
         text_encoder_file: Text encoder file for ``CLIPLoader``.
