@@ -645,25 +645,33 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
         # otherwise arrive disabled.
         interactive=True,
     )
-    strength_sliders = [
-        gr.Slider(
-            minimum=0.0,
-            maximum=MAXIMUM_LORA_STRENGTH,
-            step=LORA_STRENGTH_STEP,
-            value=lora.default_strength,
-            label=f"{lora.display_name}",
-            info="Higher pushes the style harder; 0 leaves the frame untouched.",
-            elem_classes=["zoomy-tip"],
-            visible=lora.selected_by_default,
-            interactive=True,
-        )
-        for lora in family.loras
-    ]
-    if strength_sliders:
+    strength_sliders: list[gr.Slider] = []
+    strength_groups: list[gr.Group] = []
+    for lora in family.loras:
+        # The visibility toggle targets the wrapper group, never the Slider
+        # itself: a Slider that doubles as a gr.update() target has its
+        # frontend value clobbered by the update response, so the next Grow
+        # submits [{'type': 'update', ...}] for it and Gradio's own
+        # Slider.preprocess crashes before grow_frames runs.
+        with gr.Group(visible=lora.selected_by_default) as strength_group:
+            strength_sliders.append(
+                gr.Slider(
+                    minimum=0.0,
+                    maximum=MAXIMUM_LORA_STRENGTH,
+                    step=LORA_STRENGTH_STEP,
+                    value=lora.default_strength,
+                    label=f"{lora.display_name}",
+                    info="Higher pushes the style harder; 0 leaves the frame untouched.",
+                    elem_classes=["zoomy-tip"],
+                    interactive=True,
+                )
+            )
+        strength_groups.append(strength_group)
+    if strength_groups:
         selected_loras.change(  # type: ignore[attr-defined]
             _lora_slider_visibility(family),
             inputs=[selected_loras],
-            outputs=strength_sliders,
+            outputs=strength_groups,
             queue=False,
         )
     gr.Markdown("## 2 · Prompt")

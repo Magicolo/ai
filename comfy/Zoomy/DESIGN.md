@@ -343,8 +343,13 @@ every frame. The per-family panel is drawn by
 `@gr.render(inputs=[family_selector])`. Style cards are a LoRA
 `CheckboxGroup` (defaults mirror the source workflows: Ernie C64 on, Z
 styles off = photorealistic default) plus one strength slider (0–2, step
-0.05) per LoRA that reveals itself only while its card stays selected
-(`selected_loras.change` → `_lora_slider_visibility`). Step 2 Prompt: a
+0.05) per LoRA, each wrapped in its own `gr.Group` that reveals itself
+only while its card stays selected (`selected_loras.change` →
+`_lora_slider_visibility`). The toggle targets the wrapper group, never the
+Slider itself: a Slider that doubles as a `gr.update()` target has its
+frontend value clobbered by the update response, so the next Grow submits
+`[{'type': 'update', ...}]` for it and Gradio's own `Slider.preprocess`
+crashes before `grow_frames` runs. Step 2 Prompt: a
 large prompt box (12 lines, up to 20) applying to every grown frame, and
 the negative prompt inside a collapsed accordion only for families that
 define one (Ernie shows a zeroed-conditioning note instead). Step 3 Grow:

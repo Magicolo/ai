@@ -701,6 +701,41 @@ def test_panel_inputs_are_explicitly_interactive(tmp_path: Path) -> None:
         assert all(found.values())
 
 
+def test_lora_strength_sliders_are_never_visibility_targets(tmp_path: Path) -> None:
+    """Strength sliders stay pure inputs; wrapper groups take the visibility updates.
+
+    A strength Slider that doubles as a gr.update() target has its frontend
+    value clobbered by the update response, so the next Grow submits
+    [{'type': 'update', 'visible': ...}] for that Slider and Gradio's own
+    Slider.preprocess crashes before grow_frames runs (TypeError: '<' not
+    supported between 'list' and 'float'). The style toggle must target
+    wrapper containers while the Sliders only ever submit floats.
+    """
+    for family in FAMILY_CATALOG:
+        with gr.Blocks() as demo:
+            wiring = _test_wiring(tmp_path)
+            _draw_family_panel(wiring, family.key)
+        visibility_outputs: list[object] = []
+        grow_slider_inputs: list[object] = []
+        for event in demo.fns.values():
+            if event.name == "update_visibility":
+                visibility_outputs.extend(event.outputs)
+            elif event.name == "grow_frames":
+                grow_slider_inputs.extend(
+                    block for block in event.inputs if isinstance(block, gr.Slider)
+                )
+        assert visibility_outputs, f"no visibility handler drawn for {family.key}"
+        assert grow_slider_inputs, f"no grow sliders drawn for {family.key}"
+        assert not any(isinstance(block, gr.Slider) for block in visibility_outputs)
+        assert not set(map(id, visibility_outputs)) & set(map(id, grow_slider_inputs))
+
+
+def test_coerce_to_float_absorbs_visibility_update_payloads() -> None:
+    """Second line of defense: echoed gr.update() payloads coerce to zero."""
+    assert _coerce_to_float([{"type": "update", "visible": False}]) == 0.0
+    assert _coerce_to_float({"type": "update", "visible": True}) == 0.0
+
+
 def _free_port() -> int:
     """Return a currently-free localhost port for the smoke launch."""
     with socket.socket() as socket_handle:
