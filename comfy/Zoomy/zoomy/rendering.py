@@ -35,6 +35,7 @@ from zoomy.errors import (
     RenderInterruptedError,
     ZoomyError,
 )
+from zoomy.retry import is_retryable_transient
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
@@ -256,7 +257,10 @@ def _attempt_frame_with_retries(
     """Render one frame, retrying transient failures; True when rendered.
 
     User interrupts and engine configuration errors propagate immediately;
-    other failures retry until the attempt budget is spent, ending with False.
+    video-memory failures propagate too — the engine already spent its own
+    evict-and-retry budget inside the stage, so a second loop here would
+    just re-run full diffusion passes (previously up to 9 per frame). Other
+    failures retry until the attempt budget is spent, ending with False.
     """
     for attempt in range(1, max_attempts_per_frame + 1):
         try:
@@ -264,6 +268,8 @@ def _attempt_frame_with_retries(
         except (RenderInterruptedError, EngineConfigurationError):
             raise
         except ZoomyError as failure:
+            if not is_retryable_transient(failure):
+                raise
             if attempt >= max_attempts_per_frame:
                 yield ProgressUpdate(
                     message=(

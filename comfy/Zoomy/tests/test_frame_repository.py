@@ -225,43 +225,6 @@ def test_sequence_statistics_of_an_empty_sequence(tmp_path: Path) -> None:
     assert statistics.video_modified_timestamp is None
 
 
-def test_segment_twin_paths_resolves_the_newest_music_and_effects_twins(
-    tmp_path: Path,
-) -> None:
-    """Each window's two soundtrack twins resolve independently by recency."""
-    repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "z_image_seg002_music_00001-audio.mp4", modification_time=100.0)
-    _write_file(tmp_path / "z_image_seg002_music_00002-audio.mp4", modification_time=200.0)
-    _write_file(tmp_path / "z_image_seg002_sfx_00001-audio.mp4", modification_time=150.0)
-    twins = repository.segment_twin_paths("z_image", 2)
-    assert twins == (
-        tmp_path / "z_image_seg002_music_00002-audio.mp4",
-        tmp_path / "z_image_seg002_sfx_00001-audio.mp4",
-    )
-
-
-def test_segment_twin_paths_needs_both_stems(tmp_path: Path) -> None:
-    """A window with only one rendered twin is not ready for assembly."""
-    repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "z_image_seg002_music_00001-audio.mp4")
-    assert repository.segment_twin_paths("z_image", 2) is None
-    assert repository.segment_twin_paths("z_image", 3) is None
-
-
-def test_segment_stem_paths_resolves_the_newest_flac_stems(tmp_path: Path) -> None:
-    """Each window's two overlap stems resolve independently by recency."""
-    repository = FrameRepository(tmp_path)
-    _write_file(tmp_path / "z_image_seg002_music_stem.flac", modification_time=100.0)
-    _write_file(tmp_path / "z_image_seg002_music_stem_00001.flac", modification_time=200.0)
-    _write_file(tmp_path / "z_image_seg002_sfx_stem.flac", modification_time=150.0)
-    stems = repository.segment_stem_paths("z_image", 2)
-    assert stems == (
-        tmp_path / "z_image_seg002_music_stem_00001.flac",
-        tmp_path / "z_image_seg002_sfx_stem.flac",
-    )
-    assert repository.segment_stem_paths("z_image", 3) is None
-
-
 def test_next_video_stem_continues_the_main_sequence(tmp_path: Path) -> None:
     """Assembly names follow the VHS counter, skipping twins and segments."""
     repository = FrameRepository(tmp_path)

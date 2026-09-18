@@ -48,9 +48,11 @@ class SegmentSoundtrack:
     """One rendered segment's artifacts, in sequence order.
 
     Attributes:
-        music_video_path: The twin whose video stream concatenates.
+        music_video_path: The segment's silent video, whose stream
+            concatenates (formerly a per-stem twin; the twin muxes are
+            gone, so this points at the silent segment encode directly).
         music_stem_path: The full-length music stem (FLAC keeps the overlap
-            tail the twin trims away).
+            tail the video trims away).
         sound_effect_stem_path: The full-length effects stem.
         music_seconds: Nominal music stem duration placing the join fades.
         sound_effect_seconds: Nominal effects stem duration.
@@ -68,7 +70,7 @@ class AssemblyRequest:
     """Everything the final assembly needs.
 
     Attributes:
-        segments: Per-segment twins in playback order.
+        segments: Per-segment artifacts in playback order.
         work_directory: Scratch directory for extracted waves and the concat
             list; removed after a successful assembly.
         output_video_path: The silent concatenated video (the main file).

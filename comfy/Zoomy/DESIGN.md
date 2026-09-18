@@ -100,7 +100,17 @@ Zoomy/
     family_catalog.py     # frozen FamilyDefinition/LoraDefinition catalog of 3
     engine_protocol.py    # FrameRenderRequest/FinalizeRequest, duration math,
                           # segmentation, EngineProtocol, EngineStatistics
-    local_engine.py       # LocalEngine: the whole render backend (see §7)
+    local_engine.py       # LocalEngine: thin orchestrator owning residency +
+                          # sequencing (see §7); stages live in stage modules
+    frame_pipelines.py    # frame diffusion loading: fp8-first DiT, LoRA
+                          # selection with dirty check, Z scheduler wiring
+    interpolation.py      # RIFE recursive bisection (depth 2 = ×4)
+    music.py              # ACE-Step stack (resident) + MusicRenderRequest step
+    effects.py            # MMAudio stack (resident) + SoundEffectsRenderRequest
+    video_io.py           # silent-video encode, audio slicing, artifact
+                          # verify/discard, memory helpers, ffmpeg binary cache
+    retry.py              # shared retry policy: OOM detection, stage budget,
+                          # loop-transient predicate
     vendor_compat.py      # transformers-5 compatibility shim
     final_assembly.py     # segmented-finalize ffmpeg assembly
     frame_repository.py   # frame/video discovery + clearing under the output dir
@@ -198,8 +208,8 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
   order is render order — the layout is flat since 2026-09-16: no `Zoomy/`
   nesting, old nested artifacts were orphaned without migration);
   `latest_video_path` returns the newest `<sequence>*.mp4`, **preferring
-  the `-audio` twin** (see §8) and excluding segment twins (which could
-  otherwise win as newest); `sequence_statistics()` summarizes count,
+  the `-audio` twin** (see §8) and excluding segment windows (whose silent
+  videos could otherwise win as newest); `sequence_statistics()` summarizes count,
   bytes, recent paths, and video details in one pass for the stats panel
   (tolerates files vanishing mid-read).
 - `local_engine.LocalEngine`: see §7. Constructor
@@ -253,57 +263,100 @@ back to 1376×768) and must be positive multiples of 16
 call uses the request dims, so families render at any aligned size.
 
 One frame pipeline stays resident per family (evicted on family change —
-each holds ~20 GB of CPU weights under sequential offload). `_apply_lora_selection`
-loads newly selected LoRAs once via `load_lora_weights` and activates
-exactly the selection with `set_adapters(names, weights)`; deselecting is a
-weight swap, no reload. (Empty selections skip `set_adapters` entirely, so
+each holds ~20 GB of CPU weights under offload, and the pipeline is dropped
+wholesale when finalize starts because no more frames render after it).
+`apply_lora_selection` (`frame_pipelines.py`) loads newly selected LoRAs once
+via `load_lora_weights` and activates exactly the selection with
+`set_adapters(names, weights)`; deselecting is a weight swap, no reload —
+and unchanged selections skip the swap entirely via the active-adapter dirty
+check. (Empty selections skip `set_adapters` entirely, so
 an e2e A/B must use a fresh engine or sequence — a stale adapter would stay
-active. Caught once during verification, now documented.)
+active. Caught once during verification, now documented.) Ernie text
+embeddings are cached per (family, prompt) on the resident pipeline:
+sequences reuse one prompt across frames, so only the first frame pays the
+7B text encoder.
 
-- **Ernie** (`_load_ernie_pipeline`): `ErnieImagePipeline`; local fp8 DiT
-  via `from_single_file` + official text encoder, VAE, tokenizer, scheduler
-  from `baidu/ERNIE-Image-Turbo` (only `transformer/config.json` downloads —
-  never the official bf16 weights); euler/simple, 8 steps, cfg 1.0;
-  sequential CPU offload.
-- **Z** (`_load_z_pipeline`): `ZImageImg2ImgPipeline`; local fp8 DiT via
-  `from_single_file`; text encoder, tokenizer, scheduler from
-  `Tongyi-MAI/Z-Image-Turbo` (fast) or `Tongyi-MAI/Z-Image` (quality).
-  Fast: DDIM, 6 steps, cfg 1.0. Quality: `res_multistep`, `beta`,
-  22 steps, cfg 4.0. The scheduler is never reconfigured — the repo default
-  is used. Sequential CPU offload. The local `ae.safetensors` is tried via
-  `from_single_file` but **rejected** (its `conv_out` is 32-channel vs the
-  8-channel config → `ValueError`), so the Turbo family renders with the
-  official VAE through the fallback chain — the fallback is load-bearing,
-  not dead code (verified live).
-- **Interpolation**: RIFE via `ccvfi` (recursive bisection, depth 2 = ×4),
-  replacing the old FILM node.
-- **Music**: ACE-Step 1.5 (in-image clone), instrumental tags per family,
-  seed `31 + window.index` so long sequences evolve.
-- **SFX**: MMAudio (in-image clone @8eaeb72) conditioned on the interpolated
-frames, seed 7 fixed. Three load-bearing guards: the interp batch is tiled
-to ≥ `MINIMUM_SYNC_FRAMES` (17) by `_pad_frames_to_minimum` — the
-synchformer needs ≥ 16 sync frames and short renders crash with
-`torch.stack([])` (the old `BatchPadToMin` node, ported as a helper);
-`_render_music` / `_render_sound_effects` **evict their stack after
-the stems land** (`_unload_music_stack` / `_unload_effects_stack` over the
-shared `_collect_free_video_memory`: `gc` + `cuda.empty_cache`) — without
-eviction the resident 14.5 GiB ACE stack OOMs the MMAudio load (verified
-live; pinned by test); and **every fallible stage runs under
-`run_stage_with_retries`** (3 attempts, evict-all-stacks + empty-cache
-between tries — OOM is matched on the error shape without importing
-torch, so the slim image stays light; interrupts, config errors, and
-non-OOM failures propagate immediately; a budget below 1 raises
-`ValueError`).
+- **Ernie** (`load_ernie_pipeline`): `ErnieImagePipeline`; local fp8 DiT
+  via `from_single_file` (fp8 dtypes tried first through the shared
+  `_load_single_file_transformer`, bfloat16 fallback) + official text
+  encoder, VAE, tokenizer, scheduler from `baidu/ERNIE-Image-Turbo` (only
+  `transformer/config.json` downloads, cached once per process via
+  `cached_transformer_config` — never the official bf16 weights);
+  euler/simple, 8 steps, cfg 1.0.
+- **Z** (`load_z_pipeline`): `ZImageImg2ImgPipeline`; local fp8 DiT via
+  `from_single_file` (same shared loader); text encoder, tokenizer,
+  scheduler from `Tongyi-MAI/Z-Image-Turbo` (fast) or `Tongyi-MAI/Z-Image`
+  (quality). `configure_z_scheduler` applies the catalog recipe (shift 3.0
+  when exposed; DDIM vs flow-match scheduler swap when diffusers offers
+  the named class, best-effort). Fast: DDIM, 6 steps, cfg 1.0. Quality:
+  `res_multistep`, `beta`, 22 steps, cfg 4.0. The local `ae.safetensors`
+  is tried via `_load_local_autoencoder_or_none` but **rejected** (its
+  `conv_out` is 32-channel vs the 8-channel config → `ValueError`), so the
+  Turbo family renders with the official VAE through the fallback chain —
+  the fallback is load-bearing, not dead code (verified live).
+- **Offload** (both families): `enable_model_cpu_offload` (whole-model
+  paging — markedly faster than per-layer sequential streaming on a 16 GB
+  card) with sequential offload as fallback, plus VAE slicing/tiling when
+  supported and best-effort full-graph `torch.compile` of the transformer.
+- **Interpolation** (`interpolation.py`): RIFE via `ccvfi` (recursive
+  bisection, depth 2 = ×4), replacing the old FILM node. The RIFE model
+  stays resident across windows.
+- **Music** (`music.py`): ACE-Step 1.5 (in-image clone), instrumental tags
+  per family. The stack loads once per finalize and stays resident across
+  windows; single-pass finalizes render the stem directly (seed
+  `MUSIC_SEED + window.index`), while segmented finalizes render one
+  global take (seed `MUSIC_SEED`) and slice per-window stems out of it —
+  see §8.
+- **SFX** (`effects.py`): MMAudio (in-image clone @8eaeb72) conditioned on
+  the interpolated frames, seed 7 fixed, flow-matching sampler built once
+  with the stack. The stack loads on the first window and stays resident
+  for the rest. Three load-bearing guards: the interp batch is tiled
+  to ≥ `MINIMUM_SYNC_FRAMES` (17) by `pad_frames_to_minimum` (`video_io.py`)
+  — the synchformer needs ≥ 16 sync frames and short renders crash with
+  `torch.stack([])` (the old `BatchPadToMin` node, ported as a helper);
+  sync frames are truncated to the needed count *before* the per-frame
+  transform runs, so padded excess is never transformed just to be
+  discarded; audio stacks are evicted before assembly (`_unload_music_stack`
+  / `_unload_effects_stack` over the shared `collect_free_video_memory`:
+  `gc` + `cuda.empty_cache`) — without eviction the resident 14.5 GiB ACE
+  stack OOMs the MMAudio load (verified live; pinned by test).
+- **Retries** (`retry.py`): every fallible engine stage runs under
+  `run_stage_with_retries` (3 attempts, evict-all-stacks + empty-cache
+  between tries — OOM is matched on the error shape without importing
+  torch, so the slim image stays light; the bare `oom` marker only counts
+  as its own word, so ordinary words like `boom` never misroute into the
+  evict path). Interrupts, config errors, and non-OOM failures propagate
+  immediately; a budget below 1 raises `ValueError`; an exhausted OOM
+  budget raises `EngineExecutionError` naming the stage so the render loop
+  recognizes it and never double-retries (previously up to 9 diffusion
+  passes per frame: 3 inner × 3 outer). The loop (`rendering.py`) retries
+  only transient non-OOM stage failures via `is_retryable_transient` —
+  OOMs propagate because the engine already spent its budget on them.
 
 ## 8. Finalize (`local_engine.py` + `final_assembly.py`)
 
-Short sequences finalize in one window: interpolate → music + SFX →
-per-stem FLAC stems + twin videos → mux. Long ones — anything interpolating
+Short sequences finalize in one window: interpolate → music + SFX stems →
+one silent segment video → assembly. Long ones — anything interpolating
 past what 48 source frames produce (`needs_segmentation`) — finalize window
 by window and assemble in Python, so VRAM per job depends only on the fixed
-48-frame window, never on the total frame count. The segmented path is
+48-frame window, never on the total frame count. Each window keeps one
+silent segment video (the assembly concatenates these directly) plus its
+music and effects stems — the former per-stem twin muxes are gone.
+`_finalize_window(family, window, extension, global_music)` renders one
+window and verifies every artifact, discarding partials on failure so a
+retry starts clean.
+
+Music renders once as a single global take covering the whole timeline
+(`_prepare_global_music`: total video seconds + the crossfade overlap, one
+diffusion pass with its own evict-and-retry budget — previously one pass
+per window): each window then slices its stem, overlap included, out of it
+(`GlobalMusicSlice`: track path + start offset), so a window retry
+re-slices instead of re-running ACE-Step. Sound effects stay per-window
+because they are conditioned on each window's own frames. Both audio
+stacks are evicted before assembly. The segmented path is
 covered by unit tests (`_finalize_window`, `compute_segment_windows`
-including a Hypothesis tiling property, crossfade assembly) but
+including a Hypothesis tiling property, the 49-frame global-take test
+pinning one music pass plus tiled slices, crossfade assembly) but
 deliberately **not run live** (a 49-frame verification render is uneconomical);
 only the single-window path is verified live (see §12).
 

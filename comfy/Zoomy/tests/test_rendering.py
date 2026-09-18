@@ -370,6 +370,21 @@ def test_render_loop_propagates_configuration_errors_without_retry(tmp_path: Pat
     assert len(engine.render_requests) == 1
 
 
+def test_render_loop_propagates_out_of_memory_without_retry(tmp_path: Path) -> None:
+    """A video-memory failure is never retried by the loop.
+
+    The engine already spent its own evict-and-retry budget inside the stage
+    (surfacing an EngineExecutionError naming it), so a second loop here
+    would just re-run full diffusion passes that already proved too big.
+    """
+    repository = _repository_with_frames(tmp_path, frame_count=0)
+    failure = EngineExecutionError("frame", "Stage 'frame' ran out of video memory: CUDA OOM")
+    engine = ScriptedEngine(frame_results=[failure])
+    with pytest.raises(EngineExecutionError, match="ran out of video memory"):
+        _drain_loop(engine, repository, frame_target=None)
+    assert len(engine.render_requests) == 1
+
+
 def test_interrupt_module_flag_is_independent_of_engine() -> None:
     """The loop stop flag still toggles without any engine involved."""
     clear_loop_stop()

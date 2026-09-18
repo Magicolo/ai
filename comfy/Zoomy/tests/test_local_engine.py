@@ -18,6 +18,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from PIL import Image as PillowImage
 
+from zoomy.effects import LoadedEffectsStack
 from zoomy.engine_protocol import FinalizeRequest, FrameRenderRequest, SegmentWindow
 from zoomy.errors import (
     AssemblyError,
@@ -213,7 +214,7 @@ def test_system_memory_failure_reports_unknown(monkeypatch: pytest.MonkeyPatch) 
         def read_text(self, *_args: object, **_kwargs: object) -> str:
             raise OSError("no /proc here")
 
-    monkeypatch.setattr("zoomy.local_engine.Path", _NoProcPath)
+    monkeypatch.setattr("zoomy.video_io.Path", _NoProcPath)
     assert _read_system_memory_bytes() == (None, None)
 
 
@@ -236,7 +237,13 @@ def test_audio_stacks_unload_after_render(tmp_path: Path) -> None:
     """
     engine = _engine(tmp_path)
     engine._music_stack = {"diffusion_handler": object()}  # noqa: SLF001
-    engine._effects_stack = {"model": object()}  # noqa: SLF001
+    engine._effects_stack = LoadedEffectsStack(  # noqa: SLF001
+        model=object(),
+        feature_utils=object(),
+        sync_transform=object(),
+        flow_matching=object(),
+        generate=object(),
+    )
     engine._unload_music_stack()  # noqa: SLF001
     engine._unload_effects_stack()  # noqa: SLF001
     assert engine._music_stack is None  # noqa: SLF001
@@ -292,7 +299,11 @@ def test_effects_frame_padding_covers_the_minimum(batch_size: int, minimum_frame
 def test_single_frame_window_finalizes_with_stubbed_audio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One frame has no pairs to interpolate; the window still lands twins."""
+    """One frame has no pairs to interpolate; the window still lands its files.
+
+    No twin muxes run: the soundtrack references the silent segment video
+    directly, alongside the two stems.
+    """
     engine = _engine(tmp_path)
     family = find_family(FAMILY_CATALOG, "ernie_turbo")
     repository = FrameRepository(tmp_path / "output")
@@ -317,18 +328,13 @@ def test_single_frame_window_finalizes_with_stubbed_audio(
     ) -> None:
         stem_path.write_bytes(b"effects")
 
-    def fake_mux_audio_twin(_silent_video: Path, _stem: Path, twin: Path) -> None:
-        twin.write_bytes(b"twin")
-
-    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
-    monkeypatch.setattr("zoomy.local_engine._mux_audio_twin", fake_mux_audio_twin)
+    monkeypatch.setattr("zoomy.video_io.write_silent_video", fake_write_silent_video)
     monkeypatch.setattr(engine, "_render_music", fake_render_music)
     monkeypatch.setattr(engine, "_render_sound_effects", fake_render_sound_effects)
     window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
-    soundtrack = engine._finalize_window(  # noqa: SLF001
-        family, family.sequence_key, window, extension=False
-    )
+    soundtrack = engine._finalize_window(family, window, extension=False)  # noqa: SLF001
     assert soundtrack.music_video_path.is_file()
+    assert soundtrack.music_video_path.name.endswith("_silent.mp4")
     assert soundtrack.music_stem_path.is_file()
     assert soundtrack.sound_effect_stem_path.is_file()
 
@@ -354,13 +360,11 @@ def test_failed_window_removes_partial_artifacts(
         stem_path.write_bytes(b"partial-music")
         raise EngineExecutionError("music", "boiler exploded")
 
-    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
+    monkeypatch.setattr("zoomy.video_io.write_silent_video", fake_write_silent_video)
     monkeypatch.setattr(engine, "_render_music", broken_render_music)
     window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
     with pytest.raises(EngineExecutionError, match="boiler exploded"):
-        engine._finalize_window(  # noqa: SLF001
-            family, family.sequence_key, window, extension=False
-        )
+        engine._finalize_window(family, window, extension=False)  # noqa: SLF001
     leftovers = [
         path for path in output_directory.rglob("*") if "seg000" in path.name and path.is_file()
     ]
@@ -389,11 +393,7 @@ def _stub_window_heavy_stages(monkeypatch: pytest.MonkeyPatch, engine: LocalEngi
     ) -> None:
         stem_path.write_bytes(b"effects")
 
-    def fake_mux_audio_twin(_silent_video: Path, _stem: Path, twin: Path) -> None:
-        twin.write_bytes(b"twin")
-
-    monkeypatch.setattr("zoomy.local_engine._write_silent_video", fake_write_silent_video)
-    monkeypatch.setattr("zoomy.local_engine._mux_audio_twin", fake_mux_audio_twin)
+    monkeypatch.setattr("zoomy.video_io.write_silent_video", fake_write_silent_video)
     monkeypatch.setattr(engine, "_render_music", fake_render_music)
     monkeypatch.setattr(engine, "_render_sound_effects", fake_render_sound_effects)
 
@@ -436,7 +436,7 @@ def test_window_render_closes_source_files(tmp_path: Path, monkeypatch: pytest.M
     _stub_window_heavy_stages(monkeypatch, engine)
     opened = _record_image_opens(monkeypatch)
     window = SegmentWindow(index=0, skip_first_images=0, frame_count=1)
-    engine._finalize_window(family, family.sequence_key, window, extension=False)  # noqa: SLF001
+    engine._finalize_window(family, window, extension=False)  # noqa: SLF001
     assert len(opened) == 1
     assert [image.close_calls for image in opened] == [1]
 
@@ -625,7 +625,7 @@ def test_failed_encode_terminates_the_child_and_closes_the_pipe(
 ) -> None:
     """A mid-stream stdin failure must reap the ffmpeg child, then raise."""
     processes: list[_StubEncodeProcess] = []
-    monkeypatch.setattr("zoomy.local_engine.subprocess", _stub_encode_subprocess(processes))
+    monkeypatch.setattr("zoomy.video_io.subprocess", _stub_encode_subprocess(processes))
     frame = PillowImage.new("RGB", (16, 16))
     with pytest.raises(AssemblyError, match="Silent video encode failed"):
         _write_silent_video([frame], tmp_path / "silent.mp4")
@@ -642,7 +642,7 @@ def test_hung_encode_is_killed_after_terminate_timeout(
     """A child ignoring terminate must be killed, never left behind."""
     processes: list[_StubEncodeProcess] = []
     monkeypatch.setattr(
-        "zoomy.local_engine.subprocess",
+        "zoomy.video_io.subprocess",
         _stub_encode_subprocess(processes, hang_on_wait=True),
     )
     frame = PillowImage.new("RGB", (16, 16))
@@ -715,14 +715,19 @@ def test_stage_runner_never_retries_interrupts_or_bad_config(failure: Exception)
 
 
 def test_stage_runner_exhausts_the_attempt_budget() -> None:
-    """Persistent OOM raises the last failure after the final attempt."""
+    """Persistent OOM names the stage instead of re-raising the last failure.
+
+    The exhausted budget surfaces an EngineExecutionError (not the raw OOM)
+    so the render loop recognizes a spent budget and does not retry it a
+    second time — previously up to 9 diffusion passes per frame.
+    """
     attempts: list[int] = []
 
     def always_out_of_memory() -> str:
         attempts.append(len(attempts))
         raise _out_of_memory_error()
 
-    with pytest.raises(RuntimeError, match="out of memory"):
+    with pytest.raises(EngineExecutionError, match="ran out of video memory"):
         run_stage_with_retries(
             "music", always_out_of_memory, max_attempts=2, evict_resident_stacks=lambda: None
         )
@@ -735,6 +740,21 @@ def test_stage_runner_rejects_an_empty_attempt_budget() -> None:
         run_stage_with_retries(
             "frame", lambda: "never", max_attempts=0, evict_resident_stacks=lambda: None
         )
+
+
+def test_stage_runner_retries_backend_memory_failures() -> None:
+    """Allocator, cuDNN, and NCCL failures evict and retry like CUDA OOMs."""
+    from zoomy.retry import is_out_of_memory  # noqa: PLC0415
+
+    assert is_out_of_memory(RuntimeError("CUDA out of memory. Tried to allocate 1 GiB"))
+    assert is_out_of_memory(RuntimeError("CUDNN_STATUS_ALLOC_FAILED: cudnn error"))
+    assert is_out_of_memory(RuntimeError("NCCL WARN out of bounds append"))
+    assert is_out_of_memory(
+        EngineExecutionError("frame", "Stage 'frame' ran out of video memory: CUDA OOM")
+    )
+    assert not is_out_of_memory(EngineExecutionError("frame", "broken weights"))
+    assert not is_out_of_memory(EngineExecutionError("z-frame", "boom"))
+    assert not is_out_of_memory(ValueError("bad request"))
 
 
 def test_render_frame_rejects_misaligned_sizes(tmp_path: Path) -> None:
@@ -788,3 +808,92 @@ def test_denoise_validation_accepts_the_full_span(denoise: float) -> None:
         denoise_strength=denoise,
     )
     LocalEngine._validate_denoise_strength(request)  # noqa: SLF001
+
+
+def test_segmented_finalize_renders_music_once_and_slices_per_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """49 frames finalize in 2 windows with one global music take.
+
+    The global take covers both windows' video plus the crossfade overlap;
+    each window slices its stem (overlap included) out of it, so a window
+    retry re-slices instead of re-running ACE-Step diffusion.
+    """
+    from zoomy.engine_protocol import MUSIC_SEED  # noqa: PLC0415
+    from zoomy.final_assembly import AssemblyOutputs, AssemblyRequest  # noqa: PLC0415
+
+    engine = _engine(tmp_path)
+    family = find_family(FAMILY_CATALOG, "ernie_turbo")
+    repository = FrameRepository(tmp_path / "output")
+    for _ in range(49):
+        repository.save_next_frame(family.sequence_key, PillowImage.new("RGB", (16, 16)))
+
+    music_calls: list[tuple[float, int]] = []
+    slice_calls: list[tuple[float, float]] = []
+
+    def fake_render_music(
+        _caption: str, duration_seconds: float, stem_path: Path, *, seed: int
+    ) -> None:
+        music_calls.append((duration_seconds, seed))
+        stem_path.write_bytes(b"global-music")
+
+    def fake_slice_audio(
+        source: Path,
+        destination: Path,
+        *,
+        start_seconds: float,
+        duration_seconds: float,
+        run: object = None,
+    ) -> None:
+        del run
+        assert source.name == "global_music.flac"
+        slice_calls.append((start_seconds, duration_seconds))
+        destination.write_bytes(b"music-slice")
+
+    def fake_render_sound_effects(
+        _prompt: str,
+        _negative_prompt: str | None,
+        _interpolated_frames: list[object],
+        _duration_seconds: float,
+        stem_path: Path,
+    ) -> None:
+        stem_path.write_bytes(b"effects")
+
+    def fake_interpolate(frames: list[object]) -> list[object]:
+        return list(frames)
+
+    def fake_write_silent_video(frames: list[object], destination: Path) -> None:
+        del frames
+        destination.write_bytes(b"silent")
+
+    def fake_assemble(request: AssemblyRequest) -> AssemblyOutputs:
+        segments = request.segments
+        assert len(segments) == 2
+        return AssemblyOutputs(
+            main_video_path=request.output_video_path,
+            audio_video_path=request.output_audio_video_path,
+        )
+
+    monkeypatch.setattr(engine, "_interpolate_frames", fake_interpolate)
+    monkeypatch.setattr("zoomy.video_io.write_silent_video", fake_write_silent_video)
+    monkeypatch.setattr(engine, "_render_music", fake_render_music)
+    monkeypatch.setattr("zoomy.video_io.slice_audio", fake_slice_audio)
+    monkeypatch.setattr(engine, "_render_sound_effects", fake_render_sound_effects)
+    monkeypatch.setattr("zoomy.local_engine.assemble_final_video", fake_assemble)
+
+    updates = list(engine.finalize_sequence(FinalizeRequest(family=family, frame_count=49)))
+    assert updates[-1].video_path is not None
+    # One global take: 48-window video (189f @32fps) + 1-frame video (1s
+    # floor) + the 1s crossfade overlap the last window extends.
+    assert len(music_calls) == 1
+    global_seconds, global_seed = music_calls[0]
+    assert global_seconds == pytest.approx(189 / 32 + 1.0 + 1.0)
+    assert global_seed == MUSIC_SEED
+    # Slices tile the timeline: window 2 starts where window 1's video ends.
+    assert [round(start, 5) for start, _ in slice_calls] == [0.0, round(189 / 32, 5)]
+    assert [round(duration, 5) for _, duration in slice_calls] == [
+        round(189 / 32 + 1.0, 5),
+        2.0,
+    ]
+    assert engine._music_stack is None  # noqa: SLF001
+    assert engine._effects_stack is None  # noqa: SLF001

@@ -135,33 +135,6 @@ class FrameRepository:
         leaf = f"{sequence_key}{ASSEMBLY_DIRECTORY_SUFFIX}"
         return self.output_directory / leaf
 
-    def segment_twin_paths(self, sequence_key: str, index: int) -> tuple[Path, Path] | None:
-        """Return a segment window's music and effects twins, newest each.
-
-        Returns ``None`` unless both twins landed, so the finalize loop never
-        assembles half a window. The twins carry the concatenated pixels;
-        the full-length soundtrack stems resolve separately.
-        """
-        _check_sequence_key(sequence_key)
-        music_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_music*-audio.mp4")
-        effects_twin = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx*-audio.mp4")
-        if music_twin is None or effects_twin is None:
-            return None
-        return (music_twin, effects_twin)
-
-    def segment_stem_paths(self, sequence_key: str, index: int) -> tuple[Path, Path] | None:
-        """Return a segment window's music and effects stems, newest each.
-
-        Stems keep the over-generated overlap tails the twins trim away, so
-        both must be present before the window joins the assembly.
-        """
-        _check_sequence_key(sequence_key)
-        music_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_music_stem*.flac")
-        sound_stem = self._newest_match(f"{sequence_key}_seg{index:03d}_sfx_stem*.flac")
-        if music_stem is None or sound_stem is None:
-            return None
-        return (music_stem, sound_stem)
-
     def next_video_stem(self, sequence_key: str) -> str:
         """Return the next ``<sequence>_NNNNN`` stem.
 
@@ -183,8 +156,9 @@ class FrameRepository:
     def remove_segment_files(self, sequence_key: str) -> int:
         """Delete a sequence's segment intermediates, returning the count.
 
-        Matches every segment artifact regardless of extension: videos,
-        twins, stems, and the metadata preview images written alongside.
+        Matches every segment artifact regardless of extension: silent
+        window videos, stems, and the metadata preview images written
+        alongside.
         """
         _check_sequence_key(sequence_key)
         removed = 0
@@ -198,20 +172,13 @@ class FrameRepository:
             removed += 1
         return removed
 
-    def _newest_match(self, pattern: str) -> Path | None:
-        """Return the newest file matching a glob, or ``None`` when empty."""
-        candidates = list(self.output_directory.glob(pattern))
-        if not candidates:
-            return None
-        return max(candidates, key=lambda path: path.stat().st_mtime)
-
     def latest_video_path(self, sequence_key: str) -> Path | None:
         """Return the newest finalized video, preferring the audio-muxed twin.
 
         The finalize always writes a silent main file plus, when an audio
         track is connected, a ``-audio`` twin carrying the muxed soundtrack;
         the twin is the artifact users want to preview. Segment windows write
-        their own twins, which never count as finished videos. When several
+        their own silent videos, which never count as finished videos. When several
         videos exist the newest by modification time wins, which is the one
         the latest finalize just wrote.
         """
