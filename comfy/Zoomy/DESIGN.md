@@ -12,10 +12,14 @@
 
 Zoomy is a small Gradio web application that renders the two verified
 infinite-zoom loops (Ernie Image Turbo, Juggernaut Z) without any external
-backend. The user picks a model family, selects LoRA styles with strengths,
-edits the prompt, and clicks **Render next frame** once per frame;
-**Finalize video** turns the accumulated frames into a music video with
-sound effects.
+backend. The studio layout pairs a left canvas (latest frame, filmstrip,
+finished video, Finish/refresh/clear, interrupt, session log) with a right
+stepped rail: pick a model card, choose LoRA style cards with strengths,
+shape the prompt, then **Grow** the zoom (one frame, loop to a duration, or
+loop until stopped); **Finish video** turns the accumulated frames into a
+music video with sound effects. Every frame draws a fresh random seed —
+there is no manual seed control. Resolution is preset-only (official
+vendor buckets plus a 512 draft card, no width/height boxes).
 
 Deliberate non-goals:
 
@@ -164,10 +168,19 @@ v2921151: bf16 = 2799849, fp16 = 2804116). Total volume after provisioning:
   `z_quality`. `find_family(catalog, key)` raises `ZoomyError` on miss.
   `LoraDefinition.selected_by_default` mirrors the source workflows (Ernie
   C64 on; Z styles off = photorealistic default). Each family carries
-  `resolution_presets`: Ernie offers the seven official Baidu sizes
-  (1024x1024, 1264x848, 848x1264, 1376x768, 768x1376, 1200x896,
-  896x1200); both Z variants offer a flexible 512-2048 list with a fast
-  512x512 draft plus HD sizes. Every preset is a positive multiple of 16.
+   `resolution_presets`: Ernie offers the seven official Baidu sizes
+   (1024x1024, 1264x848, 848x1264, 1376x768, 768x1376, 1200x896,
+   896x1200); both Z variants offer the eleven official Comfy-Org
+   1024-buckets (1024x1024, 1152x896, 896x1152, 1152x864, 864x1152,
+   1248x832, 832x1248, 1280x720, 720x1280, 1344x576, 576x1344). Each
+   list appends `DRAFT_RESOLUTION_PRESET` (Draft 512x512) LAST for
+   quick generation — appended, never prepended, so the official
+   defaults selected by `_default_preset_name` never shift. The
+   non-official Z sizes (1376x768, 1536x864) were dropped in the 2026-09-17
+   revamp — off-bucket sizes risk RoPE artifacts. Every preset is a positive
+   multiple of 16. Ernie panels default to the 1376x768 HD entry (which also
+   matches `FRAME_WIDTH/HEIGHT_PIXELS`); Z panels default to Square
+   1024x1024 (the first bucket, since 1376x768 no longer exists for Z).
 - `engine_protocol`: `FrameRenderRequest(family, prompt, negative_prompt,
   frame_count, lora_selections, seed, frame_width = 1376,
   frame_height = 768, denoise_strength = 0.60)` / `FinalizeRequest` / `SegmentWindow`
@@ -310,52 +323,93 @@ hundred KB); safe to delete, not referenced by any artifact.
 
 ## 9. Interface behavior (`interface.py`)
 
-Unchanged from the Comfy era except the backend: header row (family dropdown
-+ reachability badge, now backed by `engine.is_ready()` / statistics),
-live statistics line (frames · disk · last/avg durations · video ·
-VRAM/RAM), short status line, session log (append-only, last 8 of 200
-lines), then a main row with previews on the left (latest frame, 8-frame
-gallery strip, finalized video) and the per-family panel on the right. The
-panel is drawn by `@gr.render(inputs=[family_dropdown])`: LoRA
-`CheckboxGroup` + one strength slider (0–2, step 0.05) per family LoRA,
-prompt box, negative box only for families that define one, Render button,
-Loop checkbox, target-duration number (blank = unlimited loop until
-stopped), finalize-when-loop-ends checkbox (default on), resolution
-preset dropdown (fills width/height; defaults to the 1376x768 HD entry),
-and width/height
-numbers (prefilled 1376/768; blank or garbage falls back to the default —
-both Numbers carry no `minimum=`, for the same preprocess-rejection
-reason as the old frame target: Gradio validates minimums before the
-handler runs and would reject every blank input outright), temporal
-coherence slider (0.05-0.90, step 0.05, default 0.40 — higher keeps more
-of the previous frame; garbage restores the default), and a seed row
-(seed number + lock checkbox: locked reuses the fixed seed every frame,
-unlocked or blank draws fresh random per frame). Components the
-panel wiring touches are created *before* the render block (the decorator
-executes immediately at build).
+Creator-studio layout (2026-09-17 revamp, user-approved): a header row
+(reachability badge backed by `engine.is_ready()` / statistics, slim
+statistics line — frames · disk · last/avg durations · video · VRAM/RAM,
+no timestamp — plus a short status line), then a main row with the canvas
+on the left and a stepped rail on the right.
 
-Events: render/loop/finalize generators stream status + log + previews +
-stats (gallery/preview refresh only on frame completion to avoid flicker;
-durations accumulate in session `State`); the loop handler dogfoods
-`generate_video` with a request factory carrying the panel dims, denoise,
-and seed-lock choice (fresh random seed per call unless locked) and also surfaces the finalized video preview, so
-the UI loop and the programmatic API (`VideoGenerationOptions`) can never
-drift apart. The Loop checkbox carries TWO
-`change` listeners because generators must queue while stops must not wait:
-the queued generator (starts the loop when checked, no-ops when unchecked)
-and an unqueued plain handler (no-op when checked, sets the stop flag when
-unchecked — this is what ends a running loop). The final yield unchecks the
-box programmatically, which fires no event, so no phantom loop can start.
-Health badge + stats refresh on a 10 s `Timer` and on dropdown
-change/refresh (`queue=False` so they never block behind a render);
-Interrupt sets the engine flag (checked between stages, so it lands
-promptly) and also sets the loop-stop flag so it ends loops even between
-frames; clear-frames uses a two-click confirm (`gr.State` armed flag +
-button label change) and refreshes disarm it (no cross-family accidents);
-`blocks.queue(default_concurrency_limit=1)` serializes render jobs. Wiring
-lives in `FamilyPanelWiring` / `InterfaceContext` dataclasses with small
-`_bind_*`/`_create_*` factories plus pure, unit-tested format/parse helpers
-to keep every function under the complexity budget.
+Left canvas (`zoomy-canvas` column): a status pill (Idle green / Rendering
+violet / Finalizing cyan, via `_render_status_pill`), the latest frame,
+an 8-slot filmstrip gallery (4 columns × 2 rows), the finished video, a
+button row (Finish video / Refresh previews / Clear frames), an Interrupt
+button, and the session log (append-only, last 8 of 200 lines) inside a
+collapsed accordion.
+
+Right rail (`zoomy-rail` column), four numbered steps. Step 1 Style: a
+model `Radio` (display name → family key) with a shared-sequence note —
+Z Fast and Z Quality continue one zoom sequence, switching cards keeps
+every frame. The per-family panel is drawn by
+`@gr.render(inputs=[family_selector])`. Style cards are a LoRA
+`CheckboxGroup` (defaults mirror the source workflows: Ernie C64 on, Z
+styles off = photorealistic default) plus one strength slider (0–2, step
+0.05) per LoRA that reveals itself only while its card stays selected
+(`selected_loras.change` → `_lora_slider_visibility`). Step 2 Prompt: a
+large prompt box (12 lines, up to 20) applying to every grown frame, and
+the negative prompt inside a collapsed accordion only for families that
+define one (Ernie shows a zeroed-conditioning note instead). Step 3 Grow:
+a unified grow-mode `Radio` (Single frame / Loop to duration / Loop until
+stopped), a target-duration number (blank = run until stopped; carries no
+`minimum=`, for the same preprocess-rejection reason as the old frame
+target: Gradio validates minimums before the handler runs and would
+reject every blank input outright), a resolution-preset radio (one card per official vendor bucket plus a
+Draft 512x512 quick-generation card last — sizes
+the next grown frames, preset-only, no width/height boxes), a temporal coherence slider (0.05-0.90, step
+0.05, default 0.40 — higher keeps more of the previous frame; maps to
+img2img denoise as `denoise = 1 - coherence`; garbage restores the
+default), and the **Grow** button (primary). Step 4 Finish: an
+auto-finish checkbox (default on — auto-finish runs after loops; the
+Finish button under the canvas runs it by hand).
+
+Seeds are fully automatic: every frame draws a fresh random seed via
+`_fresh_seed` (`MAXIMUM_SEED = 2**48`); there is no seed box and no lock.
+`_coerce_seed` / `_resolve_frame_seed` survive only as tested pure
+helpers for compatibility. `_coerce_frame_size` / `_apply_resolution_preset`
+likewise survive only as tested helpers — the revamp panel passes the
+preset name straight into the grow request instead of filling geometry
+boxes. `_preset_dimensions` falls back to the family's own default preset
+on garbage names so the geometry is never empty.
+
+Events: the Grow button carries TWO `click` listeners because generators
+must queue while stops must not wait: the queued generator (renders one
+frame, or dogfoods `generate_video` with a request factory carrying the
+panel preset, denoise, and a fresh random seed per frame for loops — also
+surfacing the finalized video preview, so the UI loop and the
+programmatic API can never drift apart) and an unqueued plain toggle
+(`_grow_toggle_button`, no-op when idle, sets the stop flag when running —
+this is what ends a running grow). A `grow_state` (`gr.State`) morphs the
+button label between Grow and Stop; the final yield resets it
+programmatically, which fires no event, so no phantom grow can start.
+Gallery/preview refresh only on frame completion to avoid flicker;
+durations accumulate in session `State`. The finalize generator streams
+the Finalizing pill while the mux runs. Health badge + stats refresh on a
+10 s `Timer` and on model change/refresh (`queue=False` so they never
+block behind a render); Interrupt sets the engine flag (checked between
+stages, so it lands promptly) and also sets the loop-stop flag so it ends
+grows even between frames; clear-frames uses a two-click confirm
+(`gr.State` armed flag + button label showing the live frame count, e.g.
+"Confirm: clear 12 frames") and refreshes disarm it (no cross-family
+accidents); `blocks.queue(default_concurrency_limit=1)` serializes render
+jobs. Wiring lives in `FamilyPanelWiring` / `InterfaceContext` dataclasses
+with small `_bind_*`/`_create_*` factories plus pure, unit-tested
+format/parse helpers; the 8-10 grow-helper arguments travel as a `_GrowRun`
+mutable dataclass to keep every function under the complexity budget.
+Every panel input carries explicit `interactive=True`: listeners registered
+inside `@gr.render` do not flip the frontend's inferred interactivity, so
+without it the whole panel arrives disabled (verified live 2026-09-17 —
+the server sent `interactive: null` for all 10 render-block inputs and the
+browser showed a disabled cursor).
+
+Theme: `STUDIO_THEME` (`gr.themes.Soft`, violet primary / cyan secondary)
+plus `STUDIO_CSS` (dark cinematic container, canvas, and rail styling) are
+applied in `main.py`'s `launch()` call — Gradio 6 takes `theme=`/`css=`
+at launch, not on `Blocks()`. Every technical control carries an `info=`
+hover tooltip behind a short label (Model/Style/Prompt/Negative/Mode/
+Duration (s)/Resolution/Coherence/Auto-finish — the verbose explanations,
+e.g. `denoise = 1 - coherence`, live in the tooltip, not the label);
+`.zoomy-tip` CSS hides each `block-info` until its own control is hovered,
+when it floats as a tooltip card. Gradio `Button` has no `info=` parameter
+(verified against 6.26), so buttons keep plain labels.
 
 Gradio 6.26 specifics (all verified against the runtime, not assumed):
 `Dropdown` tuple choices are `(display, key)`; `Timer` takes
@@ -398,7 +452,7 @@ Both scripts run the gates in-container against the host tree via the
 `/tmp/...` so no tool residue ever lands in the tree. `quality-gates.sh`
 additionally mounts the named `zoomy_mypy_cache` volume at `/tmp/mypy-cache`,
 so repeat runs reuse type-check results (~8 s warm vs ~44 s cold; verified
-2026-09-17, 139 tests). The cache is content+mtime keyed — safe to drop any
+2026-09-17, 245 tests). The cache is content+mtime keyed — safe to drop any
 time (`docker volume rm zoomy_mypy_cache`).
 
 Config summary (`pyproject.toml`): ruff `select = ["ALL"]`, line-length 100,
@@ -486,7 +540,9 @@ frames (same mechanics as Comfy — document, don't fix).
 ## 13. Future work
 
 - More families = more catalog entries (nothing else changes).
-- Optional seed control / per-frame prompt history in the UI.
+- Optional per-frame prompt history in the UI. (Manual seed control was
+  deliberately dropped in the 2026-09-17 revamp — every frame draws fresh
+  random; do not re-add without a user decision.)
 - Z LoRA default strengths: consider 1.0 (chalkboard renders partial at the
   ported 0.85; user decision).
 - If the UI is ever exposed beyond localhost, add auth in front of it.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from zoomy.family_catalog import FAMILY_CATALOG
 from zoomy.frame_repository import FrameRepository
-from zoomy.interface import build_application
+from zoomy.interface import STUDIO_CSS, STUDIO_THEME, build_application
 from zoomy.local_engine import LocalEngine
 from zoomy.settings import Settings
 
@@ -30,6 +30,8 @@ def main() -> None:
         allowed_paths=[settings.output_directory],
         show_error=True,
         inbrowser=False,
+        theme=STUDIO_THEME,
+        css=STUDIO_CSS,
         # Server-side rendering needs a Node.js runtime the slim image does not
         # ship; the standard client-side rendering works everywhere.
         ssr_mode=False,

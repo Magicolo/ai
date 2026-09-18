@@ -19,6 +19,8 @@ from zoomy.family_catalog import FAMILY_CATALOG, find_family
 from zoomy.frame_repository import FrameRepository, SequenceStatistics
 from zoomy.interface import (
     MAXIMUM_SEED,
+    STUDIO_CSS,
+    STUDIO_THEME,
     FamilyPanelWiring,
     InterfaceContext,
     _append_log_entry,
@@ -37,17 +39,20 @@ from zoomy.interface import (
     _draw_family_panel,
     _format_bytes,
     _format_timestamp,
+    _fresh_seed,
+    _grow_toggle_button,
     _parse_panel_submission,
     _parse_target_seconds,
     _preset_dimensions,
     _record_frame_duration,
     _render_statistics_line,
+    _render_status_pill,
     _resolve_frame_seed,
     _safe_system_statistics,
     _selected_lora_names,
     build_application,
 )
-from zoomy.rendering import RenderEnvironment
+from zoomy.rendering import RenderEnvironment, clear_loop_stop, is_loop_stop_requested
 from zoomy.settings import Settings
 
 if TYPE_CHECKING:
@@ -162,10 +167,12 @@ def _wiring_context(tmp_path: Path) -> InterfaceContext:
             catalog=FAMILY_CATALOG,
             repository=repository,
             environment=environment,
-            family_dropdown=gr.Dropdown(choices=["z_fast"], value="z_fast"),
+            family_selector=gr.Radio(choices=["z_fast"], value="z_fast"),
             health_badge=gr.HTML(value="badge"),
             stats_line=gr.Markdown(value="stats"),
             status_markdown=gr.Markdown(value="status"),
+            status_pill=gr.HTML(value="pill"),
+            grow_state=gr.State(value=False),
             log_textbox=gr.Textbox(value="log"),
             log_state=gr.State(value=[]),
             durations_state=gr.State(value=(0, 0.0, 0.0)),
@@ -201,7 +208,7 @@ def test_finalize_reports_unknown_family(tmp_path: Path) -> None:
     """A bad dropdown key yields one error update, never a traceback."""
     updates = list(_bind_finalize(_wiring_context(tmp_path))("no-such-family", [], (0, 0.0, 0.0)))
     assert len(updates) == 1
-    (message, _log, _video, _stats, _gallery) = updates[0]
+    (message, _log, _video, _stats, _gallery, _pill) = updates[0]
     assert isinstance(message, str)
     assert message.startswith("**Error:**")
     assert "no-such-family" in message
@@ -567,19 +574,23 @@ def test_preset_dimensions_resolve_by_display_name() -> None:
 
 
 def test_preset_dimensions_fall_back_to_default() -> None:
-    """Unknown or garbage preset names restore the default HD geometry."""
-    family = find_family(FAMILY_CATALOG, "z_fast")
-    assert _preset_dimensions(family, "no-such-preset") == (1376, 768)
-    assert _preset_dimensions(family, None) == (1376, 768)
-    assert _preset_dimensions(family, 512) == (1376, 768)
+    """Unknown or garbage preset names restore the family's default geometry."""
+    ernie = find_family(FAMILY_CATALOG, "ernie_turbo")
+    assert _preset_dimensions(ernie, "no-such-preset") == (1376, 768)
+    assert _preset_dimensions(ernie, None) == (1376, 768)
+    assert _preset_dimensions(ernie, 512) == (1376, 768)
+    z_fast = find_family(FAMILY_CATALOG, "z_fast")
+    assert _preset_dimensions(z_fast, "no-such-preset") == (1024, 1024)
+    assert _preset_dimensions(z_fast, None) == (1024, 1024)
 
 
-def test_default_preset_matches_default_geometry() -> None:
-    """The preselected preset is the HD default every family ships."""
-    for family in FAMILY_CATALOG:
-        name = _default_preset_name(family)
-        assert name is not None
-        assert _preset_dimensions(family, name) == (1376, 768)
+def test_default_preset_matches_family_default() -> None:
+    """The preselected preset is Ernie HD and the Z square bucket."""
+    ernie = find_family(FAMILY_CATALOG, "ernie_turbo")
+    assert _preset_dimensions(ernie, _default_preset_name(ernie)) == (1376, 768)
+    for family_key in ("z_fast", "z_quality"):
+        family = find_family(FAMILY_CATALOG, family_key)
+        assert _preset_dimensions(family, _default_preset_name(family)) == (1024, 1024)
 
 
 def test_apply_resolution_preset_fills_geometry() -> None:
@@ -588,7 +599,7 @@ def test_apply_resolution_preset_fills_geometry() -> None:
     apply_preset = _apply_resolution_preset(family)
     first = family.resolution_presets[0]
     assert apply_preset(first.display_name) == (first.width, first.height)
-    assert apply_preset("no-such-preset") == (1376, 768)
+    assert apply_preset("no-such-preset") == (1024, 1024)
 
 
 @given(epoch_seconds=st.floats(min_value=0, max_value=4102444800, allow_nan=False))
@@ -608,6 +619,8 @@ def _test_wiring(tmp_path: Path) -> FamilyPanelWiring:
         repository=repository,
         environment=RenderEnvironment(engine=engine, repository=repository),
         status_markdown=gr.Markdown(),
+        status_pill=gr.HTML(),
+        grow_state=gr.State(value=False),
         log_textbox=gr.Textbox(),
         log_state=gr.State(value=[]),
         preview_image=gr.Image(),
@@ -630,6 +643,62 @@ def test_draw_family_panel_for_every_family(tmp_path: Path) -> None:
         for family in FAMILY_CATALOG:
             with gr.Row():
                 _draw_family_panel(wiring, family.key)
+
+
+def test_resolution_presets_render_as_radio_cards(tmp_path: Path) -> None:
+    """Every panel offers its presets as cards preselected to the default.
+
+    The preset dropdown silently ignored the selection for every family, so
+    presets render as a Radio (like the model cards) whose submitted value
+    flows straight into _preset_dimensions.
+    """
+    with gr.Blocks() as demo:
+        wiring = _test_wiring(tmp_path)
+        for family in FAMILY_CATALOG:
+            with gr.Row():
+                _draw_family_panel(wiring, family.key)
+    radios = [
+        block
+        for block in demo.blocks.values()
+        if isinstance(block, gr.Radio) and block.label == "Resolution"
+    ]
+    assert len(radios) == len(FAMILY_CATALOG)
+    for radio, family in zip(radios, FAMILY_CATALOG, strict=True):
+        names = [choice[0] if isinstance(choice, tuple) else choice for choice in radio.choices]
+        assert names == [preset.display_name for preset in family.resolution_presets]
+        assert radio.value == _default_preset_name(family)
+
+
+def test_panel_inputs_are_explicitly_interactive(tmp_path: Path) -> None:
+    """Every panel input stays enabled inside the dynamic render block.
+
+    Listeners registered inside @gr.render do not flip the frontend's
+    inferred interactivity, so each input carries interactive=True; without
+    it the browser shows a disabled cursor and the control cannot change.
+    """
+    for family in FAMILY_CATALOG:
+        expected_labels = {
+            "Style",
+            *(lora.display_name for lora in family.loras),
+            "Prompt",
+            "Mode",
+            "Duration (s)",
+            "Resolution",
+            "Coherence",
+            "Auto-finish",
+        }
+        if family.negative_prompt is not None:
+            expected_labels.add("Negative")
+        with gr.Blocks() as demo:
+            wiring = _test_wiring(tmp_path)
+            _draw_family_panel(wiring, family.key)
+        found = {
+            block.label: block.interactive
+            for block in demo.blocks.values()
+            if getattr(block, "label", None) in expected_labels and hasattr(block, "interactive")
+        }
+        assert set(found) == expected_labels
+        assert all(found.values())
 
 
 def _free_port() -> int:
@@ -665,3 +734,56 @@ def test_application_serves_front_page(tmp_path: Path) -> None:
     finally:
         application.close()
     assert response.status_code == 200
+
+
+def test_status_pill_marks_each_state() -> None:
+    """The canvas pill names the Idle, Rendering, and Finalizing states."""
+    assert "Idle" in _render_status_pill("Idle")
+    assert "Rendering" in _render_status_pill("Rendering")
+    assert "Finalizing" in _render_status_pill("Finalizing")
+
+
+def test_fresh_seed_stays_in_range() -> None:
+    """Automatic seeds always land inside the sampler range."""
+    for _ in range(25):
+        assert 0 <= _fresh_seed() < MAXIMUM_SEED
+
+
+def test_grow_toggle_idle_announces_start() -> None:
+    """Clicking an idle Grow button announces the start, never a stop."""
+    assert _grow_toggle_button(False) == "Grow starting…"  # noqa: FBT003
+
+
+def test_grow_toggle_running_requests_stop() -> None:
+    """Clicking a running Grow button flags the loop stop and says so."""
+    try:
+        message = _grow_toggle_button(True)  # noqa: FBT003
+        assert "Stopping" in message
+        assert is_loop_stop_requested()
+    finally:
+        clear_loop_stop()
+
+
+def test_clear_first_click_carries_frame_count(tmp_path: Path) -> None:
+    """The armed-confirm prompt names the doomed frame count."""
+    armed, button, message, _preview, _stats, _gallery = _bind_clear_frames(
+        _wiring_context(tmp_path)
+    )(False, "z_fast", (0, 0.0, 0.0))  # noqa: FBT003
+    assert armed is True
+    assert isinstance(button, dict)
+    assert button["value"] == "Confirm: clear 0 frames"
+    assert isinstance(message, str)
+    assert "**0**" in message
+
+
+def test_statistics_line_has_no_timestamp(tmp_path: Path) -> None:
+    """Slim stats carry counts and sizes, never a clock stamp."""
+    line = _render_statistics_line(_example_statistics(tmp_path), None, (0, 0.0, 0.0))
+    assert TIMESTAMP_PATTERN.search(line) is None
+    assert "frames" in line
+
+
+def test_studio_theme_constants_available() -> None:
+    """The cinematic theme ships as launch-ready constants."""
+    assert isinstance(STUDIO_THEME, gr.themes.Soft)
+    assert ".gradio-container" in STUDIO_CSS

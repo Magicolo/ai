@@ -1,24 +1,33 @@
 """Gradio web interface for the zoomy control panel.
 
-Layout: a header row (family selector + reachability badge), a live
-statistics line, a short status line, then a main row with the per-family
-controls on the left and previews (latest frame, recent-frames gallery,
-finalized video) on the right, followed by the session log and the global
-action buttons.
+Creator-studio layout: a header row (title + engine badge), a slim
+statistics line, a short status line, then a main row with the canvas on
+the left (status pill, latest frame, filmstrip gallery, finalized video,
+Finish/refresh/clear buttons, Interrupt, expandable session log) and a
+stepped rail on the right (1 Style: model cards + LoRA style cards with
+reveal-on-select strength sliders; 2 Prompt: large prompt box plus a
+collapsible negative prompt; 3 Grow: unified Single/Loop-to-duration/
+Loop-until-stop mode plus duration, resolution preset, and coherence;
+4 Finish: auto-finish toggle — the Finish button itself lives under the
+canvas).
 
-Ordering note: the per-family panel is drawn by ``@gr.render`` whenever the
-family dropdown changes. That decorated function executes immediately at app
-build time, so every component its event wiring references is created before
-the render block in source order — hence the two wiring dataclasses.
+Ordering note: the per-family panel is drawn by ``@gr.render`` whenever
+the model selector changes. That decorated function executes immediately
+at app build time, so every component its event wiring references is
+created before the render block in source order — hence the two wiring
+dataclasses.
 
-Loop control: checking the Loop box starts :func:`generate_video`, which
-renders frame after frame until the optional target duration, a graceful
-stop request (unchecking the box), or exhausted per-frame retries, then
-runs the finalize stages automatically (after a reached target always,
-after a manual stop when the auto-finalize box is checked). Graceful stops
-flow through a module-level ``threading.Event`` (see
-:func:`request_loop_stop`); the forceful Interrupt button aborts the
-running engine job immediately, which ends the loop as a side effect.
+Grow control: the Grow button carries two click listeners. The queued
+generator does the rendering (one frame for Single mode, otherwise
+:func:`generate_video` until the optional target duration, a graceful
+stop request, or exhausted per-frame retries, then the finalize stages
+automatically per the auto-finish toggle). The unqueued plain handler
+sets the stop flag immediately when a grow is running, which is what
+ends it mid-frame — the button morphs to a Stop label while running and
+back to Grow at the end. A programmatic state reset fires no event, so
+no phantom grow can start. The forceful Interrupt button aborts the
+running engine job immediately, which ends the grow as a side effect.
+Every frame draws a fresh random seed; there is no manual seed control.
 """
 
 from __future__ import annotations
@@ -54,7 +63,7 @@ from zoomy.rendering import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
-    from typing import Any
+    from typing import Any, Literal
 
     from zoomy.engine_protocol import EngineProtocol, EngineStatistics
     from zoomy.family_catalog import FamilyDefinition, LoraDefinition
@@ -77,6 +86,47 @@ GALLERY_ROWS = 2
 BYTES_PER_UNIT = 1024.0
 BYTE_UNITS = ("B", "KiB", "MiB", "GiB", "TiB")
 
+GROW_MODE_SINGLE = "Single frame"
+GROW_MODE_LOOP_DURATION = "Loop to duration"
+GROW_MODE_LOOP_STOP = "Loop until stopped"
+GROW_MODES = (GROW_MODE_SINGLE, GROW_MODE_LOOP_DURATION, GROW_MODE_LOOP_STOP)
+GROW_BUTTON_LABEL = "Grow"
+GROW_STOP_LABEL = "Stop"
+
+PROMPT_LINES = 12
+PROMPT_MAX_LINES = 20
+
+_STUDIO_CSS = """
+.gradio-container {
+  background: radial-gradient(1200px 600px at 70% -10%, #2e1065 0%, #0b0b18 55%, #06060f 100%);
+}
+.zoomy-canvas img { border-radius: 12px; }
+.zoomy-rail { gap: 12px; }
+/* Details on demand: per-control help hides until its control is hovered,
+   then floats as a tooltip card (Gradio 6 renders info= in
+   span[data-testid="block-info"]). */
+.zoomy-tip { position: relative; }
+.zoomy-tip span[data-testid="block-info"] { display: none; }
+.zoomy-tip:hover span[data-testid="block-info"] {
+  display: block;
+  position: absolute;
+  z-index: 50;
+  top: 100%;
+  left: 0;
+  max-width: 320px;
+  background: #171226;
+  color: #e8e4f5;
+  border: 1px solid #6d5bd0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+  line-height: 1.4;
+}
+"""
+STUDIO_CSS = _STUDIO_CSS
+STUDIO_THEME = gr.themes.Soft(primary_hue="violet", secondary_hue="cyan")
+
 _random_generator = random.SystemRandom()
 
 
@@ -90,6 +140,8 @@ class FamilyPanelWiring:
     repository: FrameRepository
     environment: RenderEnvironment
     status_markdown: gr.Markdown
+    status_pill: gr.HTML
+    grow_state: gr.State
     log_textbox: gr.Textbox
     log_state: gr.State
     preview_image: gr.Image
@@ -118,10 +170,12 @@ class InterfaceContext:
     catalog: Sequence[FamilyDefinition]
     repository: FrameRepository
     environment: RenderEnvironment
-    family_dropdown: gr.Dropdown
+    family_selector: gr.Radio
     health_badge: gr.HTML
     stats_line: gr.Markdown
     status_markdown: gr.Markdown
+    status_pill: gr.HTML
+    grow_state: gr.State
     log_textbox: gr.Textbox
     log_state: gr.State
     durations_state: gr.State
@@ -156,33 +210,50 @@ def _create_components(
 ) -> InterfaceContext:
     """Create every component in layout order and bundle the wiring context."""
     environment = RenderEnvironment(engine=engine, repository=repository)
-    gr.Markdown("# Zoomy — infinite zoom control panel")
+    gr.Markdown("# Zoomy — infinite zoom studio")
     with gr.Row():
         with gr.Column(scale=3):
-            family_dropdown = gr.Dropdown(
-                choices=[(family.display_name, family.key) for family in catalog],
-                value=catalog[0].key,
-                label="Model family",
-            )
+            gr.Markdown("Pick a model, shape the prompt, then grow the zoom.")
         with gr.Column(scale=1):
             health_badge = gr.HTML(value=_render_health_badge(is_reachable=engine.is_ready()))
     stats_line = gr.Markdown(value=_initial_statistics(catalog[0], repository, engine))
     status_markdown = gr.Markdown("Ready.")
-    log_textbox = gr.Textbox(label="Session log", lines=LOG_LINES_HEIGHT, interactive=False)
     log_state: gr.State = gr.State(value=[])
     durations_state = gr.State(value=(0, 0.0, 0.0))
     confirmation_state = gr.State(value=False)
+    grow_state: gr.State = gr.State(value=False)
     with gr.Row():
-        with gr.Column(scale=3):
-            preview_image = gr.Image(label="Latest frame", interactive=False, type="filepath")
+        with gr.Column(scale=3, elem_classes=["zoomy-canvas"]):
+            status_pill = gr.HTML(value=_render_status_pill("Idle"))
+            preview_image = gr.Image(label="Canvas — latest frame", interactive=False)
             gallery = gr.Gallery(
-                label="Recent frames",
+                label="Filmstrip — recent frames",
                 columns=GALLERY_COLUMNS,
                 rows=GALLERY_ROWS,
                 object_fit="cover",
             )
-            preview_video = gr.Video(label="Finalized video")
-        with gr.Column(scale=2):
+            preview_video = gr.Video(label="Finished video")
+            with gr.Row():
+                finalize_button = gr.Button("Finish video", variant="secondary")
+                refresh_button = gr.Button("Refresh previews")
+                clear_frames_button = gr.Button(CLEAR_FRAMES_LABEL)
+            interrupt_button = gr.Button("Interrupt now (ends Grow immediately)", variant="stop")
+            with gr.Accordion("Session log", open=False):
+                log_textbox = gr.Textbox(
+                    label="Session log", lines=LOG_LINES_HEIGHT, interactive=False
+                )
+        with gr.Column(scale=2, elem_classes=["zoomy-rail"]):
+            gr.Markdown("## 1 · Style")
+            family_selector = gr.Radio(
+                choices=[(family.display_name, family.key) for family in catalog],
+                value=catalog[0].key,
+                label="Model",
+                info=(
+                    "Render recipe per card. Z Fast and Z Quality share one zoom "
+                    "sequence — switching cards keeps every frame."
+                ),
+                elem_classes=["zoomy-tip"],
+            )
             panel_wiring = FamilyPanelWiring(
                 settings=settings,
                 engine=engine,
@@ -190,6 +261,8 @@ def _create_components(
                 repository=repository,
                 environment=environment,
                 status_markdown=status_markdown,
+                status_pill=status_pill,
+                grow_state=grow_state,
                 log_textbox=log_textbox,
                 log_state=log_state,
                 preview_image=preview_image,
@@ -199,26 +272,23 @@ def _create_components(
                 durations_state=durations_state,
             )
 
-            @gr.render(inputs=[family_dropdown])  # type: ignore[untyped-decorator]
+            @gr.render(inputs=[family_selector])  # type: ignore[untyped-decorator]
             def family_panel(family_key: str) -> None:
-                """Draw the per-family controls: LoRAs, prompts, render, loop."""
+                """Draw the per-family style, prompt, grow, and finish steps."""
                 _draw_family_panel(panel_wiring, family_key)
 
-    with gr.Row():
-        finalize_button = gr.Button("Finalize video")
-        interrupt_button = gr.Button("Interrupt now (ends loop immediately)")
-        refresh_button = gr.Button("Refresh previews")
-        clear_frames_button = gr.Button(CLEAR_FRAMES_LABEL)
     return InterfaceContext(
         settings=settings,
         engine=engine,
         catalog=catalog,
         repository=repository,
         environment=environment,
-        family_dropdown=family_dropdown,
+        family_selector=family_selector,
         health_badge=health_badge,
         stats_line=stats_line,
         status_markdown=status_markdown,
+        status_pill=status_pill,
+        grow_state=grow_state,
         log_textbox=log_textbox,
         log_state=log_state,
         durations_state=durations_state,
@@ -252,36 +322,37 @@ def _wire_events(context: InterfaceContext) -> None:
     status_timer = gr.Timer(value=STATUS_TIMER_SECONDS)
     status_timer.tick(  # type: ignore[attr-defined]
         _bind_refresh_status(context),
-        inputs=[context.family_dropdown, context.durations_state],
+        inputs=[context.family_selector, context.durations_state],
         outputs=[context.health_badge, context.stats_line],
         queue=False,
     )
-    context.family_dropdown.change(  # type: ignore[attr-defined]
+    context.family_selector.change(  # type: ignore[attr-defined]
         _bind_refresh_previews(context),
-        inputs=[context.family_dropdown, context.durations_state],
+        inputs=[context.family_selector, context.durations_state],
         outputs=preview_outputs,
         queue=False,
     )
     context.finalize_button.click(  # type: ignore[attr-defined]
         _bind_finalize(context),
-        inputs=[context.family_dropdown, context.log_state, context.durations_state],
+        inputs=[context.family_selector, context.log_state, context.durations_state],
         outputs=[
             context.status_markdown,
             context.log_textbox,
             context.preview_video,
             context.stats_line,
             context.gallery,
+            context.status_pill,
         ],
     )
     context.interrupt_button.click(  # type: ignore[attr-defined]
         _bind_interrupt(context),
-        inputs=None,
-        outputs=[context.status_markdown],
+        inputs=[context.grow_state],
+        outputs=[context.status_markdown, context.status_pill, context.grow_state],
         queue=False,
     )
     context.refresh_button.click(  # type: ignore[attr-defined]
         _bind_refresh_previews(context),
-        inputs=[context.family_dropdown, context.durations_state],
+        inputs=[context.family_selector, context.durations_state],
         outputs=preview_outputs,
         queue=False,
     )
@@ -289,7 +360,7 @@ def _wire_events(context: InterfaceContext) -> None:
         _bind_clear_frames(context),
         inputs=[
             context.confirmation_state,
-            context.family_dropdown,
+            context.family_selector,
             context.durations_state,
         ],
         outputs=[
@@ -368,42 +439,57 @@ def _bind_refresh_previews(
     return refresh_previews
 
 
-def _bind_interrupt(context: InterfaceContext) -> Callable[[], str]:
+def _bind_interrupt(
+    context: InterfaceContext,
+) -> Callable[[object], tuple[str, str, bool]]:
     """Create the handler that aborts the running job immediately."""
 
-    def interrupt_running_job() -> str:
-        """Interrupt the engine now and end any running loop with it."""
+    def interrupt_running_job(_grow_value: object) -> tuple[str, str, bool]:
+        """Interrupt the engine now and end any running grow with it."""
         request_loop_stop()
         try:
             context.engine.request_interrupt()
         except ZoomyError as failure:
-            return f"**Error:** {failure}"
-        return "Interrupt requested; the running job stops immediately."
+            return (f"**Error:** {failure}", _render_status_pill("Idle"), False)
+        return (
+            "Interrupt requested; the running job stops immediately.",
+            _render_status_pill("Idle"),
+            False,
+        )
 
     return interrupt_running_job
 
 
 def _bind_finalize(
     context: InterfaceContext,
-) -> Callable[[str, object, object], Iterator[tuple[object, object, object, str, object]]]:
+) -> Callable[[str, object, object], Iterator[tuple[object, object, object, str, object, str]]]:
     """Create the generator that runs the finalize workflow for a family."""
 
     def finalize_sequence(
         family_key: str, log_value: object, durations_value: object
-    ) -> Iterator[tuple[object, object, object, str, object]]:
+    ) -> Iterator[tuple[object, object, object, str, object, str]]:
         """Render the finalized video and stream status updates."""
         try:
             family = find_family(context.catalog, family_key)
         except ZoomyError as failure:
             message = f"**Error:** {failure}"
-            log_entries, log_text = _append_log_entry(_as_string_list(log_value), message)
-            yield (message, log_text, gr.update(), message, [])
+            _log_entries, log_text = _append_log_entry(_as_string_list(log_value), message)
+            yield (message, log_text, gr.update(), message, [], _render_status_pill("Idle"))
             return
         log_entries = _as_string_list(log_value)
         durations = _as_durations(durations_value)
         request = FinalizeRequest(
             family=family,
             frame_count=context.repository.frame_count(family.sequence_key),
+        )
+        log_entries, log_text = _append_log_entry(log_entries, "Finalizing video…")
+        yield (
+            "Finalizing video…",
+            log_text,
+            gr.update(),
+            _fresh_statistics(context.repository, context.engine, family, durations),
+            _fresh_gallery(context.repository, family),
+            _render_status_pill("Finalizing"),
         )
         try:
             for update in finalize_video(
@@ -417,17 +503,28 @@ def _bind_finalize(
                     update.video_path if update.video_path is not None else gr.update(),
                     _fresh_statistics(context.repository, context.engine, family, durations),
                     _fresh_gallery(context.repository, family),
+                    _render_status_pill("Finalizing"),
                 )
         except ZoomyError as failure:
             message = f"**Error:** {failure}"
-            log_entries, log_text = _append_log_entry(log_entries, message)
+            _log_entries, log_text = _append_log_entry(log_entries, message)
             yield (
                 message,
                 log_text,
                 gr.update(),
                 _fresh_statistics(context.repository, context.engine, family, durations),
                 _fresh_gallery(context.repository, family),
+                _render_status_pill("Idle"),
             )
+            return
+        yield (
+            "Video finished.",
+            log_text,
+            gr.update(),
+            _fresh_statistics(context.repository, context.engine, family, durations),
+            _fresh_gallery(context.repository, family),
+            _render_status_pill("Idle"),
+        )
 
     return finalize_sequence
 
@@ -455,13 +552,14 @@ def _bind_clear_frames(
                 [],
             )
         durations = _as_durations(values[2])
+        frame_count = context.repository.frame_count(family.sequence_key)
         if not confirmation_armed:
             return (
                 True,
-                gr.update(value=CONFIRM_CLEAR_FRAMES_LABEL),
+                gr.update(value=f"Confirm: clear {frame_count} frames"),
                 (
-                    "Click **Confirm** again to permanently delete every frame "
-                    f"of sequence *{family.sequence_key}*."
+                    f"Sequence *{family.sequence_key}* holds **{frame_count}** "
+                    "frames — click **Confirm** again to permanently delete them."
                 ),
                 gr.update(),
                 _fresh_statistics(context.repository, context.engine, family, durations),
@@ -482,7 +580,7 @@ def _bind_clear_frames(
         return (
             False,
             gr.update(value=CLEAR_FRAMES_LABEL),
-            f"Cleared all frames of sequence *{family.sequence_key}*.",
+            f"Cleared **{frame_count}** frames of sequence *{family.sequence_key}*.",
             None,
             _fresh_statistics(context.repository, context.engine, family, durations),
             _fresh_gallery(context.repository, family),
@@ -491,16 +589,28 @@ def _bind_clear_frames(
     return clear_frames
 
 
-def _loop_toggled(*values: object) -> str:
-    """React to a loop checkbox toggle without queueing.
+def _grow_toggle_button(grow_value: object) -> str:
+    """React to a Grow click without queueing.
 
-    Checking is a no-op here (the queued generator does the work); unchecking
-    sets the stop flag immediately, which is what ends a running loop.
+    Starting is a no-op here (the queued generator does the work); clicking
+    while a grow runs sets the stop flag immediately, which is what ends it
+    mid-frame.
     """
-    if isinstance(values[0], bool) and values[0]:
-        return "Loop starting…"
-    request_loop_stop()
-    return "Stopping the loop after the current frame… (Interrupt now ends it immediately.)"
+    if isinstance(grow_value, bool) and grow_value:
+        request_loop_stop()
+        return "Stopping the grow after the current frame… (Interrupt now ends it immediately.)"
+    return "Grow starting…"
+
+
+def _fresh_seed() -> int:
+    """Draw a fresh random seed for one frame render."""
+    return _random_generator.randrange(MAXIMUM_SEED)
+
+
+def _render_status_pill(status: Literal["Idle", "Rendering", "Finalizing"]) -> str:
+    """Format the canvas status pill for one grow/finalize state."""
+    colors = {"Idle": "#16a34a", "Rendering": "#8b5cf6", "Finalizing": "#22d3ee"}
+    return f'<span style="color: {colors[status]}; font-weight: bold;">● {status}</span>'
 
 
 def _fresh_statistics(
@@ -521,12 +631,19 @@ def _fresh_gallery(repository: FrameRepository, family: FamilyDefinition) -> lis
 
 
 def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
-    """Draw the LoRA, prompt, render, and loop controls for one family."""
+    """Draw the style, prompt, grow, and finish steps for one family."""
     family = find_family(wiring.catalog, family_key)
+    gr.Markdown("### Style cards")
     selected_loras = gr.CheckboxGroup(
         choices=[lora.display_name for lora in family.loras],
         value=[lora.display_name for lora in family.loras if lora.selected_by_default],
-        label="LoRA styles",
+        label="Style",
+        info="Style cards applied in order. Pick one to reveal its strength.",
+        elem_classes=["zoomy-tip"],
+        # Explicit: listeners registered inside @gr.render do not flip the
+        # frontend's inferred interactivity, so render-block inputs would
+        # otherwise arrive disabled.
+        interactive=True,
     )
     strength_sliders = [
         gr.Slider(
@@ -534,99 +651,110 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
             maximum=MAXIMUM_LORA_STRENGTH,
             step=LORA_STRENGTH_STEP,
             value=lora.default_strength,
-            label=f"{lora.display_name} strength",
+            label=f"{lora.display_name}",
+            info="Higher pushes the style harder; 0 leaves the frame untouched.",
+            elem_classes=["zoomy-tip"],
+            visible=lora.selected_by_default,
+            interactive=True,
         )
         for lora in family.loras
     ]
-    prompt_textbox = gr.Textbox(value=family.default_prompt, lines=6, max_lines=12, label="Prompt")
+    if strength_sliders:
+        selected_loras.change(  # type: ignore[attr-defined]
+            _lora_slider_visibility(family),
+            inputs=[selected_loras],
+            outputs=strength_sliders,
+            queue=False,
+        )
+    gr.Markdown("## 2 · Prompt")
+    prompt_textbox = gr.Textbox(
+        value=family.default_prompt,
+        lines=PROMPT_LINES,
+        max_lines=PROMPT_MAX_LINES,
+        label="Prompt",
+        info="What the next frames dive into. Applies to every grown frame.",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
+    )
     has_negative_prompt = family.negative_prompt is not None
     negative_textbox: gr.Textbox | None = None
     if has_negative_prompt:
-        negative_textbox = gr.Textbox(
-            value=family.negative_prompt, lines=2, max_lines=4, label="Negative prompt"
-        )
+        with gr.Accordion("Negative prompt", open=False):
+            negative_textbox = gr.Textbox(
+                value=family.negative_prompt,
+                lines=4,
+                max_lines=8,
+                label="Negative",
+                info="What to keep out of every frame.",
+                elem_classes=["zoomy-tip"],
+                interactive=True,
+            )
     else:
         gr.Markdown("_This family uses zeroed negative conditioning._")
-    with gr.Row():
-        render_button = gr.Button("Render next frame", variant="primary")
-        loop_checkbox = gr.Checkbox(label="Loop frames (uncheck to stop after current frame)")
-    # NOTE: no minimum= on the numbers below. A blank box submits 0 (which
-    # means unlimited for the duration, or the default size for the frame
-    # geometry), and Gradio validates minimum= in preprocess — before the
-    # handler runs — so any minimum would reject blank inputs outright.
-    duration_seconds = gr.Number(
-        label="Target video duration, seconds (blank = run until stopped)", precision=1
+    gr.Markdown("## 3 · Grow")
+    mode_radio = gr.Radio(
+        choices=list(GROW_MODES),
+        value=GROW_MODE_SINGLE,
+        label="Mode",
+        info="Single renders one frame. Loops render to a duration or until stopped.",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
     )
-    finalize_checkbox = gr.Checkbox(label="Finalize video when the loop ends", value=True)
-    preset_dropdown: gr.Dropdown | None = None
-    if family.resolution_presets:
-        preset_dropdown = gr.Dropdown(
-            choices=[preset.display_name for preset in family.resolution_presets],
-            value=_default_preset_name(family),
-            label="Resolution preset",
-        )
-    with gr.Row():
-        frame_width = gr.Number(value=FRAME_WIDTH_PIXELS, label="Frame width", precision=0)
-        frame_height = gr.Number(value=FRAME_HEIGHT_PIXELS, label="Frame height", precision=0)
-    if preset_dropdown is not None:
-        preset_dropdown.change(  # type: ignore[attr-defined]
-            _apply_resolution_preset(family),
-            inputs=[preset_dropdown],
-            outputs=[frame_width, frame_height],
-            queue=False,
-        )
+    # NOTE: no minimum= on the duration below. A blank box submits 0 (which
+    # means the loop runs until stopped), and Gradio validates minimum= in
+    # preprocess — before the handler runs — so any minimum would reject
+    # blank inputs outright.
+    duration_seconds = gr.Number(
+        label="Duration (s)",
+        precision=1,
+        info="Target length for Loop to duration. Blank runs until stopped.",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
+    )
+    preset_radio = gr.Radio(
+        choices=[preset.display_name for preset in family.resolution_presets],
+        value=_default_preset_name(family),
+        label="Resolution",
+        info="Official vendor buckets plus a 512 draft. Sizes the next frames.",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
+    )
     coherence_slider = gr.Slider(
         minimum=MINIMUM_COHERENCE,
         maximum=MAXIMUM_COHERENCE,
         step=COHERENCE_SLIDER_STEP,
         value=DEFAULT_COHERENCE,
-        label="Temporal coherence (higher keeps more of the previous frame)",
+        label="Coherence",
+        info="Higher keeps more of the previous frame (denoise = 1 - coherence).",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
     )
-    with gr.Row():
-        seed_number = gr.Number(label="Seed (used when locked)", precision=0)
-        seed_lock = gr.Checkbox(label="Lock seed (reuse one seed every frame)", value=False)
+    grow_button = gr.Button(GROW_BUTTON_LABEL, variant="primary")
+    gr.Markdown("## 4 · Finish")
+    finalize_checkbox = gr.Checkbox(
+        label="Auto-finish",
+        value=True,
+        info="Auto-finish runs after loops; the Finish button runs it by hand.",
+        elem_classes=["zoomy-tip"],
+        interactive=True,
+    )
     render_inputs: list[Any] = [selected_loras, *strength_sliders, prompt_textbox]
     if negative_textbox is not None:
         render_inputs.append(negative_textbox)
-    render_button.click(  # type: ignore[attr-defined]
-        _create_render_handler(
-            wiring=wiring, family=family, has_negative_prompt=has_negative_prompt
-        ),
+    # Both listeners below share the Grow click: the generator runs queued
+    # and does the rendering, while the plain handler runs unqueued so a
+    # stop click sets the flag immediately even mid-frame. A programmatic
+    # state reset fires no event, so no phantom grow can start.
+    grow_button.click(  # type: ignore[attr-defined]
+        _create_grow_handler(wiring=wiring, family=family, has_negative_prompt=has_negative_prompt),
         inputs=[
-            *render_inputs,
-            wiring.log_state,
-            wiring.durations_state,
-            coherence_slider,
-            seed_number,
-            seed_lock,
-            frame_width,
-            frame_height,
-        ],
-        outputs=[
-            wiring.status_markdown,
-            wiring.log_textbox,
-            wiring.preview_image,
-            wiring.stats_line,
-            wiring.gallery,
-            wiring.durations_state,
-        ],
-    )
-    # Both listeners below share the checkbox change event: the generator runs
-    # queued and does the rendering, while the plain handler runs unqueued so
-    # an uncheck stops the loop immediately even mid-frame. A programmatic
-    # uncheck (loop end) fires no event, so no phantom loop can start.
-    loop_checkbox.change(  # type: ignore[attr-defined]
-        _create_loop_handler(wiring=wiring, family=family, has_negative_prompt=has_negative_prompt),
-        inputs=[
-            loop_checkbox,
+            wiring.grow_state,
+            mode_radio,
             *render_inputs,
             duration_seconds,
             finalize_checkbox,
             coherence_slider,
-            seed_number,
-            seed_lock,
-            frame_width,
-            frame_height,
+            preset_radio,
             wiring.log_state,
             wiring.durations_state,
         ],
@@ -637,112 +765,64 @@ def _draw_family_panel(wiring: FamilyPanelWiring, family_key: str) -> None:
             wiring.stats_line,
             wiring.gallery,
             wiring.durations_state,
-            loop_checkbox,
+            grow_button,
             wiring.preview_video,
+            wiring.status_pill,
+            wiring.grow_state,
         ],
     )
-    loop_checkbox.change(  # type: ignore[attr-defined]
-        _loop_toggled,
-        inputs=[loop_checkbox],
+    grow_button.click(  # type: ignore[attr-defined]
+        _grow_toggle_button,
+        inputs=[wiring.grow_state],
         outputs=[wiring.status_markdown],
         queue=False,
     )
 
 
-def _create_render_handler(
-    *,
-    wiring: FamilyPanelWiring,
+def _lora_slider_visibility(
     family: FamilyDefinition,
-    has_negative_prompt: bool,
-) -> Callable[..., Iterator[tuple[str, str, object, str, object, tuple[int, float, float]]]]:
-    """Build the generator Gradio calls for one Render-next-frame click."""
+) -> Callable[[object], list[object]]:
+    """Create the handler revealing strength sliders for selected styles."""
 
-    def render_frame(
-        *values: object,
-    ) -> Iterator[tuple[str, str, object, str, object, tuple[int, float, float]]]:
-        """Queue one frame render and stream status updates."""
-        submission = _parse_panel_submission(
-            family, values, has_negative_prompt=has_negative_prompt
-        )
-        rest = values[submission.consumed_count :]
-        log_entries = _as_string_list(rest[0])
-        durations = _as_durations(rest[1])
-        denoise_strength = coherence_to_denoise(_coerce_coherence(rest[2]))
-        seed = _resolve_frame_seed(rest[3], rest[4])
-        frame_width = _coerce_frame_size(rest[5], FRAME_WIDTH_PIXELS)
-        frame_height = _coerce_frame_size(rest[6], FRAME_HEIGHT_PIXELS)
-        request = FrameRenderRequest(
-            family=family,
-            prompt=submission.prompt_text,
-            negative_prompt=submission.negative_text,
-            frame_count=wiring.repository.frame_count(family.sequence_key),
-            lora_selections=submission.lora_selections,
-            seed=seed,
-            frame_width=frame_width,
-            frame_height=frame_height,
-            denoise_strength=denoise_strength,
-        )
-        try:
-            for update in render_next_frame(request, wiring.environment):
-                log_entries, log_text = _append_log_entry(log_entries, update.message)
-                preview_value: object = gr.update()
-                gallery_value: object = gr.update()
-                if update.frame_path is not None and update.elapsed_seconds is not None:
-                    durations = _record_frame_duration(durations, update.elapsed_seconds)
-                    preview_value = update.frame_path
-                    gallery_value = _fresh_gallery(wiring.repository, family)
-                yield (
-                    update.message,
-                    log_text,
-                    preview_value,
-                    _fresh_statistics(wiring.repository, wiring.engine, family, durations),
-                    gallery_value,
-                    durations,
-                )
-        except ZoomyError as failure:
-            message = f"**Error:** {failure}"
-            _, log_text = _append_log_entry(log_entries, message)
-            yield (
-                message,
-                log_text,
-                gr.update(),
-                _fresh_statistics(wiring.repository, wiring.engine, family, durations),
-                _fresh_gallery(wiring.repository, family),
-                durations,
-            )
+    def update_visibility(selected_value: object) -> list[object]:
+        """Show each style's slider only while its card stays selected."""
+        selected_names = _selected_lora_names(selected_value)
+        return [gr.update(visible=(lora.display_name in selected_names)) for lora in family.loras]
 
-    return render_frame
+    return update_visibility
 
 
-def _create_loop_handler(
+def _create_grow_handler(
     *,
     wiring: FamilyPanelWiring,
     family: FamilyDefinition,
     has_negative_prompt: bool,
 ) -> Callable[
-    ..., Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object, object]]
+    ..., Iterator[tuple[object, object, object, str, object, object, object, object, str, bool]]
 ]:
-    """Build the generator Gradio calls for one Loop-frames change."""
+    """Build the generator Gradio calls for one Grow click."""
 
-    def loop_frames(
+    def grow_frames(
         *values: object,
-    ) -> Iterator[tuple[str, str, object, str, object, tuple[int, float, float], object, object]]:
-        """Render frames until the duration, a stop, or failed retries, then finalize."""
+    ) -> Iterator[tuple[object, object, object, str, object, object, object, object, str, bool]]:
+        """Render one frame or loop frames, then finalize per the toggle."""
         submission = _parse_panel_submission(
-            family, values[1:], has_negative_prompt=has_negative_prompt
+            family, values[2:], has_negative_prompt=has_negative_prompt
         )
-        rest = values[1 + submission.consumed_count :]
-        target_seconds = _parse_target_seconds(rest[0])
+        rest = values[2 + submission.consumed_count :]
+        grow_mode = values[1] if isinstance(values[1], str) else GROW_MODE_SINGLE
+        target_seconds = (
+            _parse_target_seconds(rest[0]) if grow_mode == GROW_MODE_LOOP_DURATION else None
+        )
+        if grow_mode == GROW_MODE_SINGLE:
+            target_seconds = None
         finalize_on_stop = rest[1] is True
         denoise_strength = coherence_to_denoise(_coerce_coherence(rest[2]))
-        seed_number_value = rest[3]
-        seed_lock_value = rest[4]
-        frame_width = _coerce_frame_size(rest[5], FRAME_WIDTH_PIXELS)
-        frame_height = _coerce_frame_size(rest[6], FRAME_HEIGHT_PIXELS)
-        log_entries = _as_string_list(rest[7])
-        durations = _as_durations(rest[8])
-        if not (isinstance(values[0], bool) and values[0]):
-            message = "Loop is off — check the box to start rendering."
+        frame_width, frame_height = _preset_dimensions(family, rest[3])
+        log_entries = _as_string_list(rest[4])
+        durations = _as_durations(rest[5])
+        if isinstance(values[0], bool) and values[0]:
+            message = "Stopping the grow after the current frame…"
             _, log_text = _append_log_entry(log_entries, message)
             yield (
                 message,
@@ -753,83 +833,213 @@ def _create_loop_handler(
                 durations,
                 gr.update(),
                 gr.update(),
+                _render_status_pill("Rendering"),
+                True,
             )
             return
+        run = _GrowRun(
+            wiring=wiring,
+            family=family,
+            submission=submission,
+            target_seconds=target_seconds,
+            finalize_on_stop=finalize_on_stop,
+            denoise_strength=denoise_strength,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            log_entries=log_entries,
+            durations=durations,
+        )
+        if grow_mode == GROW_MODE_SINGLE:
+            yield from _grow_single_frame(run)
+            return
+        yield from _grow_loop_frames(run)
 
-        def request_factory(frame_count: int) -> FrameRenderRequest:
-            """Build one loop frame request, honoring the seed lock."""
-            return FrameRenderRequest(
-                family=family,
-                prompt=submission.prompt_text,
-                negative_prompt=submission.negative_text,
-                frame_count=frame_count,
-                lora_selections=submission.lora_selections,
-                seed=_resolve_frame_seed(seed_number_value, seed_lock_value),
-                frame_width=frame_width,
-                frame_height=frame_height,
-                denoise_strength=denoise_strength,
+    return grow_frames
+
+
+@dataclass
+class _GrowRun:
+    """Mutable state shared by the single-frame and loop grow paths."""
+
+    wiring: FamilyPanelWiring
+    family: FamilyDefinition
+    submission: PanelSubmission
+    target_seconds: float | None
+    finalize_on_stop: bool
+    denoise_strength: float
+    frame_width: int
+    frame_height: int
+    log_entries: list[str]
+    durations: tuple[int, float, float]
+
+
+_GrowOutputs = tuple[object, object, object, str, object, object, object, object, str, bool]
+
+
+def _grow_single_frame(run: _GrowRun) -> Iterator[_GrowOutputs]:
+    """Render exactly one frame and stream the canvas updates."""
+    request = FrameRenderRequest(
+        family=run.family,
+        prompt=run.submission.prompt_text,
+        negative_prompt=run.submission.negative_text,
+        frame_count=run.wiring.repository.frame_count(run.family.sequence_key),
+        lora_selections=run.submission.lora_selections,
+        seed=_fresh_seed(),
+        frame_width=run.frame_width,
+        frame_height=run.frame_height,
+        denoise_strength=run.denoise_strength,
+    )
+    run.log_entries, log_text = _append_log_entry(run.log_entries, "Rendering one frame…")
+    yield (
+        "Rendering one frame…",
+        log_text,
+        gr.update(),
+        _fresh_statistics(run.wiring.repository, run.wiring.engine, run.family, run.durations),
+        _fresh_gallery(run.wiring.repository, run.family),
+        run.durations,
+        gr.update(),
+        gr.update(),
+        _render_status_pill("Rendering"),
+        False,
+    )
+    try:
+        for update in render_next_frame(request, run.wiring.environment):
+            run.log_entries, log_text = _append_log_entry(run.log_entries, update.message)
+            preview_value: object = gr.update()
+            gallery_value: object = gr.update()
+            if update.frame_path is not None and update.elapsed_seconds is not None:
+                run.durations = _record_frame_duration(run.durations, update.elapsed_seconds)
+                preview_value = update.frame_path
+                gallery_value = _fresh_gallery(run.wiring.repository, run.family)
+            yield (
+                update.message,
+                log_text,
+                preview_value,
+                _fresh_statistics(
+                    run.wiring.repository, run.wiring.engine, run.family, run.durations
+                ),
+                gallery_value,
+                run.durations,
+                gr.update(),
+                gr.update(),
+                _render_status_pill("Rendering"),
+                False,
             )
-
-        options = VideoGenerationOptions(
-            target_seconds=target_seconds, finalize_on_stop=finalize_on_stop
-        )
-        system = _safe_system_statistics(wiring.engine)
-        if target_seconds is None:
-            start_message = "Loop started — rendering until stopped…"
-        else:
-            start_message = f"Loop started — rendering a {target_seconds:.1f} s video…"
-        last_message = start_message
-        log_entries, log_text = _append_log_entry(log_entries, start_message)
-        statistics = wiring.repository.sequence_statistics(family.sequence_key)
+    except ZoomyError as failure:
+        message = f"**Error:** {failure}"
+        _, log_text = _append_log_entry(run.log_entries, message)
         yield (
-            start_message,
+            message,
             log_text,
             gr.update(),
-            _render_statistics_line(statistics, system, durations),
-            [str(path) for path in statistics.recent_frame_paths],
-            durations,
+            _fresh_statistics(run.wiring.repository, run.wiring.engine, run.family, run.durations),
+            _fresh_gallery(run.wiring.repository, run.family),
+            run.durations,
             gr.update(),
             gr.update(),
+            _render_status_pill("Idle"),
+            False,
         )
-        try:
-            for update in generate_video(family, request_factory, wiring.environment, options):
-                last_message = update.message
-                log_entries, log_text = _append_log_entry(log_entries, update.message)
-                preview_value: object = gr.update()
-                gallery_value: object = gr.update()
-                video_value: object = gr.update()
-                if update.frame_path is not None and update.elapsed_seconds is not None:
-                    durations = _record_frame_duration(durations, update.elapsed_seconds)
-                    preview_value = update.frame_path
-                    gallery_value = _fresh_gallery(wiring.repository, family)
-                if update.video_path is not None:
-                    video_value = update.video_path
-                yield (
-                    update.message,
-                    log_text,
-                    preview_value,
-                    _fresh_statistics(wiring.repository, wiring.engine, family, durations),
-                    gallery_value,
-                    durations,
-                    gr.update(),
-                    video_value,
-                )
-        except ZoomyError as failure:
-            last_message = f"**Error:** {failure}"
-            _, log_text = _append_log_entry(log_entries, last_message)
-        final_statistics = wiring.repository.sequence_statistics(family.sequence_key)
-        yield (
-            last_message,
-            log_text,
-            gr.update(),
-            _render_statistics_line(final_statistics, system, durations),
-            [str(path) for path in final_statistics.recent_frame_paths],
-            durations,
-            gr.update(value=False),
-            gr.update(),
+        return
+    yield (
+        "Frame rendered.",
+        log_text,
+        gr.update(),
+        _fresh_statistics(run.wiring.repository, run.wiring.engine, run.family, run.durations),
+        _fresh_gallery(run.wiring.repository, run.family),
+        run.durations,
+        gr.update(),
+        gr.update(),
+        _render_status_pill("Idle"),
+        False,
+    )
+
+
+def _grow_loop_frames(run: _GrowRun) -> Iterator[_GrowOutputs]:
+    """Render frames until the duration, a stop, or failed retries, then finalize."""
+    system = _safe_system_statistics(run.wiring.engine)
+
+    def request_factory(frame_count: int) -> FrameRenderRequest:
+        """Build one loop frame request with a fresh random seed."""
+        return FrameRenderRequest(
+            family=run.family,
+            prompt=run.submission.prompt_text,
+            negative_prompt=run.submission.negative_text,
+            frame_count=frame_count,
+            lora_selections=run.submission.lora_selections,
+            seed=_fresh_seed(),
+            frame_width=run.frame_width,
+            frame_height=run.frame_height,
+            denoise_strength=run.denoise_strength,
         )
 
-    return loop_frames
+    options = VideoGenerationOptions(
+        target_seconds=run.target_seconds, finalize_on_stop=run.finalize_on_stop
+    )
+    if run.target_seconds is None:
+        start_message = "Grow started — rendering until stopped…"
+    else:
+        start_message = f"Grow started — rendering a {run.target_seconds:.1f} s video…"
+    last_message = start_message
+    run.log_entries, log_text = _append_log_entry(run.log_entries, start_message)
+    statistics = run.wiring.repository.sequence_statistics(run.family.sequence_key)
+    yield (
+        start_message,
+        log_text,
+        gr.update(),
+        _render_statistics_line(statistics, system, run.durations),
+        [str(path) for path in statistics.recent_frame_paths],
+        run.durations,
+        gr.update(value=GROW_STOP_LABEL),
+        gr.update(),
+        _render_status_pill("Rendering"),
+        True,
+    )
+    try:
+        for update in generate_video(run.family, request_factory, run.wiring.environment, options):
+            last_message = update.message
+            run.log_entries, log_text = _append_log_entry(run.log_entries, update.message)
+            preview_value: object = gr.update()
+            gallery_value: object = gr.update()
+            video_value: object = gr.update()
+            pill = _render_status_pill("Rendering")
+            if update.frame_path is not None and update.elapsed_seconds is not None:
+                run.durations = _record_frame_duration(run.durations, update.elapsed_seconds)
+                preview_value = update.frame_path
+                gallery_value = _fresh_gallery(run.wiring.repository, run.family)
+            if update.video_path is not None:
+                video_value = update.video_path
+                pill = _render_status_pill("Finalizing")
+            yield (
+                update.message,
+                log_text,
+                preview_value,
+                _fresh_statistics(
+                    run.wiring.repository, run.wiring.engine, run.family, run.durations
+                ),
+                gallery_value,
+                run.durations,
+                gr.update(),
+                video_value,
+                pill,
+                True,
+            )
+    except ZoomyError as failure:
+        last_message = f"**Error:** {failure}"
+        _, log_text = _append_log_entry(run.log_entries, last_message)
+    final_statistics = run.wiring.repository.sequence_statistics(run.family.sequence_key)
+    yield (
+        last_message,
+        log_text,
+        gr.update(),
+        _render_statistics_line(final_statistics, system, run.durations),
+        [str(path) for path in final_statistics.recent_frame_paths],
+        run.durations,
+        gr.update(value=GROW_BUTTON_LABEL),
+        gr.update(),
+        _render_status_pill("Idle"),
+        False,
+    )
 
 
 def _parse_panel_submission(
@@ -874,6 +1084,8 @@ def _parse_target_seconds(value: object) -> float | None:
 def _coerce_frame_size(value: object, default_pixels: int) -> int:
     """Interpret a frame geometry input, falling back to the default size.
 
+    Retained for backward compatibility with tests and callers that still
+    pass raw geometry; the panel itself is preset-only since the revamp.
     Blank or unusable boxes submit 0 or text; the engine's alignment check
     still refuses sizes like 511, so this only restores the default.
     """
@@ -904,6 +1116,8 @@ def _coerce_coherence(value: object) -> float:
 def _coerce_seed(value: object) -> int | None:
     """Interpret a seed box payload, returning None when unusable.
 
+    Retained for backward compatibility with tests; the panel draws a fresh
+    random seed every frame since the revamp removed manual seed control.
     Blank boxes submit 0/None/text depending on Gradio's state; only
     non-negative integers below ``MAXIMUM_SEED`` are genuine fixed seeds.
     """
@@ -917,7 +1131,11 @@ def _coerce_seed(value: object) -> int | None:
 
 
 def _resolve_frame_seed(seed_value: object, lock_value: object) -> int:
-    """Return the fixed seed when locked, otherwise a fresh random seed."""
+    """Return the fixed seed when locked, otherwise a fresh random seed.
+
+    Retained for backward compatibility with tests; the panel always takes
+    the fresh-seed path since the revamp removed manual seed control.
+    """
     if lock_value is True:
         fixed_seed = _coerce_seed(seed_value)
         if fixed_seed is not None:
@@ -928,12 +1146,17 @@ def _resolve_frame_seed(seed_value: object, lock_value: object) -> int:
 def _preset_dimensions(family: FamilyDefinition, preset_name: object) -> tuple[int, int]:
     """Return the (width, height) for a preset display name.
 
-    Unknown or garbage names fall back to the default frame size so the
-    preset change handler never leaves the geometry boxes empty.
+    Unknown or garbage names fall back to the family's default preset so
+    the preset change handler never leaves the geometry empty.
     """
     if isinstance(preset_name, str):
         for preset in family.resolution_presets:
             if preset.display_name == preset_name:
+                return (preset.width, preset.height)
+    default_name = _default_preset_name(family)
+    if isinstance(default_name, str):
+        for preset in family.resolution_presets:
+            if preset.display_name == default_name:
                 return (preset.width, preset.height)
     return (FRAME_WIDTH_PIXELS, FRAME_HEIGHT_PIXELS)
 
@@ -951,7 +1174,12 @@ def _default_preset_name(family: FamilyDefinition) -> str | None:
 def _apply_resolution_preset(
     family: FamilyDefinition,
 ) -> Callable[[object], tuple[int, int]]:
-    """Create the handler that fills width/height from a preset choice."""
+    """Create the handler that fills width/height from a preset choice.
+
+    Retained for backward compatibility with tests; the revamp panel passes
+    the preset name straight into the grow request instead of filling
+    geometry boxes.
+    """
 
     def apply_preset(preset_name: object) -> tuple[int, int]:
         """Map the chosen preset name to its frame dimensions."""
@@ -988,7 +1216,7 @@ def _render_statistics_line(
     system: EngineStatistics | None,
     durations: tuple[int, float, float],
 ) -> str:
-    """Format the live statistics line for one sequence."""
+    """Format the slim statistics line for one sequence."""
     segments = [
         f"**{statistics.frame_count}** frames",
         f"**{_format_bytes(statistics.frames_bytes)}** on disk",
@@ -998,11 +1226,9 @@ def _render_statistics_line(
         average_seconds = total_seconds / rendered_frames
         segments.append(f"last frame {last_seconds:.0f} s | avg {average_seconds:.1f} s")
     if statistics.video_path is not None and statistics.video_bytes is not None:
-        video_details = f"**{statistics.video_path.name}** ({_format_bytes(statistics.video_bytes)}"
-        if statistics.video_modified_timestamp is not None:
-            video_details += f", {_format_timestamp(statistics.video_modified_timestamp)}"
-        video_details += ")"
-        segments.append(f"video {video_details}")
+        segments.append(
+            f"video **{statistics.video_path.name}** ({_format_bytes(statistics.video_bytes)})"
+        )
     else:
         segments.append("no video yet")
     if system is None:

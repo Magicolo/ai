@@ -168,6 +168,11 @@ class FamilyDefinition:
     resolution_presets: tuple[ResolutionPreset, ...] = ()
 
 
+#: Half-square quick-generation draft appended last in every preset list,
+#: so the official defaults selected by _default_preset_name never shift.
+DRAFT_RESOLUTION_PRESET = ResolutionPreset(display_name="Draft 512 x 512", width=512, height=512)
+
+
 ERNIE_RESOLUTION_PRESETS: tuple[ResolutionPreset, ...] = (
     ResolutionPreset(display_name="Square 1024 x 1024", width=1024, height=1024),
     ResolutionPreset(display_name="Landscape 1264 x 848", width=1264, height=848),
@@ -176,17 +181,22 @@ ERNIE_RESOLUTION_PRESETS: tuple[ResolutionPreset, ...] = (
     ResolutionPreset(display_name="Portrait HD 768 x 1376", width=768, height=1376),
     ResolutionPreset(display_name="Landscape 1200 x 896", width=1200, height=896),
     ResolutionPreset(display_name="Portrait 896 x 1200", width=896, height=1200),
+    DRAFT_RESOLUTION_PRESET,
 )
 
 Z_RESOLUTION_PRESETS: tuple[ResolutionPreset, ...] = (
-    ResolutionPreset(display_name="Draft 512 x 512", width=512, height=512),
-    ResolutionPreset(display_name="Square 768 x 768", width=768, height=768),
     ResolutionPreset(display_name="Square 1024 x 1024", width=1024, height=1024),
+    ResolutionPreset(display_name="Landscape 1152 x 896", width=1152, height=896),
+    ResolutionPreset(display_name="Portrait 896 x 1152", width=896, height=1152),
+    ResolutionPreset(display_name="Landscape 1152 x 864", width=1152, height=864),
+    ResolutionPreset(display_name="Portrait 864 x 1152", width=864, height=1152),
+    ResolutionPreset(display_name="Landscape 1248 x 832", width=1248, height=832),
+    ResolutionPreset(display_name="Portrait 832 x 1248", width=832, height=1248),
     ResolutionPreset(display_name="Landscape 1280 x 720", width=1280, height=720),
     ResolutionPreset(display_name="Portrait 720 x 1280", width=720, height=1280),
-    ResolutionPreset(display_name="Landscape HD 1376 x 768", width=1376, height=768),
-    ResolutionPreset(display_name="Portrait HD 768 x 1376", width=768, height=1376),
-    ResolutionPreset(display_name="Landscape 1536 x 864", width=1536, height=864),
+    ResolutionPreset(display_name="Ultra-wide 1344 x 576", width=1344, height=576),
+    ResolutionPreset(display_name="Ultra-tall 576 x 1344", width=576, height=1344),
+    DRAFT_RESOLUTION_PRESET,
 )
 
 

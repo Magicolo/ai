@@ -110,7 +110,7 @@ def test_lora_strengths_are_positive() -> None:
 
 
 def test_ernie_presets_match_official_sizes() -> None:
-    """Ernie offers exactly the seven official Baidu frame sizes."""
+    """Ernie offers the seven official Baidu frame sizes plus a 512 draft."""
     ernie = find_family(FAMILY_CATALOG, "ernie_turbo")
     assert [(preset.width, preset.height) for preset in ernie.resolution_presets] == [
         (1024, 1024),
@@ -120,17 +120,36 @@ def test_ernie_presets_match_official_sizes() -> None:
         (768, 1376),
         (1200, 896),
         (896, 1200),
+        (512, 512),
     ]
 
 
-def test_z_presets_offer_draft_and_hd_sizes() -> None:
-    """Z offers a fast 512 draft plus HD sizes for quick experiments."""
+def test_z_presets_match_official_buckets() -> None:
+    """Z offers the 11 official Comfy-Org 1024-buckets plus a 512 draft."""
     for family_key in ("z_fast", "z_quality"):
         family = find_family(FAMILY_CATALOG, family_key)
-        sizes = [(preset.width, preset.height) for preset in family.resolution_presets]
-        assert (512, 512) in sizes
-        assert (1376, 768) in sizes
-        assert (768, 1376) in sizes
+        assert [(preset.width, preset.height) for preset in family.resolution_presets] == [
+            (1024, 1024),
+            (1152, 896),
+            (896, 1152),
+            (1152, 864),
+            (864, 1152),
+            (1248, 832),
+            (832, 1248),
+            (1280, 720),
+            (720, 1280),
+            (1344, 576),
+            (576, 1344),
+            (512, 512),
+        ]
+
+
+def test_half_square_draft_preset_ends_every_list() -> None:
+    """Every family ends its presets with the 512 quick-generation draft."""
+    for family in FAMILY_CATALOG:
+        last = family.resolution_presets[-1]
+        assert (last.display_name, last.width, last.height) == ("Draft 512 x 512", 512, 512)
+        assert family.resolution_presets[0].width == 1024
 
 
 def test_every_preset_is_engine_aligned() -> None:
