@@ -1,0 +1,47 @@
+[project]
+name = "voyage"
+version = "0.1.0"
+description = "Autonomous infinite audiovisual voyage — supervisor + workers (Phase 0 skeleton)"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "mypy>=1.10",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+voyage = "voyage.cli:main"
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voyage*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "A", "C4", "DTZ", "W"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider --strict-markers"
+markers = [
+  "gpu: requires GPU model workers",
+  "endurance: long-running stability tests",
+]
