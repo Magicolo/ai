@@ -5365,3 +5365,43 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   block without reset, scene-cut support, recovery tail + replay resume,
   RoPE on, 29f causal decode, flat VRAM, restart/recovery proven by live
   kill test. Next: Phase 3 (Qwen director worker behind DirectorBackend).
+
+## Phase 3 progress (2026-09-22, groups F+G done, E2E PASS)
+
+- **Schemas (models.py, full §19):** StyleSpec (§15 + spec-example defaults),
+  TransitionMechanism (8 literals), TransitionPlan, DirectorDestination,
+  VideoPlan (3-5 stages), DirectorAudioPlan, DirectorNovelty,
+  EvolutionDecision rewritten (destination/transition/video/audio/novelty +
+  phase/novelty_accepted/notes, destination_concept property).
+- **Config:** DirectorConfig gains enable_thinking=false, max_new_tokens,
+  embedding_model_id; new [voyage] table (allow_concept_revisit=false,
+  major_transition bounds, world_decision_interval, blocks_per_prompt_stage=3,
+  novelty_threshold=0.85, novelty_max_attempts=3, validators).
+- **Prompts:** 3-layer compose (§18) + enforce_style (§18.1, code-level) +
+  override detection → ProposalRejected (not a worker failure) + staged plans
+  (§18.2, balanced staging, last stage absorbs remainder).
+- **Novelty (§21):** ConceptStore(directory) with concepts.jsonl +
+  concept_vectors.npy + concept_index.json, cosine check on canonicalized
+  text (canonicalize sorts tokens — frozenset join was nondeterministic),
+  legacy migration, rejections recorded immutably.
+- **Director worker:** lazy Qwen3-8B bf16→fp32 CPU + MiniLM; `decide`/`embed`
+  ops; §51 chain (generate → validate → retry with validation errors fed
+  back → deterministic fallback, fallback=true + notes). Non-thinking
+  defaults (temp 0.7/top_p 0.8/top_k 20). Shape instruction pins the 8
+  mechanisms, environment-as-array, novelty-as-object (Qwen's first live
+  output used free-text mechanism + string environment — prompt fix landed).
+- **Runtime:** voyage-director image (slim + torch CPU + transformers +
+  sentence-transformers + accelerate + safetensors — accelerate is required
+  for device_map=auto, found via live fallback notes) runs supervisor + fake
+  workers + director subprocess. longlive2+Qwen combined image deferred.
+- **Registry:** Qwen3-8B rev b968826d (~16.4GiB) + MiniLM rev 1110a243 pinned;
+  `models download/verify director-qwen8b`.
+- **Supervisor (§74):** bounded accept loop (schema → stages → style →
+  embed → cosine/token-set → record), exhaustion → local fallback;
+  per-block staged prompts into longlive payload; audio from decision;
+  prompt_plan.json + transition.json persisted per segment (§75).
+- **Live E2E (CPU, qwen backend, fake media):** 1 segment committed, VALID
+  (48f); Qwen decision lighting_transformation, 3 stages, novelty 0.000
+  embeddings-on; kill-mid-run left an uncommitted partial correctly ignored
+  by validate. ~5 min/segment on CPU.
+- Gates green in both images (ruff + format + mypy strict + 37 pytest).

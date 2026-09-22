@@ -57,7 +57,7 @@ class CpuUmt5Encoder:
     """
 
     def __init__(self, wan_dir: Path, device: str) -> None:
-        import torch  # type: ignore[import-not-found]
+        import torch
         from wan_5b.modules.t5 import umt5_xxl  # type: ignore[import-not-found]
         from wan_5b.modules.tokenizers import HuggingfaceTokenizer  # type: ignore[import-not-found]
 

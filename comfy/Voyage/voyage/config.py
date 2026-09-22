@@ -74,6 +74,36 @@ class DirectorConfig(BaseModel):
     backend: str = "deterministic"
     model_id: str = "Qwen/Qwen3-8B"
     temperature: float = 0.7
+    # Qwen worker: non-thinking mode (no <think> parsing), JSON-only output.
+    enable_thinking: bool = False
+    max_new_tokens: int = 1024
+    embedding_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+class VoyageConfig(BaseModel):
+    """Evolution policy (DESIGN §14 [voyage] table, §§21.2-21.3)."""
+
+    allow_concept_revisit: bool = False
+    major_transition_min_seconds: float = 30.0
+    major_transition_max_seconds: float = 120.0
+    world_decision_interval_seconds: float = 16.0
+    blocks_per_prompt_stage: int = 3
+    novelty_threshold: float = 0.85
+    novelty_max_attempts: int = 3
+
+    @field_validator("blocks_per_prompt_stage", "novelty_max_attempts")
+    @classmethod
+    def positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+
+    @field_validator("novelty_threshold")
+    @classmethod
+    def unit_range(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("novelty_threshold must be within [0, 1]")
+        return value
 
 
 class ProjectConfig(BaseModel):
@@ -85,6 +115,7 @@ class ProjectConfig(BaseModel):
     video: VideoConfig = Field(default_factory=VideoConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     director: DirectorConfig = Field(default_factory=DirectorConfig)
+    voyage: VoyageConfig = Field(default_factory=VoyageConfig)
 
     @field_validator("style")
     @classmethod
@@ -125,6 +156,18 @@ energy = 0.5
 backend = "deterministic"
 model_id = "Qwen/Qwen3-8B"
 temperature = 0.7
+enable_thinking = false
+max_new_tokens = 1024
+embedding_model_id = "sentence-transformers/all-MiniLM-L6-v2"
+
+[voyage]
+allow_concept_revisit = false
+major_transition_min_seconds = 30.0
+major_transition_max_seconds = 120.0
+world_decision_interval_seconds = 16.0
+blocks_per_prompt_stage = 3
+novelty_threshold = 0.85
+novelty_max_attempts = 3
 """
 
 

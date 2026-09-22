@@ -3,11 +3,12 @@
 Owns lifecycle and commit state (DESIGN §73). The director proposes,
 the supervisor validates and commits. One segment commit:
 
-  1. director decide (via worker) → EvolutionDecision
-  2. novelty check → accept/reject (rejections recorded, never deleted)
-  3. prompt plan → video generate_blocks → audio generate_audio
-  4. validate media → write metadata (.partial + fsync + rename)
-  5. checksums → DONE (.partial + fsync + rename) → state.json update
+  1. director decide (via worker) → EvolutionDecision (schema-validated)
+  2. novelty check (bounded retries, then deterministic fallback) → accept/reject
+  3. style check (code-level, §18.1) → staged prompt plan (§18.2)
+  4. video generate_blocks → audio generate_audio
+  5. validate media → write metadata (.partial + fsync + rename)
+  6. checksums → DONE (.partial + fsync + rename) → state.json update
 """
 
 from __future__ import annotations
@@ -26,18 +27,20 @@ from voyage import paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
+from voyage.director import DeterministicDirector, director_input_from_state
 from voyage.errors import (
     ConfigurationError,
     DiskSpaceError,
     FatalWorkerError,
     MediaError,
+    ProposalRejected,
     RecoverableWorkerError,
     VoyageError,
 )
 from voyage.media import validate_audio, validate_video
-from voyage.models import AudioPlan, EvolutionDecision, SegmentWorldState
+from voyage.models import AudioPlan, EvolutionDecision, SegmentWorldState, StyleSpec
 from voyage.persistence import read_state, write_state
-from voyage.prompts import build_prompt_plan
+from voyage.prompts import build_staged_prompt_plan, check_prompt_against_style
 from voyage.rpc import SubprocessWorker
 from voyage.seeds import audio_seed, video_seed
 
@@ -272,6 +275,152 @@ class Supervisor:
     def _stop_requested_via_file(self) -> bool:
         return read_state(self._run_dir).status == "STOP_REQUESTED"
 
+    def _embed_texts(self, texts: list[str]) -> list[list[float]] | None:
+        """Embed via the director worker; None when unavailable (fallback)."""
+        try:
+            result = self._director.call("embed", {"texts": texts})
+        except VoyageError:
+            return None
+        vectors = result.get("vectors")
+        if not isinstance(vectors, list):
+            return None
+        cleaned: list[list[float]] = []
+        for row in vectors:
+            if not isinstance(row, list):
+                return None
+            cleaned.append([float(value) for value in row])
+        return cleaned
+
+    def _decide_payload(
+        self,
+        config: ProjectConfig,
+        state: Any,
+        store: ConceptStore,
+        style_spec: StyleSpec,
+        retry_feedback: str = "",
+    ) -> dict[str, Any]:
+        history = store.history_texts()
+        payload = director_input_from_state(
+            state,
+            style_charter=style_spec.prompt,
+            recent_summary="; ".join(history[-5:]) if history else "(no concepts yet)",
+            forbidden_summary=(
+                "; ".join(history[-20:])
+                if not config.voyage.allow_concept_revisit and history
+                else "(revisits allowed)"
+            ),
+            audio_state=(f"style={config.audio.music_style} energy={config.audio.energy}"),
+        )
+        payload.update(
+            {
+                "decision_index": state.decision_index,
+                "phase": state.phase,
+                # Flat fields for the deterministic backend (backward compat).
+                "current_concept": state.current_concept,
+                "destination_concept": state.destination_concept,
+                "style": style_spec.prompt,
+                "backend": config.director.backend,
+                "model_id": config.director.model_id,
+                "temperature": config.director.temperature,
+                "max_new_tokens": config.director.max_new_tokens,
+                "enable_thinking": config.director.enable_thinking,
+                "retry_feedback": retry_feedback,
+            }
+        )
+        return payload
+
+    def _accept_director_decision(
+        self,
+        config: ProjectConfig,
+        state: Any,
+        store: ConceptStore,
+        style_spec: StyleSpec,
+        segment_id: str,
+    ) -> EvolutionDecision:
+        """§74 transaction: validate → novelty → style → accept.
+
+        Bounded retries with rejection feedback; exhaustion falls back to
+        the local deterministic director. Every rejection is recorded in
+        the immutable concept history.
+        """
+        max_attempts = max(1, config.voyage.novelty_max_attempts)
+        feedback = ""
+        last_score = 0.0
+        for _attempt in range(max_attempts):
+            raw = self._call_with_restart(
+                self._director,
+                "director",
+                segment_id,
+                "decide",
+                self._decide_payload(config, state, store, style_spec, feedback),
+            )
+            try:
+                decision = EvolutionDecision.model_validate(raw)
+            except Exception as exc:
+                feedback = f"previous output failed schema validation: {exc}"
+                continue
+            if not decision.video.stages:
+                feedback = "previous output had no video stages; provide 3-5."
+                continue
+            try:
+                for stage_text in decision.video.stages:
+                    check_prompt_against_style(stage_text, style_spec)
+            except ProposalRejected as exc:
+                store.append(
+                    decision.destination_concept,
+                    accepted=False,
+                    summary=f"style-policy rejection: {exc}",
+                    segment=state.next_segment_number,
+                )
+                feedback = f"style-policy rejection: {exc}"
+                continue
+            vectors = self._embed_texts([decision.destination_concept])
+            vector = vectors[0] if vectors else None
+            accepted, last_score = store.check_novel(decision.destination_concept, vector)
+            if not accepted and not config.voyage.allow_concept_revisit:
+                store.append(
+                    decision.destination_concept,
+                    accepted=False,
+                    summary=decision.destination.summary,
+                    vector=vector,
+                    segment=state.next_segment_number,
+                )
+                feedback = (
+                    "novelty rejection: concept too similar to history "
+                    f"(similarity {last_score:.3f}); propose a different world. "
+                    f"Director's novelty claim: {decision.novelty.why_new}"
+                )
+                continue
+            record = store.append(
+                decision.destination_concept,
+                accepted=True,
+                summary=decision.destination.summary,
+                vector=vector,
+                segment=state.next_segment_number,
+            )
+            decision.novelty_accepted = True
+            suffix = (
+                f"novelty similarity {last_score:.3f} "
+                f"(embeddings {'on' if vector is not None else 'fallback'}) "
+                f"record {record.id}"
+            )
+            decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
+            return decision
+        fallback = DeterministicDirector(style_spec.prompt).propose(
+            decision_index=state.decision_index,
+            current_concept=state.current_concept,
+            destination_concept=state.destination_concept,
+            phase=state.phase,
+        )
+        store.append(
+            fallback.destination_concept,
+            accepted=True,
+            summary="deterministic fallback after exhausted retries",
+            segment=state.next_segment_number,
+        )
+        fallback.novelty_accepted = False
+        return fallback
+
     def commit_one_segment(self) -> str:
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
@@ -286,37 +435,36 @@ class Supervisor:
         segment.mkdir(parents=True, exist_ok=True)
 
         # 1. Director proposal (validated schema; never writes state itself).
-        raw = self._call_with_restart(
-            self._director,
-            "director",
-            segment_id,
-            "decide",
-            {
-                "decision_index": state.decision_index,
-                "current_concept": state.current_concept,
-                "destination_concept": state.destination_concept,
-                "phase": state.phase,
-                "style": config.style,
-            },
+        # §74 proposal transaction: validate → novelty → style → accept.
+        style_spec = StyleSpec(prompt=config.style)
+        store = ConceptStore(
+            self._run_dir / "novelty",
+            similarity_threshold=config.voyage.novelty_threshold,
+            legacy_path=self._run_dir / paths.CONCEPTS_FILENAME,
         )
-        decision = EvolutionDecision.model_validate(raw)
+        decision = self._accept_director_decision(config, state, store, style_spec, segment_id)
 
-        # 2. Novelty check (rejections recorded in immutable history).
-        store = ConceptStore(self._run_dir / paths.CONCEPTS_FILENAME)
-        _record, _score = store.propose(decision.destination_concept)
-
-        # 3. Prompt plan + media generation.
-        prompt_plan = build_prompt_plan(
+        # 3. Staged prompt plan (§18.2) + media generation.
+        num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1
+        prompt_plan = build_staged_prompt_plan(
             segment_id,
-            style=config.style,
-            concept=decision.destination_concept,
-            phase=decision.phase,
-            block_starts=[0],
-            block_ends=[0],
+            style_spec,
+            stage_texts=list(decision.video.stages),
+            transition_texts=list(decision.transition.intermediate_stages),
+            num_blocks=num_blocks,
+            blocks_per_stage=config.voyage.blocks_per_prompt_stage,
         )
+        # Map each block to its stage prompt.
+        block_prompts = []
+        for block in range(num_blocks):
+            stage = next(
+                stage
+                for stage in prompt_plan.stages
+                if stage.block_start <= block <= stage.block_end
+            )
+            block_prompts.append(stage.prompt)
         video_out = segment / "video.mp4"
         audio_out = segment / "audio.wav"
-        num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1
         video_payload: dict[str, Any] = {
             "segment_id": segment_id,
             "output_path": str(video_out),
@@ -331,7 +479,7 @@ class Supervisor:
             # scene_cut fires on destination change (new shot); the worker
             # translates it to the upstream cut prefix (zero-KV + sink
             # re-pin inside _inference_inner).
-            video_payload["prompts"] = [prompt_plan.stages[0].prompt] * num_blocks
+            video_payload["prompts"] = list(block_prompts)
             video_payload["seeds"] = [
                 video_seed(config.seed, number, block) for block in range(num_blocks)
             ]
@@ -365,8 +513,8 @@ class Supervisor:
         duration = frames / config.video.fps
         audio_plan = AudioPlan(
             segment_id=segment_id,
-            music_style=config.audio.music_style,
-            energy=config.audio.energy,
+            music_style=decision.audio.music_caption or config.audio.music_style,
+            energy=min(1.0, max(0.0, decision.audio.energy)),
             seed=audio_seed(config.seed, number, 0),
         )
         self._call_with_restart(

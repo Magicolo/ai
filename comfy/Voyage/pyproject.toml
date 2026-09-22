@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
   "pydantic>=2.7",
   "huggingface_hub>=0.23",
+  "numpy>=1.26",
   "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -39,6 +40,22 @@ python_version = "3.12"
 strict = true
 warn_unused_ignores = true
 show_error_codes = true
+
+# Heavy optional deps (GPU/CPU model stacks): never follow them — treat as
+# Any in every image. `ignore_missing_imports` covers images without them
+# (slim gates), `follow_imports = "skip"` covers images with them
+# (director/video), where an inline `type: ignore` would be unused.
+[[tool.mypy.overrides]]
+module = [
+  "torch",
+  "torch.*",
+  "transformers",
+  "transformers.*",
+  "sentence_transformers",
+  "sentence_transformers.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

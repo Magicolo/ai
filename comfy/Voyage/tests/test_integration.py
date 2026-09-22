@@ -58,7 +58,8 @@ def test_director_worker_decides(tmp_path: Path) -> None:
                 "style": "s",
             },
         )
-        assert result["destination_concept"] == "b"
+        assert result["destination"]["canonical_name"] == "b"
+        assert result["fallback"] is True
     finally:
         worker.stop()
 

@@ -20,7 +20,12 @@ from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import MediaError, StateError, VoyageError
 from voyage.media import finalize_run
 from voyage.media import probe as media_probe
-from voyage.model_registry import download_longlive2_bf16, verify_longlive2_bf16
+from voyage.model_registry import (
+    download_director_models,
+    download_longlive2_bf16,
+    verify_director_models,
+    verify_longlive2_bf16,
+)
 from voyage.persistence import (
     build_manifest,
     initial_state,
@@ -74,22 +79,42 @@ def _models_dir(args: argparse.Namespace) -> Path:
     return Path(raw)
 
 
+def _download_director(models_dir: Path) -> int:
+    """Download the Phase 3 director stack (DESIGN §§8-9, 85)."""
+    print(f"downloading director-qwen8b into {models_dir} ...")
+    try:
+        record = download_director_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    director = record["director"]
+    assert isinstance(director, dict)
+    print(f"qwen3-8b: {director.get('checkpoint_bytes')} bytes")
+    print(f"minilm: {director.get('embedding_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     action = args.models_action
     if action == "list":
         print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
         print("audio: fake (built-in) | acestep (Phase 4, not yet implemented)")
-        print("director: deterministic (built-in) | qwen3-8b (Phase 3, not yet implemented)")
+        print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
         return 0
     if action == "verify":
         ok, message = verify_longlive2_bf16(_models_dir(args))
         print(message)
+        dok, dmessage = verify_director_models(_models_dir(args))
+        print(dmessage)
         print("fake backends need no model files: OK")
-        return 0 if ok else 1
+        return 0 if (ok and dok) else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
+        if target == "director-qwen8b":
+            return _download_director(_models_dir(args))
         if target != "longlive2-bf16":
-            print(f"unknown models target {target!r} (known: longlive2-bf16)")
+            print(f"unknown models target {target!r} (known: longlive2-bf16, director-qwen8b)")
             return 2
         models_dir = _models_dir(args)
         print(f"downloading longlive2-bf16 into {models_dir} ...")
@@ -281,10 +306,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 def cmd_inspect(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     if args.inspect_target == "concepts":
-        records = ConceptStore.load_jsonl(run_dir / paths.CONCEPTS_FILENAME)
+        store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
+        records = store.records()
         for record in records:
-            flag = "+" if record.get("accepted") else "-"
-            print(f"[{flag}] #{record.get('index')}: {str(record.get('text'))[:120]}")
+            flag = "+" if record.accepted else "-"
+            print(f"[{flag}] #{record.id}: {record.canonical_name[:120]}")
         return 0
     if args.inspect_target == "segments":
         root = run_dir / paths.SEGMENTS_DIRNAME

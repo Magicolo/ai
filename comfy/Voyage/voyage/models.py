@@ -51,12 +51,81 @@ class PromptPlan(BaseModel):
     stages: list[PromptStage] = Field(default_factory=list)
 
 
+class StyleSpec(BaseModel):
+    """Immutable human-owned style charter (DESIGN §15)."""
+
+    prompt: str
+    motion_energy_min: float = 0.20
+    motion_energy_max: float = 0.35
+    visual_complexity_min: float = 0.30
+    visual_complexity_max: float = 0.50
+    semantic_drift_min: float = 0.12
+    semantic_drift_max: float = 0.25
+    surrealism: float = 0.70
+    transition_smoothness: float = 0.90
+
+
+TransitionMechanism = Literal[
+    "material_metamorphosis",
+    "environmental_transformation",
+    "scale_shift",
+    "geometric_transformation",
+    "physical_rule_change",
+    "lighting_transformation",
+    "perceptual_transformation",
+    "hybrid",
+]
+
+
+class TransitionPlan(BaseModel):
+    """Explicit narrative bridge between concepts (DESIGN §17)."""
+
+    source_concept: str = ""
+    destination_concept: str = ""
+    mechanism: TransitionMechanism = "hybrid"
+    transition_strength: float = 0.25
+    estimated_duration_seconds: float = 64.0
+    intermediate_stages: list[str] = Field(default_factory=list)
+    major_transition: bool = False
+
+
+class DirectorDestination(BaseModel):
+    canonical_name: str
+    summary: str = ""
+
+
+class DirectorVideoPlan(BaseModel):
+    stages: list[str] = Field(default_factory=list)
+
+
+class DirectorAudioPlan(BaseModel):
+    music_caption: str = "slow ambient electronic composition"
+    energy: float = 0.48
+    tempo_bpm: int = 74
+    texture: str = ""
+    environment: list[str] = Field(default_factory=list)
+
+
+class DirectorNovelty(BaseModel):
+    why_new: str = ""
+
+
 class EvolutionDecision(BaseModel):
+    """Director proposal, validated before anything else touches it (§§19, 74)."""
+
     decision_index: int
-    destination_concept: str
-    phase: TransitionPhase
+    destination: DirectorDestination
+    transition: TransitionPlan = Field(default_factory=TransitionPlan)
+    video: DirectorVideoPlan = Field(default_factory=DirectorVideoPlan)
+    audio: DirectorAudioPlan = Field(default_factory=DirectorAudioPlan)
+    novelty: DirectorNovelty = Field(default_factory=DirectorNovelty)
+    phase: TransitionPhase = "ESTABLISH"
     novelty_accepted: bool = True
     notes: str = ""
+
+    @property
+    def destination_concept(self) -> str:
+        return self.destination.canonical_name
 
 
 class SegmentWorldState(BaseModel):

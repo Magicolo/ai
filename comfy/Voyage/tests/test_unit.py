@@ -65,7 +65,7 @@ def test_config_missing_file(tmp_path: Path) -> None:
 
 
 def test_novelty_accepts_then_rejects_repeat(tmp_path: Path) -> None:
-    store = ConceptStore(tmp_path / "concepts.jsonl", similarity_threshold=0.55)
+    store = ConceptStore(tmp_path / "novelty", similarity_threshold=0.55)
     first, _ = store.propose("luminous fungal metropolis at dusk")
     assert first.accepted
     second, score = store.propose("luminous fungal metropolis at dusk")
@@ -74,12 +74,20 @@ def test_novelty_accepts_then_rejects_repeat(tmp_path: Path) -> None:
 
 
 def test_novelty_history_is_append_only(tmp_path: Path) -> None:
-    path = tmp_path / "concepts.jsonl"
-    store = ConceptStore(path)
+    store = ConceptStore(tmp_path / "novelty")
     store.propose("crystalline ocean archive")
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = (tmp_path / "novelty" / "concepts.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["index"] == 0
+    assert json.loads(lines[0])["id"] == "concept-000000"
+
+
+def test_novelty_records_rejections_immutably(tmp_path: Path) -> None:
+    store = ConceptStore(tmp_path / "novelty", similarity_threshold=0.55)
+    store.propose("luminous fungal metropolis at dusk")
+    rejected, _ = store.propose("luminous fungal metropolis at dusk")
+    assert not rejected.accepted
+    assert len(store.records()) == 2
+    assert [record.accepted for record in store.records()] == [True, False]
 
 
 def test_token_similarity_bounds() -> None:

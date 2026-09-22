@@ -42,6 +42,46 @@ WAN_ALLOW = [
 ]
 WAN_LICENSE = "Apache 2.0 (see repo LICENSE; record exact text at download)"
 
+# Phase 3 director LLM (DESIGN §8). Qwen3-8B dense, Apache 2.0, ungated.
+# BF16 weights (~16.4 GiB); served on CPU from system RAM in the director
+# worker process — never on the video GPU.
+QWEN_HF_REPO = "Qwen/Qwen3-8B"
+QWEN_HF_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
+QWEN_SUBDIR = "Qwen3-8B"
+QWEN_ALLOW = [
+    "model-0000[1-5]-of-00005.safetensors",
+    "model.safetensors.index.json",
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+]
+QWEN_MIN_BYTES = 15_000_000_000
+QWEN_LICENSE = "Apache 2.0"
+QWEN_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE"
+
+# Phase 3 novelty embeddings (DESIGN §9). MiniLM-L6-v2, Apache 2.0,
+# ungated; CPU-only in the director worker process.
+MINILM_HF_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+MINILM_HF_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+MINILM_SUBDIR = "all-MiniLM-L6-v2"
+MINILM_ALLOW = [
+    "model.safetensors",
+    "config.json",
+    "config_sentence_transformers.json",
+    "sentence_bert_config.json",
+    "modules.json",
+    "1_Pooling/config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.txt",
+]
+MINILM_MIN_BYTES = 50_000_000
+MINILM_LICENSE = "Apache 2.0"
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -109,9 +149,103 @@ def verify_longlive2_bf16(models_dir: Path) -> tuple[bool, str]:
     return True, f"longlive2-bf16 OK (generator {size_gib:.1f} GiB + Wan subset)"
 
 
+def _merge_manifest_record(models_dir: Path, key: str, value: dict[str, Any]) -> dict[str, Any]:
+    """Merge one record into models_dir/manifest.json (DESIGN §85)."""
+    manifest_path = models_dir / "manifest.json"
+    record: dict[str, Any] = {}
+    if manifest_path.exists():
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            record = loaded
+    record[key] = value
+    manifest_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return record
+
+
+def download_director_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Phase 3 director stack (DESIGN §§8-9, 85).
+
+    Qwen3-8B snapshot (bf16 shards + tokenizer) plus MiniLM-L6-v2
+    (safetensors + tokenizer/configs, skips the onnx/openvino/tf extras).
+    Merges into the shared manifest; returns the merged record.
+    """
+    from huggingface_hub import snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    qwen_dir = models_dir / QWEN_SUBDIR
+    snapshot_download(
+        repo_id=QWEN_HF_REPO,
+        revision=QWEN_HF_REVISION,
+        local_dir=str(qwen_dir),
+        allow_patterns=QWEN_ALLOW,
+    )
+    minilm_dir = models_dir / MINILM_SUBDIR
+    snapshot_download(
+        repo_id=MINILM_HF_REPO,
+        revision=MINILM_HF_REVISION,
+        local_dir=str(minilm_dir),
+        allow_patterns=MINILM_ALLOW,
+    )
+    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
+    qwen_bytes = sum(p.stat().st_size for p in qwen_shards)
+    minilm_weights = minilm_dir / "model.safetensors"
+    record = _merge_manifest_record(
+        models_dir,
+        "director",
+        {
+            "repo": QWEN_HF_REPO,
+            "revision": QWEN_HF_REVISION,
+            "model_dir": str(qwen_dir),
+            "checkpoint_bytes": qwen_bytes,
+            "shards": [p.name for p in qwen_shards],
+            "license": QWEN_LICENSE,
+            "license_url": QWEN_LICENSE_URL,
+            "embedding_repo": MINILM_HF_REPO,
+            "embedding_revision": MINILM_HF_REVISION,
+            "embedding_dir": str(minilm_dir),
+            "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
+            "embedding_license": MINILM_LICENSE,
+        },
+    )
+    return record
+
+
+def verify_director_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the director stack."""
+    missing: list[str] = []
+    qwen_dir = models_dir / QWEN_SUBDIR
+    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
+    qwen_bytes = sum(p.stat().st_size for p in qwen_shards) if qwen_shards else 0
+    for pattern in QWEN_ALLOW:
+        if "[" in pattern:
+            continue  # covered by the shard glob above
+        if not (qwen_dir / pattern).exists():
+            missing.append(str(qwen_dir / pattern))
+    if qwen_bytes < QWEN_MIN_BYTES:
+        missing.append(f"{qwen_dir}/model-*-of-*.safetensors ({qwen_bytes} bytes)")
+    minilm_dir = models_dir / MINILM_SUBDIR
+    minilm_weights = minilm_dir / "model.safetensors"
+    if not minilm_weights.exists() or minilm_weights.stat().st_size < MINILM_MIN_BYTES:
+        missing.append(str(minilm_weights))
+    for pattern in MINILM_ALLOW[1:]:
+        if "/" in pattern:
+            if not (minilm_dir / pattern).exists():
+                missing.append(str(minilm_dir / pattern))
+        elif not (minilm_dir / pattern).exists():
+            missing.append(str(minilm_dir / pattern))
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    return True, (
+        f"director-qwen8b OK (Qwen3-8B {qwen_bytes / 1024**3:.1f} GiB + MiniLM "
+        f"{minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
+    )
+
+
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     return {
         "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
         "generator_ckpt": str(models_dir / "longlive2" / LONGLIVE_HF_FILE),
+        "qwen_dir": str(models_dir / QWEN_SUBDIR),
+        "minilm_dir": str(models_dir / MINILM_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),
     }

@@ -28,6 +28,14 @@ class MediaError(VoyageError):
     """ffmpeg/ffprobe failure or media validation failure."""
 
 
+class ProposalRejected(VoyageError):
+    """Director proposal failed novelty/style policy (DESIGN §§18.1, 21.2).
+
+    Not a worker failure: no restart, the supervisor retries with
+    feedback or falls back deterministically.
+    """
+
+
 class StateError(VoyageError):
     """Corrupt or inconsistent persistent state."""
 
