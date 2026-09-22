@@ -25,7 +25,7 @@ def build_manifest(
     return {
         "schema_version": paths.SCHEMA_VERSION,
         "run_id": config.run_id,
-        "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),  # noqa: UP017 — worker image is py3.10, datetime.UTC needs 3.11+
         "voyage_version": __import__("voyage").__version__,
         "config_sha256": config_sha256,
         "style": config.style,

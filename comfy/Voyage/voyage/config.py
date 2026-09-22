@@ -35,8 +35,12 @@ class VideoConfig(BaseModel):
     # 8 latents -> 8 frames chunked, 29 causal).
     models_dir: str = "/models"
     latent_shape: list[int] = Field(default_factory=lambda: [1, 8, 48, 44, 80])
+    # Phase 2: DiT blocks per committed segment (1 block = 8 latents).
+    # The stream session holds caches across blocks, so memory stays flat;
+    # only wall time grows. Fake backend ignores this (renders segment_frames).
+    blocks_per_segment: int = 1
 
-    @field_validator("width", "height", "fps", "segment_frames")
+    @field_validator("width", "height", "fps", "segment_frames", "blocks_per_segment")
     @classmethod
     def positive(cls, value: int) -> int:
         if value <= 0:
@@ -108,6 +112,7 @@ segment_frames = 48
 device = "cpu"
 models_dir = "/models"
 latent_shape = [1, 8, 48, 44, 80]
+blocks_per_segment = 1
 
 [audio]
 backend = "fake"

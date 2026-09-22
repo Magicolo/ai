@@ -280,21 +280,31 @@ class Supervisor:
         )
         video_out = segment / "video.mp4"
         audio_out = segment / "audio.wav"
+        num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1
+        video_payload: dict[str, Any] = {
+            "segment_id": segment_id,
+            "output_path": str(video_out),
+            "width": config.video.width,
+            "height": config.video.height,
+            "fps": config.video.fps,
+            "frames": config.video.segment_frames,
+        }
+        if config.video.backend == "longlive2":
+            # Phase 2: one stream session appends N blocks (same prompt in
+            # this slice); per-block seeds from the run RNG stream.
+            video_payload["prompts"] = [prompt_plan.stages[0].prompt] * num_blocks
+            video_payload["seeds"] = [
+                video_seed(config.seed, number, block) for block in range(num_blocks)
+            ]
+        else:
+            video_payload["prompt"] = prompt_plan.stages[0].prompt
+            video_payload["seed"] = video_seed(config.seed, number, 0)
         video_result = self._call_with_restart(
             self._video,
             "video",
             segment_id,
             "generate_blocks",
-            {
-                "segment_id": segment_id,
-                "prompt": prompt_plan.stages[0].prompt,
-                "seed": video_seed(config.seed, number, 0),
-                "output_path": str(video_out),
-                "width": config.video.width,
-                "height": config.video.height,
-                "fps": config.video.fps,
-                "frames": config.video.segment_frames,
-            },
+            video_payload,
         )
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
@@ -352,7 +362,15 @@ class Supervisor:
         atomic_write_json(segment / "audio_state.json", audio_plan.model_dump())
         atomic_write_json(
             segment / "metrics.json",
-            {"video": video_info, "audio": audio_info, "frames": frames},
+            {
+                "video": video_info,
+                "audio": audio_info,
+                "frames": frames,
+                # §23: RoPE mode is a first-class record — never change it
+                # silently across resume; compare on recovery.
+                "use_relative_rope": False,
+                "blocks": num_blocks,
+            },
         )
         atomic_write_json(
             segment / "sha256.json",

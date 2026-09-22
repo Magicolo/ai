@@ -237,6 +237,112 @@ def _install_pos_only_caches(pipe: Any) -> bool:
     return True
 
 
+class LongLiveStreamSession:
+    """Persistent causal stream (DESIGN §22): caches survive across blocks.
+
+    Upstream `inference()` either allocates caches (first call) or RESETS
+    their positions to zero (later calls) — repeated calls are separate
+    streams, not one voyage. This session replicates the preamble
+    (prompt encode + output buffer) once per block and calls the
+    lower-level `_inference_inner` directly, so `global/local_end_index`
+    advance monotonically and the rolling window (§24) evicts old entries:
+    memory is flat by construction no matter how many blocks append.
+
+    One block = `num_frame_per_block` latents (8). Same-prompt text
+    embeddings are cached (§22.4 step 3) — a CPU T5-XXL forward costs
+    minutes, so repeat encodes must not rerun per block.
+    """
+
+    def __init__(self, pipeline: Any, latent_shape: list[int], device: Any) -> None:
+        self._pipeline = pipeline
+        self._latent_shape = list(latent_shape)
+        self._device = device
+        self._next_start_frame = 0  # latent frames committed to the stream
+        self._blocks_appended = 0
+        self._embed_cache: dict[str, tuple[Any, Any]] = {}
+
+    @property
+    def blocks_appended(self) -> int:
+        return self._blocks_appended
+
+    @property
+    def next_start_frame(self) -> int:
+        return self._next_start_frame
+
+    def reset(self) -> None:
+        """Drop caches + position (fresh stream; full recover() lands later)."""
+        pipe = self._pipeline
+        pipe.kv_cache_pos = None
+        pipe.kv_cache_neg = None
+        pipe.crossattn_cache_pos = None
+        pipe.crossattn_cache_neg = None
+        self._next_start_frame = 0
+        self._blocks_appended = 0
+
+    def _encode(self, prompt: str) -> tuple[Any, Any]:
+        cached = self._embed_cache.get(prompt)
+        if cached is not None:
+            return cached
+        from utils.prompt_conditioning import encode_prompt_blocks  # type: ignore[import-not-found]
+
+        cond, cond_list = encode_prompt_blocks(self._pipeline.text_encoder, [[prompt]], 1)
+        self._embed_cache[prompt] = (cond, cond_list)
+        return cond, cond_list
+
+    def append_block(self, prompt: str, seed: int) -> Any:
+        """Denoise one block into the persistent stream; return its latents."""
+        import torch
+
+        pipe = self._pipeline
+        shape = self._latent_shape
+        block_frames = int(pipe.num_frame_per_block)
+        generator = torch.Generator(device=self._device).manual_seed(seed)
+        noise = torch.randn(
+            [1, block_frames, shape[2], shape[3], shape[4]],
+            device=self._device,
+            dtype=torch.bfloat16,
+            generator=generator,
+        )
+        cond, cond_list = self._encode(prompt)
+        output = torch.zeros(
+            [1, block_frames, shape[2], shape[3], shape[4]],
+            device=self._device,
+            dtype=torch.bfloat16,
+        )
+        if pipe.kv_cache_pos is None:
+            pipe._initialize_kv_cache(batch_size=1, dtype=torch.bfloat16, device=self._device)
+            pipe._initialize_crossattn_cache(
+                batch_size=1, dtype=torch.bfloat16, device=self._device
+            )
+        # NOTE: no position reset — that is the whole point. Positions
+        # persist in the cache dicts; only the per-call window advances.
+        latents = pipe._inference_inner(
+            noise=noise,
+            batch_size=1,
+            num_frames=block_frames,
+            num_channels=shape[2],
+            height=shape[3],
+            width=shape[4],
+            num_blocks=1,
+            num_input_frames=0,
+            num_output_frames=block_frames,
+            output=output,
+            conditional_dict=cond,
+            conditional_dict_list=cond_list,
+            unconditional_dict=None,
+            use_cfg=False,
+            initial_latent=None,
+            clamp_i2v_first_chunk=False,
+            return_latents=True,
+            current_start_frame=self._next_start_frame,
+            cache_start_frame=0,
+            raw_prompts=[[prompt]],
+        )
+        self._next_start_frame += block_frames
+        self._blocks_appended += 1
+        return latents
+
+
 class LongLiveSession:
     """Resident pipeline: built once at `init`, reused per segment."""
 
@@ -288,34 +394,41 @@ class LongLiveSession:
         pipeline.vae.to(device=self._device)
         self._pipeline = pipeline
         self._config = config
+        self._stream = LongLiveStreamSession(pipeline, list(latent_shape), self._device)
 
-    def generate(self, prompt: str, seed: int, output_path: Path, fps: int) -> dict[str, Any]:
+    @property
+    def stream(self) -> LongLiveStreamSession:
+        return self._stream
+
+    def generate_blocks(
+        self, prompts: list[str], seeds: list[int], output_path: Path, fps: int
+    ) -> dict[str, Any]:
         import imageio.v2 as imageio  # type: ignore[import-not-found]
         from einops import rearrange  # type: ignore[import-not-found]
-        from utils.misc import set_seed  # type: ignore[import-not-found]
 
+        if len(prompts) != len(seeds) or not prompts:
+            raise ValueError("prompts and seeds must be non-empty lists of equal length")
         torch = self._torch
-        set_seed(seed)
-        shape = self._latent_shape
-        noise = torch.randn(
-            [1, shape[1], shape[2], shape[3], shape[4]],
-            device=self._device,
-            dtype=torch.bfloat16,
-        )
+        block_videos = []
         with torch.inference_mode():
-            latents = self._pipeline.inference(
-                noise=noise, text_prompts=[[prompt]], return_latents=True
-            )
-        # Chunked VAE decode (public wrapper API): whole-segment
-        # decode_to_pixel OOMs at 1280x704x29f on 16 GB, and even 2-latent
-        # chunks exceed budget (~14.6 GB resident at decode). One latent
-        # frame per chunk peaks at 8.7 GB end-to-end (measured). Each chunk
-        # restarts the causal history, so a chunk carries no temporal
-        # expansion (8 latents -> 8 frames, not 29) — verify visually; the
-        # fallback is CPU decode (slow, full 29f causal).
-        generated = self._pipeline.vae.decode_to_pixel_chunk(latents, use_cache=False, chunk_size=1)
-        video = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
+            for prompt, seed in zip(prompts, seeds, strict=True):
+                latents = self._stream.append_block(prompt, seed)
+                # Chunked VAE decode (public wrapper API): whole-segment
+                # decode_to_pixel OOMs at 1280x704x29f on 16 GB, and even 2-latent
+                # chunks exceed budget (~14.6 GB resident at decode). One latent
+                # frame per chunk peaks at 8.7 GB end-to-end (measured). Each chunk
+                # restarts the causal history, so a chunk carries no temporal
+                # expansion (8 latents -> 8 frames, not 29) — verify visually; the
+                # fallback is CPU decode (slow, full 29f causal).
+                generated = self._pipeline.vae.decode_to_pixel_chunk(
+                    latents, use_cache=False, chunk_size=1
+                )
+                block_videos.append(
+                    (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
+                )
+                del latents, generated
         self._pipeline.vae.model.clear_cache()
+        video = torch.cat(block_videos, dim=1)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         frames = [video[0, index].numpy() for index in range(video.shape[1])]
         with imageio.get_writer(
@@ -323,12 +436,14 @@ class LongLiveSession:
         ) as writer:
             for frame in frames:
                 writer.append_data(frame)
-        height, width = int(video.shape[3]), int(video.shape[4])
+        height, width = int(video.shape[2]), int(video.shape[3])
         return {
             "frames": len(frames),
             "fps": fps,
             "width": width,
             "height": height,
+            "blocks": len(prompts),
+            "stream_start_frame": self._stream.next_start_frame - 8 * len(prompts),
         }
 
 
@@ -373,18 +488,30 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
-    checked_request(payload, segment_id=str, prompt=str, seed=int, output_path=str, fps=int)
     if _SESSION is None:
         raise RuntimeError("video_longlive not initialized — send `init` first")
+    # Multi-block form (Phase 2): prompts/seeds lists, one entry per block.
+    # Single-block form (Phase 1): bare prompt/seed.
+    if "prompts" in payload or "seeds" in payload:
+        checked_request(payload, segment_id=str, output_path=str, fps=int)
+        raw_prompts = payload["prompts"]
+        raw_seeds = payload["seeds"]
+        assert isinstance(raw_prompts, list) and isinstance(raw_seeds, list)
+        prompts = [str(item) for item in raw_prompts]
+        seeds = [int(item) for item in raw_seeds]
+    else:
+        checked_request(payload, segment_id=str, prompt=str, seed=int, output_path=str, fps=int)
+        prompts = [str(payload["prompt"])]
+        seeds = [int(payload["seed"])]
     output = Path(str(payload["output_path"]))
-    result = _SESSION.generate(
-        prompt=str(payload["prompt"]),
-        seed=int(payload["seed"]),
+    result = _SESSION.generate_blocks(
+        prompts=prompts,
+        seeds=seeds,
         output_path=output,
         fps=int(payload["fps"]),
     )
     return {
-        "blocks_generated": 1,
+        "blocks_generated": len(prompts),
         "artifacts": [str(output)],
         "video": result,
     }

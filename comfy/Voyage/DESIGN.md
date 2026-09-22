@@ -5276,3 +5276,42 @@ Next: Phase 2 stream session (`append_blocks`, persistent KV, recovery
 replay across segments — currently each segment rebuilds from noise;
 no cross-segment continuity yet), then quality path (larger windows,
 torch.compile warmup, CPU-decode 29f).
+
+## 2026-09-22 — Phase 2 continuity slice (shared stream session, RoPE off)
+
+Slice implemented (user-aligned: slice-first, RoPE off, 2-3 blocks/segment):
+
+- `LongLiveStreamSession` in `voyage/workers/video_longlive.py`: persistent
+  pipeline across blocks AND segments within one worker invocation —
+  `next_start_frame`/`blocks_appended` tracked, prompt-embed cache keyed by
+  prompt (CPU T5 encode costs minutes; repeated prompts reuse embeds),
+  `append_block` via direct `_inference_inner` (upstream `inference()`
+  resets cache positions to zero on later calls, so continuation bypasses
+  it after block 1 with tracked `current_start_frame`, `cache_start_frame=0`,
+  rolling-window eviction → FLAT peak by construction: longer segments cost
+  wall time, not VRAM). `reset()` stub reserved for scene-cut recovery.
+- `LongLiveSession.generate_blocks(prompts, seeds)`: per-block direct calls,
+  per-block `decode_to_pixel_chunk(1)`, concatenated output; RPC accepts
+  multi-block prompts/seeds lists (backward-compat single prompt/seed).
+  `use_relative_rope:false` recorded in segment metrics (RoPE is a top-level
+  config attr defaulting False, applied/restored per upstream call).
+- `VideoConfig.blocks_per_segment=1` (+validator, +TOML template);
+  supervisor sends prompts/seeds lists for longlive2
+  (per-block seeds `video_seed(seed, seg, block)`), records blocks +
+  `use_relative_rope:false` in metrics.json.
+
+VRAM sizing (4060 Ti, 15.57 GiB): 3-block probe peaked 13.17 GiB allocated
+(init 6.06 GiB) — fits with 2.4 GB headroom. Probe also caught a real bug:
+`generate_blocks` indexed shape[3]/shape[4] on the concatenated (B,T,H,W,C)
+tensor (width=3/height=1280 — would have failed supervisor validate); fixed
+to shape[2]/shape[3].
+
+E2E continuity proof (PASS): 2 segments x 3 blocks, one invocation, both
+committed, VALID 48f @ 1280x704. Boundary metrics — mid-block 0.06-0.09,
+block boundaries 0.32-0.35 (fresh noise per block, expected this slice),
+SEGMENT boundary 23->24 = 0.366 (same magnitude, no reset penalty), far
+control 0.344. Visual: same neon-portrait subject across the boundary, no
+hard cut (tighter framing, palette drift — block-evolution, not reset).
+Tree note: `persistence.py` had regressed to `datetime.UTC` (commit 6b7b6b9
+contains it — Phase 1 fix lost pre-commit via concurrent-agent/tree mishap);
+re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
