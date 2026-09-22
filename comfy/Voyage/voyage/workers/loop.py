@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import traceback
 from collections.abc import Callable
@@ -35,7 +36,11 @@ def serve(handlers: dict[str, Handler]) -> None:
             stdout.flush()
             continue
         try:
-            result = handler(request.payload)
+            # Upstream model code prints to stdout; quarantine it to stderr
+            # so the JSONL framing on stdout survives. Responses are written
+            # through the captured `stdout` handle below, unaffected.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = handler(request.payload)
         except NotImplementedError as exc:
             stdout.write(
                 encode_response(failure(request.id, "NOT_IMPLEMENTED", str(exc), retryable=False))

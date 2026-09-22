@@ -8,9 +8,13 @@ the run manifest so runs are traceable to exact configuration.
 from __future__ import annotations
 
 import hashlib
-import tomllib
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10 worker image (upstream env)
+    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -25,6 +29,12 @@ class VideoConfig(BaseModel):
     fps: int = 24
     segment_frames: int = 48
     device: str = "cpu"
+    # LongLive backend only: host path (or /models mount in the worker
+    # image) holding wan_models/ + longlive2/, and the latent shape the
+    # pipeline denoises. [1,8,48,44,80] decodes to 1280x704 (x16 spatial;
+    # 8 latents -> 8 frames chunked, 29 causal).
+    models_dir: str = "/models"
+    latent_shape: list[int] = Field(default_factory=lambda: [1, 8, 48, 44, 80])
 
     @field_validator("width", "height", "fps", "segment_frames")
     @classmethod
@@ -96,6 +106,8 @@ height = 432
 fps = 24
 segment_frames = 48
 device = "cpu"
+models_dir = "/models"
+latent_shape = [1, 8, 48, 44, 80]
 
 [audio]
 backend = "fake"

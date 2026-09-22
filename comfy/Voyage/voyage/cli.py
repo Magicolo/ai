@@ -7,6 +7,7 @@ stop / validate / finalize / inspect
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import MediaError, StateError, VoyageError
 from voyage.media import finalize_run
 from voyage.media import probe as media_probe
+from voyage.model_registry import download_longlive2_bf16, verify_longlive2_bf16
 from voyage.persistence import (
     build_manifest,
     initial_state,
@@ -67,18 +69,40 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _models_dir(args: argparse.Namespace) -> Path:
+    raw = getattr(args, "models_dir", None) or os.environ.get("VOYAGE_MODELS_DIR", "/models")
+    return Path(raw)
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     action = args.models_action
     if action == "list":
-        print("video: fake (built-in) | longlive2 (Phase 1/2, not yet implemented)")
+        print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
         print("audio: fake (built-in) | acestep (Phase 4, not yet implemented)")
         print("director: deterministic (built-in) | qwen3-8b (Phase 3, not yet implemented)")
         return 0
     if action == "verify":
+        ok, message = verify_longlive2_bf16(_models_dir(args))
+        print(message)
         print("fake backends need no model files: OK")
-        return 0
+        return 0 if ok else 1
     if action == "download":
-        print("Phase 0 skeleton: explicit downloads land with real backends (Phases 1-4).")
+        target = getattr(args, "models_target", "longlive2-bf16")
+        if target != "longlive2-bf16":
+            print(f"unknown models target {target!r} (known: longlive2-bf16)")
+            return 2
+        models_dir = _models_dir(args)
+        print(f"downloading longlive2-bf16 into {models_dir} ...")
+        try:
+            record = download_longlive2_bf16(models_dir)
+        except Exception as exc:
+            print(f"download failed: {exc}", file=sys.stderr)
+            return 1
+        video = record["video"]
+        assert isinstance(video, dict)
+        print(f"generator: {video.get('checkpoint_bytes')} bytes")
+        print(f"sha256: {video.get('checkpoint_sha256')}")
+        print(f"manifest: {models_dir / 'manifest.json'}")
         return 0
     if action == "info":
         print("Use `voyage models list` for backends, `verify` for file checks.")
@@ -313,6 +337,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     models = sub.add_parser("models", help="Model management")
     models.add_argument("models_action", choices=["list", "download", "verify", "info"])
+    models.add_argument("models_target", nargs="?", default="longlive2-bf16")
+    models.add_argument("--models-dir", default=None)
     models.set_defaults(func=cmd_models)
 
     run = sub.add_parser("run", help="Generate segments (infinite unless --segments)")

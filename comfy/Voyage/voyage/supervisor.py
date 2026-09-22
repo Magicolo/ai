@@ -19,12 +19,14 @@ import shutil
 import signal
 import time
 from pathlib import Path
+from typing import Any
 
 from voyage import paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
 from voyage.errors import (
+    ConfigurationError,
     DiskSpaceError,
     FatalWorkerError,
     MediaError,
@@ -50,13 +52,40 @@ def check_free_space(run_dir: Path, min_free_gib: float) -> float:
     return free_gib
 
 
+VIDEO_WORKER_MODULES = {
+    "fake": "voyage.workers.video",
+    "longlive2": "voyage.workers.video_longlive",
+}
+"""Backend name → worker module. longlive2 only exists in the CUDA image."""
+
+
+def video_worker_module(backend: str) -> str:
+    try:
+        return VIDEO_WORKER_MODULES[backend]
+    except KeyError:
+        raise ConfigurationError(
+            f"unknown video backend {backend!r} (known: {sorted(VIDEO_WORKER_MODULES)})"
+        ) from None
+
+
 class Supervisor:
     def __init__(self, run_dir: Path, config: ProjectConfig) -> None:
         self._run_dir = run_dir
         self._config = config
         self._logs = run_dir / paths.LOGS_DIRNAME
+        video_module = video_worker_module(config.video.backend)
+        video_init: dict[str, Any] = {}
+        if config.video.backend == "longlive2":
+            video_init = {
+                "models_dir": config.video.models_dir,
+                "device": config.video.device,
+                "latent_shape": list(config.video.latent_shape),
+            }
         self._video = SubprocessWorker(
-            "voyage.workers.video", run_dir, self._logs / "video-worker.log"
+            video_module,
+            run_dir,
+            self._logs / "video-worker.log",
+            init_payload=video_init,
         )
         self._audio = SubprocessWorker(
             "voyage.workers.audio", run_dir, self._logs / "audio-worker.log"
@@ -251,8 +280,7 @@ class Supervisor:
         )
         video_out = segment / "video.mp4"
         audio_out = segment / "audio.wav"
-        frames = config.video.segment_frames
-        self._call_with_restart(
+        video_result = self._call_with_restart(
             self._video,
             "video",
             segment_id,
@@ -265,9 +293,18 @@ class Supervisor:
                 "width": config.video.width,
                 "height": config.video.height,
                 "fps": config.video.fps,
-                "frames": frames,
+                "frames": config.video.segment_frames,
             },
         )
+        # Truthful frame accounting: the worker reports what it rendered
+        # (longlive's decoded count depends on the VAE chunking, not the
+        # request), so the timeline always matches reality.
+        frames = config.video.segment_frames
+        video_block = video_result.get("video")
+        if isinstance(video_block, dict):
+            reported = video_block.get("frames")
+            if isinstance(reported, int) and reported > 0:
+                frames = reported
         duration = frames / config.video.fps
         audio_plan = AudioPlan(
             segment_id=segment_id,

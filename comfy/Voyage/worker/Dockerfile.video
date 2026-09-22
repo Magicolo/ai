@@ -1,0 +1,53 @@
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+
+# Phase 1 video worker env: CUDA 12.8 + Python 3.10 + torch 2.8.0/cu128 +
+# TorchAO FP8 PTQ + LongLive@6b36d20 + voyage package. Eager mode
+# (torch_compile off); flash-attn 2 is MANDATORY (upstream attention asserts
+# it — no SDPA fallback). Layer order keeps slow builds cached across
+# voyage-code edits (requirements + FA before COPY).
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CUDA_HOME=/usr/local/cuda
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3-pip git gcc g++ ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip \
+    && pip install torch==2.8.0 torchvision==0.23.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+RUN pip install torchao==0.13.0 "huggingface_hub[cli]" "pydantic>=2.7,<2.11"
+
+# LongLive at the pinned commit (DESIGN §140). Full requirements (matches
+# upstream env; heavy but reproducible).
+RUN git clone https://github.com/NVlabs/LongLive /opt/longlive \
+    && git -C /opt/longlive checkout 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
+    && pip install -r /opt/longlive/requirements.txt
+
+# Python headers for JIT builds at runtime (triton compiles its CUDA utils
+# on first use; gcc alone is not enough). Placed late so the heavy torch /
+# requirements layers above stay cached.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3.10-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mandatory attention backend (see header note). Built for the host GPU
+# family at image build time; sm89 (Ada) is covered by the default arch list.
+RUN pip install flash-attn --no-build-isolation
+
+# Voyage supervisor package (pure-python here; torch lives only behind the
+# worker module import). --no-deps: pydantic already pinned above.
+COPY pyproject.toml README.md /app/
+COPY voyage/ /app/voyage/
+RUN pip install --no-deps -e /app
+
+ENV PYTHONPATH=/opt/longlive:/app \
+    VOYAGE_LONGLIVE_DIR=/opt/longlive \
+    VOYAGE_MODELS_DIR=/models \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+WORKDIR /opt/longlive
+CMD ["voyage", "doctor"]

@@ -5190,3 +5190,89 @@ director worker behind `DirectorBackend`, Phase 4 ACE-Step worker.
   backends) + `stop` from a second invocation → exit 0 at STOP_REQUESTED;
   `resume` + `run --segments 1` continued at 000029; `validate` passed on
   30 segments. Gates green (ruff + format + mypy strict + 18 pytest).
+
+## 2026-09-22 — Phase 1 checkpoint decision (task group E kickoff)
+
+Decision (user-aligned via Q&A): **BF16 5B + TorchAO FP8 PTQ first** on the
+RTX 4060 Ti (sm89, 16 GB, GPU index 0). Research behind it:
+
+- Host 4060 Ti is sm89 → meets upstream minimum (compute capability >= 8.9);
+  the RTX 2060 (sm75) is out.
+- NVFP4 W4A4 acceleration is Blackwell-only (paper §Limitations); the
+  supported non-Blackwell path is BF16 + TorchAO FP8 PTQ (W8A8), first-class
+  upstream (`configs/fp8/inference_fp8.yaml`, `utils/fp8.py`,
+  `tests/test_fp8_inference.py`, `torchao==0.13.0` pinned in requirements).
+- S2 NVFP4 checkpoint additionally needs custom fouroversix/kernel builds with
+  CUDA_ARCHS listing only 100/120 — high risk on Ada. Deferred.
+- HF repo `Efficient-Large-Model/LongLive-2.0-5B` is NOT gated; single weight
+  file `model_bf16.pt` (~10 GB); upstream pin `6b36d20` (2026-09-07).
+- Upstream attention (`wan_5b/modules/attention.py`) degrades FA4→FA3→FA2 with
+  graceful import guards, so a missing flash-attn build must not hard-fail
+  the eager-mode smoke test.
+- Disk: 296 GB free — ample for the ~10 GB checkpoint + worker image.
+
+Plan: `Voyage/worker/Dockerfile.video` (CUDA 12.8 + py3.10 + torch 2.8.0/cu128
++ torchao 0.13.0 + LongLive@6b36d20 + voyage package, eager mode,
+`torch_compile: false`), `voyage models download longlive2-bf16` with revision
+pin + manifest record, real `LongLiveBackend` behind the worker RPC, finite
+one-segment E2E on the 4060 Ti.
+
+## 2026-09-22 — Phase 1 group E: finite LongLive segment on 4060 Ti (DONE)
+
+First real-model segment committed (run id `vll`, 1 segment, 8 frames
+@ 1280x704 h264 24fps, VALID, frames visually coherent — neon portrait,
+stable across the 8-frame span).
+
+What was built:
+
+- `Voyage/worker/Dockerfile.video` (CUDA 12.8 devel + py3.10 + torch
+  2.8.0/cu128 + torchao 0.13.0 + LongLive@6b36d20 + flash-attn 2.8.3 +
+  voyage, image `voyage-video:latest`). Runs the whole stack (supervisor +
+  workers in one container, `--gpus all`); the supervisor/GPU-env split is
+  a later-phase refactor.
+- `voyage/workers/video_longlive.py`: resident pipeline (strict ckpt load
+  via upstream `unwrap_generator_state_dict`, bf16, TorchAO FP8 PTQ eager),
+  CPU/bf16 UMT5 twin injected through the pipeline's `text_encoder=` seam
+  (upstream's fp32+auto-CUDA wrapper alone exceeds 16 GB), latents +
+  `decode_to_pixel_chunk` mp4 write. Backend selected by
+  `config.video.backend` (`fake`/`longlive2`); `SubprocessWorker` replays
+  `init` after every restart so the resident pipeline rebuilds.
+- `voyage/model_registry.py` + `voyage models download/verify`: pinned
+  `Efficient-Large-Model/LongLive-2.0-5B@model_bf16.pt`
+  (rev 8521079, 9.3 GiB, sha ec9063a4) + `Wan-AI/Wan2.2-TI2V-5B` subset
+  (diffusion shards, VAE 2.8 GB, T5 11.4 GB, tokenizer) into `/models`
+  (host `~/.cache/voyage-models`), manifest + sha record. Both repos
+  ungated. `scripts/run.sh` gained `VOYAGE_IMAGE`/`VOYAGE_GPUS`/`VOYAGE_MODELS`.
+- `voyage/workers/loop.py`: quarantines worker stdout to stderr during
+  handlers (upstream prints progress to stdout, which broke JSONL framing).
+
+16 GB VRAM findings (measured, RTX 4060 Ti 15.57 GiB):
+
+- Resident after init only ~6 GB (FP8 generator 4.75 + VAE 2.6→1.3 +
+  overhead); the FP8 print confirms 300 linears quantized.
+- Latent [1,8,48,44,80] decodes to **1280x704** (VAE spatial x16, causal
+  temporal 1+7x4=29) — not 640x352. Longlive profile: 1280x704, 8-29
+  frames (see decode note).
+- KV cache is `local_attn_size x frame_seq_length` bf16 per layer for BOTH
+  branches (neg never gated upstream): 32-window default = ~20 GB alone.
+  Fix: `local_attn_size` 32→8 in our config + `_install_pos_only_caches`
+  (pos-only twins of the two init methods, guidance-1.0-only, all neg
+  reads verified use_cfg-guarded except one unguarded crossattn-neg reset
+  write covered by tensor-free placeholders).
+- VAE full-segment `decode_to_pixel` OOMs (14.3 GB); `streaming_vae=true`
+  unusable (needs `VAE.cached_decode`, absent from this VAE build).
+  Working point: `decode_to_pixel_chunk(chunk_size=1)` — 8.7 GB peak
+  end-to-end. Tradeoff: causal history restarts per chunk (8 latents → 8
+  frames, not 29); frames verified coherent, no visible breakage. Fallback
+  on record: CPU decode (slow, full 29f causal) or 1024x576 latents.
+- Triton JIT (TorchAO kernels) needs `python3.10-dev` in the image
+  (diagnosed via `Python.h` missing) + `CUDA_HOME` set.
+- `datetime.UTC` is 3.11+ (worker is 3.10): use `timezone.utc`;
+  `requires-python` relaxed to >=3.10 with a tomli shim (3.10 branch).
+- mypy quirk documented in the worker header: one missing-module error
+  per file → ignore on first occurrence per module only.
+
+Next: Phase 2 stream session (`append_blocks`, persistent KV, recovery
+replay across segments — currently each segment rebuilds from noise;
+no cross-segment continuity yet), then quality path (larger windows,
+torch.compile warmup, CPU-decode 29f).

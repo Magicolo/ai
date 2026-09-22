@@ -59,12 +59,26 @@ def failure(request_id: str, code: str, message: str, retryable: bool = True) ->
 
 
 class SubprocessWorker:
-    """Supervisor-side handle for one JSONL worker process."""
+    """Supervisor-side handle for one JSONL worker process.
 
-    def __init__(self, module: str, workdir: Path, log_path: Path) -> None:
+    `init_op`/`init_payload` are (re)sent after every (re)start so a
+    restarted worker rebuilds its session before the next real op — the
+    longlive video worker's resident pipeline depends on this.
+    """
+
+    def __init__(
+        self,
+        module: str,
+        workdir: Path,
+        log_path: Path,
+        init_op: str | None = "init",
+        init_payload: dict[str, Any] | None = None,
+    ) -> None:
         self._module = module
         self._workdir = workdir
         self._log_path = log_path
+        self._init_op = init_op
+        self._init_payload = dict(init_payload) if init_payload else {}
         self._proc: subprocess.Popen[str] | None = None
         self._counter = 0
 
@@ -78,6 +92,8 @@ class SubprocessWorker:
             text=True,
             cwd=str(self._workdir),
         )
+        if self._init_op is not None:
+            self.call(self._init_op, dict(self._init_payload))
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
