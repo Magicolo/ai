@@ -11,13 +11,9 @@ set -o errexit
 # Config lives at /root/.config/comfy-cli/config.ini (not on a volume), so set on every boot.
 comfy set-default /comfy >/dev/null 2>&1 || true
 
-# Rebuild-safety: install requirements.txt for any custom_nodes present on the mounted volume
-# (covers fresh host clones that were not baked into image, follows same --requirement pattern).
-for req in /comfy/custom_nodes/*/requirements.txt /comfy/custom_nodes/*/requirements-*.txt; do
-  [ -f "$req" ] || continue
-  echo "[entry.sh] pip install --requirement $req"
-  pip install --no-cache-dir --requirement "$req" || echo "[entry.sh] WARN: pip install --requirement $req failed" >&2
-done
+# NOTE: custom-node requirements are baked into the image at build time (Dockerfile copies
+# every Comfy/custom_nodes/*/requirements*.txt from the host checkout and pip-installs them).
+# Nodes added later are handled by ComfyUI-Manager at startup, so no pip runs here.
 
 # Ensure loopback patch persists across rebuilds/host clones (fixed workflow_key for ernie_zoom)
 PY_PATCH="/comfy/custom_nodes/comfy-loopback-buffer/src/image_loopback/nodes.py"
