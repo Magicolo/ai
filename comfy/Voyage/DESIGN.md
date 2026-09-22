@@ -5315,3 +5315,53 @@ hard cut (tighter framing, palette drift — block-evolution, not reset).
 Tree note: `persistence.py` had regressed to `datetime.UTC` (commit 6b7b6b9
 contains it — Phase 1 fix lost pre-commit via concurrent-agent/tree mishap);
 re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
+
+## 2026-09-22 — Phase 2 remainder (RoPE on, scene-cut, recovery, 29f decode)
+
+- **RoPE on**: `use_relative_rope: true` in built config + dit setup in
+  `LongLiveSession` (mirrors `inference()` preamble bypassed by the direct
+  `_inference_inner` path). Denoise peak 8.68 GiB — identical to RoPE-off:
+  zero VRAM impact (compute-only). Metrics now record
+  `use_relative_rope: true`.
+- **Scene-cut**: `append_block(..., scene_cut)` → upstream prefix
+  `"The scene transitions. "` on raw_prompts only (embeds stay bare);
+  supervisor fires it on destination change. Pure helper slim-tested.
+- **Recovery (DESIGN §27)**: worker writes `recovery.pt` per segment (last
+  block tail latents + embeds + position, ~7 MB); supervisor `_resume_video_worker`
+  hook replays the tape after any video restart before the retried op.
+  Root cause found empirically: replay must run at current_start=0 with the
+  clock REWOUND to tail length (fresh-cache replay at nonzero start gathers
+  0 tokens — local wraps at ring size while counters stay absolute).
+  Post-resume state is structurally a fresh stream that generated the tail.
+- **29f decode**: VAE transient is ~10 GB regardless of chunk size (spatial
+  intermediates, not chunk-scalable). Fix: offload generator (FP8 `.cpu()`
+  works) + KV caches to CPU → 1.34 GB resident → full causal decode of 24
+  latents → true 93f (1+23x4), zero pops. Segments are now 93f @ 1280x704.
+- **Kill-test PASS**: SIGKILL mid-run → restart + resume (rewind 8/1 in
+  metrics) → retry commits → VALID 2 segments/186f, PAUSED, no error.
+- **CpuUmt5Encoder hardened**: inference-mode self-contained (probes calling
+  outside `inference_mode` hit inplace-on-inference-tensor errors).
+- Pending: torch.compile verdict (probe running), 5-min soak, then Phase 3.
+
+## 2026-09-22 — Phase 2 remainder complete (compile verdict + soak PASS)
+
+- **torch.compile verdict: functional but DEFERRED.** Inductor
+  (max-autotune-no-cudagraphs) compiles the FP8 generator and denoises
+  correctly; warmup cost 383 s, post-compile VRAM peak 8.68 GiB — identical
+  to eager. Warmup exceeds any per-segment saving at our scale (segments
+  run minutes each; compile pays once per process but blocks startup ~6 min
+  and saves ~0). Revisit for long-running (hour+) workers only. No code
+  change (worker stays eager).
+- **5-min soak: PASS.** 4 segments x 3 blocks (93f each, 372f = 15.5 min
+  timeline, 3x requirement), VALID, PAUSED, no errors, no restarts, timeline
+  monotonic. VRAM per-quarter peaks 15578/15578/15598/15498 MiB — flat
+  within noise, global max 15598 of 16380 MiB. KNOWN TIGHTNESS: ~350 MB
+  headroom at decode peaks; bounded and repeating (rolling window, flat by
+  construction), but any +350 MB transient OOMs — the single allowed restart
+  + resume hook is the safety net. Later-phase relief: smaller overlapped
+  decode windows or CPU VAE.
+- Slim gates green (ruff + format + mypy strict 25 files + 25 pytest).
+- Phase 2 exit criteria all met: persistent stream, prompt changes per
+  block without reset, scene-cut support, recovery tail + replay resume,
+  RoPE on, 29f causal decode, flat VRAM, restart/recovery proven by live
+  kill test. Next: Phase 3 (Qwen director worker behind DirectorBackend).

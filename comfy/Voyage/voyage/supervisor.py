@@ -18,6 +18,7 @@ import os
 import shutil
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -146,11 +147,14 @@ class Supervisor:
         segment_id: str,
         op: str,
         payload: dict[str, object],
+        restart_hook: Callable[[], None] | None = None,
     ) -> dict[str, object]:
         """One RPC call with a single worker restart on recoverable failure.
 
         A second consecutive failure is recorded and re-raised: the run loop
         decides (fatal → FAILED state, anything else → last_error + abort).
+        `restart_hook` (e.g. video recovery-tape resume) runs after the
+        restart replays `init`, before the retried call.
         """
         try:
             return worker.call(op, dict(payload))
@@ -165,7 +169,39 @@ class Supervisor:
                 }
             )
             worker.restart()
+            if restart_hook is not None:
+                restart_hook()
             return worker.call(op, dict(payload))
+
+    def _latest_recovery_tape(self) -> Path | None:
+        """Newest committed segment's recovery.pt, or None (DESIGN §27)."""
+        segments_root = self._run_dir / paths.SEGMENTS_DIRNAME
+        if not segments_root.exists():
+            return None
+        for segment in sorted(
+            (p for p in segments_root.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+            reverse=True,
+        ):
+            if (segment / paths.DONE_MARKER).exists():
+                tape = segment / "recovery.pt"
+                if tape.exists():
+                    return tape
+        return None
+
+    def _resume_video_worker(self) -> None:
+        """Rebuild video causal context from the latest tape (DESIGN §27.1).
+
+        Runs after a video worker restart: replays the tail latents at clean
+        timestep=0 so the retried block continues the stream instead of
+        starting a fresh one. No tape (first segment) → fresh stream is
+        correct — nothing to resume.
+        """
+        tape = self._latest_recovery_tape()
+        if tape is None:
+            return
+        result = self._video.call("resume", {"recovery_path": str(tape)})
+        self._log_metric({"event": "video_resumed", "tape": str(tape), **result})
 
     def _pause_requested(self) -> bool:
         """Honor an external `voyage pause`: transition to PAUSED and exit."""
@@ -292,10 +328,16 @@ class Supervisor:
         if config.video.backend == "longlive2":
             # Phase 2: one stream session appends N blocks (same prompt in
             # this slice); per-block seeds from the run RNG stream.
+            # scene_cut fires on destination change (new shot); the worker
+            # translates it to the upstream cut prefix (zero-KV + sink
+            # re-pin inside _inference_inner).
             video_payload["prompts"] = [prompt_plan.stages[0].prompt] * num_blocks
             video_payload["seeds"] = [
                 video_seed(config.seed, number, block) for block in range(num_blocks)
             ]
+            video_payload["scene_cuts"] = [state.destination_concept != state.current_concept] + [
+                False
+            ] * (num_blocks - 1)
         else:
             video_payload["prompt"] = prompt_plan.stages[0].prompt
             video_payload["seed"] = video_seed(config.seed, number, 0)
@@ -305,16 +347,21 @@ class Supervisor:
             segment_id,
             "generate_blocks",
             video_payload,
+            restart_hook=self._resume_video_worker if config.video.backend == "longlive2" else None,
         )
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
         # request), so the timeline always matches reality.
         frames = config.video.segment_frames
         video_block = video_result.get("video")
+        recovery_tape: str | None = None
         if isinstance(video_block, dict):
             reported = video_block.get("frames")
             if isinstance(reported, int) and reported > 0:
                 frames = reported
+            tape = video_block.get("recovery_path")
+            if isinstance(tape, str):
+                recovery_tape = tape
         duration = frames / config.video.fps
         audio_plan = AudioPlan(
             segment_id=segment_id,
@@ -368,8 +415,9 @@ class Supervisor:
                 "frames": frames,
                 # §23: RoPE mode is a first-class record — never change it
                 # silently across resume; compare on recovery.
-                "use_relative_rope": False,
+                "use_relative_rope": config.video.backend == "longlive2",
                 "blocks": num_blocks,
+                "recovery_tape": recovery_tape,
             },
         )
         atomic_write_json(

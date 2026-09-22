@@ -33,6 +33,18 @@ if str(VOYAGE_LONGLIVE_DIR) not in sys.path:
 
 from voyage.workers.loop import checked_request, serve  # noqa: E402
 
+# Upstream scene-cut signal: prompt prefix detected by _is_scene_cut when
+# multi_shot_sink is on (ours: true). Embeddings always use the bare prompt;
+# only raw_prompts carry the prefix (conditioning vs boundary signal split).
+SCENE_CUT_PREFIX = "The scene transitions. "
+
+
+def apply_scene_cut_prefix(prompt: str, scene_cut: bool) -> str:
+    """Prepend the cut prefix for boundary blocks (pure helper, slim-testable)."""
+    if scene_cut and not prompt.startswith(SCENE_CUT_PREFIX):
+        return SCENE_CUT_PREFIX + prompt
+    return prompt
+
 
 class CpuUmt5Encoder:
     """Call-compatible twin of upstream WanTextEncoder, CPU/bf16 resident.
@@ -73,10 +85,13 @@ class CpuUmt5Encoder:
         torch = self._torch
         ids, mask = self._tokenizer(text_prompts, return_mask=True, add_special_tokens=True)
         seq_lens = mask.gt(0).sum(dim=1).long()
+        # Self-contained inference mode: callers (probes, resume paths) may
+        # invoke outside torch.inference_mode, where the padding zeroing
+        # below would raise (inplace update on an inference tensor).
         with torch.inference_mode():
             context = self._model(ids, mask)
-        for row, length in zip(context, seq_lens, strict=True):
-            row[length:] = 0.0  # match upstream padding semantics
+            for row, length in zip(context, seq_lens, strict=True):
+                row[length:] = 0.0  # match upstream padding semantics
         return {"prompt_embeds": context.to(self._device)}
 
 
@@ -143,6 +158,11 @@ def build_longlive_config(generator_ckpt: Path, latent_shape: list[int]) -> Any:
         },
         "checkpoints": {"generator_ckpt": str(generator_ckpt)},
         "fp8_quant": True,
+        # Relative RoPE (DESIGN Phase 2 remainder): top-level config attr,
+        # default False upstream. Applied to the dit model in LongLiveSession
+        # (mirrors inference() per-call setup, which our direct
+        # _inference_inner path bypasses). Compute-only — no VRAM impact.
+        "use_relative_rope": True,
     }
     return normalize_config(OmegaConf.create(raw_config))
 
@@ -279,6 +299,80 @@ class LongLiveStreamSession:
         self._next_start_frame = 0
         self._blocks_appended = 0
 
+    def offload_caches(self) -> None:
+        """Move KV/crossattn tensors to CPU (frees VRAM for VAE decode)."""
+        pipe = self._pipeline
+        for cache in (pipe.kv_cache_pos, pipe.crossattn_cache_pos):
+            if not cache:
+                continue
+            for entry in cache:
+                for key in ("k", "v"):
+                    value = entry.get(key)
+                    if value is not None and hasattr(value, "device"):
+                        entry[key] = value.cpu()
+
+    def restore_caches(self) -> None:
+        """Move KV/crossattn tensors back to the worker device."""
+        import torch
+
+        pipe = self._pipeline
+        for cache in (pipe.kv_cache_pos, pipe.crossattn_cache_pos):
+            if not cache:
+                continue
+            for entry in cache:
+                for key in ("k", "v"):
+                    value = entry.get(key)
+                    if value is not None and hasattr(value, "device"):
+                        entry[key] = value.to(self._device)
+        torch.cuda.empty_cache()
+
+    def resume_from_tape(self, tape: dict[str, Any]) -> dict[str, int]:
+        """Rebuild causal context after restart (DESIGN §27.1).
+
+        Loads the tail latents + embeds, allocates empty caches, replays one
+        generator forward at clean timestep=0 (mirrors the upstream recache
+        pattern). Never serializes the whole KV cache.
+
+        POSITION CONTRACT (measured): the forward's gather math derives read
+        windows from the cache counters, so a fresh (empty) cache MUST start
+        at current_start=0 — replaying at the taped absolute position reads
+        unwritten ring slots (empty gather → expand crash, observed twice).
+        The stream clock is therefore REWOUND to the tail length (one
+        window). This loses nothing observable: the rolling window holds
+        exactly one tail worth of content, so post-resume state is
+        structurally identical to a fresh stream that generated the tail
+        (counters global=tail, local=ring — verified by probe). Absolute
+        video timeline is supervisor-owned and stays monotonic regardless.
+        """
+        import torch
+
+        pipe = self._pipeline
+        tail = tape["tail_latents"].to(self._device)
+        tail_frames = int(tail.shape[1])
+        embeds = tape["prompt_embeds"].to(self._device)
+        if pipe.kv_cache_pos is None:
+            pipe._initialize_kv_cache(batch_size=1, dtype=torch.bfloat16, device=self._device)
+            pipe._initialize_crossattn_cache(
+                batch_size=1, dtype=torch.bfloat16, device=self._device
+            )
+        timestep = torch.zeros([1, 1], device=self._device, dtype=torch.int64)
+        with torch.inference_mode():
+            pipe.generator(
+                noisy_image_or_video=tail,
+                conditional_dict={"prompt_embeds": embeds},
+                timestep=timestep,
+                kv_cache=pipe.kv_cache_pos,
+                crossattn_cache=pipe.crossattn_cache_pos,
+                current_start=0,
+                cache_start=0,
+            )
+        self._next_start_frame = tail_frames
+        self._blocks_appended = 1
+        return {
+            "next_start_frame": self._next_start_frame,
+            "blocks_appended": self._blocks_appended,
+        }
+
     def _encode(self, prompt: str) -> tuple[Any, Any]:
         cached = self._embed_cache.get(prompt)
         if cached is not None:
@@ -289,8 +383,13 @@ class LongLiveStreamSession:
         self._embed_cache[prompt] = (cond, cond_list)
         return cond, cond_list
 
-    def append_block(self, prompt: str, seed: int) -> Any:
-        """Denoise one block into the persistent stream; return its latents."""
+    def append_block(self, prompt: str, seed: int, scene_cut: bool = False) -> Any:
+        """Denoise one block into the persistent stream; return its latents.
+
+        scene_cut prepends the upstream cut prefix to raw_prompts only
+        (zero-KV + sink re-pin fire inside _inference_inner); the text
+        embedding still encodes the bare prompt.
+        """
         import torch
 
         pipe = self._pipeline
@@ -336,7 +435,7 @@ class LongLiveStreamSession:
             return_latents=True,
             current_start_frame=self._next_start_frame,
             cache_start_frame=0,
-            raw_prompts=[[prompt]],
+            raw_prompts=[[apply_scene_cut_prefix(prompt, scene_cut)]],
         )
         self._next_start_frame += block_frames
         self._blocks_appended += 1
@@ -376,6 +475,13 @@ class LongLiveSession:
         )
         pos_only = _install_pos_only_caches(pipeline)
         print(f"pos-only KV caches: {pos_only}", file=sys.stderr)
+        # RoPE setup mirrors inference() per-call preamble (which the direct
+        # _inference_inner path bypasses): relative RoPE on, temporal offset
+        # zeroed; per-shot offsets then evolve inside _inference_inner.
+        dit = pipeline._dit_model
+        dit.use_relative_rope = True
+        dit.rope_temporal_offset = 0.0
+        print("use_relative_rope: True", file=sys.stderr)
         # Mirror inference.py: unwrap the checkpoint container (keys:
         # generator + export metadata), strict-load, bf16, in-place FP8.
         import utils.nvfp4_checkpoint as nvfp4_ckpt  # type: ignore[import-not-found]
@@ -401,34 +507,62 @@ class LongLiveSession:
         return self._stream
 
     def generate_blocks(
-        self, prompts: list[str], seeds: list[int], output_path: Path, fps: int
+        self,
+        prompts: list[str],
+        seeds: list[int],
+        scene_cuts: list[bool],
+        output_path: Path,
+        fps: int,
     ) -> dict[str, Any]:
         import imageio.v2 as imageio  # type: ignore[import-not-found]
         from einops import rearrange  # type: ignore[import-not-found]
 
-        if len(prompts) != len(seeds) or not prompts:
-            raise ValueError("prompts and seeds must be non-empty lists of equal length")
+        if not prompts or not (len(prompts) == len(seeds) == len(scene_cuts)):
+            raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
         torch = self._torch
-        block_videos = []
+        block_latents = []
         with torch.inference_mode():
-            for prompt, seed in zip(prompts, seeds, strict=True):
-                latents = self._stream.append_block(prompt, seed)
-                # Chunked VAE decode (public wrapper API): whole-segment
-                # decode_to_pixel OOMs at 1280x704x29f on 16 GB, and even 2-latent
-                # chunks exceed budget (~14.6 GB resident at decode). One latent
-                # frame per chunk peaks at 8.7 GB end-to-end (measured). Each chunk
-                # restarts the causal history, so a chunk carries no temporal
-                # expansion (8 latents -> 8 frames, not 29) — verify visually; the
-                # fallback is CPU decode (slow, full 29f causal).
-                generated = self._pipeline.vae.decode_to_pixel_chunk(
-                    latents, use_cache=False, chunk_size=1
+            for prompt, seed, cut in zip(prompts, seeds, scene_cuts, strict=True):
+                block_latents.append(self._stream.append_block(prompt, seed, cut))
+        latents = torch.cat(block_latents, dim=1)
+        # Recovery tail (DESIGN §27): last block's clean latents + embeds so
+        # a restarted worker rebuilds causal context without re-encoding
+        # (CPU T5 costs minutes). Written beside the segment video.
+        tail_prompt = prompts[-1]
+        _cond, _cond_list = self._stream._encode(tail_prompt)
+        tape = {
+            "tail_latents": block_latents[-1].detach().cpu(),
+            "prompt_embeds": _cond["prompt_embeds"].detach().cpu(),
+            "next_start_frame": self._stream.next_start_frame,
+            "blocks_appended": self._stream.blocks_appended,
+            "profile": "longlive2-bf16-fp8",
+            "dtype": "bfloat16",
+            "latent_shape": list(self._latent_shape),
+        }
+        recovery_path = output_path.with_name("recovery.pt")
+        torch.save(tape, str(recovery_path))
+        # Full causal decode (93f per 3-block segment): the VAE transient at
+        # 1280x704 is ~10 GB regardless of chunk size (full-frame spatial
+        # intermediates), so chunking alone cannot fit it alongside the
+        # resident stack. Offload generator + caches to CPU (measured:
+        # 1.34 GB resident, decode adds ~nothing), decode the whole
+        # segment causally in one call, then restore. PCIe roundtrip costs
+        # tens of seconds; the stream (caches) survives intact.
+        pipe = self._pipeline
+        pipe.generator.to("cpu")
+        self._stream.offload_caches()
+        torch.cuda.empty_cache()
+        try:
+            with torch.inference_mode():
+                generated = pipe.vae.decode_to_pixel_chunk(
+                    latents, use_cache=False, chunk_size=int(latents.shape[1])
                 )
-                block_videos.append(
-                    (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
-                )
-                del latents, generated
-        self._pipeline.vae.model.clear_cache()
-        video = torch.cat(block_videos, dim=1)
+        finally:
+            pipe.generator.to(self._device)
+            self._stream.restore_caches()
+        video = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
+        pipe.vae.model.clear_cache()
+        del latents, generated, block_latents
         output_path.parent.mkdir(parents=True, exist_ok=True)
         frames = [video[0, index].numpy() for index in range(video.shape[1])]
         with imageio.get_writer(
@@ -444,6 +578,7 @@ class LongLiveSession:
             "height": height,
             "blocks": len(prompts),
             "stream_start_frame": self._stream.next_start_frame - 8 * len(prompts),
+            "recovery_path": str(recovery_path),
         }
 
 
@@ -499,22 +634,43 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
         assert isinstance(raw_prompts, list) and isinstance(raw_seeds, list)
         prompts = [str(item) for item in raw_prompts]
         seeds = [int(item) for item in raw_seeds]
+        raw_cuts = payload.get("scene_cuts", [False] * len(prompts))
+        assert isinstance(raw_cuts, list) and len(raw_cuts) == len(prompts)
+        scene_cuts = [bool(item) for item in raw_cuts]
     else:
         checked_request(payload, segment_id=str, prompt=str, seed=int, output_path=str, fps=int)
         prompts = [str(payload["prompt"])]
         seeds = [int(payload["seed"])]
+        scene_cuts = [bool(payload.get("scene_cut", False))]
     output = Path(str(payload["output_path"]))
     result = _SESSION.generate_blocks(
         prompts=prompts,
         seeds=seeds,
+        scene_cuts=scene_cuts,
         output_path=output,
         fps=int(payload["fps"]),
     )
+    artifacts = [str(output), str(result["recovery_path"])]
     return {
         "blocks_generated": len(prompts),
-        "artifacts": [str(output)],
+        "artifacts": artifacts,
         "video": result,
     }
+
+
+def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild causal context from a recovery.pt tape (DESIGN §27.1)."""
+    if _SESSION is None:
+        raise RuntimeError("video_longlive not initialized — send `init` first")
+    import torch
+
+    checked_request(payload, recovery_path=str)
+    with open(str(payload["recovery_path"]), "rb") as handle:
+        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    if not isinstance(tape, dict) or tape.get("profile") != "longlive2-bf16-fp8":
+        raise ValueError("recovery tape profile mismatch")
+    position = _SESSION.stream.resume_from_tape(tape)
+    return {"resumed": True, **position}
 
 
 def main() -> None:
@@ -526,10 +682,7 @@ def main() -> None:
             "checkpoint": lambda payload: {
                 "checkpoint_id": f"longlive-{payload.get('segment_id', 'none')}"
             },
-            "resume": lambda payload: {
-                "resumed": True,
-                "checkpoint_id": payload.get("checkpoint_id"),
-            },
+            "resume": handle_resume,
             "shutdown": lambda _payload: {"stopped": True},
         }
     )
