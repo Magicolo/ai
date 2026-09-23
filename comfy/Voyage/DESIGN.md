@@ -5520,3 +5520,18 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   0.12–0.25). Definitions and bands kept as-is; real-footage calibration is
   deferred to a GPU longlive run with measured justification.
 - Gates green both images (ruff + format + mypy strict 31 files + 94 pytest).
+
+## Fast iteration, slice 1: draft mode (2026-09-23)
+
+- `config.py` gains `DraftConfig` (640x352, latent `[1,8,48,22,40]`
+  spatial-halved/temporal-untouched, blocks 1, take 15 s) + TOML `[draft]` +
+  pure `apply_draft_overrides` (profile + targeted director/blocks/take-seconds,
+  re-validating constructors; in-memory only, printed as "effective settings").
+- CLI `run` gains `--draft` / `--director` / `--blocks` / `--take-seconds`;
+  `./Voyage/output/` added to `.gitignore` (experiment runs preserved there).
+- Verified: fake draft 2-seg (VALID 96f, 1.3 s) + GPU draft 2-seg
+  (longlive2/acestep/deterministic, 640x352@29f per segment, 15 s chained
+  takes via audio-ahead, VALID 58f, finalize → 768x432 h264 + AAC) in
+  `./Voyage/output/draft-fake1` + `draft-gpu1` — 5m50s (~2m55s/segment, above
+  the ~1-2 min target; per-stage breakdown is the next slice: benchmark).
+- Gates green (100 pytest / mypy 31).

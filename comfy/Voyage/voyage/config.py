@@ -134,6 +134,36 @@ class ExperimentalConfig(BaseModel):
     visual_inspector: bool = False
 
 
+class DraftConfig(BaseModel):
+    """Cheap iteration profile (fast loop): quarter-res spatial latents.
+
+    Applied only when the run requests it (`voyage run --draft`); the
+    stored TOML keeps full-quality values. Spatial dims are halved
+    (640x352, latent [1,8,48,22,40]); the temporal dim is untouched.
+    Draft renders are for iteration, never for finals.
+    """
+
+    width: int = 640
+    height: int = 352
+    latent_shape: list[int] = Field(default_factory=lambda: [1, 8, 48, 22, 40])
+    blocks_per_segment: int = 1
+    take_seconds: float = 15.0
+
+    @field_validator("width", "height", "blocks_per_segment")
+    @classmethod
+    def positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+
+    @field_validator("take_seconds")
+    @classmethod
+    def non_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("must be non-negative")
+        return value
+
+
 class ProjectConfig(BaseModel):
     schema_version: int = 1
     run_id: str = "voyage"
@@ -145,6 +175,7 @@ class ProjectConfig(BaseModel):
     director: DirectorConfig = Field(default_factory=DirectorConfig)
     voyage: VoyageConfig = Field(default_factory=VoyageConfig)
     experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)
+    draft: DraftConfig = Field(default_factory=DraftConfig)
 
     @field_validator("style")
     @classmethod
@@ -206,6 +237,13 @@ novelty_max_attempts = 3
 
 [experimental]
 visual_inspector = false
+
+[draft]
+width = 640
+height = 352
+latent_shape = [1, 8, 48, 22, 40]
+blocks_per_segment = 1
+take_seconds = 15.0
 """
 
 
@@ -223,3 +261,41 @@ def load_config(path: Path) -> tuple[ProjectConfig, str]:
         raise ConfigurationError(f"invalid config {path}: {exc}") from exc
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return config, digest
+
+
+def apply_draft_overrides(
+    config: ProjectConfig,
+    *,
+    draft: bool = False,
+    director: str | None = None,
+    blocks: int | None = None,
+    take_seconds: float | None = None,
+) -> ProjectConfig:
+    """Apply the draft profile + targeted run overrides (fast loop).
+
+    Pure: returns a new config, never mutates. Rebuilds submodels through
+    their constructors so invalid overrides (blocks=0, negative takes)
+    raise ValidationError instead of silently corrupting the run.
+    """
+    video = config.video
+    audio = config.audio
+    director_cfg = config.director
+    if draft:
+        profile = config.draft
+        video = VideoConfig(
+            **{
+                **video.model_dump(),
+                "width": profile.width,
+                "height": profile.height,
+                "latent_shape": list(profile.latent_shape),
+                "blocks_per_segment": profile.blocks_per_segment,
+            }
+        )
+        audio = AudioConfig(**{**audio.model_dump(), "take_seconds": profile.take_seconds})
+    if director is not None:
+        director_cfg = DirectorConfig(**{**director_cfg.model_dump(), "backend": director})
+    if blocks is not None:
+        video = VideoConfig(**{**video.model_dump(), "blocks_per_segment": blocks})
+    if take_seconds is not None:
+        audio = AudioConfig(**{**audio.model_dump(), "take_seconds": take_seconds})
+    return config.model_copy(update={"video": video, "audio": audio, "director": director_cfg})

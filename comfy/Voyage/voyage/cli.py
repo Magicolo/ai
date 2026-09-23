@@ -15,7 +15,7 @@ from types import FrameType
 
 from voyage import paths
 from voyage.concepts import ConceptStore
-from voyage.config import ProjectConfig, default_config_toml, load_config
+from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml, load_config
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import MediaError, StateError, VoyageError
 from voyage.media import finalize_run
@@ -187,6 +187,22 @@ def _load_run(run: Path) -> tuple[ProjectConfig, str]:
 def cmd_run(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
+    if args.draft or args.director or args.blocks is not None or args.take_seconds is not None:
+        config = apply_draft_overrides(
+            config,
+            draft=args.draft,
+            director=args.director,
+            blocks=args.blocks,
+            take_seconds=args.take_seconds,
+        )
+        print(
+            "effective settings: "
+            f"director={config.director.backend} "
+            f"blocks={config.video.blocks_per_segment} "
+            f"{config.video.width}x{config.video.height} "
+            f"latent={list(config.video.latent_shape)} "
+            f"take_seconds={config.audio.take_seconds}"
+        )
     supervisor = Supervisor(run_dir, config)
 
     def _on_signal(signum: int, frame: FrameType | None) -> None:
@@ -419,6 +435,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="segments to generate; omit to run until pause/stop/SIGINT",
+    )
+    run.add_argument(
+        "--draft",
+        action="store_true",
+        help="apply the [draft] profile (fast low-res iteration settings)",
+    )
+    run.add_argument(
+        "--director",
+        default=None,
+        help="override the director backend (e.g. deterministic, qwen)",
+    )
+    run.add_argument(
+        "--blocks",
+        type=int,
+        default=None,
+        help="override video blocks per segment",
+    )
+    run.add_argument(
+        "--take-seconds",
+        type=float,
+        default=None,
+        help="override audio take length in seconds",
     )
     run.set_defaults(func=cmd_run)
 
