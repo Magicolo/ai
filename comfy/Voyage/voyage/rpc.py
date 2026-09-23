@@ -7,8 +7,10 @@ Stdout is reserved for RPC — never log there from a worker.
 
 from __future__ import annotations
 
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -73,12 +75,14 @@ class SubprocessWorker:
         log_path: Path,
         init_op: str | None = "init",
         init_payload: dict[str, Any] | None = None,
+        timeout: float = 600.0,
     ) -> None:
         self._module = module
         self._workdir = workdir
         self._log_path = log_path
         self._init_op = init_op
         self._init_payload = dict(init_payload) if init_payload else {}
+        self._timeout = timeout
         self._proc: subprocess.Popen[str] | None = None
         self._counter = 0
 
@@ -124,20 +128,46 @@ class SubprocessWorker:
         proc = self._proc
         return proc is not None and proc.poll() is None
 
-    def call(self, op: str, payload: dict[str, Any], timeout: float = 600.0) -> dict[str, Any]:
-        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+    def call(
+        self, op: str, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
+        """Send one request, return the result dict.
+
+        `timeout` (default: the worker's configured timeout) bounds waiting
+        for the response line: expiry raises RecoverableWorkerError so the
+        supervisor's restart path engages (`stop()` kills the hung worker).
+        Workers always emit one complete response line per request, so the
+        wait is a select-deadline on readability — a worker dribbling a
+        partial line forever would still block `readline` (not a real
+        worker behavior: `loop.py` writes the full line at once).
+        """
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.stdout is None:
             raise FatalWorkerError(f"worker {self._module} is not running")
+        effective_timeout = self._timeout if timeout is None else timeout
         self._counter += 1
         request = WorkerRequest(id=f"req-{self._counter:06d}", op=op, payload=payload)
         try:
-            assert self._proc.stdin is not None and self._proc.stdout is not None
-            self._proc.stdin.write(encode_request(request))
-            self._proc.stdin.flush()
+            proc.stdin.write(encode_request(request))
+            proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             raise RecoverableWorkerError(f"worker {self._module} pipe broken") from exc
-        line = self._proc.stdout.readline()
-        if not line:
-            raise RecoverableWorkerError(f"worker {self._module} closed stdout")
+        deadline = time.monotonic() + effective_timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RecoverableWorkerError(
+                    f"worker {self._module} timed out after {effective_timeout}s on {op}"
+                )
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                raise RecoverableWorkerError(
+                    f"worker {self._module} timed out after {effective_timeout}s on {op}"
+                )
+            line = proc.stdout.readline()
+            if not line:
+                raise RecoverableWorkerError(f"worker {self._module} closed stdout")
+            break
         response = decode_response(line)
         if response.id != request.id:
             raise FatalWorkerError(f"worker {self._module} id mismatch: {response.id}")

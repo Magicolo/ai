@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import signal
 import time
 from collections.abc import Callable
@@ -45,6 +44,7 @@ from voyage.errors import (
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     assemble_segment_audio,
+    check_free_space,
     probe,
     run_capture,
     slice_take,
@@ -76,13 +76,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def check_free_space(run_dir: Path, min_free_gib: float) -> float:
-    free_gib = shutil.disk_usage(run_dir).free / (1024**3)
-    if free_gib < min_free_gib:
-        raise DiskSpaceError(f"free space {free_gib:.1f} GiB below reserve {min_free_gib:.1f} GiB")
-    return free_gib
 
 
 VIDEO_WORKER_MODULES = {
@@ -135,6 +128,7 @@ class Supervisor:
             run_dir,
             self._logs / "video-worker.log",
             init_payload=video_init,
+            timeout=config.voyage.rpc_timeout_seconds,
         )
         audio_module = audio_worker_module(config.audio.backend)
         audio_init: dict[str, Any] = {}
@@ -144,13 +138,24 @@ class Supervisor:
                 "device": config.audio.device,
             }
         self._audio = SubprocessWorker(
-            audio_module, run_dir, self._logs / "audio-worker.log", init_payload=audio_init
+            audio_module,
+            run_dir,
+            self._logs / "audio-worker.log",
+            init_payload=audio_init,
+            timeout=config.voyage.rpc_timeout_seconds,
         )
         self._director = SubprocessWorker(
-            "voyage.workers.director", run_dir, self._logs / "director-worker.log"
+            "voyage.workers.director",
+            run_dir,
+            self._logs / "director-worker.log",
+            timeout=config.voyage.rpc_timeout_seconds,
         )
         self._workers_running = False
         self._stop_flag = False
+        # Restarts used per worker since the current run started (Phase 6
+        # slice B budget). Reset by run_segments; direct commit_one_segment
+        # callers share the counters for the supervisor's lifetime.
+        self._restarts: dict[str, int] = {}
 
     def request_stop(self) -> None:
         """Ask the run loop to exit after the current segment (SIGINT path)."""
@@ -202,31 +207,56 @@ class Supervisor:
         segment_id: str,
         op: str,
         payload: dict[str, object],
-        restart_hook: Callable[[], None] | None = None,
+        restart_hook: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
-        """One RPC call with a single worker restart on recoverable failure.
+        """One RPC call with worker restarts on recoverable failure.
 
-        A second consecutive failure is recorded and re-raised: the run loop
-        decides (fatal → FAILED state, anything else → last_error + abort).
-        `restart_hook` (e.g. video recovery-tape resume) runs after the
-        restart replays `init`, before the retried call.
+        At most `config.voyage.max_worker_restarts` restarts per worker per
+        run; past that the circuit breaker opens (FatalWorkerError → the
+        run rests at FAILED). `restart_hook` (e.g. video recovery-tape
+        resume) runs after the restart replays `init`, before the retried
+        call — and shares the same budget when it retries internally.
         """
-        try:
-            return worker.call(op, dict(payload))
-        except RecoverableWorkerError as exc:
-            self._log_metric(
-                {
-                    "event": "worker_restart",
-                    "worker": worker_name,
-                    "op": op,
-                    "segment_id": segment_id,
-                    "reason": str(exc),
-                }
-            )
-            worker.restart()
-            if restart_hook is not None:
-                restart_hook()
-            return worker.call(op, dict(payload))
+        budget = self._config.voyage.max_worker_restarts
+        while True:
+            try:
+                return worker.call(op, dict(payload))
+            except RecoverableWorkerError as exc:
+                used = self._restarts.get(worker_name, 0)
+                if used >= budget:
+                    self._log_metric(
+                        {
+                            "event": "circuit_breaker_open",
+                            "worker": worker_name,
+                            "op": op,
+                            "segment_id": segment_id,
+                            "restarts_used": used,
+                            "budget": budget,
+                            "reason": str(exc),
+                        }
+                    )
+                    raise FatalWorkerError(
+                        f"circuit breaker open for {worker_name}/{op}: "
+                        f"{used} restarts exhausted ({exc})"
+                    ) from exc
+                self._restarts[worker_name] = used + 1
+                self._log_metric(
+                    {
+                        "event": "worker_restart",
+                        "worker": worker_name,
+                        "op": op,
+                        "segment_id": segment_id,
+                        "attempt": used + 1,
+                        "budget": budget,
+                        "reason": str(exc),
+                    }
+                )
+                worker.restart()
+                if restart_hook is not None:
+                    restart_hook(segment_id)
+                # Loop: the retried call runs at the top. A FatalWorkerError
+                # from the hook (e.g. its own budget exhausted) is not
+                # Recoverable, so it propagates without further retries.
 
     def _latest_recovery_tape(self) -> Path | None:
         """Newest committed segment's recovery.pt, or None (DESIGN §27)."""
@@ -244,18 +274,22 @@ class Supervisor:
                     return tape
         return None
 
-    def _resume_video_worker(self) -> None:
+    def _resume_video_worker(self, segment_id: str) -> None:
         """Rebuild video causal context from the latest tape (DESIGN §27.1).
 
         Runs after a video worker restart: replays the tail latents at clean
         timestep=0 so the retried block continues the stream instead of
         starting a fresh one. No tape (first segment) → fresh stream is
-        correct — nothing to resume.
+        correct — nothing to resume. The resume call itself retries through
+        the shared restart budget, so a resume failure gets a second chance
+        instead of aborting the segment at once.
         """
         tape = self._latest_recovery_tape()
         if tape is None:
             return
-        result = self._video.call("resume", {"recovery_path": str(tape)})
+        result = self._call_with_restart(
+            self._video, "video", segment_id, "resume", {"recovery_path": str(tape)}
+        )
         self._log_metric({"event": "video_resumed", "tape": str(tape), **result})
 
     def _pause_requested(self) -> bool:
@@ -282,6 +316,7 @@ class Supervisor:
         """
         self.start_workers()
         try:
+            self._restarts = {}
             state = read_state(self._run_dir)
             if state.status in ("PAUSE_REQUESTED", "STOP_REQUESTED"):
                 # A request that arrived before startup wins over RUNNING.
@@ -304,7 +339,13 @@ class Supervisor:
                 except VoyageError as exc:
                     failed = read_state(self._run_dir)
                     failed.last_error = str(exc)
-                    if isinstance(exc, FatalWorkerError):
+                    if isinstance(exc, DiskSpaceError):
+                        # Free the operator to clear space and `run` again:
+                        # the next commit precheck re-pauses if still full.
+                        failed.status = "PAUSED_DISK_FULL"
+                    else:
+                        # Any abort leaves FAILED — resting at RUNNING after
+                        # a twice-failed recoverable op misled operators.
                         failed.status = "FAILED"
                     write_state(self._run_dir, failed)
                     self._log_metric({"event": "segment_commit_failed", "error": str(exc)})

@@ -53,16 +53,16 @@ def test_restart_hook_runs_after_video_crash(tmp_path: Path) -> None:
     supervisor.start_workers()
     try:
         supervisor.inject_worker_crash("video")
-        fired: list[str] = []
+        fired: list[tuple[str, str]] = []
         result = supervisor._call_with_restart(
             supervisor._video,
             "video",
             "000000",
             "health",
             {},
-            restart_hook=lambda: fired.append("resume"),
+            restart_hook=lambda segment_id: fired.append(("resume", segment_id)),
         )
         assert result["status"] == "READY"
-        assert fired == ["resume"]
+        assert fired == [("resume", "000000")]
     finally:
         supervisor.stop_workers()

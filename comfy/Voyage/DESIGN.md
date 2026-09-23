@@ -5658,3 +5658,39 @@ written-never-verified sha256 gap plus the atomicity gaps.
   finalize (checksum), misaligned A/V fails finalize, --skip-bad
   finalizes the rest; concept vector/index + ledger roundtrips.
 - Gates green (126 pytest / mypy 32).
+
+Phase 6 slice B (failure policy) done 2026-09-23: closes the
+single-restart, dead-timeout, and misleading-status gaps.
+- Restart budget + circuit breaker: `[voyage] max_worker_restarts = 3`
+  (TOML-configurable, non-negative) bounds restarts per worker per run;
+  `_call_with_restart` loops the op until success or budget exhaustion,
+  then opens the breaker (FatalWorkerError → run rests FAILED) and logs
+  `circuit_breaker_open`; `worker_restart` events now carry
+  attempt/budget. Counters reset each `run_segments`; resume retries
+  share the same budget (config.py, supervisor.py).
+- Honest abort statuses: any VoyageError aborting the run sets FAILED —
+  the old only-Fatal mapping left twice-failed recoverable runs
+  misleadingly at RUNNING. DiskSpaceError instead rests at
+  PAUSED_DISK_FULL; `voyage run` resumes from it (precheck re-pauses if
+  still full). The video resume call goes through `_call_with_restart`
+  (hook now takes segment_id), so a resume failure gets its own restart
+  instead of aborting at once (supervisor.py).
+- RPC timeout wired: the dead `timeout` param is now a select-deadline
+  on worker stdout (new `SubprocessWorker(timeout=...)`, default 600s,
+  `[voyage] rpc_timeout_seconds` plumbing from Supervisor construction
+  so model-load `init` honors it too); expiry raises
+  RecoverableWorkerError so restart engages and `stop()` kills the hung
+  worker (rpc.py).
+- Finalize preflight (DESIGN §53): `finalize_run(...,
+  min_free_space_gib=0.0)` runs the shared `check_free_space` (moved
+  supervisor → media, import direction stays supervisor → media) before
+  any encode; CLI passes the run reserve and surfaces DiskSpaceError as
+  exit 1 instead of a traceback (media.py, cli.py).
+- tests/test_failure_policy.py (9 tests, TDD): breaker opens after the
+  budget (attempt counts asserted), zero budget fails fast, repeated
+  failure rests FAILED (not RUNNING), disk-full pauses then resumes
+  after freeing space, silent-worker call times out, resume failure
+  gets a second chance, resume failures share the budget, finalize
+  preflight refuses then succeeds, config plumbing end to end.
+  test_phase2 restart-hook lambda updated to the segment_id signature.
+- Gates green (135 pytest / mypy 32).

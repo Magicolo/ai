@@ -118,10 +118,26 @@ class VoyageConfig(BaseModel):
     blocks_per_prompt_stage: int = 3
     novelty_threshold: float = 0.85
     novelty_max_attempts: int = 3
+    max_worker_restarts: int = 3
+    rpc_timeout_seconds: float = 600.0
 
     @field_validator("blocks_per_prompt_stage", "novelty_max_attempts")
     @classmethod
     def positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+
+    @field_validator("max_worker_restarts")
+    @classmethod
+    def non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be non-negative")
+        return value
+
+    @field_validator("rpc_timeout_seconds")
+    @classmethod
+    def positive_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("must be positive")
         return value
@@ -245,6 +261,8 @@ world_decision_interval_seconds = 16.0
 blocks_per_prompt_stage = 3
 novelty_threshold = 0.85
 novelty_max_attempts = 3
+max_worker_restarts = 3
+rpc_timeout_seconds = 600.0
 
 [experimental]
 visual_inspector = false

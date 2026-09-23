@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -16,12 +17,26 @@ from typing import Any
 
 from voyage import paths
 from voyage.atomic import atomic_write_bytes
-from voyage.errors import MediaError
+from voyage.errors import DiskSpaceError, MediaError
 
 #: Max |video duration − audio duration| per segment, seconds (DESIGN §56
 #: step 6). Same budget the commit path enforces, so anything committed
 #: stays finalizable.
 AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6
+
+
+def check_free_space(run_dir: Path, min_free_gib: float) -> float:
+    """Free GiB under `run_dir`; raise DiskSpaceError below the reserve.
+
+    Shared by the commit precheck and the finalize preflight (DESIGN §53):
+    a final metadata write must never be the thing that discovers a full
+    disk. Moved here from supervisor (import direction is supervisor →
+    media, never the reverse).
+    """
+    free_gib = shutil.disk_usage(run_dir).free / (1024**3)
+    if free_gib < min_free_gib:
+        raise DiskSpaceError(f"free space {free_gib:.1f} GiB below reserve {min_free_gib:.1f} GiB")
+    return free_gib
 
 
 def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -253,13 +268,18 @@ def finalize_run(
     height: int = 432,
     fps: int = 24,
     skip_bad: bool = False,
+    min_free_space_gib: float = 0.0,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
     Exactly one final encode: scale/pad to 768×432, mux audio, validate,
     atomically publish. With skip_bad, corrupt segments are skipped with
-    a warning instead of aborting the whole finalize.
+    a warning instead of aborting the whole finalize. A positive
+    `min_free_space_gib` runs the §53 preflight first so a full disk
+    fails fast instead of mid-encode.
     """
+    if min_free_space_gib > 0:
+        check_free_space(run_dir, min_free_space_gib)
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     segment_dirs = (
         sorted(p for p in segments_root.iterdir() if p.is_dir()) if segments_root.exists() else []

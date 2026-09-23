@@ -19,7 +19,7 @@ from voyage import paths
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml, load_config
 from voyage.doctor import check_ffmpeg, probe
-from voyage.errors import MediaError, StateError, VoyageError
+from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.media import finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
@@ -423,8 +423,14 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     config, _digest = _load_run(run_dir)
     output = Path(args.output)
     try:
-        finalize_run(run_dir, output, fps=config.video.fps, skip_bad=args.skip_bad)
-    except (MediaError, StateError) as exc:
+        finalize_run(
+            run_dir,
+            output,
+            fps=config.video.fps,
+            skip_bad=args.skip_bad,
+            min_free_space_gib=config.min_free_space_gib,
+        )
+    except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
         return 1
     print(f"finalized -> {output}")
