@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage.errors import FatalWorkerError, RecoverableWorkerError
+from voyage.logrotate import rotate_log
 from voyage.models import WorkerRequest, WorkerResponse
 
 OPS = (
@@ -87,6 +88,7 @@ class SubprocessWorker:
         self._counter = 0
 
     def start(self) -> None:
+        rotate_log(self._log_path)
         log_file = self._log_path.open("a", encoding="utf-8")
         self._proc = subprocess.Popen(
             [sys.executable, "-m", self._module],

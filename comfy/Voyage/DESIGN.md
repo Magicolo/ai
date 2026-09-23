@@ -5703,3 +5703,16 @@ single-restart, dead-timeout, and misleading-status gaps.
   cleanly, dead-director embed degrades to None instead of raising;
   every committed segment asserts validate_run() == [].
 - Gates green (142 pytest / mypy 32).
+- Phase 6 slice D (observability) done 2026-09-23: voyage/logrotate.py
+  (daily rotation `<stem>-YYYY-MM-DD<suffix>` + 30-day retention prune,
+  best-effort, live paths unchanged) wired into `_log_metric` and
+  `SubprocessWorker.start()`; every metric event now carries `run_id`;
+  `voyage status` renders the §59 sections (Uptime from manifest
+  created_at, Video backend/render/timeline/segments/blocks/GPU via
+  nvidia-smi, World, Audio style/energy/buffer, idle Workers with
+  backends, last-commit per-stage seconds, Storage free GiB) degrading
+  to 'unknown' instead of failing; tests/test_observability.py (6
+  tests: roll, no-op, prune, worker-log roll, run_id on every event,
+  status layout). Timezone notes: UP017 noqas are deliberate (worker
+  image is py3.10, same precedent as persistence.py).
+- Gates green (148 pytest / mypy 33).

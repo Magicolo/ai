@@ -7,9 +7,11 @@ stop / validate / finalize / inspect
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -229,6 +231,48 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_uptime(manifest: dict[str, object]) -> str:
+    """HH:MM:SS since the manifest's created_at, else 'unknown'."""
+    created = manifest.get("created_at")
+    if not isinstance(created, str):
+        return "unknown"
+    try:
+        started = datetime.datetime.fromisoformat(created)
+    except ValueError:
+        return "unknown"
+    now = datetime.datetime.now(tz=started.tzinfo)
+    elapsed = now - started
+    if elapsed.total_seconds() < 0:
+        return "unknown"
+    hours, rest = divmod(int(elapsed.total_seconds()), 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
+    """Newest segment_committed event (id + stages) in the live metrics log.
+
+    Returns None when the log is missing, empty, or rolled past the last
+    commit (daily rotation) — status must degrade, never fail.
+    """
+    metrics_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
+    try:
+        lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "segment_committed":
+            stages = event.get("stages")
+            segment_id = event.get("segment_id")
+            if isinstance(stages, dict) and isinstance(segment_id, str):
+                return segment_id, stages
+    return None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     try:
@@ -237,15 +281,65 @@ def cmd_status(args: argparse.Namespace) -> int:
     except StateError as exc:
         print(f"status: BROKEN ({exc})", file=sys.stderr)
         return 1
+    try:
+        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    except VoyageError:
+        config = None
     seconds = state.timeline_frames / state.fps if state.fps else 0
     print(f"Voyage: {state.run_id}")
     print(f"Status: {state.status}")
-    print(f"Segments: {state.committed_segments}")
-    print(f"Timeline: {seconds:.2f}s ({state.timeline_frames} frames @ {state.fps}fps)")
-    print(f"Concept: {state.current_concept[:100]}")
-    print(f"Destination: {state.destination_concept[:100]}")
-    print(f"Phase: {state.phase}")
-    print(f"Audio buffered: {state.audio_buffer_seconds:.2f}s")
+    print(f"Uptime: {_format_uptime(manifest)}")
+    print()
+    print("Video")
+    print(f"  Backend: {config.video.backend if config else 'unknown'}")
+    if config:
+        print(f"  Render: {config.video.width}×{config.video.height} @ {config.video.fps}fps")
+    print(f"  Timeline: {seconds:.2f}s ({state.timeline_frames} frames @ {state.fps}fps)")
+    print(f"  Segments: {state.committed_segments}")
+    if config:
+        print(f"  Blocks per segment: {config.video.blocks_per_segment}")
+    gpus = probe().get("gpus")
+    if isinstance(gpus, list) and gpus:
+        print(f"  GPU: {gpus[0]}")
+        for extra in gpus[1:]:
+            print(f"       {extra}")
+    else:
+        print("  GPU: unavailable (no nvidia-smi)")
+    print()
+    print("World")
+    print(f"  Current: {state.current_concept[:100]}")
+    print(f"  Destination: {state.destination_concept[:100]}")
+    print(f"  Phase: {state.phase}")
+    print()
+    print("Audio")
+    print(f"  Backend: {config.audio.backend if config else 'unknown'}")
+    if config:
+        print(f"  Music: {config.audio.music_style}")
+        print(f"  Energy: {config.audio.energy}")
+    print(f"  Buffered audio: {state.audio_buffer_seconds:.2f}s")
+    print()
+    print("Workers")
+    for name in ("video", "audio", "director"):
+        backend = "unknown"
+        if config:
+            backend = {"video": config.video.backend, "audio": config.audio.backend}.get(
+                name, config.director.backend
+            )
+        print(f"  {name}: idle ({backend} backend; workers run during `voyage run`)")
+    last_commit = _last_commit_stages(run_dir)
+    if last_commit is not None:
+        segment_id, stages = last_commit
+        print()
+        print(f"Stages (last commit {segment_id})")
+        for stage, stage_seconds in stages.items():
+            print(f"  {stage}: {stage_seconds}s")
+    print()
+    print("Storage")
+    try:
+        free_gib = shutil.disk_usage(run_dir).free / (1024**3)
+        print(f"  Free: {free_gib:.1f} GiB")
+    except OSError:
+        print("  Free: unknown")
     if state.last_error:
         print(f"Last error: {state.last_error}")
     _ = manifest

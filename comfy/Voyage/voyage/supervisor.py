@@ -41,6 +41,7 @@ from voyage.errors import (
     RecoverableWorkerError,
     VoyageError,
 )
+from voyage.logrotate import append_line
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     assemble_segment_audio,
@@ -194,11 +195,8 @@ class Supervisor:
         self._workers_running = False
 
     def _log_metric(self, event: dict[str, object]) -> None:
-        line = json.dumps({"ts": time.time(), **event})
-        metrics_path = self._logs / "metrics.jsonl"
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        with metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        line = json.dumps({"ts": time.time(), "run_id": self._config.run_id, **event})
+        append_line(self._logs / "metrics.jsonl", line)
 
     def _call_with_restart(
         self,
