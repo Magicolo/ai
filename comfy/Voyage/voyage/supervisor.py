@@ -122,6 +122,7 @@ class Supervisor:
                 "models_dir": config.video.models_dir,
                 "device": config.video.device,
                 "latent_shape": list(config.video.latent_shape),
+                "quantization": config.video.quantization,
             }
         self._video = SubprocessWorker(
             video_module,
@@ -765,7 +766,9 @@ class Supervisor:
         }
         if config.video.backend == "longlive2":
             # Phase 2: one stream session appends N blocks (same prompt in
-            # this slice); per-block seeds from the run RNG stream.
+            # this slice); per-block seeds ride the protocol but only the
+            # first seeds the worker's stream noise RNG (§22.5 — sequential
+            # draws continue the trajectory across blocks and segments).
             # scene_cut fires on destination change (new shot); the worker
             # translates it to the upstream cut prefix (zero-KV + sink
             # re-pin inside _inference_inner).

@@ -5574,3 +5574,58 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   with +0.000 deltas on identical testsrc; seg2 no-visual by piggyback
   design; inspect=0.2/0.3 s in stages).
 - Gates green (104 pytest / mypy 32).
+
+## Fast iteration, slice 4: bf16 precision + highlight-blowout investigation (2026-09-23)
+
+- Draft runs exposed a quality defect: bright/saturated regions render
+  solarized/posterized (Exp A chrome-river draft: neon blobs everywhere;
+  Exp C calm dawn lake draft: mostly photorealistic BUT a giant
+  yellow/red sun blob + dark edge bands; Exp B full-res confirmed the
+  same look — draft shape exonerated).
+- Elimination arc (all our-path diffs cleared): pos-only KV patch
+  (faithful replication), max_attention_size (7040 = 7040 at full res),
+  RoPE/sink/t-scale mirror, KV persistence (block-1 equivalent), VAE
+  decode (full causal, chunk_size = ALL latents), text-encoder twin
+  (bf16-vs-fp32 rounding only), manual seeded noise both sides,
+  guidance 1.0 both, full-res also broken.
+- Decisive A/B (same calm prompt + video_seed(7,0,0) + draft shape):
+  bf16 probe renders a gorgeous clean lake (frame means ~150) vs fp8
+  Exp C blown out (~204). VERDICT: fp8 W8A8 dynamic activation
+  quantization (torchao Float8DynamicActivationFloat8WeightConfig,
+  per-row) is the amplifier — it mangles extreme magnitudes.
+- W8-only alternative is DEAD on sm89/16GB: torchao 0.13
+  Float8WeightOnlyConfig dequantizes eagerly per forward (no scaled_mm
+  without sm90/compile) and the transients accumulate to ~a full
+  second bf16 copy → OOM even after a gc.collect() fix that freed
+  4.36 GiB at LOAD (8.91 GiB free → died at the identical point).
+  Also no speedup without compile (deferred since Phase 2).
+- Adopted: `VideoConfig.quantization: fp8|bf16 = fp8` (+ TOML +
+  `--quantization` CLI flag + worker conditional + derived recovery
+  profile `longlive2-bf16` vs `longlive2-bf16-fp8`, so tapes never
+  resume across numerics) + tests/test_precision.py (7 tests).
+- Verified: draft 3-seg bf16 E2E (`/app/output/exp-d-bf16`, VALID 87f,
+  GEN 3s same speed as fp8, fits with 2.66 GiB free at GEN) and
+  full-res 1-seg bf16 (`/app/output/exp-e-bf16full`, VALID 29f, no OOM).
+  One transient silent worker death mid-load on the first full-res
+  attempt (no traceback, clean dmesg, GPU contention aftermath with a
+  just-finished probe the likely cause); immediate retry on a clean
+  GPU committed first try.
+- Residual: bf16 still shows a moderate solarized band at peak
+  brightness (draft AND full-res) — the band is model/4-step behavior
+  at extremes, fp8 only amplifies it. Saturated greens blow out too
+  (exp-d seg1 'glowing green aurora' prompt → posterized masses even
+  in bf16). Prompt guidance: avoid extreme brightness/saturation;
+  calm midtones render beautifully in either precision.
+- Determinism characterization (same-process 3-way: bare/bare/stream
+  latents bit-identical, A==B==C meanabs 0.000000): the stack is
+  deterministic, stream ≡ bare path. Cross-process carries ~±5
+  mean-abs PNG noise (cudnn/flash-attn scheduling) — A/B verdicts must
+  exceed ~5 or run same-process. A bogus 17.58 reading (violating the
+  triangle inequality vs 2.89+3.95) plus biased separate viewings
+  caused a long false paradox; contact sheets + the inequality check
+  resolved it. Lesson: compare side by side, verify arithmetic.
+- Real-footage calibration points (LongLive, testsrc is far below):
+  motion 0.076-0.658, complexity 0.06-0.13, drift 0.01-0.10 vs bands
+  0.20-0.35/0.30-0.50/0.12-0.25 — bands kept (they encode desired
+  ranges, evidence still thin), revisit with more footage.
+- Gates green (111 pytest / mypy 32).

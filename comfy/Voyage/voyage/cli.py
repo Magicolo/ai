@@ -187,13 +187,20 @@ def _load_run(run: Path) -> tuple[ProjectConfig, str]:
 def cmd_run(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
-    if args.draft or args.director or args.blocks is not None or args.take_seconds is not None:
+    if (
+        args.draft
+        or args.director
+        or args.blocks is not None
+        or args.take_seconds is not None
+        or args.quantization is not None
+    ):
         config = apply_draft_overrides(
             config,
             draft=args.draft,
             director=args.director,
             blocks=args.blocks,
             take_seconds=args.take_seconds,
+            quantization=args.quantization,
         )
         print(
             "effective settings: "
@@ -201,7 +208,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"blocks={config.video.blocks_per_segment} "
             f"{config.video.width}x{config.video.height} "
             f"latent={list(config.video.latent_shape)} "
-            f"take_seconds={config.audio.take_seconds}"
+            f"take_seconds={config.audio.take_seconds} "
+            f"quantization={config.video.quantization}"
         )
     supervisor = Supervisor(run_dir, config)
 
@@ -486,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="override audio take length in seconds",
+    )
+    run.add_argument(
+        "--quantization",
+        default=None,
+        choices=("fp8", "bf16"),
+        help="override DiT quantization (fp8 default, bf16 for clean highlights)",
     )
     run.set_defaults(func=cmd_run)
 

@@ -271,6 +271,14 @@ class LongLiveStreamSession:
     One block = `num_frame_per_block` latents (8). Same-prompt text
     embeddings are cached (§22.4 step 3) — a CPU T5-XXL forward costs
     minutes, so repeat encodes must not rerun per block.
+
+    Noise is stream-level (§22.5): upstream draws ONE noise tensor per
+    sequence and slices it per chunk, so a single generator drawn
+    sequentially per block reproduces that exact trajectory. A fresh
+    generator per block breaks it at every boundary (measured 6-9x frame
+    diff jumps) — hence the persistent `self._noise_rng`, seeded by the
+    first block's seed and carried across evict/rebuild via the
+    recovery.pt tape (`noise_rng_state`).
     """
 
     def __init__(self, pipeline: Any, latent_shape: list[int], device: Any) -> None:
@@ -280,6 +288,7 @@ class LongLiveStreamSession:
         self._next_start_frame = 0  # latent frames committed to the stream
         self._blocks_appended = 0
         self._embed_cache: dict[str, tuple[Any, Any]] = {}
+        self._noise_rng: Any = None  # stream noise generator (seeded on first block)
 
     @property
     def blocks_appended(self) -> int:
@@ -298,6 +307,7 @@ class LongLiveStreamSession:
         pipe.crossattn_cache_neg = None
         self._next_start_frame = 0
         self._blocks_appended = 0
+        self._noise_rng = None
 
     def offload_caches(self) -> None:
         """Move KV/crossattn tensors to CPU (frees VRAM for VAE decode)."""
@@ -368,10 +378,23 @@ class LongLiveStreamSession:
             )
         self._next_start_frame = tail_frames
         self._blocks_appended = 1
+        # Continue the stream noise trajectory: the tape carries the RNG
+        # state from the end of the taped segment, so the next appended
+        # block draws exactly where the stream left off — including across
+        # evict/rebuild cycles. Tapes predate this key only across code
+        # versions (never resumed), so direct access is correct.
+        self._noise_rng = torch.Generator(device=self._device)
+        self._noise_rng.set_state(torch.as_tensor(tape["noise_rng_state"]).cpu())
         return {
             "next_start_frame": self._next_start_frame,
             "blocks_appended": self._blocks_appended,
         }
+
+    def noise_rng_state(self) -> Any:
+        """CPU snapshot of the stream noise RNG (taped per segment, §27)."""
+        if self._noise_rng is None:
+            raise RuntimeError("stream noise RNG read before the first block")
+        return self._noise_rng.get_state().cpu()
 
     def _encode(self, prompt: str) -> tuple[Any, Any]:
         cached = self._embed_cache.get(prompt)
@@ -386,21 +409,25 @@ class LongLiveStreamSession:
     def append_block(self, prompt: str, seed: int, scene_cut: bool = False) -> Any:
         """Denoise one block into the persistent stream; return its latents.
 
-        scene_cut prepends the upstream cut prefix to raw_prompts only
-        (zero-KV + sink re-pin fire inside _inference_inner); the text
-        embedding still encodes the bare prompt.
+        Noise comes from the stream RNG (§22.5), seeded once by the first
+        block's seed — later blocks' `seed` arguments only preserve the
+        supervisor protocol and are otherwise unused. scene_cut prepends
+        the upstream cut prefix to raw_prompts only (zero-KV + sink re-pin
+        fire inside _inference_inner); the text embedding still encodes
+        the bare prompt.
         """
         import torch
 
         pipe = self._pipeline
         shape = self._latent_shape
         block_frames = int(pipe.num_frame_per_block)
-        generator = torch.Generator(device=self._device).manual_seed(seed)
+        if self._noise_rng is None:
+            self._noise_rng = torch.Generator(device=self._device).manual_seed(seed)
         noise = torch.randn(
             [1, block_frames, shape[2], shape[3], shape[4]],
             device=self._device,
             dtype=torch.bfloat16,
-            generator=generator,
+            generator=self._noise_rng,
         )
         cond, cond_list = self._encode(prompt)
         output = torch.zeros(
@@ -442,13 +469,31 @@ class LongLiveStreamSession:
         return latents
 
 
+_PROFILE_BY_QUANTIZATION = {"fp8": "longlive2-bf16-fp8", "bf16": "longlive2-bf16"}
+
+
+def profile_for_quantization(quantization: str) -> str:
+    """Recovery profile for a DiT precision (tapes never resume across numerics)."""
+    try:
+        return _PROFILE_BY_QUANTIZATION[quantization]
+    except KeyError:
+        raise ValueError(
+            f"unknown quantization {quantization!r} (known: {sorted(_PROFILE_BY_QUANTIZATION)})"
+        ) from None
+
+
 class LongLiveSession:
     """Resident pipeline: built once at `init`, reused per segment."""
 
-    def __init__(self, models_dir: Path, device: str, latent_shape: list[int]) -> None:
+    def __init__(
+        self, models_dir: Path, device: str, latent_shape: list[int], quantization: str = "fp8"
+    ) -> None:
         import torch
         from pipeline import CausalDiffusionInferencePipeline  # type: ignore[import-not-found]
         from utils.fp8 import quantize_model_fp8  # type: ignore[import-not-found]
+
+        # Fail fast on unknown precision before the expensive load.
+        self._profile = profile_for_quantization(quantization)
 
         wan_dir = models_dir / "wan_models" / "Wan2.2-TI2V-5B"
         generator_ckpt = models_dir / "longlive2" / "model_bf16.pt"
@@ -493,8 +538,11 @@ class LongLiveSession:
         del generator_container, generator_state
         pipeline = pipeline.to(dtype=torch.bfloat16)
         pipeline.generator.to(device=self._device)
-        print("quantizing generator to FP8 ...", file=sys.stderr)
-        quantize_model_fp8(pipeline.generator.model, verbose=True)
+        if quantization == "fp8":
+            print("quantizing generator to FP8 ...", file=sys.stderr)
+            quantize_model_fp8(pipeline.generator.model, verbose=True)
+        else:
+            print("keeping generator in BF16 (no FP8 quantization) ...", file=sys.stderr)
         pipeline.generator.model.eval().requires_grad_(False)
         # Eager mode for Phase 1 (torch_compile off — no warmup samples yet).
         pipeline.vae.to(device=self._device)
@@ -552,7 +600,8 @@ class LongLiveSession:
             "prompt_embeds": _cond["prompt_embeds"].detach().cpu(),
             "next_start_frame": self._stream.next_start_frame,
             "blocks_appended": self._stream.blocks_appended,
-            "profile": "longlive2-bf16-fp8",
+            "noise_rng_state": self._stream.noise_rng_state(),
+            "profile": self._profile,
             "dtype": "bfloat16",
             "latent_shape": list(self._latent_shape),
         }
@@ -612,6 +661,7 @@ def _build_session() -> LongLiveSession:
         models_dir,
         str(_INIT_PARAMS["device"]),
         list(_INIT_PARAMS["latent_shape"]),
+        str(_INIT_PARAMS["quantization"]),
     )
 
 
@@ -629,13 +679,22 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     raw_shape = payload["latent_shape"]
     assert isinstance(raw_shape, list)
     latent_shape = [int(v) for v in raw_shape]
-    _INIT_PARAMS.update({"models_dir": models_dir, "device": device, "latent_shape": latent_shape})
+    quantization = str(payload.get("quantization", "fp8"))
+    profile = profile_for_quantization(quantization)
+    _INIT_PARAMS.update(
+        {
+            "models_dir": models_dir,
+            "device": device,
+            "latent_shape": latent_shape,
+            "quantization": quantization,
+        }
+    )
     _SESSION = _build_session()
     name = torch.cuda.get_device_name(0)
     free_gib, total_gib = torch.cuda.mem_get_info()
     return {
         "status": "READY",
-        "backend": "longlive2-bf16-fp8",
+        "backend": profile,
         "gpu": name,
         "vram_free_gib": round(free_gib / 1024**3, 1),
         "vram_total_gib": round(total_gib / 1024**3, 1),
@@ -699,7 +758,8 @@ def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
     checked_request(payload, recovery_path=str)
     with open(str(payload["recovery_path"]), "rb") as handle:
         tape = torch.load(handle, map_location="cpu", weights_only=False)
-    if not isinstance(tape, dict) or tape.get("profile") != "longlive2-bf16-fp8":
+    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
+    if not isinstance(tape, dict) or tape.get("profile") != expected:
         raise ValueError("recovery tape profile mismatch")
     position = _SESSION.stream.resume_from_tape(tape)
     return {"resumed": True, **position}
@@ -732,7 +792,8 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
     _SESSION = _build_session()
     with open(str(payload["recovery_path"]), "rb") as handle:
         tape = torch.load(handle, map_location="cpu", weights_only=False)
-    if not isinstance(tape, dict) or tape.get("profile") != "longlive2-bf16-fp8":
+    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
+    if not isinstance(tape, dict) or tape.get("profile") != expected:
         raise ValueError("recovery tape profile mismatch")
     position = _SESSION.stream.resume_from_tape(tape)
     return {"rebuilt": True, **position}

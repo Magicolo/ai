@@ -68,4 +68,4 @@ def test_segment_committed_carries_stage_breakdown(tmp_path: Path) -> None:
         assert seconds >= 0.0, name
         assert seconds <= elapsed, name
         total += float(seconds)
-    assert total <= elapsed
+    assert total <= elapsed + 0.01  # +10ms: six round(x, 3) stages can sum 3ms over

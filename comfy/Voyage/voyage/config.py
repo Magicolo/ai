@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 try:
     import tomllib
@@ -39,6 +39,12 @@ class VideoConfig(BaseModel):
     # The stream session holds caches across blocks, so memory stays flat;
     # only wall time grows. Fake backend ignores this (renders segment_frames).
     blocks_per_segment: int = 1
+    # Slice 4: DiT weight precision. fp8 W8A8 dynamic activation
+    # quantization proved to be the highlight-blowout amplifier (bf16
+    # probe renders clean); bf16 keeps full precision at +~4.5GB VRAM.
+    # The worker derives its recovery profile from this, so tapes never
+    # resume across numerics.
+    quantization: Literal["fp8", "bf16"] = "fp8"
 
     @field_validator("width", "height", "fps", "segment_frames", "blocks_per_segment")
     @classmethod
@@ -208,6 +214,7 @@ device = "cpu"
 models_dir = "/models"
 latent_shape = [1, 8, 48, 44, 80]
 blocks_per_segment = 1
+quantization = "fp8"
 
 [audio]
 backend = "fake"
@@ -274,6 +281,7 @@ def apply_draft_overrides(
     director: str | None = None,
     blocks: int | None = None,
     take_seconds: float | None = None,
+    quantization: str | None = None,
 ) -> ProjectConfig:
     """Apply the draft profile + targeted run overrides (fast loop).
 
@@ -300,6 +308,8 @@ def apply_draft_overrides(
         director_cfg = DirectorConfig(**{**director_cfg.model_dump(), "backend": director})
     if blocks is not None:
         video = VideoConfig(**{**video.model_dump(), "blocks_per_segment": blocks})
+    if quantization is not None:
+        video = VideoConfig(**{**video.model_dump(), "quantization": quantization})
     if take_seconds is not None:
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": take_seconds})
     return config.model_copy(update={"video": video, "audio": audio, "director": director_cfg})
