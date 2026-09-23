@@ -279,6 +279,16 @@ class LongLiveStreamSession:
     diff jumps) — hence the persistent `self._noise_rng`, seeded by the
     first block's seed and carried across evict/rebuild via the
     recovery.pt tape (`noise_rng_state`).
+
+    Buffers are sequence-level too: `_inference_inner` indexes its `noise`
+    and `output` arguments by ABSOLUTE frame (`noise_start_frame =
+    cache_start_frame - num_input_frames`, `output[:, cache_start: ...]`),
+    so per-block-sized buffers read/write out of bounds past block 0
+    (empty-slice crash on noise, silent zero latents on output).
+    `begin_sequence` therefore draws the full-sequence noise and allocates
+    the full output once per `generate_blocks` call; `append_block` works
+    on the slice for its chunk. This mirrors one upstream `inference()`
+    call over the same frames exactly.
     """
 
     def __init__(self, pipeline: Any, latent_shape: list[int], device: Any) -> None:
@@ -289,6 +299,9 @@ class LongLiveStreamSession:
         self._blocks_appended = 0
         self._embed_cache: dict[str, tuple[Any, Any]] = {}
         self._noise_rng: Any = None  # stream noise generator (seeded on first block)
+        self._seq_noise: Any = None  # full-sequence noise for the in-flight call
+        self._seq_output: Any = None  # full-sequence output buffer, same frames
+        self._seq_offset = 0  # chunk offset (in blocks) into the in-flight buffers
 
     @property
     def blocks_appended(self) -> int:
@@ -308,6 +321,9 @@ class LongLiveStreamSession:
         self._next_start_frame = 0
         self._blocks_appended = 0
         self._noise_rng = None
+        self._seq_noise = None
+        self._seq_output = None
+        self._seq_offset = 0
 
     def offload_caches(self) -> None:
         """Move KV/crossattn tensors to CPU (frees VRAM for VAE decode)."""
@@ -406,44 +422,70 @@ class LongLiveStreamSession:
         self._embed_cache[prompt] = (cond, cond_list)
         return cond, cond_list
 
-    def append_block(self, prompt: str, seed: int, scene_cut: bool = False) -> Any:
-        """Denoise one block into the persistent stream; return its latents.
+    def begin_sequence(self, total_blocks: int, seed: int) -> None:
+        """Open one sequence: full noise draw + full output buffer.
 
-        Noise comes from the stream RNG (§22.5), seeded once by the first
-        block's seed — later blocks' `seed` arguments only preserve the
-        supervisor protocol and are otherwise unused. scene_cut prepends
-        the upstream cut prefix to raw_prompts only (zero-KV + sink re-pin
-        fire inside _inference_inner); the text embedding still encodes
-        the bare prompt.
+        Called once per `generate_blocks` payload. The noise draw continues
+        the stream RNG (seeded once by the first block's seed ever seen),
+        so the trajectory is continuous across blocks AND segments; a
+        rebuild-then-retry redraws the identical prefix because the tape
+        restores the RNG state. Only `seeds[0]` of the payload is used —
+        the rest ride the supervisor protocol unused.
         """
         import torch
 
-        pipe = self._pipeline
-        shape = self._latent_shape
-        block_frames = int(pipe.num_frame_per_block)
+        if total_blocks < 1:
+            raise ValueError("begin_sequence needs at least one block")
         if self._noise_rng is None:
             self._noise_rng = torch.Generator(device=self._device).manual_seed(seed)
-        noise = torch.randn(
-            [1, block_frames, shape[2], shape[3], shape[4]],
+        shape = self._latent_shape
+        block_frames = int(self._pipeline.num_frame_per_block)
+        total_frames = total_blocks * block_frames
+        self._seq_noise = torch.randn(
+            [1, total_frames, shape[2], shape[3], shape[4]],
             device=self._device,
             dtype=torch.bfloat16,
             generator=self._noise_rng,
         )
-        cond, cond_list = self._encode(prompt)
-        output = torch.zeros(
-            [1, block_frames, shape[2], shape[3], shape[4]],
+        self._seq_output = torch.zeros(
+            [1, total_frames, shape[2], shape[3], shape[4]],
             device=self._device,
             dtype=torch.bfloat16,
         )
+        self._seq_offset = 0
+
+    def append_block(self, prompt: str, scene_cut: bool = False) -> Any:
+        """Denoise one block into the persistent stream; return its latents.
+
+        Works on this block's slice of the sequence buffers opened by
+        `begin_sequence`, at the stream-absolute position — the equivalent
+        of one chunk inside a single upstream `inference()` call.
+        scene_cut prepends the upstream cut prefix to raw_prompts only
+        (zero-KV + sink re-pin fire inside _inference_inner); the text
+        embedding still encodes the bare prompt.
+        """
+        if self._seq_noise is None or self._seq_output is None:
+            raise RuntimeError("append_block called without begin_sequence")
+
+        pipe = self._pipeline
+        shape = self._latent_shape
+        block_frames = int(pipe.num_frame_per_block)
+        start = self._seq_offset * block_frames
+        end = start + block_frames
+        cond, cond_list = self._encode(prompt)
         if pipe.kv_cache_pos is None:
+            import torch
+
             pipe._initialize_kv_cache(batch_size=1, dtype=torch.bfloat16, device=self._device)
             pipe._initialize_crossattn_cache(
                 batch_size=1, dtype=torch.bfloat16, device=self._device
             )
         # NOTE: no position reset — that is the whole point. Positions
         # persist in the cache dicts; only the per-call window advances.
-        latents = pipe._inference_inner(
-            noise=noise,
+        # current/cache_start stay absolute and in lockstep (T2V: upstream
+        # advances both per chunk from the same start).
+        pipe._inference_inner(
+            noise=self._seq_noise,
             batch_size=1,
             num_frames=block_frames,
             num_channels=shape[2],
@@ -452,7 +494,7 @@ class LongLiveStreamSession:
             num_blocks=1,
             num_input_frames=0,
             num_output_frames=block_frames,
-            output=output,
+            output=self._seq_output,
             conditional_dict=cond,
             conditional_dict_list=cond_list,
             unconditional_dict=None,
@@ -461,12 +503,14 @@ class LongLiveStreamSession:
             clamp_i2v_first_chunk=False,
             return_latents=True,
             current_start_frame=self._next_start_frame,
-            cache_start_frame=0,
+            cache_start_frame=self._next_start_frame,
             raw_prompts=[[apply_scene_cut_prefix(prompt, scene_cut)]],
         )
+        chunk = self._seq_output[:, start:end]
+        self._seq_offset += 1
         self._next_start_frame += block_frames
         self._blocks_appended += 1
-        return latents
+        return chunk
 
 
 _PROFILE_BY_QUANTIZATION = {"fp8": "longlive2-bf16-fp8", "bf16": "longlive2-bf16"}
@@ -586,9 +630,13 @@ class LongLiveSession:
             raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
         torch = self._torch
         block_latents = []
+        # One sequence per payload: full noise + output buffers, sliced per
+        # block at absolute stream positions (mirrors one upstream
+        # inference() call). Only seeds[0] seeds the stream RNG.
+        self._stream.begin_sequence(len(prompts), seeds[0])
         with torch.inference_mode():
-            for prompt, seed, cut in zip(prompts, seeds, scene_cuts, strict=True):
-                block_latents.append(self._stream.append_block(prompt, seed, cut))
+            for prompt, cut in zip(prompts, scene_cuts, strict=True):
+                block_latents.append(self._stream.append_block(prompt, cut))
         latents = torch.cat(block_latents, dim=1)
         # Recovery tail (DESIGN §27): last block's clean latents + embeds so
         # a restarted worker rebuilds causal context without re-encoding
