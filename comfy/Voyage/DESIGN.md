@@ -5730,3 +5730,19 @@ single-restart, dead-timeout, and misleading-status gaps.
   a commit); tests/test_benchmark.py (9 tests incl. endurance-marked
   3-segment flatness).
 - Gates green (157 pytest / mypy 34).
+- Phase 6 slice F (§87 docs tree) done 2026-09-23: README rewritten
+  (quick install, model prereqs, basic run, docs index) + 11 files under
+  Voyage/docs/ — INSTALL (3 images, CUDA, ffmpeg, env vars, downloads),
+  MODELS (exact HF repos + revisions + links, mirrored from
+  model_registry.py), BACKENDS (RPC adapter contract, fake/GPU/
+  experimental backends), ARCHITECTURE (process diagram, ownership,
+  commit pipeline, GPU time-sharing, run-dir layout), STATE_AND_RECOVERY
+  (8 validate invariants + crash-scenario table), PROMPTING (charter,
+  transitions, novelty 0.85, staged plans, code injection),
+  AUDIO (slow loop keep/render/repaint, crossfade rules, final mix),
+  OPERATIONS (§127 runbook + monitoring), TROUBLESHOOTING (OOM, CUDA,
+  mismatch, ffmpeg, audio, disk-full, corruption, worker env),
+  BENCHMARKING (§104 protocol, commands, report fields, soak
+  acceptance), UPSTREAM_LONG_LIVE_PATCHES (pos-only caches, direct
+  _inference_inner session, config deviations, adapter shims).
+- Gates green (157 pytest / mypy 34, unchanged — docs only).
