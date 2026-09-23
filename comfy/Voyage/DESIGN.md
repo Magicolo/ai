@@ -5694,3 +5694,12 @@ single-restart, dead-timeout, and misleading-status gaps.
   preflight refuses then succeeds, config plumbing end to end.
   test_phase2 restart-hook lambda updated to the segment_id signature.
 - Gates green (135 pytest / mypy 32).
+- Phase 6 slice C (crash matrix) done 2026-09-23: tests/test_crash_matrix.py
+  (7 tests, fake backends, real media) — killed audio worker recovers,
+  killed director worker recovers, SIGKILL landing mid-`generate_blocks`
+  restarts and retries the op, two straight video kills recover with no
+  state leak, truncated-media partial dir without DONE is reused by the
+  next commit, DONE-without-state-advance re-commits the same number
+  cleanly, dead-director embed degrades to None instead of raising;
+  every committed segment asserts validate_run() == [].
+- Gates green (142 pytest / mypy 32).
