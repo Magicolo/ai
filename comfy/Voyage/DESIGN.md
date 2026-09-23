@@ -5716,3 +5716,17 @@ single-restart, dead-timeout, and misleading-status gaps.
   status layout). Timezone notes: UP017 noqas are deliberate (worker
   image is py3.10, same precedent as persistence.py).
 - Gates green (148 pytest / mypy 33).
+- Phase 6 slice E (benchmark + soak) done 2026-09-23: `benchmark` RPC op on
+  all workers (fake video/audio time warmup + measured renders; director
+  times deterministic decisions; longlive/acestep time real probes with
+  torch.cuda VRAM peaks, require init, honest errors otherwise),
+  `voyage benchmark video|audio --run` (worker-backed §104 report with
+  GPU/driver/torch env, honest unknowns off-GPU) + `benchmark end-to-end`
+  (throwaway temp run, per-stage means + gauge deltas, never mutates user
+  data) + `voyage soak --run --segments` (stability trend: stage means,
+  RSS/disk deltas via summarize_gauges, validate verdict, exit 1 on
+  errors); per-segment `resource_gauges` events (disk free, supervisor
+  RSS peak, worker VRAM when health reports it; best-effort, never fails
+  a commit); tests/test_benchmark.py (9 tests incl. endurance-marked
+  3-segment flatness).
+- Gates green (157 pytest / mypy 34).

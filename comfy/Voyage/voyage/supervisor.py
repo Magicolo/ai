@@ -290,6 +290,40 @@ class Supervisor:
         )
         self._log_metric({"event": "video_resumed", "tape": str(tape), **result})
 
+    def _sample_gauges(self, segment_id: str) -> None:
+        """Best-effort resource snapshot after a commit (Phase 6 slice E).
+
+        Never fails the commit: any probe error degrades to a skipped
+        event. Worker health is polled directly (no restart) so a sick
+        worker shows up as missing fields, not a recovery.
+        """
+        try:
+            import resource
+            import shutil
+
+            gauges: dict[str, object] = {
+                "event": "resource_gauges",
+                "segment_id": segment_id,
+                "disk_free_gib": round(shutil.disk_usage(self._run_dir).free / 1024**3, 2),
+                "rss_peak_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
+            }
+            for name, worker in (
+                ("video", self._video),
+                ("audio", self._audio),
+                ("director", self._director),
+            ):
+                try:
+                    health = worker.call("health", {})
+                except VoyageError:
+                    continue
+                for key in ("vram_free_gib", "vram_total_gib"):
+                    value = health.get(key)
+                    if isinstance(value, (int, float)):
+                        gauges[f"{name}_{key}"] = value
+            self._log_metric(gauges)
+        except Exception:
+            pass
+
     def _pause_requested(self) -> bool:
         """Honor an external `voyage pause`: transition to PAUSED and exit."""
         state = read_state(self._run_dir)
@@ -932,4 +966,5 @@ class Supervisor:
                 "stages": stage_seconds,
             }
         )
+        self._sample_gauges(segment_id)
         return segment_id

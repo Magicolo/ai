@@ -14,6 +14,7 @@ voyage (§44).
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, cast
 
 from voyage.director import (
@@ -317,6 +318,35 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "READY", "backend": _CONFIG["backend"]}
 
 
+def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
+    """Time warmup + measured deterministic decisions (startup excluded)."""
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    probe = {
+        "decision_index": 0,
+        "phase": "DRIFT",
+        "current_concept": "a misty harbor",
+        "destination_concept": "a glass desert",
+        "style": "pastel neon line-art, peaceful",
+        "backend": "deterministic",
+    }
+    walls: list[float] = []
+    for index in range(warmup + measured):
+        started = time.monotonic()
+        handle_decide({**probe, "decision_index": index})
+        elapsed = time.monotonic() - started
+        if index >= warmup:
+            walls.append(elapsed)
+    mean = sum(walls) / len(walls)
+    return {
+        "backend": "deterministic",
+        "warmup_decisions": warmup,
+        "measured_decisions": measured,
+        "decision_wall_seconds": [round(wall, 3) for wall in walls],
+        "decisions_per_second": round(1.0 / mean, 3),
+    }
+
+
 def main() -> None:
     serve(
         {
@@ -331,6 +361,7 @@ def main() -> None:
             "decide": handle_decide,
             "embed": handle_embed,
             "inspect": handle_inspect,
+            "benchmark": handle_benchmark,
             "shutdown": lambda _payload: {"stopped": True},
         }
     )

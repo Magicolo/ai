@@ -866,3 +866,60 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
+    """Time warmup + measured `generate_blocks` probes with VRAM peaks (§104).
+
+    Reuses the live stream session, so measured blocks ADVANCE the stream —
+    run this on a scratch session (or before a run), never mid-voyage.
+    Requires `init` first; without a session this is an error, not a
+    silent fake measurement.
+    """
+    if _SESSION is None:
+        raise RuntimeError("video_longlive not initialized — send `init` first")
+    import tempfile
+    import time
+
+    import torch
+
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    probe: dict[str, Any] = {
+        "segment_id": str(payload.get("segment_id", "benchmark")),
+        "prompts": [str(payload.get("prompt", "benchmark probe"))],
+        "seeds": [int(payload.get("seed", 0))],
+        "scene_cuts": [False],
+        "fps": int(payload.get("fps", 24)),
+    }
+    walls: list[float] = []
+    peaks: list[float] = []
+    frames: object = "unknown"
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
+        for index in range(warmup + measured):
+            torch.cuda.reset_peak_memory_stats()
+            started = time.monotonic()
+            result = handle_generate_blocks(
+                {**probe, "output_path": str(Path(tmp) / f"b{index}.mp4")}
+            )
+            elapsed = time.monotonic() - started
+            peak_gib = torch.cuda.max_memory_allocated() / 1024**3
+            if index >= warmup:
+                walls.append(elapsed)
+                peaks.append(peak_gib)
+                video = result.get("video")
+                if isinstance(video, dict) and isinstance(video.get("frames"), int):
+                    frames = video["frames"]
+    mean = sum(walls) / len(walls)
+    blocks = len(probe["prompts"])
+    return {
+        "backend": "longlive2",
+        "warmup_blocks": warmup * blocks,
+        "measured_blocks": measured * blocks,
+        "frames_per_block": frames,
+        "block_wall_seconds": [round(wall, 3) for wall in walls],
+        "blocks_per_second": round(blocks / mean, 3),
+        "vram_peak_gib": round(max(peaks), 2),
+        "vram_avg_gib": round(sum(peaks) / len(peaks), 2),
+    }
+
+
+            "benchmark": handle_benchmark,

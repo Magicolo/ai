@@ -102,6 +102,54 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
+    """Time warmup + measured take renders with VRAM peaks (§104).
+
+    Requires the resident ACE stack (`init` first); without it this is an
+    error, not a silent fake measurement.
+    """
+    import time
+
+    import torch
+
+    _require_stack()
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    probe: dict[str, Any] = {
+        "segment_id": str(payload.get("segment_id", "benchmark")),
+        "style": str(payload.get("style", "pastel neon line-art, peaceful")),
+        "energy": float(payload.get("energy", 0.5)),
+        "seed": int(payload.get("seed", 0)),
+        "sample_rate": int(payload.get("sample_rate", 48000)),
+        "channels": int(payload.get("channels", 2)),
+        "duration_seconds": float(payload.get("duration_seconds", 15.0)),
+    }
+    walls: list[float] = []
+    peaks: list[float] = []
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
+        for index in range(warmup + measured):
+            torch.cuda.reset_peak_memory_stats()
+            started = time.monotonic()
+            handle_generate_audio({**probe, "output_path": str(Path(tmp) / f"t{index}.wav")})
+            elapsed = time.monotonic() - started
+            peak_gib = torch.cuda.max_memory_allocated() / 1024**3
+            if index >= warmup:
+                walls.append(elapsed)
+                peaks.append(peak_gib)
+    mean = sum(walls) / len(walls)
+    duration = probe["duration_seconds"]
+    return {
+        "backend": "acestep",
+        "warmup_takes": warmup,
+        "measured_takes": measured,
+        "take_wall_seconds": [round(wall, 3) for wall in walls],
+        "takes_per_second": round(1.0 / mean, 3),
+        "audio_seconds_per_wall_second": round(duration / mean, 3),
+        "vram_peak_gib": round(max(peaks), 2),
+        "vram_avg_gib": round(sum(peaks) / len(peaks), 2),
+    }
+
+
 def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
     """Unload the ACE stack so video can reclaim the GPU (§40)."""
     del payload
@@ -127,6 +175,7 @@ def main() -> None:
             "init": handle_init,
             "health": handle_health,
             "generate_audio": handle_generate_audio,
+            "benchmark": handle_benchmark,
             "evict_gpu": handle_evict_gpu,
             "checkpoint": lambda payload: {
                 "checkpoint_id": f"audio-{payload.get('segment_id', 'none')}"

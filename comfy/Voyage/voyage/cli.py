@@ -14,6 +14,7 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 from pathlib import Path
 from types import FrameType
 
@@ -531,29 +532,133 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _benchmark_env() -> dict[str, object]:
+    """§104 setup fields: GPU/driver/torch, honest unknowns off-GPU."""
+    from voyage.doctor import probe as doctor_probe
+
+    facts = doctor_probe()
+    gpus = facts.get("gpus")
+    gpu = gpus[0] if isinstance(gpus, list) and gpus else "unknown"
+    try:
+        import torch
+
+        torch_version: object = torch.__version__
+        cuda_available: object = torch.cuda.is_available()
+    except ImportError:
+        torch_version = "unknown"
+        cuda_available = "unknown"
+    return {"gpu": gpu, "torch": torch_version, "cuda_available": cuda_available}
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
+    from voyage.bench import format_report, summarize_gauges
+
     target = args.benchmark_target
-    print(
-        f"benchmark {target}: fake backends only in Phase 0 "
-        f"(real timing harness lands with GPU workers, Phase 6)."
-    )
-    if target in ("video", "end-to-end"):
-        import time
-
-        from voyage.fake_backends import FakeVideoBackend
-
-        backend = FakeVideoBackend()
-        tmp = (
-            Path(args.run) / "logs" / "bench_video.mp4"
-            if args.run
-            else Path("/tmp/bench_video.mp4")
+    warmup = int(args.warmup)
+    measured = int(args.measured)
+    if target in ("video", "audio"):
+        if not args.run:
+            print("benchmark video/audio requires --run <dir>", file=sys.stderr)
+            return 2
+        run_dir = _run_dir_arg(args.run)
+        config, _digest = _load_run(run_dir)
+        worker_name = target
+        setup: dict[str, object] = {
+            "backend": (config.video.backend if target == "video" else config.audio.backend),
+            "warmup": warmup,
+            "measured": measured,
+            **_benchmark_env(),
+        }
+        supervisor = Supervisor(run_dir, config)
+        supervisor.start_workers()
+        try:
+            worker = supervisor._video if target == "video" else supervisor._audio
+            metrics = worker.call("benchmark", {"warmup": warmup, "measured": measured})
+        finally:
+            supervisor.stop_workers()
+        print(format_report(worker_name, setup, metrics))
+        return 0
+    # end-to-end: a throwaway run (never mutates the user's data) whose
+    # per-stage means + gauge deltas are the steady-state report.
+    segments = int(args.segments)
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
+        init_args = argparse.Namespace(
+            output=str(Path(tmp) / "run"),
+            run_id="benchmark",
+            style="pastel neon line-art, peaceful",
+            seed=11,
+            force=True,
         )
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        started = time.monotonic()
-        backend.generate_segment(tmp, "bench", 0, 320, 180, 24, 24)
-        elapsed = time.monotonic() - started
-        print(f"fake 24-frame 320x180 segment: {elapsed:.2f}s")
-    return 0
+        if cmd_init(init_args) != 0:
+            return 1
+        run_dir = Path(init_args.output)
+        config, _digest = _load_run(run_dir)
+        committed = Supervisor(run_dir, config).run_segments(segments)
+        events = [
+            json.loads(line)
+            for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        setup = {
+            "backend": "fake",
+            "warmup": warmup,
+            "measured": segments,
+            **_benchmark_env(),
+        }
+        metrics = {
+            "segments": committed,
+            "stages": _stage_means(events),
+            "gauges": summarize_gauges(
+                [event for event in events if event.get("event") == "resource_gauges"]
+            ),
+        }
+        print(format_report("end-to-end", setup, metrics))
+        return 0
+
+
+def _stage_means(events: list[dict[str, object]]) -> dict[str, float]:
+    """Mean per-stage seconds across `segment_committed` events."""
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for event in events:
+        if event.get("event") != "segment_committed":
+            continue
+        stages = event.get("stages")
+        if not isinstance(stages, dict):
+            continue
+        for name, seconds in stages.items():
+            if isinstance(seconds, (int, float)):
+                totals[str(name)] = totals.get(str(name), 0.0) + float(seconds)
+                counts[str(name)] = counts.get(str(name), 0) + 1
+    return {name: round(totals[name] / counts[name], 3) for name in totals}
+
+
+def cmd_soak(args: argparse.Namespace) -> int:
+    """Run N segments on a real run, then report the stability trend (§68)."""
+    import json
+
+    from voyage.bench import format_report, summarize_gauges
+
+    run_dir = _run_dir_arg(args.run)
+    segments = int(args.segments)
+    config, _digest = _load_run(run_dir)
+    committed = Supervisor(run_dir, config).run_segments(segments)
+    events = [
+        json.loads(line)
+        for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    setup: dict[str, object] = {"run": str(run_dir), "segments_requested": segments}
+    metrics: dict[str, object] = {
+        "segments_committed": committed,
+        "stages": _stage_means(events),
+        **summarize_gauges([event for event in events if event.get("event") == "resource_gauges"]),
+        "validate_errors": validate_run(run_dir),
+    }
+    print(format_report("soak", setup, metrics))
+    return 0 if not metrics["validate_errors"] else 1
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
@@ -720,8 +825,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     benchmark = sub.add_parser("benchmark", help="Performance probes")
     benchmark.add_argument("benchmark_target", choices=["video", "audio", "end-to-end"])
-    benchmark.add_argument("--run", default="")
+    benchmark.add_argument("--run", default="", help="run dir (required for video/audio targets)")
+    benchmark.add_argument("--warmup", type=int, default=1)
+    benchmark.add_argument("--measured", type=int, default=3)
+    benchmark.add_argument(
+        "--segments", type=int, default=2, help="segments for the end-to-end target"
+    )
     benchmark.set_defaults(func=cmd_benchmark)
+
+    soak = sub.add_parser("soak", help="Stability run with a resource-trend report")
+    soak.add_argument("--run", required=True)
+    soak.add_argument("--segments", type=int, required=True)
+    soak.set_defaults(func=cmd_soak)
 
     inspect = sub.add_parser("inspect", help="Inspect run artifacts")
     inspect.add_argument(
