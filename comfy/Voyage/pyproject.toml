@@ -53,6 +53,8 @@ module = [
   "transformers.*",
   "sentence_transformers",
   "sentence_transformers.*",
+  "acestep",
+  "acestep.*",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"

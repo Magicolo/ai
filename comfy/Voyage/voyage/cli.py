@@ -21,8 +21,10 @@ from voyage.errors import MediaError, StateError, VoyageError
 from voyage.media import finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
+    download_audio_models,
     download_director_models,
     download_longlive2_bf16,
+    verify_audio_models,
     verify_director_models,
     verify_longlive2_bf16,
 )
@@ -95,11 +97,27 @@ def _download_director(models_dir: Path) -> int:
     return 0
 
 
+def _download_audio(models_dir: Path) -> int:
+    """Download the Phase 4 music stack (DESIGN §§6, 37, 85)."""
+    print(f"downloading audio-acestep into {models_dir} ...")
+    try:
+        record = download_audio_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    audio = record["audio"]
+    assert isinstance(audio, dict)
+    print(f"turbo dit: {audio.get('turbo_bytes')} bytes")
+    print(f"planner lm: {audio.get('planner_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     action = args.models_action
     if action == "list":
         print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
-        print("audio: fake (built-in) | acestep (Phase 4, not yet implemented)")
+        print("audio: fake (built-in) | acestep (ACE-Step 1.5 turbo + 0.6B planner)")
         print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
         return 0
     if action == "verify":
@@ -107,14 +125,19 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(message)
         dok, dmessage = verify_director_models(_models_dir(args))
         print(dmessage)
+        aok, amessage = verify_audio_models(_models_dir(args))
+        print(amessage)
         print("fake backends need no model files: OK")
-        return 0 if (ok and dok) else 1
+        return 0 if (ok and dok and aok) else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
         if target == "director-qwen8b":
             return _download_director(_models_dir(args))
+        if target == "audio-acestep":
+            return _download_audio(_models_dir(args))
         if target != "longlive2-bf16":
-            print(f"unknown models target {target!r} (known: longlive2-bf16, director-qwen8b)")
+            print(f"unknown models target {target!r}")
+            print("known: longlive2-bf16, director-qwen8b, audio-acestep")
             return 2
         models_dir = _models_dir(args)
         print(f"downloading longlive2-bf16 into {models_dir} ...")

@@ -5405,3 +5405,64 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   embeddings-on; kill-mid-run left an uncommitted partial correctly ignored
   by validate. ~5 min/segment on CPU.
 - Gates green in both images (ruff + format + mypy strict + 37 pytest).
+
+## Phase 4 progress (2026-09-22, group H done, live GPU E2E PASS)
+
+- **GPU placement (probe verdicts):** the 2060 cannot host ACE-Step (DiT load
+  alone needs 5.30 GiB vs 5.60 total; an LM-on-CPU split changes nothing), so
+  audio renders **sequentially on the 4060 Ti**: per commit the supervisor
+  evicts the resident LongLive session (`gc.collect()` + `empty_cache()` — a
+  bare `del` frees nothing, reference cycles keep the tensors alive), renders
+  the ACE take, evicts the audio stack, then rebuilds LongLive from the
+  recovery tape. 45 s take ≈ 20 s render (peak ≈ 15.5 GiB).
+- **Single GPU image:** no `Dockerfile.audio`; `worker/Dockerfile.video` gained
+  the ACE-Step clone (`ace-step/ACE-Step-1.5` @ ca1e85fe) + `soundfile` /
+  `loguru` / `numba` / `vector_quantize_pytorch` + `torchaudio==2.8.0` (cu128),
+  and later `sentence-transformers` (director embed) with
+  `transformers==4.57.6` **pinned after** the audio deps (sentence-transformers
+  6.1.0 upgrades transformers to 5.x and breaks LongLive's x_clip imports).
+- **Compat (voyage/audio/acestep.py):** `AceStepStack` wraps
+  `AceStepHandler.initialize_service` (turbo config) + `LLMHandler.initialize`
+  (0.6B planner) with a post-init readiness gate (model/vae/text_tokenizer/
+  text_encoder non-None → VoyageError instead of a late "not fully
+  initialized"); `render_take` supports text2music and repaint
+  (`src_audio` + `repainting_start/end` + 1.0 s wav crossfade, 1.0 s floor);
+  `evict()` documented as gc + empty_cache.
+- **ACE LM offload:** `LLMHandler.initialize(offload_to_cpu=True)` keeps the
+  0.6B planner on CPU when idle and upstream moves it to GPU only during
+  planning; without it the LM stays resident (~2.4 GB) and the DiT preflight
+  fails at 45 s ("need ~0.8 GB, only 0.7 GB free").
+- **Checkpoint layout:** upstream `MAIN_MODEL_COMPONENTS` expects
+  `acestep-v15-turbo`, `vae`, `Qwen3-Embedding-0.6B`, `acestep-5Hz-lm-1.7B`
+  directly under `<project>/checkpoints/` — the 1.7B weights satisfy the gate
+  only; generation uses `lm_model_path='acestep-5Hz-lm-0.6B'` (relative to
+  `checkpoint_dir`). Registry `download/verify audio-acestep` targets that
+  layout (turbo 4.5 GiB + 0.6B 1.2 GiB of the 11 GiB total).
+- **Slow loop (§35/§40):** `audio/planner.py` (`AudioTake`, `PlanDecision`,
+  `AudioPlanner` keep/render/repaint with take_seconds 45 + ahead_seconds 20,
+  ledger `audio/takes.jsonl`); `media.py` `slice_take` (ffmpeg -ss/-t to
+  canonical s16le WAV) + `assemble_segment_audio` (single slice copied through,
+  crossfade chain otherwise with the fade clamped to half the shortest slice,
+  concat fallback <0.1 s); `AudioConfig` defaults take 45 s / ahead 20 s /
+  crossfade 2.0 s / 48 kHz; finalize muxes AAC `-b:a 256k`;
+  `audio_buffer_seconds` = coverage ahead of the committed timeline.
+- **Repaint anchoring (bug caught by live audio forensics):** repaint output is
+  **timeline-aligned with its source** (head before `repainting_start`
+  preserved, ~1 s crossfade, rest regenerated), so the new take must inherit
+  the source's `covers_from` — anchoring it at `video_time` replayed the
+  preserved head and duplicated ~1.2 s of music across segments. Fix +
+  regression tests in `tests/test_audio_planner.py`.
+- **Slice precision:** `slice_take` formatted seek/duration as `.3f`, so
+  `1.208333` became `1.208` (~16 samples) and each segment drifted ~0.33 ms —
+  unbounded over an infinite run. Now `.6f` + impulse-position regression test.
+- **Take files are `.wav`:** ACE writes FLAC and the worker converts, but the
+  supervisor requested `*.flac`; the ffmpeg FLAC muxer rejects pcm_s16le →
+  0-byte takes. Supervisor now names `*.wav`.
+- **Live GPU E2E (longlive2 + acestep + qwen, 1280×704, 29 f/segment):**
+  `/tmp/vphase4` 2 segments VALID 58 f + finalize → 768×432 h264 + AAC 48 kHz;
+  `/tmp/vphase4b` 3 segments VALID 87 f with the repaint-anchor fix — slice
+  forensics show no duplication (seg vs previous seg ≈ 0.18, seg vs its own
+  preserved head ≈ 0.17), boundary continuity diffs sit inside the
+  within-segment range, finalize → AAC 3.67 s. The GPU swap ran live on every
+  commit without OOM.
+- Gates green (ruff + format + mypy strict 29 files + 51 pytest).

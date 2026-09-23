@@ -21,7 +21,14 @@ def test_longlive_pins_are_set() -> None:
 
 def test_models_dir_layout_keys(tmp_path: Path) -> None:
     layout = model_registry.models_dir_layout(tmp_path)
-    assert set(layout) == {"wan_dir", "generator_ckpt", "qwen_dir", "minilm_dir", "manifest"}
+    assert set(layout) == {
+        "wan_dir",
+        "generator_ckpt",
+        "qwen_dir",
+        "minilm_dir",
+        "acestep_dir",
+        "manifest",
+    }
     assert layout["generator_ckpt"].endswith("model_bf16.pt")
 
 
@@ -31,6 +38,16 @@ def test_director_pins(tmp_path: Path) -> None:
     assert model_registry.MINILM_HF_REPO == "sentence-transformers/all-MiniLM-L6-v2"
     assert len(model_registry.MINILM_HF_REVISION) == 40
     ok, message = model_registry.verify_director_models(tmp_path)
+    assert not ok
+    assert "missing" in message
+
+
+def test_audio_pins(tmp_path: Path) -> None:
+    assert model_registry.ACE_MAIN_REPO == "ACE-Step/Ace-Step1.5"
+    assert len(model_registry.ACE_MAIN_REVISION) == 40
+    assert model_registry.ACE_LM_REPO == "ACE-Step/acestep-5Hz-lm-0.6B"
+    assert len(model_registry.ACE_LM_REVISION) == 40
+    ok, message = model_registry.verify_audio_models(tmp_path)
     assert not ok
     assert "missing" in message
 

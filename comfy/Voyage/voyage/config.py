@@ -50,16 +50,35 @@ class VideoConfig(BaseModel):
 
 class AudioConfig(BaseModel):
     backend: str = "fake"
-    sample_rate: int = 44100
+    sample_rate: int = 48000
     channels: int = 2
     music_style: str = "ambient electronic"
     energy: float = 0.5
+    # Slow-loop music takes (§35): each take covers `take_seconds` of video
+    # time; a new take renders when coverage drops within `ahead_seconds`
+    # (audio-ahead, §40); take boundaries inside a segment join with a
+    # `crossfade_seconds` acrossfade (clamped to half the shortest slice).
+    take_seconds: float = 45.0
+    ahead_seconds: float = 20.0
+    crossfade_seconds: float = 2.0
+    # ACE-Step backend only: mirrors VideoConfig — host path (or /models
+    # mount in the GPU image) holding acestep/checkpoints/, and the torch
+    # device the resident stack loads on. Fake backend ignores both.
+    models_dir: str = "/models"
+    device: str = "cpu"
 
     @field_validator("sample_rate", "channels")
     @classmethod
     def positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("must be positive")
+        return value
+
+    @field_validator("take_seconds", "ahead_seconds", "crossfade_seconds")
+    @classmethod
+    def non_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("must be non-negative")
         return value
 
     @field_validator("energy")
@@ -147,10 +166,15 @@ blocks_per_segment = 1
 
 [audio]
 backend = "fake"
-sample_rate = 44100
+sample_rate = 48000
 channels = 2
 music_style = "ambient electronic"
 energy = 0.5
+take_seconds = 45.0
+ahead_seconds = 20.0
+crossfade_seconds = 2.0
+models_dir = "/models"
+device = "cpu"
 
 [director]
 backend = "deterministic"

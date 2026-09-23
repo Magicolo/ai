@@ -25,6 +25,7 @@ from typing import Any
 
 from voyage import paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json
+from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
 from voyage.director import DeterministicDirector, director_input_from_state
@@ -37,7 +38,7 @@ from voyage.errors import (
     RecoverableWorkerError,
     VoyageError,
 )
-from voyage.media import validate_audio, validate_video
+from voyage.media import assemble_segment_audio, slice_take, validate_audio, validate_video
 from voyage.models import AudioPlan, EvolutionDecision, SegmentWorldState, StyleSpec
 from voyage.persistence import read_state, write_state
 from voyage.prompts import build_staged_prompt_plan, check_prompt_against_style
@@ -61,6 +62,21 @@ VIDEO_WORKER_MODULES = {
     "longlive2": "voyage.workers.video_longlive",
 }
 """Backend name → worker module. longlive2 only exists in the CUDA image."""
+
+AUDIO_WORKER_MODULES = {
+    "fake": "voyage.workers.audio",
+    "acestep": "voyage.workers.audio_acestep",
+}
+"""Backend name → worker module. acestep only exists in the GPU image."""
+
+
+def audio_worker_module(backend: str) -> str:
+    try:
+        return AUDIO_WORKER_MODULES[backend]
+    except KeyError:
+        raise ConfigurationError(
+            f"unknown audio backend {backend!r} (known: {sorted(AUDIO_WORKER_MODULES)})"
+        ) from None
 
 
 def video_worker_module(backend: str) -> str:
@@ -91,8 +107,15 @@ class Supervisor:
             self._logs / "video-worker.log",
             init_payload=video_init,
         )
+        audio_module = audio_worker_module(config.audio.backend)
+        audio_init: dict[str, Any] = {}
+        if config.audio.backend == "acestep":
+            audio_init = {
+                "models_dir": config.audio.models_dir,
+                "device": config.audio.device,
+            }
         self._audio = SubprocessWorker(
-            "voyage.workers.audio", run_dir, self._logs / "audio-worker.log"
+            audio_module, run_dir, self._logs / "audio-worker.log", init_payload=audio_init
         )
         self._director = SubprocessWorker(
             "voyage.workers.director", run_dir, self._logs / "director-worker.log"
@@ -421,6 +444,141 @@ class Supervisor:
         fallback.novelty_accepted = False
         return fallback
 
+    def _with_audio_gpu(
+        self,
+        segment_id: str,
+        audio_payload: dict[str, object],
+        recovery_path: str | None,
+    ) -> dict[str, object]:
+        """Render one music take with the GPU to itself (§40).
+
+        The video session is evicted first, the (lazily loading) ACE stack
+        renders, then audio is evicted and video rebuilds from the latest
+        tape. Fake backends answer the same ops as no-ops, so the swap
+        only happens for the acestep+longlive2 pair — every other pairing
+        renders without touching video residency.
+        """
+        swap = self._config.audio.backend == "acestep" and self._config.video.backend == "longlive2"
+        if swap:
+            self._call_with_restart(self._video, "video", segment_id, "evict_gpu", {})
+        try:
+            return self._call_with_restart(
+                self._audio, "audio", segment_id, "generate_audio", audio_payload
+            )
+        finally:
+            if swap:
+                self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
+                if recovery_path is None:
+                    raise MediaError(f"segment {segment_id}: no recovery tape for video rebuild")
+                self._call_with_restart(
+                    self._video,
+                    "video",
+                    segment_id,
+                    "rebuild",
+                    {"recovery_path": recovery_path},
+                )
+
+    def _ensure_audio_coverage(
+        self,
+        config: ProjectConfig,
+        number: int,
+        segment_id: str,
+        segment: Path,
+        video_time: float,
+        duration: float,
+        decision: EvolutionDecision,
+        recovery_tape: str | None,
+    ) -> tuple[AudioPlan, float]:
+        """Render takes when coverage runs low, then slice/assemble (§35).
+
+        Returns the segment's AudioPlan plus the seconds of music coverage
+        remaining ahead of the new segment end (drives audio_buffer_seconds).
+        Take files are immutable and versioned under `<run>/audio/`; the
+        ledger (`takes.jsonl`) is the truth the next commit plans against.
+        """
+        audio_cfg = config.audio
+        audio_dir = self._run_dir / "audio"
+        ledger = audio_dir / TAKES_FILENAME
+        planner = AudioPlanner(
+            take_seconds=audio_cfg.take_seconds,
+            ahead_seconds=audio_cfg.ahead_seconds,
+            takes=load_takes(ledger),
+        )
+        caption = decision.audio.music_caption or audio_cfg.music_style
+        energy = min(1.0, max(0.0, decision.audio.energy))
+        seed = audio_seed(config.seed, number, len(planner.takes))
+        plan = planner.plan(video_time, caption, seed, number)
+        if plan.action in ("render", "repaint") and plan.take is not None:
+            take = plan.take
+            take_file = audio_dir / f"{take.take_id}.wav"
+            payload: dict[str, object] = {
+                "segment_id": segment_id,
+                "style": caption,
+                "energy": energy,
+                "seed": take.seed,
+                "output_path": str(take_file),
+                "sample_rate": audio_cfg.sample_rate,
+                "channels": audio_cfg.channels,
+                "duration_seconds": take.duration,
+            }
+            if plan.action == "repaint" and plan.current is not None:
+                current = plan.current
+                payload["task_type"] = "repaint"
+                payload["reference_audio"] = current.path
+                payload["repaint_start"] = video_time - current.covers_from
+                payload["repaint_end"] = current.duration
+            self._with_audio_gpu(segment_id, payload, recovery_tape)
+            take.path = str(take_file)
+            planner.record(take)
+            append_take(ledger, take)
+            self._log_metric(
+                {
+                    "event": "take_rendered",
+                    "segment_id": segment_id,
+                    "take_id": take.take_id,
+                    "action": plan.action,
+                    "reason": plan.reason,
+                }
+            )
+        # Slice the takes covering [video_time, video_time + duration).
+        # A take boundary inside the segment yields two slices joined with
+        # a crossfade; the common case is exactly one slice.
+        slices: list[Path] = []
+        take_ids: list[str] = []
+        cursor = video_time
+        end = video_time + duration
+        index = 0
+        while cursor < end - 1e-6:
+            serving = planner.take_for_time(cursor)
+            if serving is None or not serving.path:
+                raise MediaError(f"segment {segment_id}: audio gap at {cursor:.2f}s")
+            piece = min(serving.covers_until(), end) - cursor
+            slice_path = segment / f"slice_{index:02d}.wav"
+            slice_take(
+                Path(serving.path),
+                cursor - serving.covers_from,
+                piece,
+                slice_path,
+                audio_cfg.sample_rate,
+                audio_cfg.channels,
+            )
+            slices.append(slice_path)
+            if serving.take_id not in take_ids:
+                take_ids.append(serving.take_id)
+            cursor += piece
+            index += 1
+        audio_out = segment / "audio.wav"
+        assemble_segment_audio(slices, audio_out, audio_cfg.crossfade_seconds)
+        ahead = planner.coverage_until() - end
+        audio_plan = AudioPlan(
+            segment_id=segment_id,
+            music_style=caption,
+            energy=energy,
+            seed=seed,
+            take_ids=take_ids,
+        )
+        return audio_plan, max(ahead, 0.0)
+
     def commit_one_segment(self) -> str:
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
@@ -511,27 +669,16 @@ class Supervisor:
             if isinstance(tape, str):
                 recovery_tape = tape
         duration = frames / config.video.fps
-        audio_plan = AudioPlan(
-            segment_id=segment_id,
-            music_style=decision.audio.music_caption or config.audio.music_style,
-            energy=min(1.0, max(0.0, decision.audio.energy)),
-            seed=audio_seed(config.seed, number, 0),
-        )
-        self._call_with_restart(
-            self._audio,
-            "audio",
+        video_time = state.timeline_frames / config.video.fps
+        audio_plan, audio_ahead = self._ensure_audio_coverage(
+            config,
+            number,
             segment_id,
-            "generate_audio",
-            {
-                "segment_id": segment_id,
-                "style": audio_plan.music_style,
-                "energy": audio_plan.energy,
-                "seed": audio_plan.seed,
-                "output_path": str(audio_out),
-                "sample_rate": config.audio.sample_rate,
-                "channels": config.audio.channels,
-                "duration_seconds": duration,
-            },
+            segment,
+            video_time,
+            duration,
+            decision,
+            recovery_tape,
         )
 
         # 4. Validate before anything claims the segment is committed.
@@ -585,7 +732,7 @@ class Supervisor:
         fresh.destination_concept = decision.destination_concept
         fresh.phase = decision.phase
         fresh.decision_index = state.decision_index + 1
-        fresh.audio_buffer_seconds = duration
+        fresh.audio_buffer_seconds = audio_ahead
         fresh.last_error = None
         write_state(self._run_dir, fresh)
         self._log_metric(

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -69,7 +69,7 @@ class ConceptRecord(BaseModel):
 
 
 def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")  # noqa: UP017 — worker image is py3.10, datetime.UTC needs 3.11+
 
 
 class ConceptStore:

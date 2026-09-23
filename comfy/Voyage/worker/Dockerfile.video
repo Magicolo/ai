@@ -38,13 +38,29 @@ RUN apt-get update \
 # family at image build time; sm89 (Ada) is covered by the default arch list.
 RUN pip install flash-attn --no-build-isolation
 
+# ACE-Step 1.5 music stack (Phase 4, DESIGN §140): same pinned clone the
+# zoomy GPU image carries, plus the audio-only pip deps the video image
+# lacks (probe-verified 2026-09-22 under torch 2.8.0+cu128: 30s take in
+# 4.3s, peak 12.84GB — identical to torch 2.10). torchaudio must match
+# torch 2.8.0 from the cu128 index; the rest are stable leaf deps.
+RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+    && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
+    && pip install soundfile loguru numba vector_quantize_pytorch sentence-transformers \
+    && pip install torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+# sentence-transformers pulls transformers 5.x, which breaks LongLive's
+# transformers-4.x imports (x_clip_loss) — pin back. Phase 3 E2E used
+# 4.57.6; MiniLM embedding is verified against it below.
+RUN pip install transformers==4.57.6
+
 # Voyage supervisor package (pure-python here; torch lives only behind the
 # worker module import). --no-deps: pydantic already pinned above.
 COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
 RUN pip install --no-deps -e /app
 
-ENV PYTHONPATH=/opt/longlive:/app \
+ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/app \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

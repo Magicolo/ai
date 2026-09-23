@@ -50,6 +50,7 @@ def main() -> None:
             "checkpoint": lambda payload: {
                 "checkpoint_id": f"audio-{payload.get('segment_id', 'none')}"
             },
+            "evict_gpu": lambda _payload: {"evicted": True},
             "resume": lambda payload: {
                 "resumed": True,
                 "checkpoint_id": payload.get("checkpoint_id"),

@@ -87,6 +87,106 @@ def validate_audio(path: Path, sample_rate: int, channels: int) -> dict[str, Any
     return {"duration": duration}
 
 
+def slice_take(
+    take_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    dest: Path,
+    sample_rate: int,
+    channels: int,
+) -> Path:
+    """Cut one segment-sized slice out of a music take (§35).
+
+    Output is canonical segment audio (WAV s16le at the run's sample
+    rate/channels) so slices from different takes always share the format
+    the assembly crossfade requires.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-ss",
+            f"{max(start_seconds, 0.0):.6f}",
+            "-t",
+            f"{max(duration_seconds, 0.1):.6f}",
+            "-i",
+            str(take_path),
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-c:a",
+            "pcm_s16le",
+            str(dest),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"take slice failed for {take_path}: {proc.stderr[-2000:]}")
+    return dest
+
+
+def assemble_segment_audio(
+    slices: list[Path],
+    dest: Path,
+    crossfade_seconds: float,
+) -> Path:
+    """Join take slices into one segment audio.wav (§35).
+
+    Consecutive slices (a take boundary falls inside the segment) are
+    joined with an acrossfade; a single slice is copied through. The fade
+    length is clamped to half the shortest slice so short segments can
+    never collapse the filter (zoomy lesson: manual fades, never
+    acrossfade on short tails — here takes are 30-60s but slices may be
+    ~2s, hence the clamp).
+    """
+    if not slices:
+        raise MediaError("no slices to assemble")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if len(slices) == 1:
+        proc = run_capture(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(slices[0]),
+                "-c:a",
+                "pcm_s16le",
+                str(dest),
+            ]
+        )
+        if proc.returncode != 0:
+            raise MediaError(f"slice copy failed: {proc.stderr[-2000:]}")
+        return dest
+    durations = [float(probe(s).get("format", {}).get("duration", 0.0) or 0.0) for s in slices]
+    if any(d <= 0 for d in durations):
+        raise MediaError("slice with non-positive duration")
+    fade = min(crossfade_seconds, min(durations) / 2.0)
+    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    for s in slices:
+        argv += ["-i", str(s)]
+    if fade < 0.1:
+        filter_graph = "".join(f"[{i}:a]" for i in range(len(slices)))
+        filter_graph += f"concat=n={len(slices)}:v=0:a=1[aout]"
+    else:
+        filter_graph = ""
+        current = "[0:a]"
+        for i in range(1, len(slices)):
+            out = f"[a{i:02d}]"
+            filter_graph += f"{current}[{i}:a]acrossfade=d={fade:.3f}:c1=tri:c2=tri{out};"
+            current = out
+        filter_graph += f"{current}anull[aout]"
+    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
+    proc = run_capture(argv)
+    if proc.returncode != 0:
+        raise MediaError(f"segment audio assembly failed: {proc.stderr[-2000:]}")
+    return dest
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -172,6 +272,8 @@ def finalize_run(
                 "veryfast",
                 "-c:a",
                 "aac",
+                "-b:a",
+                "256k",
                 str(staged),
             ]
         )

@@ -506,6 +506,23 @@ class LongLiveSession:
     def stream(self) -> LongLiveStreamSession:
         return self._stream
 
+    def evict(self) -> None:
+        """Drop the resident pipeline so audio can own the GPU (§40).
+
+        The stream position survives on disk via the segment recovery.pt
+        tapes; `rebuild` constructs a fresh session and resumes from the
+        latest tape, so this object is terminal after evict.
+        """
+        del self._stream
+        del self._pipeline
+        # gc first: reference cycles (caches, hooks, closures) keep GPU
+        # tensors alive past `del`; without a collection empty_cache frees
+        # nothing (measured: 0 bytes freed vs ~9.4GB with gc).
+        import gc
+
+        gc.collect()
+        self._torch.cuda.empty_cache()
+
     def generate_blocks(
         self,
         prompts: list[str],
@@ -583,6 +600,19 @@ class LongLiveSession:
 
 
 _SESSION: LongLiveSession | None = None
+_INIT_PARAMS: dict[str, Any] = {}
+
+
+def _build_session() -> LongLiveSession:
+    """Construct the resident session from the stored init params."""
+    models_dir = _INIT_PARAMS["models_dir"]
+    assert isinstance(models_dir, Path)
+    _enter_longlive_tree(models_dir)
+    return LongLiveSession(
+        models_dir,
+        str(_INIT_PARAMS["device"]),
+        list(_INIT_PARAMS["latent_shape"]),
+    )
 
 
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
@@ -592,13 +622,15 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     checked_request(payload, models_dir=str, device=str, latent_shape=list)
     models_dir = Path(str(payload["models_dir"]))
     device = str(payload.get("device", "cuda:0"))
+    if not device.startswith("cuda"):
+        raise RuntimeError(f"video_longlive requires a CUDA device (got {device!r})")
     if not torch.cuda.is_available():
         raise RuntimeError("video_longlive requires a CUDA GPU")
     raw_shape = payload["latent_shape"]
     assert isinstance(raw_shape, list)
     latent_shape = [int(v) for v in raw_shape]
-    _enter_longlive_tree(models_dir)
-    _SESSION = LongLiveSession(models_dir, device, latent_shape)
+    _INIT_PARAMS.update({"models_dir": models_dir, "device": device, "latent_shape": latent_shape})
+    _SESSION = _build_session()
     name = torch.cuda.get_device_name(0)
     free_gib, total_gib = torch.cuda.mem_get_info()
     return {
@@ -673,12 +705,47 @@ def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
     return {"resumed": True, **position}
 
 
+def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
+    """Unload the video stack so audio can own the GPU (§40)."""
+    del payload
+    global _SESSION
+    if _SESSION is not None:
+        _SESSION.evict()
+        _SESSION = None
+    return {"evicted": True}
+
+
+def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the session after an eviction and resume from tape (§40).
+
+    Payload carries `recovery_path` (latest committed tape): the fresh
+    session continues the stream instead of starting a new one. Without
+    init params (never initialized) this is an error, not a silent fresh
+    start — the supervisor always inits before first use.
+    """
+    global _SESSION
+    import torch
+
+    checked_request(payload, recovery_path=str)
+    if not _INIT_PARAMS:
+        raise RuntimeError("video_longlive rebuilt before init")
+    _SESSION = _build_session()
+    with open(str(payload["recovery_path"]), "rb") as handle:
+        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    if not isinstance(tape, dict) or tape.get("profile") != "longlive2-bf16-fp8":
+        raise ValueError("recovery tape profile mismatch")
+    position = _SESSION.stream.resume_from_tape(tape)
+    return {"rebuilt": True, **position}
+
+
 def main() -> None:
     serve(
         {
             "init": handle_init,
             "health": handle_health,
             "generate_blocks": handle_generate_blocks,
+            "evict_gpu": handle_evict_gpu,
+            "rebuild": handle_rebuild,
             "checkpoint": lambda payload: {
                 "checkpoint_id": f"longlive-{payload.get('segment_id', 'none')}"
             },

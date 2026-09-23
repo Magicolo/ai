@@ -141,6 +141,9 @@ class AudioPlan(BaseModel):
     music_style: str = "ambient electronic"
     energy: float = 0.5
     seed: int = 0
+    # Slow-loop takes (§35) serving this segment, oldest first. Empty for
+    # runs committed before the slow loop existed.
+    take_ids: list[str] = Field(default_factory=list)
 
 
 class RunState(BaseModel):

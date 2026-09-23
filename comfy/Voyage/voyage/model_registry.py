@@ -62,8 +62,44 @@ QWEN_MIN_BYTES = 15_000_000_000
 QWEN_LICENSE = "Apache 2.0"
 QWEN_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE"
 
-# Phase 3 novelty embeddings (DESIGN §9). MiniLM-L6-v2, Apache 2.0,
-# ungated; CPU-only in the director worker process.
+# Phase 4 music stack (DESIGN §§6, 37). ACE-Step 1.5 turbo DiT + 0.6B
+# planner LM (spec V1: 2B turbo + 0.6B LM, 8GB floor; XL rejected).
+# Both repos ungated. Layout lesson from the Step 6 E2E: the handler's
+# initialize_service gates on MAIN_MODEL_COMPONENTS (turbo + vae + text
+# encoder + the 1.7B default LM) directly under <project>/checkpoints/,
+# and auto-downloads the full 9.4GB bundle when anything is missing — so
+# the registry pre-downloads ALL FOUR main components there (the 1.7B LM
+# is load-bearing for the gate even though generation uses the 0.6B via
+# an explicit lm_model_path), plus the 0.6B planner LM alongside.
+ACE_MAIN_REPO = "ACE-Step/Ace-Step1.5"
+ACE_MAIN_REVISION = "19671f406d603126926c1b7e2adc169acbcade22"
+ACE_MAIN_SUBDIR = "acestep"
+ACE_CHECKPOINTS_SUBDIR = "checkpoints"
+ACE_MAIN_ALLOW = [
+    "acestep-v15-turbo/*",
+    "vae/*",
+    "Qwen3-Embedding-0.6B/*",
+    "acestep-5Hz-lm-1.7B/*",
+    "config.json",
+]
+ACE_TURBO_MIN_BYTES = 4_000_000_000
+ACE_LM17_MIN_BYTES = 3_000_000_000
+ACE_MAIN_LICENSE = "Apache 2.0 (upstream code repo; no LICENSE file in weight repo)"
+ACE_LM_REPO = "ACE-Step/acestep-5Hz-lm-0.6B"
+ACE_LM_REVISION = "148d8ea0225bdab342ee1ae3a354275ccd60ca80"
+ACE_LM_SUBDIR = "acestep-5Hz-lm-0.6B"
+ACE_LM_ALLOW = [
+    "model.safetensors",
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "chat_template.jinja",
+]
+ACE_LM_MIN_BYTES = 1_000_000_000
 MINILM_HF_REPO = "sentence-transformers/all-MiniLM-L6-v2"
 MINILM_HF_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 MINILM_SUBDIR = "all-MiniLM-L6-v2"
@@ -241,11 +277,91 @@ def verify_director_models(models_dir: Path) -> tuple[bool, str]:
     )
 
 
+def download_audio_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Phase 4 music stack (DESIGN §§6, 37, 85).
+
+    All four MAIN_MODEL_COMPONENTS (turbo DiT + VAE + text encoder + the
+    1.7B default LM, which only satisfies the handler's gate) under
+    <models>/acestep/checkpoints/ plus the 0.6B planner LM submodel as
+    <models>/acestep/checkpoints/acestep-5Hz-lm-0.6B — the exact layout
+    the ACE handler's initialize_service expects (Step 6 E2E lesson: any
+    other layout triggers a full 9.4GB auto-download at first run).
+    Merges into the shared manifest; returns the merged record.
+    """
+    from huggingface_hub import snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    ace_dir = models_dir / ACE_MAIN_SUBDIR
+    checkpoints_dir = ace_dir / ACE_CHECKPOINTS_SUBDIR
+    snapshot_download(
+        repo_id=ACE_MAIN_REPO,
+        revision=ACE_MAIN_REVISION,
+        local_dir=str(checkpoints_dir),
+        allow_patterns=ACE_MAIN_ALLOW,
+    )
+    snapshot_download(
+        repo_id=ACE_LM_REPO,
+        revision=ACE_LM_REVISION,
+        local_dir=str(checkpoints_dir / ACE_LM_SUBDIR),
+        allow_patterns=ACE_LM_ALLOW,
+    )
+    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
+    lm_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
+    record = _merge_manifest_record(
+        models_dir,
+        "audio",
+        {
+            "repo": ACE_MAIN_REPO,
+            "revision": ACE_MAIN_REVISION,
+            "model_dir": str(ace_dir),
+            "turbo_bytes": turbo_weights.stat().st_size if turbo_weights.exists() else 0,
+            "license": ACE_MAIN_LICENSE,
+            "planner_repo": ACE_LM_REPO,
+            "planner_revision": ACE_LM_REVISION,
+            "planner_dir": str(checkpoints_dir / ACE_LM_SUBDIR),
+            "planner_bytes": lm_weights.stat().st_size if lm_weights.exists() else 0,
+        },
+    )
+    return record
+
+
+def verify_audio_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the music stack."""
+    missing: list[str] = []
+    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
+    for pattern in ACE_MAIN_ALLOW:
+        if pattern.endswith("/*"):
+            matches = list((checkpoints_dir / pattern[:-2]).glob("*"))
+            if not matches:
+                missing.append(f"{checkpoints_dir}/{pattern}")
+        elif not (checkpoints_dir / pattern).exists():
+            missing.append(str(checkpoints_dir / pattern))
+    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
+    if not turbo_weights.exists() or turbo_weights.stat().st_size < ACE_TURBO_MIN_BYTES:
+        missing.append(str(turbo_weights))
+    lm17_weights = checkpoints_dir / "acestep-5Hz-lm-1.7B" / "model.safetensors"
+    if not lm17_weights.exists() or lm17_weights.stat().st_size < ACE_LM17_MIN_BYTES:
+        missing.append(str(lm17_weights))
+    lm_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
+    if not lm_weights.exists() or lm_weights.stat().st_size < ACE_LM_MIN_BYTES:
+        missing.append(str(lm_weights))
+    for pattern in ACE_LM_ALLOW[1:]:
+        if not (checkpoints_dir / ACE_LM_SUBDIR / pattern).exists():
+            missing.append(str(checkpoints_dir / ACE_LM_SUBDIR / pattern))
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    return True, (
+        f"audio-acestep OK (turbo {turbo_weights.stat().st_size / 1024**3:.1f} GiB "
+        f"+ planner LM {lm_weights.stat().st_size / 1024**3:.1f} GiB)"
+    )
+
+
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     return {
         "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
         "generator_ckpt": str(models_dir / "longlive2" / LONGLIVE_HF_FILE),
         "qwen_dir": str(models_dir / QWEN_SUBDIR),
         "minilm_dir": str(models_dir / MINILM_SUBDIR),
+        "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),
     }

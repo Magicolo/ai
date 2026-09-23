@@ -71,6 +71,11 @@ class FakeAudioBackend:
     ) -> dict[str, object]:
         del style, seed
         frequency = 220.0 + 220.0 * energy
+        # Take files are FLAC (ACE-Step's native container); segment slices
+        # are WAV. Match the encoder to the output extension so the fake
+        # backend stays a drop-in for either (§38: WAV intermediates, FLAC
+        # takes).
+        codec = "flac" if output_path.suffix.lower() == ".flac" else "pcm_s16le"
         _run(
             [
                 "ffmpeg",
@@ -82,7 +87,7 @@ class FakeAudioBackend:
                 "-i",
                 f"sine=frequency={frequency}:sample_rate={sample_rate}:duration={duration_seconds}",
                 "-c:a",
-                "pcm_s16le",
+                codec,
                 "-ac",
                 str(channels),
                 "-ar",

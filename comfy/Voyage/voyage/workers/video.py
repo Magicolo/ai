@@ -61,6 +61,8 @@ def main() -> None:
             "generate_blocks": handle_generate_blocks,
             "checkpoint": handle_checkpoint,
             "resume": handle_resume,
+            "evict_gpu": lambda _payload: {"evicted": True},
+            "rebuild": lambda _payload: {"rebuilt": True},
             "shutdown": lambda _payload: {"stopped": True},
         }
     )
