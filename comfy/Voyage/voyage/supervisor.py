@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
-from voyage.atomic import atomic_write_bytes, atomic_write_json
+from voyage.atomic import atomic_write_bytes, atomic_write_json, fsync_dir
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
@@ -43,6 +43,7 @@ from voyage.errors import (
     VoyageError,
 )
 from voyage.media import (
+    AV_ALIGNMENT_TOLERANCE_SECONDS,
     assemble_segment_audio,
     probe,
     run_capture,
@@ -69,7 +70,12 @@ from voyage.vision.metrics import (
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Chunked SHA-256 (constant memory — takes can be multi-GB)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def check_free_space(run_dir: Path, min_free_gib: float) -> float:
@@ -825,7 +831,7 @@ class Supervisor:
             video_out, config.video.width, config.video.height, config.video.fps
         )
         audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
-        if abs(float(video_info["duration"]) - duration) > 0.6:
+        if abs(float(video_info["duration"]) - duration) > AV_ALIGNMENT_TOLERANCE_SECONDS:
             raise MediaError(f"segment {segment_id} A/V duration drift")
         stage_seconds["validate"] = round(time.monotonic() - validate_started, 3)
 
@@ -863,6 +869,7 @@ class Supervisor:
         done_partial = segment / "DONE.partial"
         atomic_write_bytes(done_partial, b"")
         done_partial.replace(segment / paths.DONE_MARKER)
+        fsync_dir(segment)
 
         # 6. Supervisor-owned state advance (single writer).
         fresh = read_state(self._run_dir)

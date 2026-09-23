@@ -5629,3 +5629,32 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   0.20-0.35/0.30-0.50/0.12-0.25 — bands kept (they encode desired
   ranges, evidence still thin), revisit with more footage.
 - Gates green (111 pytest / mypy 32).
+
+Phase 6 slice A (state integrity) done 2026-09-23: closes the
+written-never-verified sha256 gap plus the atomicity gaps.
+- `validate` recomputes sha256.json per segment (checksum mismatch →
+  INVALID), scans orphans recursively (`rglob *.partial`, catches
+  in-segment temps + DONE.partial remnants), enforces contiguous
+  `^\d{6}$` numbering from 000000, requires positive frame counts and
+  media durations, and checks recorded recovery tapes exist. Refactored
+  to testable `validate_run()` returning error strings (cli.py).
+- `finalize` implements §56 steps 4-6 per segment before any encode:
+  checksum recompute, metrics.json frame-range sanity, A/V alignment
+  probe (shared `AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6`, same budget the
+  commit path enforces) + strict-mode contiguity check; new
+  `--skip-bad` flag skips corrupt segments with a warning instead of
+  aborting (media.py).
+- Durability: new `atomic.fsync_dir()` called after every
+  temp+fsync+replace plus after the DONE rename (rename durability —
+  file fsync alone does not persist the directory entry); chunked
+  `sha256_file` (constant memory, takes are multi-GB); concept vectors
+  saved temp+fsync+rename, index via atomic_write_json, jsonl appends
+  + legacy migration fsynced (concepts.py); takes ledger appends
+  fsynced (audio/planner.py).
+- tests/test_state_integrity.py (15 tests, TDD): clean run validates;
+  video/audio checksum mismatches, in-segment partials, DONE.partial
+  remnants, numbering gaps, non-positive frames, missing recovery
+  tapes, impossible durations all fail validate; tampered segments fail
+  finalize (checksum), misaligned A/V fails finalize, --skip-bad
+  finalizes the rest; concept vector/index + ledger roundtrips.
+- Gates green (126 pytest / mypy 32).

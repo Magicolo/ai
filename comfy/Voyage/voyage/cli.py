@@ -7,7 +7,9 @@ stop / validate / finalize / inspect
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -38,7 +40,7 @@ from voyage.persistence import (
     write_manifest,
     write_state,
 )
-from voyage.supervisor import Supervisor
+from voyage.supervisor import Supervisor, sha256_file
 
 
 def _run_dir_arg(value: str) -> Path:
@@ -278,16 +280,72 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return code
 
 
-def cmd_validate(args: argparse.Namespace) -> int:
+_SEGMENT_ID_PATTERN = re.compile(r"^\d{6}$")
+
+
+def _check_segment_checksums(segment: Path) -> list[str]:
+    """Recompute sha256.json entries (DESIGN §70: checksum mismatches)."""
+    errors: list[str] = []
+    checksums_path = segment / "sha256.json"
+    if not checksums_path.exists():
+        return errors  # missing file already reported by the caller
+    try:
+        expected = json.loads(checksums_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return [f"{segment.name} has unreadable sha256.json"]
+    if not isinstance(expected, dict):
+        return [f"{segment.name} has malformed sha256.json"]
+    for artifact in ("video.mp4", "audio.wav"):
+        recorded = expected.get(artifact)
+        target = segment / artifact
+        if not target.exists():
+            continue  # missing artifact already reported by the caller
+        if not isinstance(recorded, str) or not recorded:
+            errors.append(f"{segment.name} sha256.json missing entry for {artifact}")
+        elif sha256_file(target) != recorded:
+            errors.append(f"{segment.name} checksum mismatch for {artifact}")
+    return errors
+
+
+def _check_segment_metrics(segment: Path) -> tuple[list[str], int]:
+    """Frame ranges, durations, recovery tapes (DESIGN §70).
+
+    Returns (errors, frames).
+    """
+    errors: list[str] = []
+    metrics_path = segment / "metrics.json"
+    if not metrics_path.exists():
+        return [f"{segment.name} DONE but missing metrics.json"], 0
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        frames = int(metrics.get("frames", 0))
+    except (ValueError, KeyError, AttributeError, TypeError):
+        return [f"{segment.name} has unreadable metrics.json"], 0
+    if frames <= 0:
+        errors.append(f"{segment.name} has non-positive frame count {frames}")
+    for key in ("video", "audio"):
+        block = metrics.get(key)
+        if isinstance(block, dict):
+            try:
+                duration = float(block.get("duration", 0.0))
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration <= 0:
+                errors.append(f"{segment.name} has non-positive {key} duration")
+    tape = metrics.get("recovery_tape")
+    if isinstance(tape, str) and tape and not Path(tape).exists():
+        errors.append(f"{segment.name} references missing recovery checkpoint {tape}")
+    return errors, frames
+
+
+def validate_run(run_dir: Path) -> list[str]:
     """Read-only consistency check (DESIGN §70). Never mutates the run."""
-    run_dir = _run_dir_arg(args.run)
     errors: list[str] = []
     try:
         state = read_state(run_dir)
         read_manifest(run_dir)
     except StateError as exc:
-        print(f"INVALID: {exc}")
-        return 1
+        return [str(exc)]
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     committed = (
         sorted(
@@ -300,37 +358,63 @@ def cmd_validate(args: argparse.Namespace) -> int:
         errors.append(
             f"state claims {state.committed_segments} segments, found {len(committed)} DONE"
         )
+    for position, segment in enumerate(committed):
+        if not _SEGMENT_ID_PATTERN.match(segment.name):
+            errors.append(f"invalid segment numbering: {segment.name}")
+        elif segment.name != f"{position:06d}":
+            errors.append(f"segment numbering gap: expected {position:06d}, found {segment.name}")
     expected_frames = 0
     for segment in committed:
         for name in ("video.mp4", "audio.wav", "world_state.json", "sha256.json"):
             if not (segment / name).exists():
                 errors.append(f"{segment.name} DONE but missing {name}")
-        metrics_path = segment / "metrics.json"
-        if metrics_path.exists():
-            try:
-                import json
-
-                frames = int(json.loads(metrics_path.read_text()).get("frames", 0))
-                expected_frames += frames
-            except (ValueError, KeyError):
-                errors.append(f"{segment.name} has unreadable metrics.json")
+        errors.extend(_check_segment_checksums(segment))
+        metric_errors, frames = _check_segment_metrics(segment)
+        errors.extend(metric_errors)
+        expected_frames += frames
     if expected_frames != state.timeline_frames:
         errors.append(
             f"timeline frames {state.timeline_frames} != sum of segment frames {expected_frames}"
         )
     orphans = (
-        [p.name for p in segments_root.iterdir() if p.suffix == ".partial"]
+        sorted(
+            str(p.relative_to(segments_root))
+            for p in segments_root.rglob("*.partial")
+            if p.is_file()
+        )
         if segments_root.exists()
         else []
     )
     if orphans:
         errors.append(f"orphan partial files: {orphans}")
+    return errors
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Read-only consistency check (DESIGN §70). Never mutates the run."""
+    run_dir = _run_dir_arg(args.run)
+    errors = validate_run(run_dir)
     if errors:
         print("INVALID:")
         for error in errors:
             print(f"  - {error}")
         return 1
-    print(f"VALID: {len(committed)} committed segments, {state.timeline_frames} frames")
+    committed = (
+        len(
+            [
+                p
+                for p in (run_dir / paths.SEGMENTS_DIRNAME).iterdir()
+                if p.is_dir() and (p / paths.DONE_MARKER).exists()
+            ]
+        )
+        if (run_dir / paths.SEGMENTS_DIRNAME).exists()
+        else 0
+    )
+    try:
+        frames = read_state(run_dir).timeline_frames
+    except StateError:
+        frames = 0
+    print(f"VALID: {committed} committed segments, {frames} frames")
     return 0
 
 
@@ -339,7 +423,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     config, _digest = _load_run(run_dir)
     output = Path(args.output)
     try:
-        finalize_run(run_dir, output, fps=config.video.fps)
+        finalize_run(run_dir, output, fps=config.video.fps, skip_bad=args.skip_bad)
     except (MediaError, StateError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
         return 1
@@ -527,6 +611,11 @@ def build_parser() -> argparse.ArgumentParser:
     finalize = sub.add_parser("finalize", help="Assemble the final MP4")
     finalize.add_argument("--run", required=True)
     finalize.add_argument("--output", required=True)
+    finalize.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="skip corrupt segments with a warning instead of aborting",
+    )
     finalize.set_defaults(func=cmd_finalize)
 
     benchmark = sub.add_parser("benchmark", help="Performance probes")

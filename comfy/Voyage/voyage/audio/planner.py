@@ -177,9 +177,12 @@ def load_takes(ledger: Path) -> list[AudioTake]:
 
 
 def append_take(ledger: Path, take: AudioTake) -> None:
-    """Durably append one take to the ledger."""
+    """Durably append one take to the ledger (flush + fsync)."""
     import json
+    import os
 
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(take.to_dict()) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())

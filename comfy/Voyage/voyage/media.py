@@ -7,6 +7,7 @@ atomically.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -16,6 +17,11 @@ from typing import Any
 from voyage import paths
 from voyage.atomic import atomic_write_bytes
 from voyage.errors import MediaError
+
+#: Max |video duration − audio duration| per segment, seconds (DESIGN §56
+#: step 6). Same budget the commit path enforces, so anything committed
+#: stays finalizable.
+AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6
 
 
 def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -187,17 +193,72 @@ def assemble_segment_audio(
     return dest
 
 
+def _sha256_file(path: Path) -> str:
+    """Chunked SHA-256 (constant memory — takes can be multi-GB)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_segment(segment: Path) -> tuple[int, float, float]:
+    """DESIGN §56 steps 4-6: checksums, frame ranges, A/V alignment.
+
+    Returns (frames, video_duration, audio_duration). Raises MediaError
+    on any mismatch — fail loud, never finalize corrupt media silently.
+    """
+    name = segment.name
+    checksums_path = segment / "sha256.json"
+    if not checksums_path.exists():
+        raise MediaError(f"segment {name} missing sha256.json")
+    try:
+        expected = json.loads(checksums_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise MediaError(f"segment {name} has unreadable sha256.json: {exc}") from exc
+    if not isinstance(expected, dict):
+        raise MediaError(f"segment {name} has malformed sha256.json")
+    for artifact in ("video.mp4", "audio.wav"):
+        recorded = expected.get(artifact)
+        if not isinstance(recorded, str) or not recorded:
+            raise MediaError(f"segment {name} sha256.json missing {artifact}")
+        actual = _sha256_file(segment / artifact)
+        if actual != recorded:
+            raise MediaError(f"segment {name} checksum mismatch for {artifact}")
+    metrics_path = segment / "metrics.json"
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        frames = int(metrics.get("frames", 0))
+    except (ValueError, KeyError, AttributeError) as exc:
+        raise MediaError(f"segment {name} has unreadable metrics.json: {exc}") from exc
+    if frames <= 0:
+        raise MediaError(f"segment {name} has non-positive frame count {frames}")
+    video_duration = float(probe(segment / "video.mp4").get("format", {}).get("duration", 0.0))
+    audio_duration = float(probe(segment / "audio.wav").get("format", {}).get("duration", 0.0))
+    if video_duration <= 0 or audio_duration <= 0:
+        raise MediaError(f"segment {name} has non-positive media duration")
+    drift = abs(video_duration - audio_duration)
+    if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(
+            f"segment {name} A/V alignment drift {drift:.3f}s "
+            f"exceeds {AV_ALIGNMENT_TOLERANCE_SECONDS:.1f}s"
+        )
+    return frames, video_duration, audio_duration
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
     width: int = 768,
     height: int = 432,
     fps: int = 24,
+    skip_bad: bool = False,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
     Exactly one final encode: scale/pad to 768×432, mux audio, validate,
-    atomically publish.
+    atomically publish. With skip_bad, corrupt segments are skipped with
+    a warning instead of aborting the whole finalize.
     """
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     segment_dirs = (
@@ -212,11 +273,31 @@ def finalize_run(
         if not (segment / "audio.wav").exists():
             raise MediaError(f"segment {segment.name} missing audio.wav")
 
+    # §56 steps 4-6 per segment, before any encoding work.
+    if not skip_bad:
+        for position, segment in enumerate(committed):
+            if segment.name != f"{position:06d}":
+                raise MediaError(
+                    f"segment numbering gap: expected {position:06d}, found {segment.name}"
+                )
+    usable: list[Path] = []
+    for segment in committed:
+        try:
+            _verify_segment(segment)
+        except MediaError as exc:
+            if not skip_bad:
+                raise
+            print(f"finalize: skipping {segment.name} ({exc})")
+            continue
+        usable.append(segment)
+    if not usable:
+        raise MediaError(f"no usable segments in {run_dir}")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         # Per-segment A/V mux, then concat the muxed parts.
         parts: list[Path] = []
-        for segment in committed:
+        for segment in usable:
             part = tmpdir / f"{segment.name}.mp4"
             proc = run_capture(
                 [

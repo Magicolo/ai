@@ -10,6 +10,20 @@ from pathlib import Path
 from typing import Any
 
 
+def fsync_dir(directory: Path) -> None:
+    """Persist a directory entry (rename durability, DESIGN §31).
+
+    fsync on the file alone does not guarantee the rename survives a
+    power loss on most filesystems — the containing directory entry
+    must be synced too.
+    """
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write_bytes(destination: Path, data: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -21,6 +35,7 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, destination)
+        fsync_dir(destination.parent)
     except BaseException:
         try:
             os.unlink(tmp_name)

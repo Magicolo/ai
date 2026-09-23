@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
+
+from voyage.atomic import atomic_write_bytes, atomic_write_json, fsync_dir
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -122,9 +125,10 @@ class ConceptStore:
                     created_at=_utc_now(),
                 )
             )
-        with self._concepts_path.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(record.model_dump_json() + "\n")
+        atomic_write_bytes(
+            self._concepts_path,
+            "".join(record.model_dump_json() + "\n" for record in records).encode("utf-8"),
+        )
 
     def _load_vectors(self) -> list[list[float]]:
         if not self._vectors_path.exists():
@@ -135,6 +139,11 @@ class ConceptStore:
         return [[float(value) for value in row] for row in matrix.tolist()]
 
     def _append_vector(self, vector: list[float]) -> int:
+        """Append one row atomically: save temp + fsync + rename.
+
+        A crash mid-save must never leave a torn .npy behind — the
+        previous valid matrix survives. (Single writer, DESIGN §72.)
+        """
         import numpy as np
 
         if self._vectors_path.exists():
@@ -145,7 +154,21 @@ class ConceptStore:
         else:
             stacked = np.asarray([[float(value) for value in vector]], dtype=np.float32)
         self._vectors_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(str(self._vectors_path), stacked)
+        # np.save appends .npy when missing, so the temp name keeps the suffix.
+        tmp_npy = self._vectors_path.parent / f"{self._vectors_path.name}.{os.getpid()}.tmp.npy"
+        try:
+            np.save(str(tmp_npy), stacked)
+            with tmp_npy.open("rb+") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_npy, self._vectors_path)
+            fsync_dir(self._vectors_path.parent)
+        except BaseException:
+            try:
+                tmp_npy.unlink()
+            except OSError:
+                pass
+            raise
         return int(stacked.shape[0]) - 1
 
     def check_novel(self, text: str, vector: list[float] | None = None) -> tuple[bool, float]:
@@ -190,13 +213,15 @@ class ConceptStore:
         self._directory.mkdir(parents=True, exist_ok=True)
         with self._concepts_path.open("a", encoding="utf-8") as handle:
             handle.write(record.model_dump_json() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         self._records.append(record)
         self._write_index()
         return record
 
     def _write_index(self) -> None:
         index = {record.id: record.embedding_index for record in self._records if record.accepted}
-        self._index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+        atomic_write_json(self._index_path, index)
 
     def propose(
         self, text: str, summary: str = "", vector: list[float] | None = None, segment: int = 0
