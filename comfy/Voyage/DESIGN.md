@@ -5556,3 +5556,21 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   finalize → 768x432 h264 + AAC 3.667 s. Draft steady-state ≈ ~1 min/segment
   or better — the iteration target is hit.
 - Gates green (101 pytest / mypy 31).
+
+## Fast iteration, slice 3: inspect scoreboard view (2026-09-23)
+
+- `voyage/scoreboard.py`: `scoreboard_rows(run_dir)` reads committed
+  segments (metrics.json visual.metrics + transition.json destination/phase +
+  audio_state.json take_ids + logs/metrics.jsonl stages) and computes
+  per-metric deltas vs the previous inspected row (seg0 deltas zero;
+  missing visual → None; partials skipped). Six §43 keys pinned by
+  `tests/test_scoreboard.py` (3 commits: the piggyback inspects the
+  previous segment, so seg1 visual needs a 3rd commit).
+- `voyage inspect scoreboard --run <dir>`: compact per-segment table with
+  `value(Δ)` metric cells + stages + destination/phase/takes + segment
+  audio/video view paths + final.mp4 line.
+- Verified: `/app/output/draft-timing2` (no-visual path) and a fresh
+  flag-on fake 3-commit run `/app/output/score-visual` (seg0/seg1 metrics
+  with +0.000 deltas on identical testsrc; seg2 no-visual by piggyback
+  design; inspect=0.2/0.3 s in stages).
+- Gates green (104 pytest / mypy 32).

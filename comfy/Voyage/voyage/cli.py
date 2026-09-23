@@ -366,6 +366,35 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
+    if args.inspect_target == "scoreboard":
+        from voyage.scoreboard import METRIC_KEYS, scoreboard_rows
+
+        rows = scoreboard_rows(run_dir)
+        if not rows:
+            print("no committed segments")
+            return 0
+        header = ["seg", "frames", "stages", *[f"{key[:12]}" for key in METRIC_KEYS]]
+        print("  ".join(header))
+        for row in rows:
+            stages = row["stages"]
+            stage_cells = (
+                ",".join(f"{name}={seconds:.1f}" for name, seconds in stages.items())
+                if isinstance(stages, dict) and stages
+                else "-"
+            )
+            metrics = row["metrics"]
+            deltas = row["deltas"]
+            if isinstance(metrics, dict) and isinstance(deltas, dict):
+                cells = [f"{metrics[key]:.3f}({deltas[key]:+.3f})" for key in METRIC_KEYS]
+            else:
+                cells = ["no-visual"] * len(METRIC_KEYS)
+            print("  ".join([str(row["segment_id"]), str(row["frames"]), stage_cells, *cells]))
+            print(f"  -> {row['destination']} [{row['phase']}] takes={row['take_ids']}")
+            print(f"  view: {row['video_path']} + {row['audio_path']}")
+        final = run_dir / "final.mp4"
+        if final.exists():
+            print(f"final: {final}")
+        return 0
     if args.inspect_target == "concepts":
         store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
         records = store.records()
@@ -492,7 +521,9 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.set_defaults(func=cmd_benchmark)
 
     inspect = sub.add_parser("inspect", help="Inspect run artifacts")
-    inspect.add_argument("inspect_target", choices=["concepts", "segments", "media", "metrics"])
+    inspect.add_argument(
+        "inspect_target", choices=["concepts", "segments", "media", "metrics", "scoreboard"]
+    )
     inspect.add_argument("--run", required=True)
     inspect.set_defaults(func=cmd_inspect)
 
