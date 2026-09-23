@@ -5466,3 +5466,57 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   within-segment range, finalize → AAC 3.67 s. The GPU swap ran live on every
   commit without OOM.
 - Gates green (ruff + format + mypy strict 29 files + 51 pytest).
+
+## Phase 5 progress (2026-09-23, inspector done, live VLM E2E PASS)
+
+- **Scope (user Q&A):** deterministic metrics + VLM inspector now; style_similarity
+  = drift-vs-segment-0 proxy; feedback = director context + prompt amendments;
+  async = piggyback at next commit (ordered, no threads — §44's full async
+  loop stays future work).
+- **`voyage/vision/metrics.py` (§43, pure numpy+ffmpeg, no torch/cv2):**
+  `sample_frames` (ffmpeg rawvideo pipe, width 160; count==1 returns the middle
+  frame as the VLM view), 8-bin/channel histograms, and the six spec metrics in
+  order — motion_energy (changed-pixel fraction), visual_complexity (Sobel edge
+  fraction), semantic_change_rate (1 − first/last overlap), palette_distance
+  (mean-color walk, tint shift), style_similarity (vs segment-0 anchor
+  histogram, None → 1.0), scene_boundary_strength (max pair drop).
+- **Worker `inspect` op** on the director worker (§51-style: generate → strict
+  retry → skip with `inspected: False`, never raises): Qwen3.5-9B multimodal
+  (trust_remote_code, CPU bf16, non-thinking, greedy), single-frame JSON
+  `scene_summary`.
+- **Feedback (§43):** `format_measured_context` renders a MEASURED block (value
+  + StyleSpec band + BELOW/WITHIN/ABOVE per metric) into the director input and
+  user message; `feedback_amendments`/`apply_feedback_amendments` map
+  out-of-band readings to prompt amendments, applied post-validation
+  pre-style-check (markers verified amendment-safe). `StyleSpec` gains
+  `style_similarity_min = 0.60` (provisional — see calibration).
+- **Supervisor piggyback:** `_inspect_previous_segment` runs before `_accept`
+  (flag-off or segment-0 → skip; blanket-except → skip, never blocks the
+  voyage); VLM view frame via ffmpeg middle-frame PNG (no PIL in slim/video
+  images); the `visual` section (metrics + summary + inspected + amendments)
+  merges read-modify-write into the previous segment's `metrics.json`, never
+  clobbering. `[experimental] visual_inspector = false` TOML (§132).
+- **Registry:** Qwen3.5-9B pin rev `c202236235762e1c871ad0ccb60c8ee5ba337b9a`
+  (Apache-2.0, ~19 GiB; the download allow-list MUST include
+  `chat_template.jinja` — the Step 0 probe failed without it) +
+  `models download/verify inspector-qwen35`; `DirectorConfig.inspector_model_id`
+  (plain local path works, e.g. `/models/Qwen3.5-9B`); supervisor passes
+  `model_id` in the inspect payload.
+- **Transformers conflict:** the video image is pinned to transformers 4.57.6
+  (LongLive `x_clip_loss`) and can NEVER load qwen3_5 — the VLM lives in the
+  director image (transformers 5.17.0, torch 2.14.0+cpu) with pillow +
+  torchvision added to `Dockerfile.director`.
+- **Step 0 probe verdict GO:** LOAD 2.3 s (mmap), GENERATE 92.4 s / 128 tokens
+  CPU BF16, PEAK_RSS 16.4 GiB (62 GiB host) — ~2 min/segment overhead is
+  acceptable next to multi-minute video commits; 1 frame/segment, tight token
+  cap. Probe script was throwaway (`/tmp/probe35.py`); model retained in
+  `~/.cache/voyage-models/Qwen3.5-9B`.
+- **Live E2E:** fake-backend 2-segment run VALID 96 f (skip path: inspected
+  False, amendments fire on motion/drift below bands); director-image 2-segment
+  run VALID 96 f with `inspected: True` and an accurate testsrc scene summary —
+  full loop verified (piggyback → VLM → merge → MEASURED → amendments → VALID).
+- **Calibration (open):** synthetic testsrc reads below the StyleSpec bands
+  (motion 0.108 vs 0.20–0.35, complexity 0.063 vs 0.30–0.50, drift 0.009 vs
+  0.12–0.25). Definitions and bands kept as-is; real-footage calibration is
+  deferred to a GPU longlive run with measured justification.
+- Gates green both images (ruff + format + mypy strict 31 files + 94 pytest).

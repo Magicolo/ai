@@ -52,6 +52,15 @@ def test_audio_pins(tmp_path: Path) -> None:
     assert "missing" in message
 
 
+def test_inspector_pins(tmp_path: Path) -> None:
+    assert model_registry.QWEN35_HF_REPO == "Qwen/Qwen3.5-9B"
+    assert len(model_registry.QWEN35_HF_REVISION) == 40
+    assert "chat_template.jinja" in model_registry.QWEN35_ALLOW
+    ok, message = model_registry.verify_inspector_models(tmp_path)
+    assert not ok
+    assert "missing" in message
+
+
 def test_verify_reports_missing_on_empty_dir(tmp_path: Path) -> None:
     ok, message = model_registry.verify_longlive2_bf16(tmp_path)
     assert not ok

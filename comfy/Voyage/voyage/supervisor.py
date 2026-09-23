@@ -28,7 +28,11 @@ from voyage.atomic import atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
-from voyage.director import DeterministicDirector, director_input_from_state
+from voyage.director import (
+    DeterministicDirector,
+    director_input_from_state,
+    format_measured_context,
+)
 from voyage.errors import (
     ConfigurationError,
     DiskSpaceError,
@@ -38,12 +42,30 @@ from voyage.errors import (
     RecoverableWorkerError,
     VoyageError,
 )
-from voyage.media import assemble_segment_audio, slice_take, validate_audio, validate_video
+from voyage.media import (
+    assemble_segment_audio,
+    probe,
+    run_capture,
+    slice_take,
+    validate_audio,
+    validate_video,
+)
 from voyage.models import AudioPlan, EvolutionDecision, SegmentWorldState, StyleSpec
 from voyage.persistence import read_state, write_state
-from voyage.prompts import build_staged_prompt_plan, check_prompt_against_style
+from voyage.prompts import (
+    apply_feedback_amendments,
+    build_staged_prompt_plan,
+    check_prompt_against_style,
+    feedback_amendments,
+)
 from voyage.rpc import SubprocessWorker
 from voyage.seeds import audio_seed, video_seed
+from voyage.vision.metrics import (
+    Histogram,
+    frame_histogram,
+    sample_frames,
+    summarize_segment,
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -321,6 +343,7 @@ class Supervisor:
         store: ConceptStore,
         style_spec: StyleSpec,
         retry_feedback: str = "",
+        measured_context: str = "",
     ) -> dict[str, Any]:
         history = store.history_texts()
         payload = director_input_from_state(
@@ -333,6 +356,7 @@ class Supervisor:
                 else "(revisits allowed)"
             ),
             audio_state=(f"style={config.audio.music_style} energy={config.audio.energy}"),
+            measured_context=measured_context,
         )
         payload.update(
             {
@@ -359,12 +383,17 @@ class Supervisor:
         store: ConceptStore,
         style_spec: StyleSpec,
         segment_id: str,
+        measured_context: str = "",
+        amendments: list[str] | None = None,
     ) -> EvolutionDecision:
         """§74 transaction: validate → novelty → style → accept.
 
         Bounded retries with rejection feedback; exhaustion falls back to
         the local deterministic director. Every rejection is recorded in
-        the immutable concept history.
+        the immutable concept history. When the experimental visual
+        inspector measured the previous segment, its §43 amendments are
+        applied to each stage post-validation, pre-style-check — amended
+        text still passes ProposalRejected, so the charter always wins.
         """
         max_attempts = max(1, config.voyage.novelty_max_attempts)
         feedback = ""
@@ -375,7 +404,7 @@ class Supervisor:
                 "director",
                 segment_id,
                 "decide",
-                self._decide_payload(config, state, store, style_spec, feedback),
+                self._decide_payload(config, state, store, style_spec, feedback, measured_context),
             )
             try:
                 decision = EvolutionDecision.model_validate(raw)
@@ -385,6 +414,11 @@ class Supervisor:
             if not decision.video.stages:
                 feedback = "previous output had no video stages; provide 3-5."
                 continue
+            if amendments:
+                decision.video.stages = [
+                    apply_feedback_amendments(stage_text, amendments)
+                    for stage_text in decision.video.stages
+                ]
             try:
                 for stage_text in decision.video.stages:
                     check_prompt_against_style(stage_text, style_spec)
@@ -579,6 +613,93 @@ class Supervisor:
         )
         return audio_plan, max(ahead, 0.0)
 
+    def _inspect_previous_segment(
+        self, config: ProjectConfig, number: int, style_spec: StyleSpec
+    ) -> tuple[str, list[str]]:
+        """Piggyback inspect of the previous segment (DESIGN §44, experimental).
+
+        Ordered and synchronous at the next commit — no threads: the
+        inspector samples the previous segment's committed video, merges a
+        `visual` section into its metrics.json, and returns the MEASURED
+        director context plus any §43 prompt amendments. Disabled by
+        default; any failure degrades to ('', []) with an inspect_skipped
+        metric so a slow or missing inspector never stops a healthy voyage.
+        """
+        if not config.experimental.visual_inspector or number == 0:
+            return "", []
+        try:
+            return self._run_previous_inspect(number, style_spec)
+        except Exception as exc:  # noqa: BLE001 — inspector never breaks a commit
+            self._log_metric({"event": "inspect_skipped", "error": str(exc)})
+            return "", []
+
+    def _run_previous_inspect(self, number: int, style_spec: StyleSpec) -> tuple[str, list[str]]:
+        """Inspect helper; raises on any failure (caller converts to skip)."""
+        prev_id = paths.format_segment_id(number - 1)
+        prev_dir = paths.segment_dir(self._run_dir, prev_id)
+        prev_video = prev_dir / "video.mp4"
+        frames = sample_frames(prev_video, 5)
+        reference: Histogram | None
+        if number == 1:
+            reference = frame_histogram(frames[len(frames) // 2])
+        else:
+            seg0_video = paths.segment_dir(self._run_dir, paths.format_segment_id(0)) / "video.mp4"
+            reference = frame_histogram(sample_frames(seg0_video, 1)[0])
+        summary = summarize_segment(frames, reference)
+        scene_summary = self._inspect_frame_view(prev_dir, prev_video)
+        amendments = feedback_amendments(summary, style_spec)
+        visual = {
+            "metrics": summary,
+            "scene_summary": scene_summary,
+            "inspected": bool(scene_summary),
+            "amendments": amendments,
+        }
+        try:
+            existing = json.loads((prev_dir / "metrics.json").read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
+        except OSError:
+            pass
+        self._log_metric({"event": "segment_inspected", "segment_id": prev_id, **summary})
+        return format_measured_context(style_spec, summary), amendments
+
+    def _inspect_frame_view(self, prev_dir: Path, prev_video: Path) -> str:
+        """Single middle-frame VLM read; '' when the inspector is unavailable."""
+        try:
+            info = probe(prev_video).get("format", {})
+            duration = float(info.get("duration", 0.0) or 0.0) if isinstance(info, dict) else 0.0
+            frame_path = prev_dir / "inspect_frame.png"
+            proc = run_capture(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-nostdin",
+                    "-y",
+                    "-ss",
+                    f"{max(duration / 2.0, 0.0):.6f}",
+                    "-i",
+                    str(prev_video),
+                    "-frames:v",
+                    "1",
+                    str(frame_path),
+                ]
+            )
+            if proc.returncode != 0:
+                return ""
+            result = self._director.call(
+                "inspect",
+                {
+                    "frame_path": str(frame_path),
+                    "model_id": self._config.director.inspector_model_id,
+                },
+            )
+        except VoyageError:
+            return ""
+        if not isinstance(result, dict) or not result.get("inspected"):
+            return ""
+        scene = result.get("scene_summary")
+        return str(scene) if isinstance(scene, str) else ""
+
     def commit_one_segment(self) -> str:
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
@@ -600,7 +721,12 @@ class Supervisor:
             similarity_threshold=config.voyage.novelty_threshold,
             legacy_path=self._run_dir / paths.CONCEPTS_FILENAME,
         )
-        decision = self._accept_director_decision(config, state, store, style_spec, segment_id)
+        # 1b. Piggyback inspect of the previous segment (§44, experimental):
+        # ordered, synchronous, never blocking the commit on failure.
+        measured_context, amendments = self._inspect_previous_segment(config, number, style_spec)
+        decision = self._accept_director_decision(
+            config, state, store, style_spec, segment_id, measured_context, amendments
+        )
 
         # 3. Staged prompt plan (§18.2) + media generation.
         num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1

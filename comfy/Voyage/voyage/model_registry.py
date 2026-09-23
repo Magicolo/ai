@@ -62,6 +62,32 @@ QWEN_MIN_BYTES = 15_000_000_000
 QWEN_LICENSE = "Apache 2.0"
 QWEN_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE"
 
+# Phase 5 visual inspector (DESIGN §§43-44, 100, 132). Qwen3.5-9B
+# multimodal VLM, Apache 2.0, ungated. BF16 weights (~19 GiB); served on
+# CPU from system RAM in the director worker — never on the video GPU.
+# The allow-list MUST include chat_template.jinja: the Qwen3.5 processor
+# needs it and snapshot_download without it fails the inspector load
+# (Step 0 probe lesson). Shard names carry a `model.safetensors-` prefix
+# (unlike Qwen3-8B's `model-` prefix), hence the distinct shard glob.
+QWEN35_HF_REPO = "Qwen/Qwen3.5-9B"
+QWEN35_HF_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+QWEN35_SUBDIR = "Qwen3.5-9B"
+QWEN35_ALLOW = [
+    "model.safetensors-*-of-*.safetensors",
+    "model.safetensors.index.json",
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "chat_template.jinja",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
+]
+QWEN35_MIN_BYTES = 18_000_000_000
+QWEN35_LICENSE = "Apache 2.0"
+QWEN35_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/LICENSE"
+
 # Phase 4 music stack (DESIGN §§6, 37). ACE-Step 1.5 turbo DiT + 0.6B
 # planner LM (spec V1: 2B turbo + 0.6B LM, 8GB floor; XL rejected).
 # Both repos ungated. Layout lesson from the Step 6 E2E: the handler's
@@ -275,6 +301,59 @@ def verify_director_models(models_dir: Path) -> tuple[bool, str]:
         f"director-qwen8b OK (Qwen3-8B {qwen_bytes / 1024**3:.1f} GiB + MiniLM "
         f"{minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
     )
+
+
+def download_inspector_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Phase 5 VLM inspector (DESIGN §§43-44).
+
+    Qwen3.5-9B multimodal snapshots into <models>/Qwen3.5-9B. The
+    allow-list must include chat_template.jinja: without it the processor
+    fails to build (Step 0 probe lesson). Merges into the shared manifest;
+    returns the merged record.
+    """
+    from huggingface_hub import snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = models_dir / QWEN35_SUBDIR
+    snapshot_download(
+        repo_id=QWEN35_HF_REPO,
+        revision=QWEN35_HF_REVISION,
+        local_dir=str(target_dir),
+        allow_patterns=QWEN35_ALLOW,
+    )
+    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
+    weights_bytes = sum(p.stat().st_size for p in shards)
+    record = _merge_manifest_record(
+        models_dir,
+        "inspector",
+        {
+            "repo": QWEN35_HF_REPO,
+            "revision": QWEN35_HF_REVISION,
+            "dir": str(target_dir),
+            "bytes": weights_bytes,
+            "license": QWEN35_LICENSE,
+            "license_url": QWEN35_LICENSE_URL,
+        },
+    )
+    return record
+
+
+def verify_inspector_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the VLM inspector."""
+    missing: list[str] = []
+    target_dir = models_dir / QWEN35_SUBDIR
+    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
+    weights_bytes = sum(p.stat().st_size for p in shards) if shards else 0
+    for pattern in QWEN35_ALLOW:
+        if "*" in pattern:
+            continue  # covered by the shard glob above
+        if not (target_dir / pattern).exists():
+            missing.append(str(target_dir / pattern))
+    if weights_bytes < QWEN35_MIN_BYTES:
+        missing.append(f"{target_dir}/model shards ({weights_bytes} bytes)")
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    return True, f"inspector-qwen35 OK (Qwen3.5-9B {weights_bytes / 1024**3:.1f} GiB)"
 
 
 def download_audio_models(models_dir: Path) -> dict[str, Any]:

@@ -97,6 +97,9 @@ class DirectorConfig(BaseModel):
     enable_thinking: bool = False
     max_new_tokens: int = 1024
     embedding_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # VLM inspector (Phase 5): Qwen3.5-9B lives in the director image
+    # (transformers 5.x); a local path works for E2E (/models/Qwen3.5-9B).
+    inspector_model_id: str = "Qwen/Qwen3.5-9B"
 
 
 class VoyageConfig(BaseModel):
@@ -125,6 +128,12 @@ class VoyageConfig(BaseModel):
         return value
 
 
+class ExperimentalConfig(BaseModel):
+    """Explicit feature flags for experimental behavior (DESIGN §132)."""
+
+    visual_inspector: bool = False
+
+
 class ProjectConfig(BaseModel):
     schema_version: int = 1
     run_id: str = "voyage"
@@ -135,6 +144,7 @@ class ProjectConfig(BaseModel):
     audio: AudioConfig = Field(default_factory=AudioConfig)
     director: DirectorConfig = Field(default_factory=DirectorConfig)
     voyage: VoyageConfig = Field(default_factory=VoyageConfig)
+    experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)
 
     @field_validator("style")
     @classmethod
@@ -183,6 +193,7 @@ temperature = 0.7
 enable_thinking = false
 max_new_tokens = 1024
 embedding_model_id = "sentence-transformers/all-MiniLM-L6-v2"
+inspector_model_id = "Qwen/Qwen3.5-9B"
 
 [voyage]
 allow_concept_revisit = false
@@ -192,6 +203,9 @@ world_decision_interval_seconds = 16.0
 blocks_per_prompt_stage = 3
 novelty_threshold = 0.85
 novelty_max_attempts = 3
+
+[experimental]
+visual_inspector = false
 """
 
 

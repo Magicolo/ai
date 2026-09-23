@@ -1,10 +1,14 @@
 """Director worker: `python -m voyage.workers.director`.
 
 Backends: `deterministic` (no model weights) and `qwen` (Qwen3-8B on
-CPU + MiniLM embeddings, DESIGN §§8-9). Ops: `decide`, `embed`.
+CPU + MiniLM embeddings, DESIGN §§8-9). Ops: `decide`, `embed`, `inspect`.
 Invalid model JSON follows the §51 chain inside the worker — stricter
 retry, lower temperature, then deterministic fallback — so a bad LLM
-response never corrupts persistent state.
+response never corrupts persistent state. `inspect` (Qwen3.5-9B VLM,
+Phase 5) follows a retry→skip chain instead: a failed inspection
+returns `inspected: False` and the voyage continues on deterministic
+metrics alone — a slow or missing inspector must never stop a healthy
+voyage (§44).
 """
 
 from __future__ import annotations
@@ -26,6 +30,19 @@ from voyage.workers.loop import checked_request, serve
 _CONFIG: dict[str, Any] = {"backend": "deterministic"}
 _QWEN: dict[str, Any] = {}
 _EMBEDDER: dict[str, Any] = {}
+_INSPECTOR: dict[str, Any] = {}
+
+INSPECTOR_MODEL_ID = "Qwen/Qwen3.5-9B"
+"""Default VLM weights (pinned in the model registry, Step 5)."""
+
+INSPECT_PROMPT = (
+    "Describe what is visible in this frame of an abstract infinite "
+    "voyage animation in one or two sentences: dominant shapes, motion "
+    "direction, palette. Reply with a JSON object only, no prose: "
+    '{"scene_summary": "..."}'
+)
+"""Tight single-frame prompt: one frame per segment keeps the ~2min CPU
+budget bounded (Step 0 probe: 92s for 128 tokens)."""
 
 
 def _load_qwen(model_id: str) -> tuple[Any, Any]:
@@ -51,12 +68,100 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
     return _QWEN["model"], _QWEN["tokenizer"]
 
 
+def _load_inspector(model_id: str) -> tuple[Any, Any]:
+    """Lazily load the Qwen3.5-9B VLM + processor on CPU (bf16, mmap-fast).
+
+    trust_remote_code is required: the model ships custom modeling and
+    processor code (Step 0 probe). The weights (~19GB BF16) live in
+    system RAM — never on the 16GB GPU.
+    """
+    if "model" not in _INSPECTOR:
+        import torch
+        from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModelForMultimodalLM.from_pretrained(
+            model_id,
+            dtype=torch.bfloat16,
+            device_map="cpu",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+        model.eval()
+        _INSPECTOR["model"] = model
+        _INSPECTOR["processor"] = processor
+    return _INSPECTOR["model"], _INSPECTOR["processor"]
+
+
 def _load_embedder(model_id: str) -> Any:
     if "model" not in _EMBEDDER:
         from sentence_transformers import SentenceTransformer
 
         _EMBEDDER["model"] = SentenceTransformer(model_id, device="cpu")
     return _EMBEDDER["model"]
+
+
+def _inspector_generate(model_id: str, frame_path: str, prompt: str, max_new_tokens: int) -> str:
+    """Run one non-thinking VLM pass over a single frame PNG (greedy)."""
+    import torch
+
+    model, processor = _load_inspector(model_id)
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "url": frame_path},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    inputs = processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        enable_thinking=False,
+    ).to(model.device)
+    with torch.inference_mode():
+        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    generated = outputs[0][inputs["input_ids"].shape[-1] :]
+    return str(processor.decode(generated)).strip()
+
+
+def _normalize_inspect(text: str) -> dict[str, Any]:
+    """Parse one VLM reply into a scene summary (pure; raises on garbage)."""
+    data = _extract_json(text)
+    summary = data.get("scene_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("VLM reply has no scene_summary string")
+    return {"scene_summary": summary.strip()}
+
+
+def handle_inspect(payload: dict[str, Any]) -> dict[str, Any]:
+    """Retry→skip chain: two attempts, then `inspected: False` (never raises).
+
+    The inspector is advisory (§44): deterministic metrics carry the
+    feedback loop, so a VLM failure degrades to a missing scene summary
+    instead of aborting the segment.
+    """
+    checked_request(payload, frame_path=str)
+    model_id = str(payload.get("model_id") or _CONFIG.get("inspector_model_id", INSPECTOR_MODEL_ID))
+    max_new_tokens = int(payload.get("max_new_tokens", 256))
+    attempts = [INSPECT_PROMPT, INSPECT_PROMPT + " JSON object only. No prose."]
+    last_error = "no attempts"
+    for attempt_prompt in attempts:
+        try:
+            text = _inspector_generate(
+                model_id, str(payload["frame_path"]), attempt_prompt, max_new_tokens
+            )
+            result = _normalize_inspect(text)
+            result["inspected"] = True
+            result["model_id"] = model_id
+            return result
+        except Exception as exc:  # noqa: BLE001 — inspector must never raise
+            last_error = str(exc)
+    return {"inspected": False, "error": last_error, "model_id": model_id}
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -205,7 +310,7 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     _CONFIG.update(
         {
             key: payload[key]
-            for key in ("backend", "model_id", "embedding_model_id")
+            for key in ("backend", "model_id", "embedding_model_id", "inspector_model_id")
             if key in payload
         }
     )
@@ -221,9 +326,11 @@ def main() -> None:
                 "backend": _CONFIG["backend"],
                 "qwen_loaded": "model" in _QWEN,
                 "embedder_loaded": "model" in _EMBEDDER,
+                "inspector_loaded": "model" in _INSPECTOR,
             },
             "decide": handle_decide,
             "embed": handle_embed,
+            "inspect": handle_inspect,
             "shutdown": lambda _payload: {"stopped": True},
         }
     )

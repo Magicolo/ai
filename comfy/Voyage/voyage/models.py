@@ -61,6 +61,10 @@ class StyleSpec(BaseModel):
     visual_complexity_max: float = 0.50
     semantic_drift_min: float = 0.12
     semantic_drift_max: float = 0.25
+    # Floor for the drift-vs-segment-0 style proxy (§43): below this the
+    # inspector flags style collapse. Provisional — recalibrate against
+    # real footage in the Phase 5 E2E (same pass as the other bands).
+    style_similarity_min: float = 0.60
     surrealism: float = 0.70
     transition_smoothness: float = 0.90
 

@@ -17,6 +17,7 @@ from voyage.models import (
     DirectorNovelty,
     DirectorVideoPlan,
     EvolutionDecision,
+    StyleSpec,
     TransitionPhase,
     TransitionPlan,
 )
@@ -51,6 +52,7 @@ def build_director_user_message(
     audio_state: str,
     controller_metrics: str,
     retry_feedback: str = "",
+    measured_context: str = "",
 ) -> str:
     """Bounded director input (§20). Never a raw transcript."""
     sections = [
@@ -62,6 +64,8 @@ def build_director_user_message(
         f"CURRENT AUDIO STATE\n{audio_state}",
         f"TARGET CONTROLLER METRICS\n{controller_metrics}",
     ]
+    if measured_context:
+        sections.append(measured_context)
     if retry_feedback:
         sections.append(
             f"PREVIOUS PROPOSAL REJECTED\n{retry_feedback}\nPropose a different concept."
@@ -144,12 +148,40 @@ class DeterministicDirector:
         )
 
 
+def format_measured_context(style: StyleSpec, measured: dict[str, float]) -> str:
+    """Render the deterministic MEASURED visual block (§43 feedback).
+
+    One line per §43 metric with its value, the StyleSpec band, and a
+    BELOW/WITHIN/ABOVE flag. Empty string when no measurements exist
+    (inspector disabled or skipped) — the director prompt is unchanged.
+    """
+    if not measured:
+        return ""
+    bands = [
+        ("motion_energy", style.motion_energy_min, style.motion_energy_max),
+        ("visual_complexity", style.visual_complexity_min, style.visual_complexity_max),
+        ("semantic_change_rate", style.semantic_drift_min, style.semantic_drift_max),
+        ("palette_distance", 0.0, 0.30),
+        ("style_similarity", style.style_similarity_min, 1.0),
+        ("scene_boundary_strength", 0.0, 0.30),
+    ]
+    lines = []
+    for name, low, high in bands:
+        if name not in measured:
+            continue
+        value = measured[name]
+        flag = "BELOW" if value < low else ("ABOVE" if value > high else "WITHIN")
+        lines.append(f"{name}={value:.3f} target=[{low:.2f},{high:.2f}] {flag}")
+    return "MEASURED VISUALS (deterministic)\n" + "\n".join(lines) if lines else ""
+
+
 def director_input_from_state(
     state: Any,
     style_charter: str,
     recent_summary: str,
     forbidden_summary: str,
     audio_state: str,
+    measured_context: str = "",
 ) -> dict[str, Any]:
     """Assemble the bounded §20 input from supervisor state (no transcript)."""
     return {
@@ -161,6 +193,7 @@ def director_input_from_state(
         "recent_summary": recent_summary,
         "forbidden_summary": forbidden_summary,
         "audio_state": audio_state,
+        "measured_context": measured_context,
         "controller_metrics": (
             f"decision_index={state.decision_index} "
             f"committed_segments={state.committed_segments} "

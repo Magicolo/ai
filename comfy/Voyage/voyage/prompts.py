@@ -72,6 +72,40 @@ def check_prompt_against_style(prompt: str, style: StyleSpec) -> None:
         raise ProposalRejected(f"director prompt attempts style override ({marker!r})")
 
 
+def feedback_amendments(measured: dict[str, float], style: StyleSpec) -> list[str]:
+    """Translate §43 metric deviations into prompt amendments (Phase 5).
+
+    Pure function over the deterministic MEASURED block: each amendment
+    nudges the next segment's middle-layer text back toward the charter
+    band. Empty input → no amendments (inspector disabled/skipped).
+    """
+    if not measured:
+        return []
+    amendments = []
+    motion = measured.get("motion_energy")
+    if motion is not None:
+        if motion > style.motion_energy_max:
+            amendments.append("calm static composition, minimal motion")
+        elif motion < style.motion_energy_min:
+            amendments.append("gentle continuous motion throughout the shot")
+    complexity = measured.get("visual_complexity")
+    if complexity is not None and complexity > style.visual_complexity_max:
+        amendments.append("sparse composition, few simple shapes, large empty areas")
+    drift = measured.get("semantic_change_rate")
+    if drift is not None and drift < style.semantic_drift_min:
+        amendments.append("gradual visible transformation unfolding across the shot")
+    similarity = measured.get("style_similarity")
+    if similarity is not None and similarity < style.style_similarity_min:
+        amendments.append("strictly in the charter style, signature palette and linework")
+    return amendments
+
+
+def apply_feedback_amendments(prompt: str, amendments: list[str]) -> str:
+    """Append feedback amendments to a middle-layer prompt (§43)."""
+    parts = [prompt.strip(), *(item.strip() for item in amendments if item.strip())]
+    return ", ".join(part for part in parts if part)
+
+
 def compose_prompt(style: str, concept: str, phase: str, seed_hint: str = "") -> str:
     parts = [style.strip(), concept.strip(), f"phase: {phase.strip()}"]
     if seed_hint:

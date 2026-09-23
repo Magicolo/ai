@@ -18,7 +18,9 @@ RUN pip install --upgrade pip \
     && pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 RUN pip install "transformers>=4.51" "sentence-transformers" "accelerate" "safetensors" \
-    "huggingface_hub[cli]" "numpy>=1.26" "pydantic>=2.7,<2.11" "ruff" "mypy" "pytest"
+    "huggingface_hub[cli]" "numpy>=1.26" "pydantic>=2.7,<2.11" "ruff" "mypy" "pytest" \
+    "pillow" \
+    && pip install torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Voyage supervisor package (CPU-only here; GPU code lives only behind the
 # video_longlive worker module import, which this image never loads).
