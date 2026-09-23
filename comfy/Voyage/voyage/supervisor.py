@@ -704,6 +704,7 @@ class Supervisor:
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
         started = time.monotonic()
+        stage_seconds: dict[str, float] = {}
         config = self._config
         state = read_state(self._run_dir)
         check_free_space(self._run_dir, config.min_free_space_gib)
@@ -723,12 +724,17 @@ class Supervisor:
         )
         # 1b. Piggyback inspect of the previous segment (§44, experimental):
         # ordered, synchronous, never blocking the commit on failure.
+        inspect_started = time.monotonic()
         measured_context, amendments = self._inspect_previous_segment(config, number, style_spec)
+        stage_seconds["inspect"] = round(time.monotonic() - inspect_started, 3)
+        director_started = time.monotonic()
         decision = self._accept_director_decision(
             config, state, store, style_spec, segment_id, measured_context, amendments
         )
+        stage_seconds["director"] = round(time.monotonic() - director_started, 3)
 
         # 3. Staged prompt plan (§18.2) + media generation.
+        video_started = time.monotonic()
         num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1
         prompt_plan = build_staged_prompt_plan(
             segment_id,
@@ -794,8 +800,10 @@ class Supervisor:
             tape = video_block.get("recovery_path")
             if isinstance(tape, str):
                 recovery_tape = tape
+        stage_seconds["video"] = round(time.monotonic() - video_started, 3)
         duration = frames / config.video.fps
         video_time = state.timeline_frames / config.video.fps
+        audio_started = time.monotonic()
         audio_plan, audio_ahead = self._ensure_audio_coverage(
             config,
             number,
@@ -806,17 +814,21 @@ class Supervisor:
             decision,
             recovery_tape,
         )
+        stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
 
         # 4. Validate before anything claims the segment is committed.
+        validate_started = time.monotonic()
         video_info = validate_video(
             video_out, config.video.width, config.video.height, config.video.fps
         )
         audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
         if abs(float(video_info["duration"]) - duration) > 0.6:
             raise MediaError(f"segment {segment_id} A/V duration drift")
+        stage_seconds["validate"] = round(time.monotonic() - validate_started, 3)
 
         # 5. Metadata → checksums → DONE → state. No state file may claim
         # the segment is committed until artifacts are valid and durable.
+        commit_started = time.monotonic()
         world = SegmentWorldState(
             segment_id=segment_id,
             current_concept=state.current_concept,
@@ -861,12 +873,14 @@ class Supervisor:
         fresh.audio_buffer_seconds = audio_ahead
         fresh.last_error = None
         write_state(self._run_dir, fresh)
+        stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
         self._log_metric(
             {
                 "event": "segment_committed",
                 "segment_id": segment_id,
                 "frames": frames,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
+                "stages": stage_seconds,
             }
         )
         return segment_id

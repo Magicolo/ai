@@ -25,7 +25,7 @@ def test_draft_profile_defaults() -> None:
     assert (draft.width, draft.height) == (640, 352)
     assert draft.latent_shape == [1, 8, 48, 22, 40]
     assert draft.blocks_per_segment == 1
-    assert draft.take_seconds == 15.0
+    assert draft.take_seconds == 45.0
 
 
 def test_no_flags_leaves_config_unchanged(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -38,7 +38,11 @@ def test_draft_flag_applies_profile(tmp_path) -> None:  # type: ignore[no-untype
     assert (out.video.width, out.video.height) == (640, 352)
     assert out.video.latent_shape == [1, 8, 48, 22, 40]
     assert out.video.blocks_per_segment == 1
-    assert out.audio.take_seconds == 15.0
+    assert out.audio.take_seconds == 45.0
+    # Invariant: a draft take must outlast the audio-ahead window, or every
+    # segment triggers a render + full GPU swap (measured: swap every segment
+    # at take 15 < ahead 20).
+    assert out.audio.take_seconds > out.audio.ahead_seconds
 
 
 def test_targeted_overrides_without_draft(tmp_path) -> None:  # type: ignore[no-untyped-def]

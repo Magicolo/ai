@@ -5535,3 +5535,24 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   `./Voyage/output/draft-fake1` + `draft-gpu1` — 5m50s (~2m55s/segment, above
   the ~1-2 min target; per-stage breakdown is the next slice: benchmark).
 - Gates green (100 pytest / mypy 31).
+
+## Fast iteration, slice 2: per-stage timings (2026-09-23)
+
+- `commit_one_segment` records per-stage seconds
+  (inspect/director/video/audio/validate/commit) into the `segment_committed`
+  metrics event (`tests/test_stage_timings.py` pins the key set + bounds).
+- GPU draft breakdown (`/app/output/draft-timing`, 2 segments, 370 s):
+  seg0 166.8 s = director 8.8 (first-call warm-up) + video 70.4 (first-block
+  CUDA warm-up) + audio 87.4; seg1 137.0 s = video 54.9 (steady) + audio 82.0.
+  Audio dominated because draft `take_seconds=15` < `ahead_seconds=20`, so
+  coverage was always inside the ahead window → a fresh take + full GPU swap
+  (evict video → ACE reload → render → evict audio → rebuild from tape)
+  EVERY segment.
+- Fix: draft `take_seconds` 15 → 45 (same as full; swaps land ~every
+  21 segments, ~7 s amortized) + invariant test `take_seconds > ahead_seconds`.
+- Verified (`/app/output/draft-timing2`, 3 segments, 4m58s): seg0 168.2 s
+  (one take + swap), seg1 54.6 s (video 54.4, audio 0.06 KEEP), seg2 9.5 s
+  (video 9.4, kernel warmth) — one `take_rendered` total; VALID 87f = 29x3;
+  finalize → 768x432 h264 + AAC 3.667 s. Draft steady-state ≈ ~1 min/segment
+  or better — the iteration target is hit.
+- Gates green (101 pytest / mypy 31).

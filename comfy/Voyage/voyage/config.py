@@ -147,7 +147,11 @@ class DraftConfig(BaseModel):
     height: int = 352
     latent_shape: list[int] = Field(default_factory=lambda: [1, 8, 48, 22, 40])
     blocks_per_segment: int = 1
-    take_seconds: float = 15.0
+    # Same take length as full quality: a take shorter than the audio-ahead
+    # window forces a render + full GPU swap on EVERY segment (draft E2E:
+    # take 15 < ahead 20 → swap every segment, ~85s audio stage). At 45s the
+    # swap happens ~every 21 segments and amortizes to ~7s/segment.
+    take_seconds: float = 45.0
 
     @field_validator("width", "height", "blocks_per_segment")
     @classmethod
@@ -243,7 +247,7 @@ width = 640
 height = 352
 latent_shape = [1, 8, 48, 22, 40]
 blocks_per_segment = 1
-take_seconds = 15.0
+take_seconds = 45.0
 """
 
 
