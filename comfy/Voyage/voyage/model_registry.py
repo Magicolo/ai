@@ -165,6 +165,55 @@ LTXV_COMMIT = "4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"
 LTXV_COMMIT_SHORT = "4b2d053"
 
 
+# Stream D CausVid prep scaffolding (DESIGN §5.4, TASK §§19/23.4/25.3, §30.1).
+# No worker yet (`voyage/workers/video_causvid.py` is a deferred worker slice);
+# this block only pins the upstream sources and exposes
+# download/verify entry points mirroring the ltxv pattern, so a future
+# `models download/verify causvid-*` CLI target has registry support ready.
+# Pins probed 2026-09-24 (see docs/UPSTREAM_CAUSVID_NOTES.md for URLs,
+# geometry/fps/overlap notes, license implications, open worker questions).
+# Upstream code pin (git commit, not a floating branch; master HEAD at probe
+# time — tip commit 2025-08-07 "Update README.md").
+CAUSVID_COMMIT = "adb6a5ecd07666b4d0290042915c8406e6d5ce22"
+CAUSVID_COMMIT_SHORT = "adb6a5e"
+# DMD causal generator checkpoint (CC BY-NC-SA 4.0, ungated). The worker will
+# strict-load `torch.load(<checkpoint>)['generator']` per the upstream
+# long-video script; bidirectional/warp/ODE/LMDB siblings are skipped.
+CAUSVID_HF_REPO = "tianweiy/CausVid"
+CAUSVID_HF_REVISION = "b545eb2728fc9d1515023a270b847f7b24b3aa89"
+CAUSVID_SUBDIR = "causvid"
+CAUSVID_CHECKPOINT_SUBDIR = "autoregressive_checkpoint"
+CAUSVID_CHECKPOINT_NAME = "model.pt"
+CAUSVID_CHECKPOINT_FILE = f"{CAUSVID_CHECKPOINT_SUBDIR}/{CAUSVID_CHECKPOINT_NAME}"
+# Presence-sanity floor only: no weights were downloaded during prep (task
+# rule), so the exact byte count is unmeasured. Any real 1.3B bf16 DiT
+# checkpoint (~2.6GB of params) clears 1GB; missing/empty files fail.
+CAUSVID_CKPT_MIN_BYTES = 1_000_000_000
+CAUSVID_LICENSE = "CC BY-NC-SA 4.0 (non-commercial; share-alike on adaptations)"
+CAUSVID_LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en"
+
+# Wan2.1-T2V-1.3B base providing the DiT arch, T5 encoder, tokenizer and VAE
+# underneath the CausVid DMD checkpoint. Ungated, Apache 2.0. Downloaded as
+# a subset (diffusion shard + VAE + T5 + tokenizer). File sizes measured from
+# the HF API file listing at pin time (no download): DiT 5.68GB, VAE 508MB,
+# T5 11.36GB.
+WAN21_HF_REPO = "Wan-AI/Wan2.1-T2V-1.3B"
+WAN21_HF_REVISION = "37ec512624d61f7aa208f7ea8140a131f93afc9a"
+WAN21_SUBDIR = "Wan2.1-T2V-1.3B"
+WAN21_ALLOW = [
+    "diffusion_pytorch_model.safetensors",
+    "config.json",
+    "Wan2.1_VAE.pth",
+    "models_t5_umt5-xxl-enc-bf16.pth",
+    "google/umt5-xxl/*",
+]
+WAN21_DIT_MIN_BYTES = 5_000_000_000
+WAN21_VAE_MIN_BYTES = 400_000_000
+WAN21_T5_MIN_BYTES = 10_000_000_000
+WAN21_LICENSE = "Apache 2.0"
+WAN21_LICENSE_URL = "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/LICENSE.txt"
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -518,6 +567,86 @@ def verify_ltxv_models(models_dir: Path) -> tuple[bool, str]:
     if missing:
         return False, f"missing {len(missing)} files: {missing[:5]}"
     return True, f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
+
+
+def download_causvid_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Stream D CausVid stack (DESIGN §5.4).
+
+    The autoregressive DMD checkpoint from tianweiy/CausVid plus the
+    Wan2.1-T2V-1.3B base subset (DiT shard + VAE + T5 + tokenizer) the
+    worker needs underneath it. Merges into the shared manifest; returns
+    the merged record. Registry support only — the `models download
+    causvid-*` CLI wiring and the worker land in the Stream C slice.
+    """
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    causvid_dir = models_dir / CAUSVID_SUBDIR
+    causvid_dir.mkdir(parents=True, exist_ok=True)
+    hf_hub_download(
+        repo_id=CAUSVID_HF_REPO,
+        revision=CAUSVID_HF_REVISION,
+        subfolder=CAUSVID_CHECKPOINT_SUBDIR,
+        filename=CAUSVID_CHECKPOINT_NAME,
+        local_dir=str(causvid_dir),
+    )
+    wan21_dir = models_dir / WAN21_SUBDIR
+    snapshot_download(
+        repo_id=WAN21_HF_REPO,
+        revision=WAN21_HF_REVISION,
+        local_dir=str(wan21_dir),
+        allow_patterns=WAN21_ALLOW,
+    )
+    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
+    record = _merge_manifest_record(
+        models_dir,
+        "causvid",
+        {
+            "repo": CAUSVID_HF_REPO,
+            "revision": CAUSVID_HF_REVISION,
+            "model_dir": str(causvid_dir),
+            "checkpoint_bytes": checkpoint_path.stat().st_size,
+            "files": [CAUSVID_CHECKPOINT_FILE],
+            "code_commit": CAUSVID_COMMIT,
+            "license": CAUSVID_LICENSE,
+            "license_url": CAUSVID_LICENSE_URL,
+            "base_repo": WAN21_HF_REPO,
+            "base_revision": WAN21_HF_REVISION,
+            "base_dir": str(wan21_dir),
+            "base_license": WAN21_LICENSE,
+        },
+    )
+    return record
+
+
+def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the CausVid stack."""
+    missing: list[str] = []
+    causvid_dir = models_dir / CAUSVID_SUBDIR
+    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
+    if not checkpoint_path.exists() or checkpoint_path.stat().st_size < CAUSVID_CKPT_MIN_BYTES:
+        missing.append(str(checkpoint_path))
+    wan21_dir = models_dir / WAN21_SUBDIR
+    for pattern in WAN21_ALLOW:
+        if pattern.endswith("*"):
+            matches = list(wan21_dir.glob(pattern))
+            if not matches:
+                missing.append(f"{wan21_dir}/{pattern}")
+        elif not (wan21_dir / pattern).exists():
+            missing.append(str(wan21_dir / pattern))
+    dit_path = wan21_dir / "diffusion_pytorch_model.safetensors"
+    if not dit_path.exists() or dit_path.stat().st_size < WAN21_DIT_MIN_BYTES:
+        missing.append(str(dit_path))
+    vae_path = wan21_dir / "Wan2.1_VAE.pth"
+    if not vae_path.exists() or vae_path.stat().st_size < WAN21_VAE_MIN_BYTES:
+        missing.append(str(vae_path))
+    text_encoder_path = wan21_dir / "models_t5_umt5-xxl-enc-bf16.pth"
+    if not text_encoder_path.exists() or text_encoder_path.stat().st_size < WAN21_T5_MIN_BYTES:
+        missing.append(str(text_encoder_path))
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    gib = checkpoint_path.stat().st_size / 1024**3
+    return True, f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
 
 
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
