@@ -6614,3 +6614,48 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Gates green (279 pytest / mypy strict / ruff + format). GPU
   verification: 768x512 ltxv segments + blend + BPM log + Qwen CPU timing
   on idle GPU (1024x576 reverted — see resolution note above).
+
+## 2026-09-24 — Stream A LTXV realign (121/25/96, mp4 tail, spec JSON tape)
+
+- Worker now renders 121-frame clips with 25-frame video-tail conditioning
+  and prefix-discard (96 novel committed), writes `video_tail.mp4` + sha256
+  and the §5.3 JSON tape (clean break from torch tapes); PNG tail removed.
+  Upstream verdict (README + ltx.io): keep 768x512, reject 768x432 (pads to
+  448). Live E2E VALID 338f (121 fresh + 121 cut + 96 extension, ~17s video
+  stage for the extension). Deferred: 81/97/121 matrix; stale cli duration
+  math + relative-`--run` path doubling noted in §30.2. Collided with the
+  1024x576 preset move (still /32-clean; E2E evidence is 768x512) —
+  1024x576 VRAM probe still open.
+
+## 2026-09-24 — Stream B §137A longlive2 qualification (harness done, GPU leg PENDING)
+
+- Delivered the CPU-runnable harness (`tests/test_qualification.py`: stage
+  list, metric math, <3x boundary gate, `summarize_run`, fake 3-seg +
+  kill-recovery dry-runs), `reports/video-backends.md` (longlive2 leg with
+  registry pins + PENDING table, empty LTXV leg for Stream A), and
+  `scripts/qualify.sh` (idle gate + benchmark + 3-seg + validate + JSON
+  summary). GPU leg PENDING: 4060 Ti held by Stream A for the full back-off
+  window — never ran under contention per the GPU-contention rule. Measured
+  harness dry-run instead (fake CPU, NOT longlive2): VALID 144f, steady
+  ratio 1.32, continuity 2.16 PASS. To complete: idle GPU → `qualify.sh` →
+  fill table.
+
+## 2026-09-24 — Stream C config/interface duality (adapter, no migration)
+
+- Single contract is `voyage/backends.py:VideoBackendAdapter` — spec
+  `generate_segment`/`segment_seconds`/`state_mode` vocabulary caller-side
+  over the unchanged sync `generate_blocks` wire op and unchanged
+  `VideoConfig` schema (sync by design: blocking transport + §46
+  no-concurrency rule; no migration needed). 21 CPU-only tests in
+  `tests/test_backends_adapter.py`; mypy strict + 250 pytest green.
+
+## 2026-09-24 — Stream D CausVid prep scaffolding (no worker)
+
+- `model_registry.py` gains additive-only `CAUSVID_*`/`WAN21_*` pins (code
+  `adb6a5e`, weights `b545eb27`, Wan2.1-1.3B `37ec5126`) +
+  `download_causvid_models`/`verify_causvid_models` mirroring the ltxv
+  pattern; new `docs/UPSTREAM_CAUSVID_NOTES.md` (pins, CC BY-NC-SA 4.0
+  implications, 832x480@16fps/21-latent/overlap-3 notes, 6 worker-slice
+  questions) and `tests/test_causvid_prep.py` (5 CPU-only tests). No worker,
+  no `cli.py` wiring, no weight downloads. Full pytest 229 passed at the
+  time (gates.sh red only on concurrent files).
