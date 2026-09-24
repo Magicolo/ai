@@ -3,8 +3,8 @@
 ## Design Specification for Coding Agents
 
 **Status:** Implementation specification / architecture baseline  
-**Research snapshot:** 2026-09-21  
-**Primary video backend:** LongLive 2.0 / Wan2.2-TI2V-5B  
+**Research snapshot:** 2026-09-23  
+**Video backend architecture:** pluggable LongLive 2.0, LTX-Video 0.9.8, and CausVid profiles; backend selected per run after local benchmark validation  
 **Primary audio backend:** ACE-Step 1.5  
 **Primary interface:** Python CLI + supervised worker processes  
 **Primary operating target:** Linux, NVIDIA CUDA, 64 GB system RAM, one 16 GB VRAM GPU + one 8 GB VRAM GPU  
@@ -29,7 +29,7 @@ The intended use is highly autonomous generative art:
 - Intermediate artifacts are expected and desirable.
 - The final video is assembled only when the user requests finalization.
 
-The project is intentionally **not** a general-purpose video-generation framework. It is a purpose-built autonomous audiovisual director around a streaming autoregressive video backend and an independent generative music backend.
+The project is intentionally **not** a general-purpose video-generation framework. It is a purpose-built autonomous audiovisual director around a pluggable video-generation backend and an independent generative music backend. The first supported video backends are LongLive 2.0, LTX-Video 0.9.8, and CausVid. A run selects exactly one video backend; the supervisor and persistent run format must not depend on renderer-specific state semantics.
 
 ---
 
@@ -58,7 +58,8 @@ Director / world model
   ├───────────────────────────┐
   ▼                           ▼
 Video renderer              Audio renderer
-LongLive 2.0                ACE-Step 1.5
+selected VideoBackend        ACE-Step 1.5
+(LongLive / LTX / CausVid)
   │                           │
   ▼                           ▼
 video segment               audio segment
@@ -247,7 +248,59 @@ V1 should be intentionally small and boring.
 
 # 5. Current technology choices
 
-## 5.1 Primary video backend: LongLive 2.0
+## 5.1 Video generator backend architecture
+
+The video renderer is a replaceable subsystem. The production application must not assume that every video generator is a persistent KV-cache stream. Three concrete backends are now first-class design targets:
+
+| Backend | Family | Continuation mechanism | Renderer state across segments | Native target profile | Primary reason to support |
+|---|---|---|---|---|---|
+| `longlive2` | Wan2.2-TI2V-5B / LongLive 2.0 | causal AR block append | persistent GPU KV cache, reconstructable from recovery data | 24 fps | true infinite/streaming architecture; baseline correctness target |
+| `ltxv` | LTX-Video 0.9.8 2B distilled | video-prefix conditioning / extension | no required persistent diffusion KV cache; restart by replaying the prefix clip | validate 24 or native-supported FPS | low-VRAM, fast iteration, simple crash recovery |
+| `causvid` | Wan2.1-T2V-1.3B + CausVid causal DMD | autoregressive chunk rollout with `start_latents` overlap | no required long-lived GPU cache between rollouts; continuation reconstructed from latent prefix | upstream scripts use 16 fps | fast causal continuation and straightforward long-video rollouts |
+
+The default backend must **not** be hard-coded by architecture. `voyage benchmark video` should produce a machine-specific benchmark report and `voyage init` should record the selected backend explicitly in the run manifest.
+
+The supervisor-facing interface is conceptually:
+
+```python
+class VideoBackend(Protocol):
+    async def initialize(self, profile: VideoProfile) -> BackendCapabilities: ...
+    async def generate_segment(self, request: VideoSegmentRequest) -> VideoSegmentResult: ...
+    async def checkpoint(self) -> VideoBackendCheckpoint | None: ...
+    async def restore(self, checkpoint: VideoBackendCheckpoint) -> None: ...
+    async def health(self) -> BackendHealth: ...
+    async def shutdown(self) -> None: ...
+```
+
+A backend may implement `checkpoint()` as a no-op when all continuation state can be reconstructed from committed media or deterministic latent prefixes. The supervisor must therefore distinguish:
+
+```text
+state_mode =
+    persistent_kv
+    reconstructable_prefix
+    independent_clip
+```
+
+`LongLive 2.0` uses `persistent_kv`; `LTX-Video` and `CausVid` should initially use `reconstructable_prefix`. This distinction is important: **application-level resumability is mandatory even when model-level statefulness is not**.
+
+### Backend selection rule
+
+Do not select a backend using published FPS alone. Published FPS is useful for identifying promising architectures but is not a local hardware guarantee. A candidate becomes a supported production profile only after:
+
+1. exact model revision and upstream commit are pinned;
+2. the generator passes a finite correctness smoke test;
+3. the requested resolution/FPS configuration is validated;
+4. peak VRAM and host RAM are measured;
+5. the steady-state generation ratio is measured after warm-up;
+6. crash recovery is tested;
+7. visual continuation quality is reviewed for at least 3 consecutive segments;
+8. the benchmark record is stored with the run.
+
+The current LongLive implementation remains documented below as the reference persistent-stream backend. The LTX-Video and CausVid sections add alternative implementations without changing the director, audio, novelty, persistence, or finalization architecture.
+
+> **As-built note (2026-09-24):** the live codebase already wires two of these three backends. `voyage/backends.py` carries the sync `VideoBackend` precursor; `voyage/supervisor.py:VIDEO_WORKER_MODULES = {fake, longlive2, ltxv}` with `STREAMING_VIDEO_BACKENDS = (longlive2, ltxv)`; the worker RPC op is `generate_blocks` (not the async `generate_segment` sketched above — that remains the target interface). CausVid has no worker/registry/preset entry (`grep causvid voyage/` is empty) and stays planned-not-built.
+
+## 5.2 LongLive 2.0
 
 Use the current LongLive repository:
 
@@ -308,8 +361,280 @@ LongLive 1.0 checkpoint:
 Its model license is different from LongLive 2.0; record it separately when using it.
 
 ---
+## 5.3 LTX-Video 0.9.8 backend
 
-## 5.2 Video base model: Wan2.2-TI2V-5B
+### Upstream sources
+
+- Repository: https://github.com/Lightricks/LTX-Video
+- Model collection: https://huggingface.co/Lightricks/LTX-Video
+- 2B distilled checkpoint: `Lightricks/LTX-Video/ltxv-2b-0.9.8-distilled.safetensors`
+- 2B distilled FP8 checkpoint: `Lightricks/LTX-Video/ltxv-2b-0.9.8-distilled-fp8.safetensors`
+- Current ComfyUI extension: https://github.com/Lightricks/ComfyUI-LTXVideo
+
+The 0.9.8 2B distilled model is a particularly important target for the user's 16 GB GPU because the upstream model table describes the 2B distilled variant as intended for light VRAM usage, and the repository also publishes an FP8 variant. The exact model licenses are version-specific and currently presented as `other` on Hugging Face; the implementation must download and archive the exact license text associated with the selected checkpoint rather than infer a generic license from the repository.
+
+### Architectural role in Voyage
+
+LTX-Video is not a persistent infinite KV-cache generator in the same sense as LongLive. Voyage should use it as a **stateless segment-extension generator**:
+
+```text
+committed segment N
+       │
+       ├── extract a prefix/tail conditioning clip
+       │
+       ▼
+LTX-Video 0.9.8 distilled
+       │
+       ├── prompt for current transition stage
+       ├── previous tail as conditioning media
+       └── deterministic seed/config
+       │
+       ▼
+extended clip containing conditioning prefix + new frames
+       │
+       ├── discard duplicate conditioning frames
+       └── commit only newly generated frames
+       │
+       ▼
+segment N+1
+```
+
+This has a major operational advantage over LongLive: a video worker restart does not require serializing a large diffusion KV cache. The supervisor can reconstruct the next request from the last committed media tail and the stored random seed/configuration.
+
+### Required constraints
+
+The adapter must inspect the exact installed upstream code and model metadata before choosing these values. Do not assume the old LTX-Video 0.9.6 settings remain valid for 0.9.8.
+
+The implementation must validate at runtime that:
+
+- the selected 0.9.8 checkpoint is actually present;
+- the checkpoint's allowed inference-step schedule is compatible with the requested profile;
+- the requested width and height are accepted by the pipeline and are divisible by the model's required spatial granularity;
+- the requested number of frames satisfies the model's temporal-frame constraint (the upstream README documents `8*n+1` style frame counts for the 0.9.x line);
+- conditioning-media frame count satisfies the same contract;
+- the target frame index supplied to the extension API satisfies its multiple-of-8 requirement;
+- the generated frame rate is explicitly recorded rather than assumed to equal the final Voyage frame rate.
+
+### Recommended development profile
+
+Start with the smallest stable 2B checkpoint:
+
+```toml
+[video]
+backend = "ltxv"
+render_width = 768
+render_height = 432
+fps = 24
+
+[video.ltxv]
+repo = "https://github.com/Lightricks/LTX-Video"
+repo_revision = "<pin exact commit>"
+model_id = "Lightricks/LTX-Video/ltxv-2b-0.9.8-distilled"
+precision = "bfloat16"
+stochastic_sampling = false
+conditioning_tail_frames = 25
+conditioning_strength = 1.0
+segment_target_frames = 121
+```
+
+The numerical values above are **initial experiment defaults**, not upstream guarantees. The adapter must benchmark 81, 97, 121, and any other frame count actually supported by the checkpoint, then select a segment length that gives a useful generation/conditioning tradeoff.
+
+At 24 fps, 121 frames is approximately 5.04 seconds. With 25 conditioning frames, the adapter would commit approximately 96 new frames (4.0 seconds) if the pipeline returns the full conditioned+generated sequence. The precise overlap must be verified empirically from the generated frame count; never assume that the pipeline's returned tensor contains exactly the requested number of novel frames.
+
+### Recovery semantics
+
+LTX recovery should store:
+
+```json
+{
+  "backend": "ltxv",
+  "state_mode": "reconstructable_prefix",
+  "source_segment_id": "000123",
+  "conditioning_tail_path": "segments/000123/video_tail.mp4",
+  "conditioning_tail_sha256": "...",
+  "prompt_plan_hash": "...",
+  "seed": 123456,
+  "model_revision": "...",
+  "pipeline_revision": "...",
+  "profile_hash": "..."
+}
+```
+
+No GPU cache tensor is required. The recovery procedure is:
+
+1. verify the last committed segment;
+2. verify the conditioning tail checksum;
+3. restart the LTX worker if necessary;
+4. reproduce the next deterministic generation request;
+5. discard the conditioned prefix from the returned clip;
+6. commit only the novel frames.
+
+For production, the adapter should persist an explicit conditioning-tail file so recovery does not depend on extracting a video frame range from a large historical segment.
+
+### Performance experimentation
+
+The LTX backend exists primarily to reduce iteration time. Benchmark separately:
+
+- BF16 2B distilled;
+- FP8 2B distilled, if the exact 0.9.8 FP8 integration is supported by the installed kernels;
+- official/verified Q8 kernel path if the selected revision still supports it;
+- TeaCache only as an optional experimental acceleration, never silently in the correctness profile;
+- each supported inference-step schedule exposed by the exact checkpoint metadata;
+- 768×432 and the closest model-native resolution if 768×432 is internally binned or padded.
+
+Record `time_to_first_output`, `seconds_generated`, `wall_seconds`, `steady_state_ratio`, `peak_vram_bytes`, and `peak_cpu_ram_bytes`. Published LTX timing is not a local guarantee.
+
+### Continuation-quality rule
+
+Because LTX is a conditioned extension rather than a persistent AR cache, the director must avoid changing the semantic prompt too abruptly between every call. The director should hold the same prompt stage for at least one full LTX segment and use the tail-conditioning image/video plus a transition prompt to bridge to the next stage.
+
+The adapter must expose whether a prompt change occurred relative to the previous segment, allowing the benchmark and later visual inspector to correlate prompt changes with boundary artifacts.
+
+---
+
+## 5.4 CausVid backend
+
+### Upstream sources
+
+- Repository: https://github.com/tianweiy/CausVid
+- Model/weights: https://huggingface.co/tianweiy/CausVid
+- Paper: https://causvid.github.io/
+- Base model: https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
+
+CausVid is a causal autoregressive video diffusion system built by converting a bidirectional Wan2.1-T2V-1.3B model into a causal generator and applying distribution-matching distillation. The upstream README reports streaming generation around 9.4 FPS on a single GPU and provides both a 3-step autoregressive short-video path and an autoregressive long-video rollout path.
+
+The CausVid model release is subject to a **CC BY-NC-SA 4.0** license according to its Hugging Face model documentation. This is compatible with the current noncommercial Voyage use case, but it must remain explicit in `docs/LICENSES.md` and `run_manifest.json`.
+
+### Architectural role in Voyage
+
+CausVid should initially use the upstream long-video strategy rather than inventing a new persistent cache format:
+
+```text
+committed video segment N
+        │
+        ├── encode a short video tail to Wan latent space
+        ├── retain the required overlap latent frames
+        └── construct `start_latents`
+        │
+        ▼
+CausVid `InferencePipeline.inference()`
+        │
+        ├── new Gaussian noise for next chunk
+        ├── current director prompt
+        └── `start_latents` continuation state
+        │
+        ▼
+new video chunk
+        │
+        ├── remove overlapped decoded frames
+        └── commit novel frames
+```
+
+The upstream long-video implementation explicitly reconstructs `start_latents` from the tail of the generated video and the previous latent rollout, then calls the causal inference pipeline again. This means a worker restart can be made recoverable without serializing the full model's GPU-side execution state.
+
+### Upstream timing and tensor contract
+
+The public CausVid configuration currently uses:
+
+```yaml
+denoising_step_list:
+- 1000
+- 757
+- 522
+- 0
+num_frame_per_block: 3
+image_or_video_shape:
+- 1
+-  21
+- 16
+- 60
+- 104
+```
+
+The upstream long-video script writes at **16 fps** and uses the 21-latent-frame chunk configuration shown above. The exact decoded frame count and effective novel-frame count after overlap must be measured from the current repository rather than inferred from tensor shape alone.
+
+Voyage therefore treats CausVid's native frame rate as backend-specific configuration. Do not silently pretend that native 16 fps is 24 fps. A CausVid run may either:
+
+1. use 16 fps end-to-end; or
+2. use a separately validated final interpolation/resampling stage.
+
+Simple frame duplication from 16 to 24 fps is not acceptable for the final production path.
+
+### Recommended development profile
+
+```toml
+[video]
+backend = "causvid"
+render_width = 832
+render_height = 480
+fps = 16
+final_width = 768
+final_height = 432
+
+[video.causvid]
+repo = "https://github.com/tianweiy/CausVid"
+repo_revision = "<pin exact commit>"
+base_model_id = "Wan-AI/Wan2.1-T2V-1.3B"
+checkpoint_id = "tianweiy/CausVid"
+checkpoint_revision = "<pin exact revision>"
+num_frame_per_block = 3
+latent_chunk_frames = 21
+num_overlap_frames = 3
+sampling_steps = 3
+```
+
+These values mirror the current upstream examples and must be validated against the pinned commit before implementation. The adapter should not hard-code the output resolution from this example into the generic `VideoProfile`.
+
+### Recovery semantics
+
+Persist:
+
+```text
+recovery.pt or recovery.safetensors:
+    previous_tail_latents
+    previous_tail_decoded_tail metadata
+    next_rollout index
+    RNG seed/state sufficient for replay
+    checkpoint/profile identifiers
+```
+
+However, prefer the smallest recoverable artifact. If `start_latents` can be reconstructed deterministically from a committed tail video plus a few stored latent blocks, store those components rather than a complete model cache.
+
+At minimum the segment metadata must record:
+
+- `num_overlap_frames`;
+- actual decoded overlap frame count;
+- actual newly committed frame count;
+- latent-tail tensor shape and dtype;
+- whether the first latent is an encoded video frame or a generated latent;
+- exact CausVid commit/config hash.
+
+### Prompt evolution
+
+CausVid can accept a new text prompt on each inference call. Voyage should not exploit that capability by making every rollout a new scene. Use the same `WorldState`/`TransitionPlan` abstraction as LongLive and LTX, with the rollout prompt selecting the current transition stage.
+
+For gradual semantic drift, one destination should normally span multiple CausVid rollouts. The director may alter camera, material, lighting, motion, and environment incrementally before changing the canonical concept.
+
+### Performance profile
+
+CausVid's primary purpose in Voyage is to test whether a smaller causal Wan-derived model can deliver a dramatically better generation ratio than the user's LongLive measurement while maintaining useful visual continuity.
+
+Benchmark at minimum:
+
+- upstream 16 fps / 832×480 profile;
+- reduced 768×432-compatible profile if the model tolerates it;
+- 3-step default path;
+- all supported fast-step variants found in the exact checkpoint/config;
+- overlap values 1, 2, 3, and any larger supported value;
+- `torch.compile` only after an eager correctness baseline exists;
+- VAE decode isolated from transformer timing.
+
+The benchmark must distinguish **causal-generation throughput** from final encoded-video throughput and must measure novel frames per wall second after overlap removal.
+
+---
+
+
+## 5.5 LongLive 2.0 video base model: Wan2.2-TI2V-5B
 
 Model:
 
@@ -383,7 +708,7 @@ The implementation must calculate and validate these dimensions rather than hard
 
 ---
 
-## 5.3 LongLive 2.0 checkpoint choices
+## 5.6 LongLive 2.0 checkpoint choices
 
 ### Preferred rapid-iteration checkpoint
 
@@ -429,7 +754,7 @@ Do not silently cast a quantized checkpoint to BF16.
 
 ---
 
-## 5.4 LongLive model licensing
+## 5.7 LongLive model licensing
 
 The current LongLive 2.0 repository code is released under Apache 2.0.
 
@@ -445,6 +770,8 @@ For every run, the exact model identifier, revision, local checkpoint hash if pr
 Do not make a general legal claim such as “the model is Apache licensed” merely because the GitHub repository is Apache licensed.
 
 ---
+
+
 
 # 6. Primary audio backend: ACE-Step 1.5
 
@@ -655,7 +982,7 @@ The application consists of one supervisor and multiple long-lived worker proces
               │                │
       ┌───────▼──────┐   ┌─────▼────────┐
       │ video worker │   │ audio worker │
-      │ LongLive 2.0 │   │ ACE-Step 1.5 │
+      │ video backend│   │ ACE-Step 1.5 │
       │ GPU 0 16 GB  │   │ GPU 1  8 GB  │
       └──────────────┘   └──────────────┘
               ▲
@@ -872,7 +1199,7 @@ Reasoning:
 - better fit for a CLI application than embedding a giant YAML schema;
 - backend-specific configuration may remain in native formats if required.
 
-The supervisor should not attempt to normalize every LongLive config field. Instead, define an explicit `LongLiveProfile` in the voyage configuration and translate it into the upstream configuration contract.
+The supervisor should not attempt to normalize every generator-specific field. Define explicit backend profiles (`LongLiveProfile`, `LTXVideoProfile`, `CausVidProfile`) and translate each profile into the exact upstream configuration contract. The common supervisor-visible fields should remain limited to resolution, timeline, segment duration, continuation semantics, randomness policy, and resource limits.
 
 Example:
 
@@ -905,12 +1232,19 @@ world_decision_interval_seconds = 16
 blocks_per_prompt_stage = 3
 
 [video]
-backend = "longlive2"
+backend = "longlive2" # longlive2 | ltxv | causvid
 fps = 24
 render_width = 1280
 render_height = 704
 final_width = 768
 final_height = 432
+segment_seconds = 16
+
+[video.longlive]
+repo = "https://github.com/NVlabs/LongLive"
+repo_revision = "<pin a commit at implementation time>"
+checkpoint = "<local path>"
+model_id = "Efficient-Large-Model/LongLive-2.0-5B-NVFP4-S2"
 num_frame_per_block = 8
 local_attn_size = 32
 sink_size = 8
@@ -921,12 +1255,30 @@ sampling_steps = 2
 kv_quant = true
 streaming_vae = true
 async_vae = true
+state_mode = "persistent_kv"
 
-[video.longlive]
-repo = "https://github.com/NVlabs/LongLive"
+[video.ltxv]
+repo = "https://github.com/Lightricks/LTX-Video"
 repo_revision = "<pin a commit at implementation time>"
-checkpoint = "<local path>"
-model_id = "Efficient-Large-Model/LongLive-2.0-5B-NVFP4-S2"
+model_id = "Lightricks/LTX-Video/ltxv-2b-0.9.8-distilled"
+precision = "bfloat16"
+conditioning_tail_frames = 25
+conditioning_strength = 1.0
+segment_target_frames = 121
+stochastic_sampling = false
+state_mode = "reconstructable_prefix"
+
+[video.causvid]
+repo = "https://github.com/tianweiy/CausVid"
+repo_revision = "<pin a commit at implementation time>"
+base_model_id = "Wan-AI/Wan2.1-T2V-1.3B"
+checkpoint_id = "tianweiy/CausVid"
+checkpoint_revision = "<pin exact checkpoint revision>"
+num_frame_per_block = 3
+latent_chunk_frames = 21
+num_overlap_frames = 3
+sampling_steps = 3
+state_mode = "reconstructable_prefix"
 
 [audio]
 backend = "acestep"
@@ -956,6 +1308,7 @@ The implementation must validate all numeric controller ranges and reject imposs
 
 ---
 
+> **As-built note (2026-09-24):** the live `VideoConfig` still uses `segment_frames` + `blocks_per_segment` + `quantization (fp8|bf16)` with backend presets for `fake|longlive2|ltxv` (`voyage/config.py:with_video_backend`). `segment_seconds` and `[video.longlive/ltxv/causvid]` blocks above are the target schema — adopt them (or an adapter) before implementing the CausVid backend.
 # 15. Style charter model
 
 The style charter is represented by a dedicated immutable object:
@@ -1455,14 +1808,6 @@ persistent history
 `local_attn_size` controls how many temporal frames participate in the local rolling window.
 
 `multi_shot_sink` can preserve special chunks across scene transitions.
-
-Production values (see §22.5 for the full continuity analysis):
-`local_attn_size=16`, `sink_size=8` (16-frame cache = 8-frame sink + one
-rolling 8-frame block). HARD FLOOR: `sink + num_frame_per_block` must fit
-inside `local_attn_size`, else the sink consumes the whole cache and every
-chunk regenerates from noise+text alone. Upstream's 32/8 needs >24GB VRAM;
-16/8 fits 16GB cards only with the VAE-offload-for-generate
-(`generate_blocks` parks the 1.31GB VAE on CPU during denoising).
 
 Do not modify cache tensors from unrelated threads.
 
@@ -2198,6 +2543,7 @@ The supervisor should never issue two concurrent GPU-generation requests to the 
 
 ---
 
+> **As-built note (2026-09-24):** live worker RPC (`voyage/workers/loop.py`, `voyage/rpc.py`) is synchronous JSONL over stdio with op `generate_blocks` (multi-block payload for streaming backends + resume hook + ACE-Step GPU swap). The async `generate_segment`/`checkpoint`/`restore` sketch in §5.1 is the target, not the current wire contract.
 # 47. Supervisor state machine
 
 The supervisor controls lifecycle.
@@ -2237,29 +2583,13 @@ Define explicit errors.
 
 ```python
 class VoyageError(Exception): ...
-
-
 class ConfigurationError(VoyageError): ...
-
-
 class WorkerError(VoyageError): ...
-
-
 class RecoverableWorkerError(WorkerError): ...
-
-
 class FatalWorkerError(WorkerError): ...
-
-
 class MediaError(VoyageError): ...
-
-
 class StateError(VoyageError): ...
-
-
 class ModelCompatibilityError(VoyageError): ...
-
-
 class DiskSpaceError(VoyageError): ...
 ```
 
@@ -2645,7 +2975,7 @@ Status: RUNNING
 Uptime: 03:17:42
 
 Video
-  Backend: LongLive 2.0 / NVFP4 S2
+  Backend: <selected video backend>
   Render: 1280×704
   Timeline: 00:47:21
   Segments: 177
@@ -2864,6 +3194,7 @@ A future migration mechanism may permit it, but V1 should avoid mixing model beh
 
 ---
 
+Video-generator profiles also include `ltxv-*` (reconstructable prefix, bf16-first) and planned `causvid-*` names; recovery tapes never resume across backends or numerics (see §118 as-built note).
 # 66. Performance goals
 
 Because the user's local GPU models are unspecified in this document, V1 should establish goals rather than promise specific FPS values.
@@ -3669,6 +4000,37 @@ Official base model:
 
 https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B
 
+### LTX-Video 0.9.8 2B distilled
+
+```bash
+hf download Lightricks/LTX-Video \
+  ltxv-2b-0.9.8-distilled.safetensors \
+  --local-dir ./models/LTX-Video 
+```
+
+Optional FP8 checkpoint:
+
+```bash
+hf download Lightricks/LTX-Video \
+  ltxv-2b-0.9.8-distilled-fp8.safetensors \
+  --local-dir ./models/LTX-Video 
+```
+
+The implementation must also archive the exact license text for the selected checkpoint. Do not assume the repository's overall license applies to the individual model file.
+
+### CausVid
+
+```bash
+hf download Wan-AI/Wan2.1-T2V-1.3B \
+  --local-dir ./models/Wan2.1-T2V-1.3B
+
+hf download tianweiy/CausVid \
+  checkpoints/model.pt \
+  --local-dir ./models/CausVid
+```
+
+The exact checkpoint path and repository layout must be confirmed against the pinned CausVid commit; do not silently substitute a different checkpoint.
+
 ### ACE-Step 1.5
 
 The preferred route is the official ACE-Step installation/downloader because the repository bundles multiple compatible components:
@@ -3729,9 +4091,13 @@ with a table like:
 
 | Component | Model | License | Source |
 |---|---|---|---|
-| Video | LongLive 2.0 5B NVFP4 S2 | NVIDIA Open Model License | HF model card |
+| Video | LongLive 2.0 5B NVFP4 S2 | NVIDIA Open Model License / current model card terms | HF model card |
+| Video | LTX-Video 0.9.8 2B distilled | exact checkpoint license; current HF metadata says `other` | HF model card / bundled license |
+| Video | CausVid checkpoint | CC BY-NC-SA 4.0 | HF model card |
 | Video base | Wan2.2-TI2V-5B | Apache-2.0 | HF model card |
+| Video base | Wan2.1-T2V-1.3B | verify current model card | HF model card |
 | Video code | LongLive repo | Apache-2.0 | GitHub |
+| Video code | CausVid repo | verify current repository license | GitHub |
 | Music | ACE-Step 1.5 | MIT | GitHub/HF |
 | Director | Qwen3-8B | Apache-2.0 | HF |
 | Embedding | all-MiniLM-L6-v2 | verify current card | HF |
@@ -4610,9 +4976,11 @@ Do not introduce retrieval infrastructure before the simple novelty store demons
 
 ---
 
-# 118. Future model migration strategy
+# 118. Video backend migration and recovery contract
 
-The backend interface should eventually permit:
+The backend interface is now a V1 requirement rather than a future optimization. It must permit all supported generators without making the supervisor aware of model-specific tensor shapes.
+
+The backend interface should permit:
 
 ```python
 class VideoBackend(Protocol):
@@ -4629,6 +4997,7 @@ Possible implementations:
 ```text
 LongLive2Backend
 LTXVBackend
+CausVidBackend
 FramePackBackend
 MAGIBackend
 SkyReelsBackend
@@ -4638,9 +5007,10 @@ The supervisor must not depend on a concrete backend implementation.
 
 ---
 
-# 119. Upgrade path to newer LongLive releases
+> **As-built note (2026-09-24):** only `longlive2` (persistent KV, `recovery.pt` with tail latents + prompt embeds + `noise_rng_state`) and `ltxv` (reconstructable prefix, `recovery.pt{profile:ltxv, tail_png}` + `<stem>_tail.png`, 768×512, `25+(B-1)*24` frames, bf16-first, `generate --backend ltxv` default) are wired. `CausVidBackend` is still spec-only.
+# 119. Generator upgrade and benchmark policy
 
-LongLive 2.0 is the initial design target because it is currently the most directly aligned upstream architecture.
+LongLive 2.0, LTX-Video 0.9.8, and CausVid are all explicit generator profiles. Their selection must be driven by local benchmark evidence rather than a permanent ranking in this document. New model releases may be added behind the same interface.
 
 Future LongLive releases may add:
 
@@ -4659,20 +5029,36 @@ Never make the public CLI expose dozens of backend-specific flags.
 
 # 120. Initial production profile recommendation
 
-Once Phase 0 and Phase 2 pass their acceptance tests, the first production candidate should be approximately:
+Once the generator-correctness benchmark and recovery tests pass, the first production candidate should be selected from the three validated profiles rather than assumed in advance. The run manifest must preserve the exact selection.
+
+Reference profiles are:
 
 ```text
-Video:
+Video profile A — LongLive 2.0:
   backend = LongLive 2.0
   model = LongLive-2.0-5B-NVFP4-S2
-  steps = 2
+  state mode = persistent_kv
   frame block = 8 latent frames
   local attention = 32
   sink size = 8
-  relative RoPE = enabled and validated
-  KV quantization = enabled if checkpoint/config support it
-  streaming VAE = enabled if stable
+  relative RoPE = enabled only after correctness validation
+  KV quantization = enabled only when supported by the exact hardware/checkpoint
   output FPS = 24
+
+Video profile B — LTX-Video 0.9.8:
+  backend = LTX-Video
+  model = ltxv-2b-0.9.8-distilled or validated FP8 variant
+  state mode = reconstructable_prefix
+  continuation = conditioning tail + generated novel frames
+  FPS = exact validated native profile (prefer 24 if stable)
+
+Video profile C — CausVid:
+  backend = CausVid
+  model = Wan2.1-T2V-1.3B + CausVid checkpoint
+  state mode = reconstructable_prefix
+  frame block = 3 latent frames
+  long-video rollout = upstream latent-overlap strategy
+  native FPS = 16 unless a validated alternative exists
 
 Audio:
   backend = ACE-Step 1.5
@@ -4878,12 +5264,14 @@ The recommended order is:
 6. Create the supervisor skeleton.
 7. Implement state + CLI + fake workers.
 8. Get end-to-end fake generation passing.
-9. Integrate real LongLive in one finite segment.
-10. Refactor LongLive into a persistent streaming session.
-11. Add recovery.
-12. Add autonomous director.
-13. Add ACE-Step audio.
-14. Add endurance tests.
+9. Audit the real LongLive implementation and record the measured bottleneck.
+10. Establish the backend-neutral `VideoBackend` interface with a fake implementation.
+11. Integrate real LongLive in one finite segment and, if retained, its persistent stream/recovery path.
+12. Integrate LTX-Video 0.9.8 as a reconstructable-prefix backend.
+13. Integrate CausVid as a reconstructable-prefix backend.
+14. Add autonomous director.
+15. Add ACE-Step audio.
+16. Add cross-backend recovery and endurance tests.
 ```
 
 Do not reverse this order.
@@ -5070,9 +5458,22 @@ The following links are the primary technical references for implementation.
 
 - https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
 
-## Alternative video backends
+## Supported alternative video backends
 
+### LTX-Video
+
+- https://github.com/Lightricks/LTX-Video
+- https://huggingface.co/Lightricks/LTX-Video
 - https://github.com/Lightricks/ComfyUI-LTXVideo
+
+### CausVid
+
+- https://github.com/tianweiy/CausVid
+- https://huggingface.co/tianweiy/CausVid
+- https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B
+
+## Other alternative video backends
+
 - https://github.com/lllyasviel/FramePack
 - https://github.com/SandAI-org/MAGI-1
 - https://github.com/SkyworkAI/SkyReels-V2
@@ -5141,6 +5542,117 @@ That separation is what allows the system to run indefinitely without requiring 
 
 ---
 
+
+# 137A. Video generator benchmark and backend qualification
+
+The video renderer is now a first-class interchangeable subsystem. Before a backend can be used for an autonomous overnight or multi-day run, it must pass a qualification suite that measures both **correctness** and **generation efficiency**.
+
+The qualification command should eventually support:
+
+```bash
+voyage benchmark video --backend longlive2 --profile correctness
+voyage benchmark video --backend longlive2 --profile throughput
+voyage benchmark video --backend ltxv --profile throughput
+voyage benchmark video --backend causvid --profile throughput
+voyage benchmark video --all
+```
+
+Every benchmark record must contain:
+
+- exact repository revision;
+- exact checkpoint identifiers and revisions;
+- model file SHA-256 where practical;
+- Python version;
+- PyTorch version;
+- CUDA runtime version;
+- NVIDIA driver version;
+- GPU PCI identifiers, compute capability, total VRAM;
+- host RAM;
+- OS/kernel;
+- resolution and FPS;
+- frame count requested;
+- novel frame count actually committed;
+- warm-up duration;
+- steady-state wall time;
+- wall time per generated second;
+- peak and average VRAM;
+- peak host RAM;
+- GPU utilization statistics;
+- transformer time;
+- text-encoding time;
+- VAE time;
+- CPU↔GPU transfer time where measurable;
+- final encoded-media time;
+- error/restart count;
+- output hashes.
+
+A backend may be considered operationally preferable only after the benchmark demonstrates that its **novel-frame throughput** is materially better than the LongLive baseline or that it offers a required quality/recovery property. No static ranking in this design document overrides empirical benchmark results.
+
+# 137B. Cross-backend continuation semantics
+
+The supervisor defines one logical segment timeline but allows backend-specific continuation mechanisms.
+
+For each generated segment:
+
+```text
+logical segment interval
+        │
+        ├── conditioning/prefix frames (may overlap previous segment)
+        ├── newly generated frames
+        └── optional lookahead frames not yet committed
+```
+
+Only the novel committed interval advances the voyage timeline. This rule is necessary to avoid duplicate frames when LTX or CausVid uses explicit overlap.
+
+Each backend must report:
+
+```text
+requested_output_frames
+returned_output_frames
+conditioning_frames
+novel_frames
+committed_frames
+native_fps
+presentation_fps
+```
+
+The supervisor must reject a segment when:
+
+- `committed_frames <= 0`;
+- timestamps overlap an already committed interval;
+- returned frame count does not match the backend's declared tensor contract;
+- audio alignment cannot be established;
+- the backend reports a different native FPS without an explicit timeline conversion step.
+
+# 137C. Video backend recovery classes
+
+### `persistent_kv`
+
+Used by LongLive 2.0. The worker may retain an in-memory causal KV cache between blocks, but the supervisor must still persist a compact recovery artifact. After crash, the worker is restarted and the cache is reconstructed by replaying the minimum required clean latent history rather than serializing arbitrary CUDA tensors.
+
+### `reconstructable_prefix`
+
+Used by LTX-Video and CausVid. The worker is intentionally disposable between segments. The supervisor stores the exact media/latent prefix required to reproduce the next continuation request. Recovery therefore means restarting the worker and regenerating the in-flight segment from the last committed prefix.
+
+### `independent_clip`
+
+Future backends that do not condition on prior frames may use this class. The director must then provide an explicit transition image/video keyframe to preserve visual continuity. Such a backend is not acceptable as a default Voyage renderer until transition tests demonstrate adequate continuity.
+
+# 137D. Revised development sequence for interchangeable generators
+
+The generator implementation phases are now:
+
+1. **LongLive audit:** prove whether the current 100:1 observation is caused by implementation, quantization/kernel fallback, CPU/GPU transfer, VAE, configuration, or genuine model throughput on the user's hardware.
+2. **Backend interface extraction:** isolate the supervisor from LongLive-specific state and tensor contracts.
+3. **LTX-Video finite continuation:** implement and benchmark 2B distilled extension with explicit tail-conditioning and novel-frame accounting.
+4. **CausVid finite continuation:** implement the upstream latent-overlap long-video rollout and benchmark at native settings.
+5. **Cross-backend recovery tests:** crash each worker during a segment and verify recovery from the previous commit.
+6. **Director integration:** make one transition plan work identically through all supported backends.
+7. **Long-run bake:** run the selected backend for multiple hours with forced worker restarts and periodic validation.
+8. **Production selection:** choose the backend/profile from the measured report and record it immutably in the run manifest.
+
+The old LongLive-only development sequence remains a useful implementation detail, but these phases supersede it as the project-level generator roadmap.
+
 # 138. Explicit first implementation target
 
 The first meaningful milestone should be exactly this:
@@ -5161,7 +5673,7 @@ voyage finalize \
 
 The result should be:
 
-- roughly one minute of continuous video;
+- roughly one minute of continuous video using whichever qualified video backend is selected in the run configuration;
 - generated autonomously from style-only input;
 - continuously evolving rather than hard-cutting between unrelated subjects;
 - accompanied by evolving music;
@@ -5179,10 +5691,7 @@ Coding agents should treat this document as the architectural contract.
 
 Where this document and current upstream model code disagree, **the current upstream implementation is authoritative for backend internals**, while this document remains authoritative for the Voyage application architecture, state management, separation of concerns, and operational guarantees.
 
-Any such discrepancy discovered during implementation must be documented in the relevant source file and in `docs/UPSTREAM_LONG_LIVE_PATCHES.md`.
-
----
-
+Any such discrepancy discovered during implementation must be documented in the relevant source file and in the backend-specific upstream notes, for example `docs/UPSTREAM_LONG_LIVE_PATCHES.md`, `docs/UPSTREAM_LTXV_NOTES.md`, or `docs/UPSTREAM_CAUSVID_NOTES.md`.
 # 140. Implementation progress log (non-spec, handoff record)
 
 ## 2026-09-21 — Phase 0 skeleton complete (task groups A-D, G-partial, I, J, K-unit)
@@ -5927,4 +6436,44 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   codebase invariant is absolute voyage paths. `tests/test_generate.py`
   (duration/rounding/presets/fake 4s e2e VALID + final.mp4/refusal/default
   dir/CUDA warnings). Docs: README one-shot example, OPERATIONS `generate`
-  section. Gates green (198 pytest / mypy 35).
+  section. Gates green (198 pytest / mypy 35). Follow-up fix 2026-09-24: the
+  first live `generate --backend ltxv` failed with `No module named 'torch'`
+  (slim image + no GPUs) -> `run.sh` now auto-selects `voyage-video:latest`
+  with `--gpus all` for CUDA backends (explicit env wins), pins `-w /app`
+  (the video image WORKDIR `/opt/longlive` swallowed output into the
+  ephemeral container), and the CLI fast-fails with a `voyage-video` pointer
+  when torch is missing (`_require_cuda_stack`, `find_spec`-based per §83;
+  3 tests). Proven live: the exact user command committed 5 ltxv segments
+  and wrote `final.mp4` (h264 768x432 + AAC, 5.25s), `validate` VALID 125f.
+
+## 2026-09-24 — new-DESIGN.md merged into DESIGN.md (backend-neutral spec)
+
+- Merged the full new-DESIGN proposal per Q&A agreement (append-everything,
+  removals handled case-by-case against the tree): header research snapshot
+  2026-09-23 + pluggable-backend line; §1 purpose paragraph; §2 renderer
+  diagram (`selected VideoBackend (LongLive / LTX / CausVid)`); §5 rebuilt
+  as §§5.1 (backend table + `VideoBackend` protocol + `state_mode` trio +
+  8-step selection rule), 5.2 LongLive, 5.3 LTXV, 5.4 CausVid, 5.5 base
+  model, 5.6 checkpoints, 5.7 licensing; §11.1 worker box genericized;
+  §14 backend profiles + `segment_seconds` + `[video.longlive/ltxv/causvid]`
+  blocks; §24 production-values paragraph deleted (single-sourced in
+  §22.5); §48 whitespace collapse; §59 status backend line; §85.1 LTXV +
+  CausVid downloads; §86 license rows; §§118-120 migration/recovery +
+  benchmark-driven selection + 3 reference profiles; §128 16-step order;
+  §136 supported/other split; §§137A-D (benchmark/continuation/recovery/
+  roadmap); §138 qualified target; §139 backend-specific upstream notes;
+  §137 single blank-line change.
+- Keepers: §22.5 (stream-noise RNG + preamble mirror + 16/8 floor +
+  `cache_start_frame` frame-units + `handle_rebuild` evict — live
+  `video_longlive.py` depends on each) and the full §140 log kept verbatim.
+- Codebase-reconciliation inserts (marked `As-built note (2026-09-24)` in
+  §§5/14/46/118 + `ltxv-*`/`causvid-*` profile names in §65): proposal text
+  stays canonical while the live contracts are recorded — sync
+  `backends.py:VideoBackend` precursor, `VIDEO_WORKER_MODULES` +
+  `STREAMING_VIDEO_BACKENDS`, `generate_blocks` RPC, `VideoConfig`
+  (`segment_frames`/`blocks_per_segment`/`quantization`), LTXV as-built
+  (768×512, `25+(B-1)*24`, tail-PNG, bf16-first, `generate --backend ltxv`
+  default), CausVid spec-only.
+- TASK.md gained §30 transition checklist (CausVid remaining, LTXV drift,
+  config/interface duality, missing benchmark/audit artifacts).
+- Verification: §22.5 + §140 entries confirmed present; gates below.
