@@ -300,6 +300,8 @@ The current LongLive implementation remains documented below as the reference pe
 
 > **As-built note (2026-09-24):** the live codebase already wires two of these three backends. `voyage/backends.py` carries the sync `VideoBackend` precursor; `voyage/supervisor.py:VIDEO_WORKER_MODULES = {fake, longlive2, ltxv}` with `STREAMING_VIDEO_BACKENDS = (longlive2, ltxv)`; the worker RPC op is `generate_blocks` (not the async `generate_segment` sketched above — that remains the target interface). CausVid has no worker/registry/preset entry (`grep causvid voyage/` is empty) and stays planned-not-built.
 
+> **As-built note (2026-09-24, Stream C):** the single contract is now `voyage/backends.py:VideoBackendAdapter` over the `generate_blocks` wire op — the spec's `generate_segment` + `segment_seconds`/`state_mode` vocabulary lives caller-side and maps onto live payloads/results with no wire or config change. The sketch above stays sync on purpose (live JSONL transport blocks; §46 forbids concurrent GPU ops to one worker, so `async` adds no concurrency).
+
 ## 5.2 LongLive 2.0
 
 Use the current LongLive repository:
@@ -1366,6 +1368,8 @@ The implementation must validate all numeric controller ranges and reject imposs
 ---
 
 > **As-built note (2026-09-24):** the live `VideoConfig` still uses `segment_frames` + `blocks_per_segment` + `quantization (fp8|bf16)` with backend presets for `fake|longlive2|ltxv` (`voyage/config.py:with_video_backend`). `segment_seconds` and `[video.longlive/ltxv/causvid]` blocks above are the target schema — adopt them (or an adapter) before implementing the CausVid backend.
+
+> **As-built note (2026-09-24, Stream C):** duration mapping lives in `voyage/backends.py` (`frames_for_segment_seconds`: ceil so segments never run short, min 1 frame; `segment_seconds_for_frames` for the reverse). `VideoConfig` is unchanged — `segment_frames` + `blocks_per_segment` stay the stored schema; per-backend `[video.*]` blocks remain a follow-up schema migration.
 # 15. Style charter model
 
 The style charter is represented by a dedicated immutable object:
@@ -2601,6 +2605,8 @@ The supervisor should never issue two concurrent GPU-generation requests to the 
 ---
 
 > **As-built note (2026-09-24):** live worker RPC (`voyage/workers/loop.py`, `voyage/rpc.py`) is synchronous JSONL over stdio with op `generate_blocks` (multi-block payload for streaming backends + resume hook + ACE-Step GPU swap). The async `generate_segment`/`checkpoint`/`restore` sketch in §5.1 is the target, not the current wire contract.
+
+> **As-built note (2026-09-24, Stream C):** `generate_blocks` is the sole wire op. `voyage/backends.py:VideoBackendAdapter` builds single-prompt payloads for `fake` and multi-block prompts/seeds/scene-cuts for streaming backends (`longlive2`/`ltxv`, mirroring the supervisor), and normalizes results (worker-reported frames win with fallback to requested; as-built conditioning is 0 committed duplicates; worker fps wins so a future 16 fps backend is never relabeled; transport errors propagate untouched).
 # 47. Supervisor state machine
 
 The supervisor controls lifecycle.
