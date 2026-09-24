@@ -2646,13 +2646,29 @@ Define explicit errors.
 
 ```python
 class VoyageError(Exception): ...
+
+
 class ConfigurationError(VoyageError): ...
+
+
 class WorkerError(VoyageError): ...
+
+
 class RecoverableWorkerError(WorkerError): ...
+
+
 class FatalWorkerError(WorkerError): ...
+
+
 class MediaError(VoyageError): ...
+
+
 class StateError(VoyageError): ...
+
+
 class ModelCompatibilityError(VoyageError): ...
+
+
 class DiskSpaceError(VoyageError): ...
 ```
 
@@ -6659,3 +6675,20 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   questions) and `tests/test_causvid_prep.py` (5 CPU-only tests). No worker,
   no `cli.py` wiring, no weight downloads. Full pytest 229 passed at the
   time (gates.sh red only on concurrent files).
+
+## 2026-09-24 — Console progress layer (prompts on screen, console-only)
+
+- New `voyage/console.py` renders per-segment progress for `run`,
+  `generate`, and `soak`: destination + phase, full video prompts, music
+  caption with the beat grid (`beats @ BPM`), then spinner stages and a
+  commit summary with take IDs and per-stage seconds. `--verbose` adds
+  seeds, transitions, and take reasons; console-only by contract
+  (logs/metrics untouched).
+- `rich>=13.7` is a core dependency; worker images install it explicitly
+  because they use `--no-deps`. Colors/animation engage only on a real TTY
+  with `rich` installed and color allowed; pipes/tests get identical plain
+  words. `--verbose` / `--no-color` parse on `run`, `generate`, `status`,
+  `validate`, `finalize`, `benchmark`, `soak`, and `inspect`.
+- The supervisor takes an optional progress sink (default silent), so
+  existing callers/tests are unchanged. Covered by `tests/test_console.py`
+  (12 tests); gates green (291 pytest / mypy strict / ruff + format).

@@ -24,10 +24,13 @@ RUN pip install "transformers>=4.51" "sentence-transformers" "accelerate" "safet
 
 # Voyage supervisor package (CPU-only here; GPU code lives only behind the
 # video_longlive worker module import, which this image never loads).
+# --no-deps skips rich (console progress, a core dependency), so it lands
+# explicitly on this line.
 COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
 COPY tests/ /app/tests/
-RUN pip install --no-deps -e /app
+RUN pip install --no-deps -e /app \
+    && pip install "rich>=13.7"
 
 ENV PYTHONPATH=/app \
     VOYAGE_MODELS_DIR=/models

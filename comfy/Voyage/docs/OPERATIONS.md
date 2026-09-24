@@ -18,6 +18,27 @@ Run without `--segments` for the autonomous voyage (runs until
 pause/stop/SIGINT; state re-read at each boundary; SIGINT rests PAUSED).
 After `stop`, status rests at STOP_REQUESTED until `resume`.
 
+## Console output
+
+`run` / `generate` / `soak` render per-segment progress: a header with
+the destination + phase, the full video prompt(s) and the music caption
+with the beat grid (beats @ BPM), animated spinners with live elapsed
+timers per stage (inspect/director/video/audio/validate/commit), and a
+commit summary with per-stage seconds. Two verbosity levels, console
+only (logs/metrics stay plain):
+
+```bash
+./scripts/run.sh run --run <dir> --segments 2                 # compact default
+./scripts/run.sh run --run <dir> --segments 2 --verbose       # + seeds, transitions, take reasons
+./scripts/run.sh run --run <dir> --segments 2 --no-color      # plain (also honors NO_COLOR)
+```
+
+Colors/animation engage only on a real TTY with `rich` installed
+(`rich>=13.7` is a core dependency, pinned into the worker images that
+install with `--no-deps`); pipes and tests get identical plain words.
+`--verbose` / `--no-color` also parse on `status`, `validate`,
+`finalize`, `benchmark`, `soak`, and `inspect`.
+
 ## One-shot fixed-duration video (`generate`)
 
 `generate` chains init → run → validate → finalize in one call with sane

@@ -20,6 +20,7 @@ import signal
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +30,7 @@ from voyage.atomic import atomic_write_bytes, atomic_write_json, fsync_dir
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
+from voyage.console import SegmentProgress
 from voyage.director import (
     DeterministicDirector,
     director_input_from_state,
@@ -122,9 +124,16 @@ def video_worker_module(backend: str) -> str:
 
 
 class Supervisor:
-    def __init__(self, run_dir: Path, config: ProjectConfig) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        config: ProjectConfig,
+        progress: SegmentProgress | None = None,
+    ) -> None:
         self._run_dir = run_dir
         self._config = config
+        # Optional console progress sink (None = silent; tests use None).
+        self._progress = progress
         self._logs = run_dir / paths.LOGS_DIRNAME
         video_module = video_worker_module(config.video.backend)
         video_init: dict[str, Any] = {}
@@ -226,6 +235,12 @@ class Supervisor:
         self._prefetch_future = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
+        """Progress spinner around one commit stage (no-op when silent)."""
+        if self._progress is None:
+            return nullcontext()
+        return self._progress.stage(label, detail)
 
     def _log_metric(self, event: dict[str, object]) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._config.run_id, **event})
@@ -746,13 +761,15 @@ class Supervisor:
         duration: float,
         decision: EvolutionDecision,
         recovery_tape: str | None,
-    ) -> tuple[AudioPlan, float]:
+    ) -> tuple[AudioPlan, float, str, str]:
         """Render takes when coverage runs low, then slice/assemble (§35).
 
-        Returns the segment's AudioPlan plus the seconds of music coverage
-        remaining ahead of the new segment end (drives audio_buffer_seconds).
-        Take files are immutable and versioned under `<run>/audio/`; the
-        ledger (`takes.jsonl`) is the truth the next commit plans against.
+        Returns the segment's AudioPlan, the seconds of music coverage
+        remaining ahead of the new segment end (drives
+        audio_buffer_seconds), plus the planner action/reason
+        (render/repaint/keep — surfaced in console summaries). Take files
+        are immutable and versioned under `<run>/audio/`; the ledger
+        (`takes.jsonl`) is the truth the next commit plans against.
         """
         audio_cfg = config.audio
         audio_dir = self._run_dir / "audio"
@@ -847,7 +864,7 @@ class Supervisor:
             seed=seed,
             take_ids=take_ids,
         )
-        return audio_plan, max(ahead, 0.0)
+        return audio_plan, max(ahead, 0.0), plan.action, plan.reason
 
     def _inspect_previous_segment(
         self, config: ProjectConfig, number: int, style_spec: StyleSpec
@@ -936,6 +953,60 @@ class Supervisor:
         scene = result.get("scene_summary")
         return str(scene) if isinstance(scene, str) else ""
 
+    def _segment_plan_info(
+        self,
+        config: ProjectConfig,
+        number: int,
+        segment_id: str,
+        decision: EvolutionDecision,
+        block_prompts: list[str],
+        video_payload: dict[str, Any],
+        num_blocks: int,
+        prefetch_hit: bool,
+        drift_hold: bool,
+    ) -> dict[str, Any]:
+        """Console plan dict: decision + prompts shown before the render."""
+        from voyage.audio.beat import beats_for_segment
+
+        planned_frames = video_payload.get("frames", config.video.segment_frames)
+        if not isinstance(planned_frames, int) or planned_frames <= 0:
+            planned_frames = config.video.segment_frames
+        planned_duration = planned_frames / config.video.fps
+        caption = decision.audio.music_caption or config.audio.music_style
+        energy = min(1.0, max(0.0, decision.audio.energy))
+        beats, grid_bpm = beats_for_segment(planned_duration, config.audio.beats_per_segment)
+        seeds = video_payload.get("seeds", [video_payload.get("seed", 0)])
+        cuts = video_payload.get("scene_cuts", [])
+        return {
+            "number": number,
+            "segment_id": segment_id,
+            "destination": decision.destination_concept,
+            "phase": decision.phase,
+            "novelty_accepted": decision.novelty_accepted,
+            "drift_hold": drift_hold,
+            "prefetch_hit": prefetch_hit,
+            "director_backend": config.director.backend,
+            "video_backend": config.video.backend,
+            "audio_backend": config.audio.backend,
+            "geometry": f"{config.video.width}x{config.video.height}",
+            "fps": config.video.fps,
+            "planned_frames": planned_frames,
+            "planned_duration": planned_duration,
+            "blocks": num_blocks,
+            "video_prompts": list(block_prompts),
+            "video_seeds": list(seeds) if isinstance(seeds, list) else [seeds],
+            "scene_cuts": list(cuts) if isinstance(cuts, list) else [],
+            "transition_mechanism": decision.transition.mechanism,
+            "transition_stages": list(decision.transition.intermediate_stages),
+            "audio_caption": caption,
+            "audio_energy": energy,
+            "audio_bpm": grid_bpm,
+            "audio_beats": beats,
+            "audio_texture": decision.audio.texture,
+            "audio_environment": list(decision.audio.environment),
+            "notes": decision.notes,
+        }
+
     def commit_one_segment(self) -> str:
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
@@ -949,6 +1020,8 @@ class Supervisor:
         segment_id = paths.format_segment_id(number)
         segment = paths.segment_dir(self._run_dir, segment_id)
         segment.mkdir(parents=True, exist_ok=True)
+        if self._progress is not None:
+            self._progress.segment_start(number, segment_id)
 
         # 1. Director proposal (validated schema; never writes state itself).
         # §74 proposal transaction: validate → novelty → style → accept.
@@ -961,7 +1034,10 @@ class Supervisor:
         # 1b. Piggyback inspect of the previous segment (§44, experimental):
         # ordered, synchronous, never blocking the commit on failure.
         inspect_started = time.monotonic()
-        measured_context, amendments = self._inspect_previous_segment(config, number, style_spec)
+        with self._stage("inspect", "previous segment"):
+            measured_context, amendments = self._inspect_previous_segment(
+                config, number, style_spec
+            )
         stage_seconds["inspect"] = round(time.monotonic() - inspect_started, 3)
         # Prefetched raw proposal (computed during the previous segment's
         # render window). Usable only without fresh inspect amendments —
@@ -969,17 +1045,21 @@ class Supervisor:
         prefetched_raw = self._take_prefetch(number, segment_id)
         if amendments:
             prefetched_raw = None
+        prefetch_hit = prefetched_raw is not None
+        drift_every = max(1, config.voyage.drift_every_n_segments)
+        drift_hold = number % drift_every != 0
         director_started = time.monotonic()
-        decision = self._accept_director_decision(
-            config,
-            state,
-            store,
-            style_spec,
-            segment_id,
-            measured_context,
-            amendments,
-            prefetched_raw=prefetched_raw,
-        )
+        with self._stage("director", config.director.backend):
+            decision = self._accept_director_decision(
+                config,
+                state,
+                store,
+                style_spec,
+                segment_id,
+                measured_context,
+                amendments,
+                prefetched_raw=prefetched_raw,
+            )
         stage_seconds["director"] = round(time.monotonic() - director_started, 3)
         # Prefetch the next segment's raw proposal while this one renders
         # (CPU director vs GPU video — no contention by construction).
@@ -1032,14 +1112,32 @@ class Supervisor:
         else:
             video_payload["prompt"] = prompt_plan.stages[0].prompt
             video_payload["seed"] = video_seed(config.seed, number, 0)
-        video_result = self._call_with_restart(
-            self._video,
+        if self._progress is not None:
+            self._progress.segment_plan(
+                self._segment_plan_info(
+                    config,
+                    number,
+                    segment_id,
+                    decision,
+                    block_prompts,
+                    video_payload,
+                    num_blocks,
+                    prefetch_hit,
+                    drift_hold,
+                )
+            )
+        with self._stage(
             "video",
-            segment_id,
-            "generate_blocks",
-            video_payload,
-            restart_hook=self._resume_video_worker if streaming else None,
-        )
+            f"{config.video.backend} {config.video.width}x{config.video.height}",
+        ):
+            video_result = self._call_with_restart(
+                self._video,
+                "video",
+                segment_id,
+                "generate_blocks",
+                video_payload,
+                restart_hook=self._resume_video_worker if streaming else None,
+            )
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
         # request), so the timeline always matches reality.
@@ -1057,24 +1155,26 @@ class Supervisor:
         duration = frames / config.video.fps
         video_time = state.timeline_frames / config.video.fps
         audio_started = time.monotonic()
-        audio_plan, audio_ahead = self._ensure_audio_coverage(
-            config,
-            number,
-            segment_id,
-            segment,
-            video_time,
-            duration,
-            decision,
-            recovery_tape,
-        )
+        with self._stage("audio", config.audio.backend):
+            audio_plan, audio_ahead, take_action, take_reason = self._ensure_audio_coverage(
+                config,
+                number,
+                segment_id,
+                segment,
+                video_time,
+                duration,
+                decision,
+                recovery_tape,
+            )
         stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
 
         # 4. Validate before anything claims the segment is committed.
         validate_started = time.monotonic()
-        video_info = validate_video(
-            video_out, config.video.width, config.video.height, config.video.fps
-        )
-        audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
+        with self._stage("validate", "media checks"):
+            video_info = validate_video(
+                video_out, config.video.width, config.video.height, config.video.fps
+            )
+            audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
         if abs(float(video_info["duration"]) - duration) > AV_ALIGNMENT_TOLERANCE_SECONDS:
             raise MediaError(f"segment {segment_id} A/V duration drift")
         stage_seconds["validate"] = round(time.monotonic() - validate_started, 3)
@@ -1082,42 +1182,43 @@ class Supervisor:
         # 5. Metadata → checksums → DONE → state. No state file may claim
         # the segment is committed until artifacts are valid and durable.
         commit_started = time.monotonic()
-        world = SegmentWorldState(
-            segment_id=segment_id,
-            current_concept=state.current_concept,
-            destination_concept=decision.destination_concept,
-            phase=decision.phase,
-            seed=config.seed,
-        )
-        atomic_write_json(segment / "world_state.json", world.model_dump())
-        atomic_write_json(segment / "transition.json", decision.model_dump())
-        atomic_write_json(segment / "prompt_plan.json", prompt_plan.model_dump())
-        atomic_write_json(segment / "audio_state.json", audio_plan.model_dump())
-        atomic_write_json(
-            segment / "metrics.json",
-            {
-                "video": video_info,
-                "audio": audio_info,
-                "frames": frames,
-                # §23: RoPE mode is a first-class record — never change it
-                # silently across resume; compare on recovery.
-                "use_relative_rope": config.video.backend == "longlive2",
-                # Backend identity pins every segment to the renderer that
-                # produced it (tapes never resume across backends — the
-                # worker rejects foreign profiles loudly).
-                "video_backend": config.video.backend,
-                "blocks": num_blocks,
-                "recovery_tape": recovery_tape,
-            },
-        )
-        atomic_write_json(
-            segment / "sha256.json",
-            {"video.mp4": sha256_file(video_out), "audio.wav": sha256_file(audio_out)},
-        )
-        done_partial = segment / "DONE.partial"
-        atomic_write_bytes(done_partial, b"")
-        done_partial.replace(segment / paths.DONE_MARKER)
-        fsync_dir(segment)
+        with self._stage("commit", "metadata + checksums + DONE"):
+            world = SegmentWorldState(
+                segment_id=segment_id,
+                current_concept=state.current_concept,
+                destination_concept=decision.destination_concept,
+                phase=decision.phase,
+                seed=config.seed,
+            )
+            atomic_write_json(segment / "world_state.json", world.model_dump())
+            atomic_write_json(segment / "transition.json", decision.model_dump())
+            atomic_write_json(segment / "prompt_plan.json", prompt_plan.model_dump())
+            atomic_write_json(segment / "audio_state.json", audio_plan.model_dump())
+            atomic_write_json(
+                segment / "metrics.json",
+                {
+                    "video": video_info,
+                    "audio": audio_info,
+                    "frames": frames,
+                    # §23: RoPE mode is a first-class record — never change it
+                    # silently across resume; compare on recovery.
+                    "use_relative_rope": config.video.backend == "longlive2",
+                    # Backend identity pins every segment to the renderer that
+                    # produced it (tapes never resume across backends — the
+                    # worker rejects foreign profiles loudly).
+                    "video_backend": config.video.backend,
+                    "blocks": num_blocks,
+                    "recovery_tape": recovery_tape,
+                },
+            )
+            atomic_write_json(
+                segment / "sha256.json",
+                {"video.mp4": sha256_file(video_out), "audio.wav": sha256_file(audio_out)},
+            )
+            done_partial = segment / "DONE.partial"
+            atomic_write_bytes(done_partial, b"")
+            done_partial.replace(segment / paths.DONE_MARKER)
+            fsync_dir(segment)
 
         # 6. Supervisor-owned state advance (single writer).
         fresh = read_state(self._run_dir)
@@ -1132,14 +1233,38 @@ class Supervisor:
         fresh.last_error = None
         write_state(self._run_dir, fresh)
         stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
+        elapsed = round(time.monotonic() - started, 3)
         self._log_metric(
             {
                 "event": "segment_committed",
                 "segment_id": segment_id,
                 "frames": frames,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "elapsed_seconds": elapsed,
                 "stages": stage_seconds,
             }
         )
         self._sample_gauges(segment_id)
+        if self._progress is not None:
+            from voyage.audio.beat import beats_for_segment
+
+            beats, grid_bpm = beats_for_segment(duration, config.audio.beats_per_segment)
+            self._progress.segment_done(
+                {
+                    "number": number,
+                    "segment_id": segment_id,
+                    "frames": frames,
+                    "duration": duration,
+                    "take_ids": list(audio_plan.take_ids),
+                    "take_action": take_action,
+                    "take_reason": take_reason,
+                    "beats": beats,
+                    "bpm": grid_bpm,
+                    "video_backend": config.video.backend,
+                    "overlap_fraction": config.audio.final_overlap_fraction,
+                    "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
+                    "stage_seconds": dict(stage_seconds),
+                    "elapsed": elapsed,
+                    "prefetch_hit": prefetch_hit,
+                }
+            )
         return segment_id

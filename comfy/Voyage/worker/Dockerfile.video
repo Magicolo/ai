@@ -65,10 +65,12 @@ RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightri
     && pip install "imageio[ffmpeg]" av sentencepiece einops timm
 
 # Voyage supervisor package (pure-python here; torch lives only behind the
-# worker module import). --no-deps: pydantic already pinned above.
+# worker module import). --no-deps: pydantic already pinned above, so rich
+# (console progress, a core dependency) lands explicitly on this line.
 COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
-RUN pip install --no-deps -e /app
+RUN pip install --no-deps -e /app \
+    && pip install "rich>=13.7"
 
 ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/app \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \

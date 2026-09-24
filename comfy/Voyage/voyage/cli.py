@@ -27,6 +27,7 @@ from voyage.config import (
     default_config_toml,
     load_config,
 )
+from voyage.console import RichSegmentProgress, VoyageConsole
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.media import finalize_run
@@ -56,6 +57,28 @@ from voyage.supervisor import Supervisor, sha256_file
 
 def _run_dir_arg(value: str) -> Path:
     return Path(value)
+
+
+def get_console(args: argparse.Namespace) -> VoyageConsole:
+    """Console for a subcommand (flags default off for test Namespaces)."""
+    return VoyageConsole(
+        verbose=bool(getattr(args, "verbose", False)),
+        no_color=bool(getattr(args, "no_color", False)),
+    )
+
+
+def _add_console_args(parser: argparse.ArgumentParser) -> None:
+    """Two verbosity levels + color kill-switch (console output only)."""
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="detailed console output (retry feedback, beat math, take decisions, seeds)",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="plain console output (no colors or animation; also honors NO_COLOR)",
+    )
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -251,7 +274,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     if not _require_cuda_stack(config):
         return 1
-    supervisor = Supervisor(run_dir, config)
+    console = get_console(args)
+    console.rule(
+        f"voyage run · {config.video.backend} {config.video.width}x{config.video.height} "
+        f"@{config.video.fps}fps · director {config.director.backend} · "
+        f"{config.audio.beats_per_segment} beats/segment · "
+        f"drift every {config.voyage.drift_every_n_segments}"
+    )
+    supervisor = Supervisor(run_dir, config, progress=RichSegmentProgress(console))
 
     def _on_signal(signum: int, frame: FrameType | None) -> None:
         del signum, frame
@@ -262,8 +292,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         committed = supervisor.run_segments(args.segments)
     finally:
         signal.signal(signal.SIGINT, previous)
-    for segment_id in committed:
-        print(f"committed segment {segment_id}")
+    console.ok(f"run finished · {len(committed)} segment(s) committed")
     return 0
 
 
@@ -572,6 +601,18 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
         return 1
+    console = get_console(args)
+    try:
+        info = media_probe(output)
+        duration = info.get("format", {}).get("duration", "?") if isinstance(info, dict) else "?"
+    except MediaError:
+        duration = "?"
+    try:
+        size_mb = output.stat().st_size / (1024**2)
+        size_text = f"{size_mb:.1f} MiB"
+    except OSError:
+        size_text = "unknown size"
+    console.ok(f"finalized -> {output} ({duration}s, {size_text})")
     print(f"finalized -> {output}")
     return 0
 
@@ -709,6 +750,18 @@ def cmd_generate(args: argparse.Namespace) -> int:
     frames_per_segment = _frames_per_segment(effective)
     segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
     planned_frames = segments * frames_per_segment
+    console = get_console(args)
+    console.rule(
+        f"voyage generate · {effective.video.backend} "
+        f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps · "
+        f"director {effective.director.backend}"
+    )
+    console.info(
+        f"plan: ~{planned_frames / effective.video.fps:.1f}s "
+        f"({segments} segments, {planned_frames} frames) "
+        f"· {effective.audio.beats_per_segment} beats/segment · "
+        f"drift every {effective.voyage.drift_every_n_segments}"
+    )
     print(
         f"generating ~{planned_frames / effective.video.fps:.1f}s "
         f"({segments} segments, {planned_frames} frames) "
@@ -725,6 +778,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
             quantization=args.quantization,
             beats_per_segment=args.beats_per_segment,
             drift_every_n=args.drift_every_n,
+            verbose=console.verbose,
+            no_color=getattr(args, "no_color", False),
         )
     )
     errors = validate_run(run_dir)
@@ -748,6 +803,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return final_code
     state = read_state(run_dir)
     actual_seconds = state.timeline_frames / effective.video.fps
+    console.ok(
+        f"generated {final} ({state.committed_segments} segments, "
+        f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
+    )
     print(
         f"generated {final} ({state.committed_segments} segments, "
         f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
@@ -866,7 +925,11 @@ def cmd_soak(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     segments = int(args.segments)
     config, _digest = _load_run(run_dir)
-    committed = Supervisor(run_dir, config).run_segments(segments)
+    console = get_console(args)
+    console.rule(f"voyage soak · {segments} segments")
+    committed = Supervisor(run_dir, config, progress=RichSegmentProgress(console)).run_segments(
+        segments
+    )
     events = [
         json.loads(line)
         for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
@@ -1031,6 +1094,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="director drifts every Nth segment (default 1); other segments hold",
     )
+    _add_console_args(run)
     run.set_defaults(func=cmd_run)
 
     gen = sub.add_parser(
@@ -1104,10 +1168,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="director drifts every Nth segment (default 1); other segments hold",
     )
+    _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 
     status = sub.add_parser("status", help="Show run status")
     status.add_argument("--run", required=True)
+    _add_console_args(status)
     status.set_defaults(func=cmd_status)
 
     pause = sub.add_parser("pause", help="Request a safe pause")
@@ -1125,6 +1191,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = sub.add_parser("validate", help="Offline consistency check (read-only)")
     validate.add_argument("--run", required=True)
+    _add_console_args(validate)
     validate.set_defaults(func=cmd_validate)
 
     finalize = sub.add_parser("finalize", help="Assemble the final MP4")
@@ -1135,6 +1202,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip corrupt segments with a warning instead of aborting",
     )
+    _add_console_args(finalize)
     finalize.set_defaults(func=cmd_finalize)
 
     benchmark = sub.add_parser("benchmark", help="Performance probes")
@@ -1145,11 +1213,13 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--segments", type=int, default=2, help="segments for the end-to-end target"
     )
+    _add_console_args(benchmark)
     benchmark.set_defaults(func=cmd_benchmark)
 
     soak = sub.add_parser("soak", help="Stability run with a resource-trend report")
     soak.add_argument("--run", required=True)
     soak.add_argument("--segments", type=int, required=True)
+    _add_console_args(soak)
     soak.set_defaults(func=cmd_soak)
 
     inspect = sub.add_parser("inspect", help="Inspect run artifacts")
@@ -1157,6 +1227,7 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect_target", choices=["concepts", "segments", "media", "metrics", "scoreboard"]
     )
     inspect.add_argument("--run", required=True)
+    _add_console_args(inspect)
     inspect.set_defaults(func=cmd_inspect)
 
     return parser
