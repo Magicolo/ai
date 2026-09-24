@@ -61,6 +61,12 @@ if [ "${VOYAGE_GPUS:-}" = "1" ]; then
 elif [ -z "${VOYAGE_GPUS:-}" ] && [ "$needs_cuda" = "1" ]; then
   gpu_args=(--gpus all)
 fi
-docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -w /app "${gpu_args[@]}" \
+# The bare-command launcher TUI needs a real terminal: allocate one when
+# attached, stay pipe-friendly otherwise.
+tty_args=()
+if [ -t 0 ] && [ -t 1 ]; then
+  tty_args=(--interactive --tty)
+fi
+docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -w /app "${gpu_args[@]}" "${tty_args[@]}" \
   -v "$PWD:/app" -v /tmp:/tmp -v "$models:/models" \
   "$image" voyage "$@"

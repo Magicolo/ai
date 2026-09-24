@@ -85,6 +85,17 @@ def _add_console_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def launch_tui() -> int:
+    """Bare-command launcher (indirection so tests can monkeypatch).
+
+    The Textual import stays lazy so every CLI verb works without the
+    display extra installed.
+    """
+    from voyage.tui import run_tui
+
+    return run_tui()
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     run_dir = Path(args.output)
     if run_dir.exists() and any(run_dir.iterdir()) and not args.force:
@@ -279,24 +290,38 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not _require_cuda_stack(config):
         return 1
     console = get_console(args)
-    console.rule(
-        f"voyage run · {config.video.backend} {config.video.width}x{config.video.height} "
-        f"@{config.video.fps}fps · director {config.director.backend} · "
-        f"{config.audio.beats_per_segment} beats/segment · "
-        f"drift every {config.voyage.drift_every_n_segments}"
-    )
-    supervisor = Supervisor(run_dir, config, progress=RichSegmentProgress(console))
+    # The TUI swaps the progress sink from stdout to its RichLog: when a
+    # sink rides the namespace, the console stays silent (the TUI owns
+    # the display) and only the sink reports.
+    sink = getattr(args, "progress_sink", None)
+    progress = sink if sink is not None else RichSegmentProgress(console)
+    if sink is None:
+        console.rule(
+            f"voyage run · {config.video.backend} {config.video.width}x{config.video.height} "
+            f"@{config.video.fps}fps · director {config.director.backend} · "
+            f"{config.audio.beats_per_segment} beats/segment · "
+            f"drift every {config.voyage.drift_every_n_segments}"
+        )
+    supervisor = Supervisor(run_dir, config, progress=progress)
 
     def _on_signal(signum: int, frame: FrameType | None) -> None:
         del signum, frame
         supervisor.request_stop()
 
-    previous = signal.signal(signal.SIGINT, _on_signal)
+    previous = None
+    try:
+        previous = signal.signal(signal.SIGINT, _on_signal)
+    except ValueError:
+        # Non-main thread (e.g. the TUI worker): no SIGINT handler here —
+        # the TUI Stop button drives the file-status control plane instead.
+        pass
     try:
         committed = supervisor.run_segments(args.segments)
     finally:
-        signal.signal(signal.SIGINT, previous)
-    console.ok(f"run finished · {len(committed)} segment(s) committed")
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+    if sink is None:
+        console.ok(f"run finished · {len(committed)} segment(s) committed")
     return 0
 
 
@@ -766,22 +791,24 @@ def cmd_generate(args: argparse.Namespace) -> int:
     segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
     planned_frames = segments * frames_per_segment
     console = get_console(args)
-    console.rule(
-        f"voyage generate · {effective.video.backend} "
-        f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps · "
-        f"director {effective.director.backend}"
-    )
-    console.info(
-        f"plan: ~{planned_frames / effective.video.fps:.1f}s "
-        f"({segments} segments, {planned_frames} frames) "
-        f"· {effective.audio.beats_per_segment} beats/segment · "
-        f"drift every {effective.voyage.drift_every_n_segments}"
-    )
-    print(
-        f"generating ~{planned_frames / effective.video.fps:.1f}s "
-        f"({segments} segments, {planned_frames} frames) "
-        f"with {effective.video.backend} ..."
-    )
+    sink = getattr(args, "progress_sink", None)
+    if sink is None:
+        console.rule(
+            f"voyage generate · {effective.video.backend} "
+            f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps · "
+            f"director {effective.director.backend}"
+        )
+        console.info(
+            f"plan: ~{planned_frames / effective.video.fps:.1f}s "
+            f"({segments} segments, {planned_frames} frames) "
+            f"· {effective.audio.beats_per_segment} beats/segment · "
+            f"drift every {effective.voyage.drift_every_n_segments}"
+        )
+        print(
+            f"generating ~{planned_frames / effective.video.fps:.1f}s "
+            f"({segments} segments, {planned_frames} frames) "
+            f"with {effective.video.backend} ..."
+        )
     cmd_run(
         argparse.Namespace(
             run=str(run_dir),
@@ -795,6 +822,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             drift_every_n=args.drift_every_n,
             verbose=console.verbose,
             no_color=getattr(args, "no_color", False),
+            progress_sink=sink,
         )
     )
     errors = validate_run(run_dir)
@@ -818,14 +846,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return final_code
     state = read_state(run_dir)
     actual_seconds = state.timeline_frames / effective.video.fps
-    console.ok(
-        f"generated {final} ({state.committed_segments} segments, "
-        f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
-    )
-    print(
-        f"generated {final} ({state.committed_segments} segments, "
-        f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
-    )
+    if sink is None:
+        console.ok(
+            f"generated {final} ({state.committed_segments} segments, "
+            f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
+        )
+        print(
+            f"generated {final} ({state.committed_segments} segments, "
+            f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
+        )
     return 0
 
 
@@ -1036,7 +1065,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="voyage", description="Autonomous infinite audiovisual voyage"
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    # No `required=True`: the bare command (no verb) launches the
+    # interactive launcher TUI (see main), which configures `generate`.
+    sub = parser.add_subparsers(dest="command", required=False)
 
     init = sub.add_parser("init", help="Create a new run directory")
     init.add_argument("--output", required=True)
@@ -1251,6 +1282,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "command", None) is None:
+        # Bare `voyage`: interactive launcher TUI (TTY + Textual required;
+        # pipes and missing extras get guidance, exit 2). CLI verbs below
+        # stay fully usable non-interactively.
+        try:
+            return int(launch_tui())
+        except VoyageError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     try:
         return int(args.func(args))
     except VoyageError as exc:

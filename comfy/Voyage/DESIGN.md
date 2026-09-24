@@ -6692,6 +6692,30 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - The supervisor takes an optional progress sink (default silent), so
   existing callers/tests are unchanged. Covered by `tests/test_console.py`
   (12 tests); gates green (291 pytest / mypy strict / ruff + format).
+
+## 2026-09-24 — Launcher TUI (bare `voyage` configures `generate`)
+
+- Bare `voyage` (no verb) launches a Textual app (`voyage/tui.py` +
+  pure `voyage/tui_state.py`): every `generate` setting shown editable
+  with its default (required Story fields first, advanced collapsed),
+  live validation with a derived segments/frames plan, then Generate
+  runs the unchanged init → run → validate → finalize with per-segment
+  video + audio prompts, a progress bar, and a Stop button (Back/Quit
+  after completion). Subparsers are no longer required; non-TTY or
+  missing-Textual invocations get guidance + exit 2, all verbs stay
+  non-interactive.
+- Generation reuses `cmd_generate` via a `progress_sink` namespace slot:
+  when set, the console stays silent and the TUI's `TuiProgress`
+  (a `SegmentProgress`) reports instead — existing tests never set it,
+  so their stdout assertions hold. `cmd_run` also tolerates a non-main
+  thread (no SIGINT handler there); Stop writes STOP_REQUESTED to the
+  run-dir state, the same control plane as `voyage stop`.
+- `textual>=8.0` is core (`pyproject.toml` + explicit installs in both
+  `--no-deps` worker images); `run.sh` allocates `-it` when attached.
+  Covered by `tests/test_tui.py` (state/validation/namespace/plan +
+  bare-command wiring + app structure, Textual-dependent parts skipped
+  without the extra).
+
 ## 2026-09-24 — Stream B GPU leg + qual-driven fixes (longlive2 + acestep)
 
 - Ran the §137A leg on an idle 4060 Ti (`output/qual-longlive2`, 1-block

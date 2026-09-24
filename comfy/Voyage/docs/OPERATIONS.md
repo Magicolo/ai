@@ -39,6 +39,29 @@ install with `--no-deps`); pipes and tests get identical plain words.
 `--verbose` / `--no-color` also parse on `status`, `validate`,
 `finalize`, `benchmark`, `soak`, and `inspect`.
 
+## Interactive launcher TUI (bare `voyage`)
+
+With no verb, `voyage` launches a Textual form that shows every
+`generate` setting with its default (required Story fields first,
+advanced settings collapsed), validates live with a derived
+segments/frames plan, and runs the generation with per-segment video +
+audio prompts, a progress bar, and a Stop button — then Back/Quit
+actions on completion:
+
+```bash
+./scripts/run.sh            # needs a TTY (run.sh allocates -it when attached)
+```
+
+Non-TTY invocations and images without `textual` get guidance + exit 2
+(all CLI verbs stay usable non-interactively). `textual>=8.0` is a core
+dependency (slim image via `pyproject.toml`, worker images via explicit
+`pip install`). Stop writes STOP_REQUESTED to the run-dir state — the
+same control plane as `voyage stop` — so the run exits at the next
+segment boundary and still validates + finalizes. Note: the default
+backend is `ltxv` (CUDA); on a GPU box run the TUI in the video image
+(`VOYAGE_IMAGE=voyage-video:latest ./scripts/run.sh`, plus
+`VOYAGE_GPUS=1`) or pick `fake` for CPU smoke runs.
+
 ## One-shot fixed-duration video (`generate`)
 
 `generate` chains init → run → validate → finalize in one call with sane
