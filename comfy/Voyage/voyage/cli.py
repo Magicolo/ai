@@ -1,6 +1,6 @@
 """`voyage` CLI (DESIGN §§58, task group J).
 
-init / doctor / models / benchmark / run / status / pause / resume /
+init / doctor / models / benchmark / run / generate / status / pause / resume /
 stop / validate / finalize / inspect
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import shutil
@@ -20,7 +21,12 @@ from types import FrameType
 
 from voyage import paths
 from voyage.concepts import ConceptStore
-from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml, load_config
+from voyage.config import (
+    ProjectConfig,
+    apply_draft_overrides,
+    default_config_toml,
+    load_config,
+)
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.media import finalize_run
@@ -60,7 +66,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    config_text = default_config_toml(args.run_id, args.style, args.seed)
+    backend = getattr(args, "backend", None) or "fake"
+    config_text = default_config_toml(args.run_id, args.style, args.seed, video_backend=backend)
     (run_dir / paths.CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
     config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
     hardware = {"note": "recorded at init; see `voyage doctor` for live facts"}
@@ -552,6 +559,134 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+_DURATION_PATTERN = re.compile(
+    r"(?:(?P<hours>\d+(?:\.\d+)?)h)?"
+    r"(?:(?P<minutes>\d+(?:\.\d+)?)m)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s?)?"
+)
+
+
+def parse_duration(raw: str) -> float:
+    """Human-readable duration ('5s', '90', '1m30s', '2m', '1h') -> seconds."""
+    match = _DURATION_PATTERN.fullmatch(raw.strip())
+    if match is None or not any(match.groupdict().values()):
+        raise ValueError(f"invalid duration {raw!r} (examples: '5s', '90', '1m30s', '2m')")
+    total = 0.0
+    for name, scale in (("hours", 3600.0), ("minutes", 60.0), ("seconds", 1.0)):
+        value = match.group(name)
+        if value is not None:
+            total += float(value) * scale
+    if total <= 0:
+        raise ValueError(f"duration must be positive, got {raw!r}")
+    return total
+
+
+# Must match NATIVE_BLOCK_FRAMES in voyage/workers/video_ltxv.py: block 0
+# renders 25 frames, each extension block adds 24 new frames (frame 0 deduped).
+_LTXV_NATIVE_BLOCK_FRAMES = 25
+
+
+def _frames_per_segment(config: ProjectConfig) -> int:
+    """Committed frames per segment for duration math (backend-specific)."""
+    if config.video.backend == "ltxv":
+        blocks = config.video.blocks_per_segment
+        return _LTXV_NATIVE_BLOCK_FRAMES + (blocks - 1) * (_LTXV_NATIVE_BLOCK_FRAMES - 1)
+    return config.video.segment_frames
+
+
+def segments_for_duration(duration_seconds: float, fps: int, frames_per_segment: int) -> int:
+    """Segments needed to reach at least duration_seconds (rounds up, min 1)."""
+    return max(1, math.ceil(duration_seconds * fps / frames_per_segment - 1e-9))
+
+
+def _warn_if_no_cuda(config: ProjectConfig) -> None:
+    """Preflight: a CUDA device with no visible GPU fails late at worker init."""
+    if not config.video.device.startswith("cuda"):
+        return
+    from voyage.doctor import probe as doctor_probe
+
+    if not doctor_probe().get("nvidia_smi"):
+        print(
+            "warning: video device is CUDA but no GPU is visible; "
+            "the worker will fail at init (use VOYAGE_GPUS=1 with run.sh)",
+            file=sys.stderr,
+        )
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    """One-shot fixed-duration video: init -> run -> validate -> finalize."""
+    # Resolve once: workers spawn with CWD=run_dir, so every downstream path
+    # (payloads, takes, slices) must be absolute or they double up.
+    output = Path(args.output) if args.output else Path("output") / args.run_id
+    run_dir = output.resolve()
+    init_args = argparse.Namespace(
+        output=str(run_dir),
+        run_id=args.run_id,
+        style=args.style,
+        seed=args.seed,
+        force=args.force,
+        backend=args.backend,
+    )
+    code = cmd_init(init_args)
+    if code != 0:
+        return code
+    config, _digest = _load_run(run_dir)
+    _warn_if_no_cuda(config)
+    effective = apply_draft_overrides(
+        config,
+        draft=args.draft,
+        director=args.director,
+        blocks=args.blocks,
+        take_seconds=args.take_seconds,
+        quantization=args.quantization,
+    )
+    frames_per_segment = _frames_per_segment(effective)
+    segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
+    planned_frames = segments * frames_per_segment
+    print(
+        f"generating ~{planned_frames / effective.video.fps:.1f}s "
+        f"({segments} segments, {planned_frames} frames) "
+        f"with {effective.video.backend} ..."
+    )
+    cmd_run(
+        argparse.Namespace(
+            run=str(run_dir),
+            segments=segments,
+            draft=args.draft,
+            director=args.director,
+            blocks=args.blocks,
+            take_seconds=args.take_seconds,
+            quantization=args.quantization,
+        )
+    )
+    errors = validate_run(run_dir)
+    if errors:
+        print("INVALID:")
+        for error in errors:
+            print(f"  - {error}")
+        if not args.skip_bad:
+            print(
+                "aborting before finalize (re-run with --skip-bad to salvage)",
+                file=sys.stderr,
+            )
+            return 1
+        print("continuing with --skip-bad ...", file=sys.stderr)
+    final = Path(args.final_video) if args.final_video else run_dir / "final.mp4"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final_code = cmd_finalize(
+        argparse.Namespace(run=str(run_dir), output=str(final), skip_bad=args.skip_bad)
+    )
+    if final_code != 0:
+        return final_code
+    state = read_state(run_dir)
+    actual_seconds = state.timeline_frames / effective.video.fps
+    print(
+        f"generated {final} ({state.committed_segments} segments, "
+        f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
+    )
+    return 0
+
+
 def _benchmark_env() -> dict[str, object]:
     """§104 setup fields: GPU/driver/torch, honest unknowns off-GPU."""
     from voyage.doctor import probe as doctor_probe
@@ -763,6 +898,12 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--style", required=True)
     init.add_argument("--seed", type=int, default=0)
     init.add_argument("--force", action="store_true")
+    init.add_argument(
+        "--backend",
+        choices=("fake", "longlive2", "ltxv"),
+        default="fake",
+        help="video backend preset written into the run config",
+    )
     init.set_defaults(func=cmd_init)
 
     doctor = sub.add_parser("doctor", help="Probe hardware and environment")
@@ -811,6 +952,67 @@ def build_parser() -> argparse.ArgumentParser:
         help="override DiT quantization (fp8 default, bf16 for clean highlights)",
     )
     run.set_defaults(func=cmd_run)
+
+    gen = sub.add_parser(
+        "generate",
+        help="One-shot fixed-duration video (init + run + validate + finalize)",
+    )
+    gen.add_argument(
+        "--backend",
+        choices=("fake", "longlive2", "ltxv"),
+        default="ltxv",
+        help="video backend preset written into the run config",
+    )
+    gen.add_argument(
+        "--duration",
+        type=parse_duration,
+        required=True,
+        help="target length, e.g. '5s', '90', '1m30s', '2m' (rounds up to whole segments)",
+    )
+    gen.add_argument("--style", required=True)
+    gen.add_argument("--run-id", default="voyage")
+    gen.add_argument("--output", default=None, help="run directory (default output/<run-id>)")
+    gen.add_argument("--seed", type=int, default=0)
+    gen.add_argument("--force", action="store_true")
+    gen.add_argument(
+        "--final-video",
+        default=None,
+        help="final mp4 path (default <run>/final.mp4)",
+    )
+    gen.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="finalize past corrupt segments instead of aborting",
+    )
+    gen.add_argument(
+        "--draft",
+        action="store_true",
+        help="apply the [draft] profile (fast low-res iteration settings)",
+    )
+    gen.add_argument(
+        "--director",
+        default=None,
+        help="override the director backend (e.g. deterministic, qwen)",
+    )
+    gen.add_argument(
+        "--blocks",
+        type=int,
+        default=None,
+        help="override video blocks per segment",
+    )
+    gen.add_argument(
+        "--take-seconds",
+        type=float,
+        default=None,
+        help="override audio take length in seconds",
+    )
+    gen.add_argument(
+        "--quantization",
+        default=None,
+        choices=("fp8", "bf16"),
+        help="override DiT quantization (fp8 default, bf16 for clean highlights)",
+    )
+    gen.set_defaults(func=cmd_generate)
 
     status = sub.add_parser("status", help="Show run status")
     status.add_argument("--run", required=True)

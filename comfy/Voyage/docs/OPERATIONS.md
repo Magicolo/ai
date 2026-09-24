@@ -3,6 +3,7 @@
 ```bash
 ./scripts/run.sh doctor
 ./scripts/run.sh models verify
+./scripts/run.sh generate --backend ltxv --duration 5s --style "..."
 ./scripts/run.sh init --output <dir> --run-id <id> --style "..." --force
 ./scripts/run.sh run --run <dir> [--segments N] [--draft] [--quantization fp8|bf16]
 ./scripts/run.sh status --run <dir>
@@ -16,6 +17,25 @@
 Run without `--segments` for the autonomous voyage (runs until
 pause/stop/SIGINT; state re-read at each boundary; SIGINT rests PAUSED).
 After `stop`, status rests at STOP_REQUESTED until `resume`.
+
+## One-shot fixed-duration video (`generate`)
+
+`generate` chains init → run → validate → finalize in one call with sane
+defaults (`--backend ltxv`, `--run-id voyage`, `--seed 0`, run dir
+`./output/<run-id>`, final video `<run>/final.mp4` unless `--final-video`):
+
+```bash
+./scripts/run.sh generate --backend ltxv --duration 5s --style "..."
+```
+
+Duration is human-readable (`90`, `90s`, `2m`, `1m30s`, `1h`; combined forms
+like `1h2m3.5s` allowed). Segment count rounds **up**, so the video is never
+shorter than requested. Backend presets set geometry/device automatically
+(`ltxv`: 768×512 on `cuda:0`; `longlive2`: default geometry on `cuda:0`;
+`fake`: CPU smoke runs). Extra run flags (`--draft`, `--director`,
+`--blocks`, `--take-seconds`, `--quantization`) pass through. Validation
+failure aborts before finalize unless `--skip-bad`; on a GPU box with no
+visible GPU a warning is printed (the worker will fail at init).
 
 ## Start / pause / resume / stop
 

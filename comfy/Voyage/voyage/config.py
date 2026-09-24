@@ -222,7 +222,13 @@ class ProjectConfig(BaseModel):
         return value
 
 
-def default_config_toml(run_id: str, style: str, seed: int) -> str:
+def default_config_toml(run_id: str, style: str, seed: int, video_backend: str = "fake") -> str:
+    preset = _video_preset(video_backend)
+    backend = str(preset.get("backend", video_backend))
+    profile = str(preset.get("profile", "fake-432p"))
+    width = int(preset.get("width", 768))
+    height = int(preset.get("height", 432))
+    device = str(preset.get("device", "cpu"))
     return f"""\
 schema_version = 1
 run_id = "{run_id}"
@@ -232,13 +238,13 @@ min_free_space_gib = 5.0
 
 [video]
 # "fake" (built-in testsrc) | "longlive2" (CUDA image) | "ltxv" (CUDA image)
-backend = "fake"
-profile = "fake-432p"
-width = 768
-height = 432
+backend = "{backend}"
+profile = "{profile}"
+width = {width}
+height = {height}
 fps = 24
 segment_frames = 48
-device = "cpu"
+device = "{device}"
 models_dir = "/models"
 latent_shape = [1, 8, 48, 44, 80]
 blocks_per_segment = 1
@@ -343,3 +349,45 @@ def apply_draft_overrides(
     if take_seconds is not None:
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": take_seconds})
     return config.model_copy(update={"video": video, "audio": audio, "director": director_cfg})
+
+
+_VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
+    # `generate --backend` presets (single source of truth, also used by
+    # default_config_toml). ltxv mirrors the verified Phase 7 E2E toml
+    # (native 768x512 on CUDA); longlive2 ignores geometry (it denoises
+    # latent_shape -> 1280x704) so only backend+device change; fake is the
+    # config default, spelled out for explicitness.
+    "fake": {
+        "backend": "fake",
+        "profile": "fake-432p",
+        "width": 768,
+        "height": 432,
+        "device": "cpu",
+    },
+    "longlive2": {"backend": "longlive2", "device": "cuda:0"},
+    "ltxv": {
+        "backend": "ltxv",
+        "profile": "ltxv-512p",
+        "width": 768,
+        "height": 512,
+        "device": "cuda:0",
+    },
+}
+
+
+def _video_preset(backend: str) -> dict[str, str | int]:
+    try:
+        return _VIDEO_BACKEND_PRESETS[backend]
+    except KeyError:
+        known = ", ".join(sorted(_VIDEO_BACKEND_PRESETS))
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+
+
+def with_video_backend(config: ProjectConfig, backend: str) -> ProjectConfig:
+    """Return a copy of config with the video-backend preset applied.
+
+    Pure: never mutates. Rebuilds VideoConfig through its constructor so
+    invalid presets raise ValidationError instead of corrupting the run.
+    """
+    video = VideoConfig(**{**config.video.model_dump(), **_video_preset(backend)})
+    return config.model_copy(update={"video": video})

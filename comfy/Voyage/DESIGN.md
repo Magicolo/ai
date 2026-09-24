@@ -5906,3 +5906,25 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   block loop; seg2 f025->f026 jumped 0.114) -> per-block chain PNGs,
   last renamed to tail, intermediates deleted.
 - Gates green (168 pytest / mypy 35 files).
+- 2026-09-24 `voyage generate` one-shot command (user request: minimal-param
+  fixed-duration video, e.g. `generate --backend ltxv --duration 5s`).
+  `config.py`: `_VIDEO_BACKEND_PRESETS` table + pure `with_video_backend`
+  (ltxv -> 768x512/`cuda:0`/profile `ltxv-512p`; longlive2 -> default
+  geometry/`cuda:0`; fake -> CPU) + `default_config_toml(..., video_backend)`
+  kwarg; `init` parser gains `--backend` (default fake). `cli.py`: new
+  `generate` subparser (defaults backend ltxv, run-id voyage, seed 0, run
+  dir `./output/<run-id>`, final MP4 `<run>/final.mp4` unless
+  `--final-video`; reuses existing `--draft/--director/--blocks/--take-seconds/--quantization/--skip-bad`
+  names) chaining init -> effective-config segment math -> `cmd_run` ->
+  `validate_run` (abort unless `--skip-bad`) -> `cmd_finalize` + summary;
+  `parse_duration` (`90`/`90s`/`2m`/`1m30s`/`1h`/`1h2m3.5s`) +
+  `segments_for_duration` round-up (`_frames_per_segment`: ltxv 25 +24/block,
+  else `segment_frames`); `_warn_if_no_cuda` for GPU presets without a
+  visible GPU. `run.sh` needs no change (pure `$@` passthrough). Bug found by
+  the new default-dir test: workers spawn with CWD=run_dir, so relative run
+  dirs double up in payload paths (take WAV landed under
+  `<run>/<run>/...`) -> `cmd_generate` resolves the run dir once; the
+  codebase invariant is absolute voyage paths. `tests/test_generate.py`
+  (duration/rounding/presets/fake 4s e2e VALID + final.mp4/refusal/default
+  dir/CUDA warnings). Docs: README one-shot example, OPERATIONS `generate`
+  section. Gates green (198 pytest / mypy 35).

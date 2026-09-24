@@ -46,6 +46,17 @@ Fake backends need nothing. Real backends need one download each
 
 ## Basic run
 
+One-shot fixed-duration video (init → run → validate → finalize in one call;
+aborts if validation fails unless `--skip-bad`):
+
+```bash
+VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
+  --style "pastel neon line-art, peaceful"
+# -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
+```
+
+Step-by-step (for pause/resume and unbounded runs):
+
 ```bash
 # New run (style charter = the permanent visual identity):
 ./scripts/run.sh init --output /tmp/vdemo --run-id vdemo \
