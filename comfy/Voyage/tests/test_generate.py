@@ -11,8 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from voyage.cli import main, parse_duration, segments_for_duration, validate_run
-from voyage.config import with_video_backend
+from voyage.cli import (
+    _frames_per_segment,
+    _run_dir_arg,
+    main,
+    parse_duration,
+    segments_for_duration,
+    validate_run,
+)
+from voyage.config import VideoConfig, with_video_backend
 
 
 def test_no_cuda_warning_for_cpu_device(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -97,7 +104,7 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
     assert config.video.backend == "fake"
 
 
-def test_longlive2_preset_keeps_default_geometry(tmp_path: Path) -> None:
+def test_longlive2_preset_pins_native_geometry(tmp_path: Path) -> None:
     from voyage.config import default_config_toml, load_config
 
     (tmp_path / "voyage.toml").write_text(
@@ -106,11 +113,53 @@ def test_longlive2_preset_keeps_default_geometry(tmp_path: Path) -> None:
     config, _ = load_config(tmp_path / "voyage.toml")
     longlive = with_video_backend(config, "longlive2")
     assert longlive.video.backend == "longlive2"
+    assert longlive.video.profile == "longlive2-704p"
+    # Native worker geometry (latent_shape x16 spatial): anything else fails
+    # the commit-time resolution check (qual-longlive2, 2026-09-24).
+    assert (longlive.video.width, longlive.video.height) == (1280, 704)
     assert longlive.video.device == "cuda:0"
-    assert (longlive.video.width, longlive.video.height) == (
-        config.video.width,
-        config.video.height,
+    # Source config untouched (pure function).
+    assert config.video.backend == "fake"
+
+
+def test_frames_per_segment_longlive2_follows_decode_expansion(tmp_path: Path) -> None:
+    """longlive2 duration math must use decoded frames, not segment_frames."""
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
     )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    one_block = with_video_backend(config, "longlive2")
+    # 8 latents -> (8-1)*4+1 = 29 frames (measured qual-longlive2).
+    assert _frames_per_segment(one_block) == 29
+    three_blocks = one_block.model_copy(
+        update={"video": VideoConfig(**{**one_block.video.model_dump(), "blocks_per_segment": 3})}
+    )
+    # 24 latents -> (24-1)*4+1 = 93 frames (Phase-2 E2E).
+    assert _frames_per_segment(three_blocks) == 93
+
+
+def test_run_dir_arg_resolves_absolute(tmp_path: Path) -> None:
+    """Worker CWD is run_dir: relative dirs double up downstream (qual-leg)."""
+    assert _run_dir_arg(str(tmp_path / "some-run")) == (tmp_path / "some-run").resolve()
+    assert _run_dir_arg("output/some-run") == (Path.cwd() / "output/some-run").resolve()
+
+
+def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:
+    """ltxv duration math must use the 96-novel steady state, not 121 fresh."""
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    one_block = with_video_backend(config, "ltxv")
+    assert _frames_per_segment(one_block) == 96
+    two_blocks = one_block.model_copy(
+        update={"video": VideoConfig(**{**one_block.video.model_dump(), "blocks_per_segment": 2})}
+    )
+    assert _frames_per_segment(two_blocks) == 192
 
 
 def test_unknown_backend_rejected(tmp_path: Path) -> None:

@@ -413,9 +413,11 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
     # and /64 clean for the two-stage multiscale pipeline; 1024x576 was
     # tried 2026-09-24 but needs ~15.6 GB in the forward — beyond the
     # 16 GB card even via the dynamic-fp8 fallback — so it stays reverted
-    # until a memory-optimization pass lands); longlive2 ignores geometry
-    # (it denoises latent_shape -> 1280x704) so only backend+device change;
-    # fake is the config default, spelled out for explicitness.
+    # until a memory-optimization pass lands); longlive2 renders native
+    # 1280x704 (latent_shape x16 spatial — the worker ignores the request
+    # geometry), so the preset pins that geometry: anything else fails the
+    # commit-time resolution check (qual-longlive2, 2026-09-24); fake is
+    # the config default, spelled out for explicitness.
     "fake": {
         "backend": "fake",
         "profile": "fake-432p",
@@ -423,7 +425,13 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
         "height": 432,
         "device": "cpu",
     },
-    "longlive2": {"backend": "longlive2", "device": "cuda:0"},
+    "longlive2": {
+        "backend": "longlive2",
+        "profile": "longlive2-704p",
+        "width": 1280,
+        "height": 704,
+        "device": "cuda:0",
+    },
     "ltxv": {
         "backend": "ltxv",
         "profile": "ltxv-512p",

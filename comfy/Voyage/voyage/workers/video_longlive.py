@@ -387,25 +387,36 @@ class LongLiveStreamSession:
         import torch
 
         pipe = self._pipeline
-        tail = tape["tail_latents"].to(self._device)
-        tail_frames = int(tail.shape[1])
-        embeds = tape["prompt_embeds"].to(self._device)
-        if pipe.kv_cache_pos is None:
-            pipe._initialize_kv_cache(batch_size=1, dtype=torch.bfloat16, device=self._device)
-            pipe._initialize_crossattn_cache(
-                batch_size=1, dtype=torch.bfloat16, device=self._device
-            )
-        timestep = torch.zeros([1, 1], device=self._device, dtype=torch.int64)
-        with torch.inference_mode():
-            pipe.generator(
-                noisy_image_or_video=tail,
-                conditional_dict={"prompt_embeds": embeds},
-                timestep=timestep,
-                kv_cache=pipe.kv_cache_pos,
-                crossattn_cache=pipe.crossattn_cache_pos,
-                current_start=0,
-                cache_start=0,
-            )
+        # VAE-offload-for-resume (mirrors generate_blocks): the replay is
+        # DiT-only, so the VAE (measured 1.31 GiB, full-res) sits aside while
+        # the forward peaks — without this the post-audio rebuild OOMs the
+        # 16GB card (qual-longlive2 2026-09-24: 14.40GB allocated, +98MB
+        # failed, 3/3 attempts in fresh processes). Restored in `finally`
+        # so a failed replay never leaves the session half-moved.
+        pipe.vae.to("cpu")
+        torch.cuda.empty_cache()
+        try:
+            tail = tape["tail_latents"].to(self._device)
+            tail_frames = int(tail.shape[1])
+            embeds = tape["prompt_embeds"].to(self._device)
+            if pipe.kv_cache_pos is None:
+                pipe._initialize_kv_cache(batch_size=1, dtype=torch.bfloat16, device=self._device)
+                pipe._initialize_crossattn_cache(
+                    batch_size=1, dtype=torch.bfloat16, device=self._device
+                )
+            timestep = torch.zeros([1, 1], device=self._device, dtype=torch.int64)
+            with torch.inference_mode():
+                pipe.generator(
+                    noisy_image_or_video=tail,
+                    conditional_dict={"prompt_embeds": embeds},
+                    timestep=timestep,
+                    kv_cache=pipe.kv_cache_pos,
+                    crossattn_cache=pipe.crossattn_cache_pos,
+                    current_start=0,
+                    cache_start=0,
+                )
+        finally:
+            pipe.vae.to(self._device)
         self._next_start_frame = tail_frames
         self._blocks_appended = 1
         # Continue the stream noise trajectory: the tape carries the RNG

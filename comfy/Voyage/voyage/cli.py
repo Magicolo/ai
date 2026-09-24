@@ -56,7 +56,11 @@ from voyage.supervisor import Supervisor, sha256_file
 
 
 def _run_dir_arg(value: str) -> Path:
-    return Path(value)
+    # Absolute: workers spawn with CWD=run_dir, so a relative dir doubles up
+    # inside payload paths (qual-longlive2 2026-09-24: generate_blocks
+    # circuit-breaker on `output/.../segments/...` missing). Single funnel
+    # for every subcommand; mirrors cmd_generate's resolve-once rule.
+    return Path(value).resolve()
 
 
 def get_console(args: argparse.Namespace) -> VoyageConsole:
@@ -639,16 +643,27 @@ def parse_duration(raw: str) -> float:
     return total
 
 
-# Must match NATIVE_BLOCK_FRAMES in voyage/workers/video_ltxv.py: block 0
-# renders 25 frames, each extension block adds 24 new frames (frame 0 deduped).
-_LTXV_NATIVE_BLOCK_FRAMES = 25
+# Stream-A accounting (DESIGN §5.3, measured from the real tensors in
+# voyage/workers/video_ltxv.py): every clip renders 121 frames; fresh blocks
+# commit all 121, conditioned blocks drop the 25-frame prefix and commit 96
+# novel. Duration planning uses the steady-state minimum (96 per block) so
+# `generate --duration` never runs short however the fresh/extension mix
+# lands (worker-reported frames remain the timeline truth).
+_LTXV_NOVEL_BLOCK_FRAMES = 96
+# LongLive Wan temporal VAE: L latents decode to (L-1)*4+1 frames, one block
+# appends 8 latents (measured: 29f per 1-block segment, 93f per 3-block
+# segment — qual-longlive2 + Phase-2 E2E, 2026-09-24/22).
+_LONGLIVE_LATENTS_PER_BLOCK = 8
+_LONGLIVE_DECODE_EXPANSION = 4
 
 
 def _frames_per_segment(config: ProjectConfig) -> int:
     """Committed frames per segment for duration math (backend-specific)."""
     if config.video.backend == "ltxv":
-        blocks = config.video.blocks_per_segment
-        return _LTXV_NATIVE_BLOCK_FRAMES + (blocks - 1) * (_LTXV_NATIVE_BLOCK_FRAMES - 1)
+        return _LTXV_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
+    if config.video.backend == "longlive2":
+        latents = _LONGLIVE_LATENTS_PER_BLOCK * config.video.blocks_per_segment
+        return (latents - 1) * _LONGLIVE_DECODE_EXPANSION + 1
     return config.video.segment_frames
 
 

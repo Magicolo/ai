@@ -6692,3 +6692,39 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - The supervisor takes an optional progress sink (default silent), so
   existing callers/tests are unchanged. Covered by `tests/test_console.py`
   (12 tests); gates green (291 pytest / mypy strict / ruff + format).
+## 2026-09-24 — Stream B GPU leg + qual-driven fixes (longlive2 + acestep)
+
+- Ran the §137A leg on an idle 4060 Ti (`output/qual-longlive2`, 1-block
+  fp8 segments): `benchmark video` 29f/block @ ~38.5s, 14.28 GiB peak;
+  `run --segments 3` → VALID 87f (29f ≈ 1.21s @ 1280x704 each; steady
+  ~38.4s/segment, ratio 2.56; audio take kept after seg0). Results table in
+  `reports/video-backends.md` (environment PENDINGs filled: CUDA 12.8.0 /
+  torch 2.8.0+cu128 / 62 GiB host).
+- Continuity FAILs the provisional 3x gate (within 0.0246 / boundary 0.1134
+  → 4.61x), but per-boundary isolation exonerates the resume path: the
+  no-rebuild boundary (0.1062) matches the post-rebuild one (0.0957), so the
+  jump is native inter-block drift (every boundary IS a block boundary at 1
+  block/segment — the Phase-2 pass criterion). The 3x gate is miscalibrated
+  for slow-motion content; manual eyeball review still open.
+- Fix 1 — post-audio `rebuild` OOM (deterministic, 3/3 fresh processes, not
+  contention): `resume_from_tape` replayed the DiT forward with the 1.31 GiB
+  VAE resident (14.40 GiB + audio residue > 15.57 budget). Now
+  `pipe.vae.to("cpu")` + `empty_cache()` around the replay with `finally`
+  restore (`voyage/workers/video_longlive.py`), mirroring
+  VAE-offload-for-generate.
+- Fix 2 — `init --backend longlive2` could never commit: the preset left
+  768x432 while the worker always renders native 1280x704 (latent x16),
+  failing the commit-time resolution check. Preset now pins
+  `longlive2-704p` / 1280x704 (`voyage/config.py`); preset test renamed to
+  `test_longlive2_preset_pins_native_geometry`.
+- Fix 3 — `_run_dir_arg` resolves absolute (relative `--run` doubled paths
+  inside workers, hit live); `_frames_per_segment` gains the longlive2
+  branch ((8B-1)*4+1: 29/93 measured) and the ltxv branch moves to the
+  Stream-A 96-novel steady state (was pre-realign 25/24). Tests:
+  `test_run_dir_arg_resolves_absolute`,
+  `test_frames_per_segment_longlive2_follows_decode_expansion`,
+  `test_frames_per_segment_ltxv_uses_novel_minimum`. Gates: 309 pytest /
+  mypy strict / ruff + format clean.
+- 1024x576 LTXV probe (same window): deterministic OOM 3/3 (13.69 GiB +
+  1.72 GiB failed) — the 768x512 preset stands; the §30.2 revert note is
+  now measured evidence, not just a claim.

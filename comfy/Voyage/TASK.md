@@ -1694,6 +1694,15 @@ code/config work the merged spec now requires.
   (`output/<run>/output/<run>/...`) because workers spawn with CWD=run_dir
   — pass the absolute in-container path (`/app/output/<run>`) until the
   supervisor normalizes run_dir (same cli/supervisor family).
+- Resolved 2026-09-24 (GPU idle window, qual-longlive2 + probe-576 runs):
+  `_frames_per_segment` now uses the Stream-A 96-novel steady state for
+  ltxv (`_LTXV_NOVEL_BLOCK_FRAMES * blocks`) plus a longlive2 branch
+  ((8B-1)*4+1: 29f/93f measured); `_run_dir_arg` resolves absolute so all
+  subcommands are immune to the doubling (hit live once before the fix);
+  1024x576 LTXV probed directly — deterministic OOM 3/3 (13.69 GiB held +
+  1.72 GiB failed), so the revert stands as measured fact. Remaining open:
+  81/97/121 matrix, TeaCache/Q8/FP8 study, extension-throughput, manual
+  eyeball review of the qual continuity numbers.
 - Deliverable: `docs/UPSTREAM_LTXV_NOTES.md` (does not exist; only
   `UPSTREAM_LONG_LIVE_PATCHES.md` does).
 
