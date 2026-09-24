@@ -6752,3 +6752,70 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - 1024x576 LTXV probe (same window): deterministic OOM 3/3 (13.69 GiB +
   1.72 GiB failed) — the 768x512 preset stands; the §30.2 revert note is
   now measured evidence, not just a claim.
+
+## 2026-09-24 — Launcher-TUI usability pass (focus/dropdown/descriptions/chrome/keys)
+
+- Why: user-reported papercuts on the bare-`voyage` form — nothing took
+  focus on mount so typing went nowhere (fields felt uneditable), the
+  backend Select was not seen as a dropdown, card titles/fields had no
+  visible descriptions (verbose help lived in tooltips only), the layout
+  felt airy, and keyboard-only operation was not real.
+- What changed (`voyage/tui.py` app shell only; `tui_state.py` behavior
+  untouched): Style is a soft-wrapped multiline `TextArea`
+  (`voyage/tui.py:329-334`) and `AUTO_FOCUS` targets it
+  (`voyage/tui.py:218`, mount-time `set_focus` fallback at
+  `voyage/tui.py:491-494`) so typing lands with no click; `:focus`
+  accent styling on inputs/selects/buttons (`voyage/tui.py:294-299`);
+  every Select shows a visible `▾` affordance in its label plus a
+  `▾ pick ...` prompt (`voyage/tui.py:357-394`); card titles carry
+  one-line `.card-desc` descriptions and technical fields carry
+  `.field-hint` lines (`voyage/tui.py:322-394`); chrome tightened (card
+  padding `0 1`, margins `0 1`, shrunken key-hint/run-view margins —
+  `voyage/tui.py:220-300`) with single-column cards kept; key map
+  `ctrl+g` generate / `ctrl+s` stop / `b` back / `ctrl+q` two-press
+  confirm-quit while running (`voyage/tui.py:302-307,568-576`) plus
+  in-app key-hint bars (`#key-hints`, `#run-keys`); mouse stays optional
+  (buttons mirror every action). Remembered settings
+  (`~/.config/voyage/tui-last.toml`: `load_last_settings` prefill +
+  `save_last_settings` after validation) and the `#gpu-warning` line
+  (`tui_state.gpu_warning`) are pre-existing and unchanged.
+- How verified: repro-first Pilot — 15 of 16 new headless `run_test()`
+  Pilot tests in `tests/test_tui_app.py` failed pre-fix, then the
+  implementation until green. Gates: 343 pytest / mypy strict / ruff +
+  format clean.
+  Follow-up folded in: the `tests/test_tui.py` e2e drives the Style
+  editor as a `TextArea` (sets `.text`, not Input `.value` —
+  `tests/test_tui.py:138,147`).
+
+
+## 2026-09-24 — Launcher-TUI frontpage rework (single list + help panel)
+
+- Why: user verdict on the card-based form — "ugly frontpage",
+  flaky-feeling keyboard (root cause: `ctrl+s` is terminal XOFF, so
+  Stop keystrokes froze the terminal, not the app), no visible help,
+  no distinction where errors are, Generate seemingly froze (root
+  cause: `_start_generation` exceptions never switched views, and
+  worker-thread stdout fought Textual's alt screen), and settings
+  sprawl (run-id/output/final-video split, advanced collapse).
+- What changed: the form is now one compact required-first row
+  list (`_field_row`, `voyage/tui.py:379`) — Style (`TextArea` h3),
+  Name, Duration, Backend/Director/Quantization `Select`s, Blocks,
+  Take seconds, Beats, Drift, Seed, 5 checkboxes; run-id + output +
+  final-video merged into a single `name` (`tui_state.py`: new
+  `name` field, `_flat_folder_name` check, `field_errors()` boundary,
+  `to_generate_namespace` derives `output/<name>` +
+  `output/<name>/final.mp4`; legacy `run_id` TOML migrates silently).
+  A focus-driven help panel (`#form-columns` / `#help-body`,
+  `NARROW_WIDTH = 100` stacks it below on narrow terminals) shows
+  the overview + focused field's `FIELD_HELP` + its error; invalid
+  fields get red borders (`field-invalid`). Key map is now
+  `ctrl+g` / `ctrl+x` (stop) / `b` / `ctrl+q`; the old `ctrl+s`
+  binding is gone with a table note explaining XOFF. Freeze fixes:
+  `_start_generation` is exception-guarded (failure returns to the
+  form with the error in `#errors-line`) and worker stdout/stderr
+  are redirected into the run log.
+- How verified: Pilot repro tests first (`tests/test_tui_app.py`:
+  freeze regression via monkeypatched `cmd_generate`, help-panel
+  focus updates, narrow CSS, red-border class; click tests need
+  `scroll_visible` since Generate sits below the fold at 120x40).
+  Gates: 350 pytest / mypy strict (39 files) / ruff + format clean.

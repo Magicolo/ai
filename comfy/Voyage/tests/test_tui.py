@@ -25,12 +25,18 @@ def _valid_state() -> GenerateFormState:
     return GenerateFormState(style="pastel neon line-art, peaceful")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the e2e run's remembered settings out of the real home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
 def test_defaults_match_generate_effective_settings() -> None:
     state = GenerateFormState(style="x")
     assert state.backend == "ltxv"
     assert state.director == "qwen"
     assert state.quantization == "fp8"
-    assert state.run_id == "voyage"
+    assert state.name == "voyage"
     assert state.duration == "5s"
 
 
@@ -61,8 +67,7 @@ def test_unknown_choices_rejected() -> None:
 def test_namespace_maps_empty_optionals_to_none() -> None:
     namespace = to_generate_namespace(_valid_state())
     assert namespace.duration == pytest.approx(5.0)
-    assert namespace.output is None
-    assert namespace.final_video is None
+    assert namespace.run_id == "voyage"
     assert namespace.blocks is None
     assert namespace.take_seconds is None
     assert namespace.beats_per_segment is None
@@ -70,14 +75,21 @@ def test_namespace_maps_empty_optionals_to_none() -> None:
     assert namespace.seed == 0
 
 
+def test_namespace_derives_output_from_name() -> None:
+    namespace = to_generate_namespace(_valid_state())
+    assert namespace.output == "output/voyage"
+    assert namespace.final_video == "output/voyage/final.mp4"
+
+
 def test_namespace_carries_explicit_values() -> None:
     state = _valid_state()
     state.blocks = "2"
     state.take_seconds = "30"
-    state.output = "output/my-run"
+    state.name = "my-run"
     namespace = to_generate_namespace(state)
     assert namespace.blocks == 2
     assert namespace.take_seconds == pytest.approx(30.0)
+    assert namespace.run_id == "my-run"
     assert namespace.output == "output/my-run"
 
 
@@ -124,31 +136,34 @@ def test_parser_has_no_required_command() -> None:
     assert args.command is None
 
 
-def test_generate_end_to_end_fake_backend(tmp_path: Path) -> None:
+def test_generate_end_to_end_fake_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Headless TUI run: fake backend, 1s video, deterministic director.
 
     Drives the real app (Pilot): fills the form, presses Generate, waits
     for the worker, then asserts the run log shows the segment lifecycle
     and the result line names the final video. CPU-only; the run lands in
-    tmp_path, never the repo tree.
+    an isolated working directory (Name is a flat folder name, so the
+    export root resolves under the cwd), never the repo tree.
     """
     pytest.importorskip("textual")
     import asyncio
 
-    from textual.widgets import Input, Select, Static
+    from textual.widgets import Button, Input, Select, Static, TextArea
 
     from voyage.tui import VoyageApp
 
-    run_dir = tmp_path / "tui-e2e"
+    monkeypatch.chdir(tmp_path)
 
     async def _run() -> None:
         app = VoyageApp()
-        async with app.run_test(size=(120, 40)) as pilot:
-            app.query_one("#field-style", Input).value = "pastel neon line-art, peaceful"
+        async with app.run_test(size=(120, 60)) as pilot:
+            app.query_one("#field-style", TextArea).text = "pastel neon line-art, peaceful"
             app.query_one("#field-duration", Input).value = "1s"
-            app.query_one("#field-output", Input).value = str(run_dir)
+            app.query_one("#field-name", Input).value = "tui-e2e"
             app.query_one("#field-backend", Select).value = "fake"
             app.query_one("#field-director", Select).value = "deterministic"
+            await pilot.pause()
+            app.query_one("#button-generate", Button).scroll_visible()
             await pilot.pause()
             await pilot.click("#button-generate")
             for _ in range(240):
@@ -162,7 +177,7 @@ def test_generate_end_to_end_fake_backend(tmp_path: Path) -> None:
             assert "generated" in str(result.content)
 
     asyncio.run(_run())
-    assert (run_dir / "final.mp4").exists()
+    assert (tmp_path / "output" / "tui-e2e" / "final.mp4").exists()
 
 
 def test_app_structure_matches_form_fields() -> None:
@@ -178,11 +193,12 @@ def test_app_structure_matches_form_fields() -> None:
                 "field-backend",
                 "field-duration",
                 "field-style",
-                "field-run-id",
+                "field-name",
                 "field-seed",
                 "field-director",
                 "field-quantization",
                 "button-generate",
+                "help-panel",
                 "run-log",
             ):
                 assert app.query_one(f"#{field_id}") is not None
