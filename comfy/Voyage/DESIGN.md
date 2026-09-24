@@ -6445,6 +6445,13 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   when torch is missing (`_require_cuda_stack`, `find_spec`-based per §83;
   3 tests). Proven live: the exact user command committed 5 ltxv segments
   and wrote `final.mp4` (h264 768x432 + AAC, 5.25s), `validate` VALID 125f.
+  Follow-up fix 2026-09-24: that video's audio was a constant sine — the
+  presets only set video, audio stayed on the toml-default `fake` backend
+  (ffmpeg `sine`). `_AUDIO_BACKEND_PRESETS` now pairs audio with video
+  (`ltxv`/`longlive2` -> ACE-Step music on `cuda:0`, `fake` keeps sine),
+  applied in both `default_config_toml` and `with_video_backend` (3 tests).
+  Proven live: fresh `--run-id voyage-audio` run, 5 ltxv segs, `final.mp4`
+  AAC 5.23s with dynamic music (per-window RMS -11 to -59 dB), VALID 125f.
 
 ## 2026-09-24 — new-DESIGN.md merged into DESIGN.md (backend-neutral spec)
 

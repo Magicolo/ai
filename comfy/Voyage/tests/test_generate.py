@@ -124,6 +124,46 @@ def test_unknown_backend_rejected(tmp_path: Path) -> None:
         with_video_backend(config, "framepack")
 
 
+def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:
+    """CUDA video presets must pair with real ACE-Step music, not fake sine."""
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    for backend in ("ltxv", "longlive2"):
+        applied = with_video_backend(config, backend)
+        assert applied.audio.backend == "acestep"
+        assert applied.audio.device == "cuda:0"
+        assert applied.audio.models_dir == "/models"
+    # Source config untouched (pure function).
+    assert config.audio.backend == "fake"
+
+
+def test_fake_preset_keeps_fake_audio(tmp_path: Path) -> None:
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    assert with_video_backend(config, "fake").audio.backend == "fake"
+
+
+def test_init_toml_carries_audio_preset(tmp_path: Path) -> None:
+    """`init --backend ltxv` writes the audio preset into the toml directly."""
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11, video_backend="ltxv"),
+        encoding="utf-8",
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    assert config.audio.backend == "acestep"
+    assert config.audio.device == "cuda:0"
+
+
 def _generate_args(output: Path, *extra: str) -> list[str]:
     return [
         "generate",
@@ -187,3 +227,59 @@ def test_generate_defaults_to_output_run_id(
         == 0
     )
     assert (tmp_path / "output" / "gen-default" / "final.mp4").exists()
+
+
+def test_cuda_guard_passes_for_fake_without_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    from voyage.cli import _require_cuda_stack
+    from voyage.config import default_config_toml, load_config
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("guard", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    assert _require_cuda_stack(config) is True
+
+
+def test_cuda_guard_fails_for_ltxv_without_torch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    from voyage.cli import _require_cuda_stack
+    from voyage.config import default_config_toml, load_config
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("guard", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    assert _require_cuda_stack(with_video_backend(config, "ltxv")) is False
+    assert "voyage-video" in capsys.readouterr().err
+
+
+def test_generate_aborts_before_init_without_cuda_stack(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    monkeypatch.chdir(tmp_path)
+    code = main(
+        [
+            "generate",
+            "--backend",
+            "ltxv",
+            "--duration",
+            "5s",
+            "--style",
+            "pastel neon line-art, peaceful",
+        ]
+    )
+    assert code == 1
+    assert not (tmp_path / "output" / "voyage").exists()
+    assert "voyage-video" in capsys.readouterr().err

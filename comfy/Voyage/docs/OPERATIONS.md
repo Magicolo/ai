@@ -32,10 +32,17 @@ Duration is human-readable (`90`, `90s`, `2m`, `1m30s`, `1h`; combined forms
 like `1h2m3.5s` allowed). Segment count rounds **up**, so the video is never
 shorter than requested. Backend presets set geometry/device automatically
 (`ltxv`: 768×512 on `cuda:0`; `longlive2`: default geometry on `cuda:0`;
-`fake`: CPU smoke runs). Extra run flags (`--draft`, `--director`,
+`fake`: CPU smoke runs) and pair the audio backend too (`ltxv`/`longlive2`
+get real ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Extra run flags (`--draft`, `--director`,
 `--blocks`, `--take-seconds`, `--quantization`) pass through. Validation
 failure aborts before finalize unless `--skip-bad`; on a GPU box with no
-visible GPU a warning is printed (the worker will fail at init).
+visible GPU a warning is printed (the worker will fail at init). `run.sh`
+selects the container automatically: a CUDA backend (`ltxv`, `longlive2`,
+`acestep` — from `--backend` or the run's `voyage.toml`) switches to
+`voyage-video:latest` with `--gpus all` and pins `-w /app`, unless
+`VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. A CUDA backend in an image
+without torch fails fast with a pointer to `voyage-video` instead of a
+cryptic worker error.
 
 ## Start / pause / resume / stop
 

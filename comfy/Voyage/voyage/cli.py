@@ -243,6 +243,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"take_seconds={config.audio.take_seconds} "
             f"quantization={config.video.quantization}"
         )
+    if not _require_cuda_stack(config):
+        return 1
     supervisor = Supervisor(run_dir, config)
 
     def _on_signal(signum: int, frame: FrameType | None) -> None:
@@ -599,6 +601,41 @@ def segments_for_duration(duration_seconds: float, fps: int, frames_per_segment:
     return max(1, math.ceil(duration_seconds * fps / frames_per_segment - 1e-9))
 
 
+_CUDA_BACKENDS = frozenset({"ltxv", "longlive2", "acestep"})
+
+
+def _torch_available() -> bool:
+    """Whether torch is importable (find_spec locates without importing)."""
+    import importlib.util
+
+    return importlib.util.find_spec("torch") is not None
+
+
+def _cuda_stack_error(backend: str) -> str:
+    return (
+        f"error: video backend {backend!r} needs the CUDA worker stack (torch), "
+        "but torch is not importable in this container; re-run with "
+        "VOYAGE_IMAGE=voyage-video:latest and VOYAGE_GPUS=1 (run.sh selects "
+        "both automatically for CUDA backends)"
+    )
+
+
+def _require_cuda_stack(config: ProjectConfig) -> bool:
+    """Fast-fail when a CUDA backend is configured but torch is unavailable.
+
+    Workers are in-container subprocesses, so the container image must carry
+    the worker stack (run.sh selects voyage-video automatically; direct
+    `docker run` users must pass the image + --gpus all themselves).
+    find_spec locates torch without importing it — the supervisor never
+    imports GPU libraries (§83).
+    """
+    needs_cuda = config.video.backend in _CUDA_BACKENDS or config.audio.backend in _CUDA_BACKENDS
+    if not needs_cuda or _torch_available():
+        return True
+    print(_cuda_stack_error(config.video.backend), file=sys.stderr)
+    return False
+
+
 def _warn_if_no_cuda(config: ProjectConfig) -> None:
     """Preflight: a CUDA device with no visible GPU fails late at worker init."""
     if not config.video.device.startswith("cuda"):
@@ -615,6 +652,12 @@ def _warn_if_no_cuda(config: ProjectConfig) -> None:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     """One-shot fixed-duration video: init -> run -> validate -> finalize."""
+    # Fail before init: generate always writes a fresh config from the
+    # backend preset (CUDA video backends pair with ACE-Step audio), so the
+    # preset alone decides the stack.
+    if args.backend in _CUDA_BACKENDS and not _torch_available():
+        print(_cuda_stack_error(args.backend), file=sys.stderr)
+        return 1
     # Resolve once: workers spawn with CWD=run_dir, so every downstream path
     # (payloads, takes, slices) must be absolute or they double up.
     output = Path(args.output) if args.output else Path("output") / args.run_id
@@ -631,6 +674,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if code != 0:
         return code
     config, _digest = _load_run(run_dir)
+    if not _require_cuda_stack(config):
+        return 1
     _warn_if_no_cuda(config)
     effective = apply_draft_overrides(
         config,

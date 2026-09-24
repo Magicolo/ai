@@ -229,6 +229,9 @@ def default_config_toml(run_id: str, style: str, seed: int, video_backend: str =
     width = int(preset.get("width", 768))
     height = int(preset.get("height", 432))
     device = str(preset.get("device", "cpu"))
+    audio_preset = _audio_preset(video_backend)
+    audio_backend = audio_preset["backend"]
+    audio_device = audio_preset["device"]
     return f"""\
 schema_version = 1
 run_id = "{run_id}"
@@ -251,7 +254,7 @@ blocks_per_segment = 1
 quantization = "fp8"
 
 [audio]
-backend = "fake"
+backend = "{audio_backend}"
 sample_rate = 48000
 channels = 2
 music_style = "ambient electronic"
@@ -260,7 +263,7 @@ take_seconds = 45.0
 ahead_seconds = 20.0
 crossfade_seconds = 2.0
 models_dir = "/models"
-device = "cpu"
+device = "{audio_device}"
 
 [director]
 backend = "deterministic"
@@ -383,11 +386,34 @@ def _video_preset(backend: str) -> dict[str, str | int]:
         raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
 
 
+# Audio backend paired with each video preset: CUDA video backends get the
+# real ACE-Step music stack (models + device mirror the video preset), while
+# fake video keeps the fake sine backend for CPU-only test runs.
+_AUDIO_BACKEND_PRESETS: dict[str, dict[str, str]] = {
+    "fake": {"backend": "fake", "device": "cpu"},
+    "longlive2": {"backend": "acestep", "device": "cuda:0"},
+    "ltxv": {"backend": "acestep", "device": "cuda:0"},
+}
+
+
+def _audio_preset(backend: str) -> dict[str, str]:
+    try:
+        return _AUDIO_BACKEND_PRESETS[backend]
+    except KeyError:
+        known = ", ".join(sorted(_AUDIO_BACKEND_PRESETS))
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+
+
 def with_video_backend(config: ProjectConfig, backend: str) -> ProjectConfig:
     """Return a copy of config with the video-backend preset applied.
 
-    Pure: never mutates. Rebuilds VideoConfig through its constructor so
-    invalid presets raise ValidationError instead of corrupting the run.
+    Pure: never mutates. Rebuilds VideoConfig/AudioConfig through their
+    constructors so invalid presets raise ValidationError instead of
+    corrupting the run. The audio backend rides along (CUDA video backends
+    pair with ACE-Step music; fake video keeps fake sine).
     """
     video = VideoConfig(**{**config.video.model_dump(), **_video_preset(backend)})
-    return config.model_copy(update={"video": video})
+    audio = AudioConfig(
+        **{**config.audio.model_dump(), **_audio_preset(backend), "models_dir": "/models"}
+    )
+    return config.model_copy(update={"video": video, "audio": audio})
