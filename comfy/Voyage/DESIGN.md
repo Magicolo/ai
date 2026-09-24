@@ -1347,6 +1347,70 @@ The worker acknowledges that a block is **generated**, not **committed**.
 
 ---
 
+## 22.5 Stream-noise continuity, attention preamble, and KV capacity floor
+
+Three deviations from upstream's single-call `inference()` path each broke
+chunk-to-chunk continuity on their own (measured ~6x frame-diff jumps at
+every block boundary until all three were fixed; see §140 continuity entry).
+All apply to the direct-`_inference_inner` session path (§22.1-22.4):
+
+1. **Stream-level noise.** Upstream draws ONE noise tensor per sequence and
+   slices it per chunk. The session therefore holds a single persistent
+   RNG (`LongLiveStreamSession`, seeded by the first block's seed) and
+   draws each block's noise sequentially — the identical trajectory.
+   The RNG state is taped per segment (`noise_rng_state` in
+   `recovery.pt`, i.e. the "RNG state" of §27) so evict/rebuild cycles
+   continue the trajectory instead of restarting it.
+
+2. **Attention preamble mirror.** Upstream `inference()` applies a per-call
+   preamble (`dit.local_attn_size`, `_set_all_modules_max_attention_size`,
+   `_set_all_modules_sink_size`, `_set_all_modules_global_sink_size`).
+   The direct-`_inference_inner` path bypasses it, so attention modules
+   kept construction values — notably `sink_size=0`, which disabled the
+   leading-frames sink prepend entirely. `LongLiveSession` mirrors the
+   full preamble once at build (values are static per config).
+
+3. **KV capacity floor: `sink + block <= local_attn_size`.** The KV cache
+   holds `local_attn_size` frames; the sink permanently occupies `sink`
+   of them. With `local_attn_size=8, sink=8` the sink consumed the whole
+   cache and every chunk attended only to its own window (fresh scene per
+   chunk). Production uses `local_attn_size=16, sink=8` (16-frame cache =
+   8-frame sink + one    rolling 8-frame block): every chunk sees the anchor
+   plus its predecessor. Validated pairs: 16/8 (draft, boundaries smooth),
+   12/4 (tighter, slight chunk-2 morph — insufficient). Upstream's 32/8
+   needs >24GB VRAM and does not fit 16GB cards.
+
+4. **`cache_start_frame` units: segment-relative FRAMES, not block indices.**
+   `_inference_inner` uses its `cache_start_frame` local directly as a
+   frame index into the caller-provided noise/output buffers
+   (`noise[:, cs:cs+8]`, `output[:, cs:...]`). Voyage's `append_block`
+   once passed the block index (0,1,2): block 1 denoised `noise[:,1:9]`
+   while chunk reads happen at `[:,8:16]`/`[:,16:24]` — so chunk 1 became
+   1 real latent + 7 zeros and chunk 2 all zeros (symptoms: a white flash
+   at the real→zero transition, white-locked brightness thereafter,
+   and byte-similar brightness envelopes across runs since zeros decode
+   identically). Upstream `inference()` advances both its
+   `current_start` (absolute) and `cache_start` (buffer-relative) by
+   `num_frame_per_block` per chunk; the voyage equivalent is
+   `cache_start_frame` = segment-relative start frame (0,8,16 per block)
+   while `current_start_frame` stays absolute for KV/RoPE continuity.
+   (The generator-internal `cache_start` forward argument is dead —
+   it defaults to `current_start` and is never read for any computation;
+   do not confuse the two.) `handle_rebuild` additionally tears down the
+   old session (`evict()`) before building the new one — without it the
+   old session (~11.5GB: fp8 DiT + 16F cache + VAE) and the new build
+   (~6GB) coexist and resume replays OOM (measured 14.97GB).
+
+Fitting 16/8 on 16GB VRAM requires the **VAE-offload-for-generate**:
+`generate_blocks` moves the 1.31GB VAE to CPU during denoising (it is
+idle until the decode) and restores it before `decode_to_pixel_chunk`,
+mirroring the existing generator-offload-for-decode. Measured full-res
+fp8 stage peaks: build 6.06 / encode 6.07 / buffers+8F-cache 8.67 /
+forward peak 13.16GB; local-16 projects to 13.16 + 2.59 (extra 8F cache)
+− 1.31 (VAE) = 14.44GB — fits with ~1.5GB headroom.
+
+---
+
 # 23. LongLive relative RoPE
 
 The upstream LongLive 2.0 code added relative RoPE support as part of its move toward infinite video generation.
@@ -1391,6 +1455,14 @@ persistent history
 `local_attn_size` controls how many temporal frames participate in the local rolling window.
 
 `multi_shot_sink` can preserve special chunks across scene transitions.
+
+Production values (see §22.5 for the full continuity analysis):
+`local_attn_size=16`, `sink_size=8` (16-frame cache = 8-frame sink + one
+rolling 8-frame block). HARD FLOOR: `sink + num_frame_per_block` must fit
+inside `local_attn_size`, else the sink consumes the whole cache and every
+chunk regenerates from noise+text alone. Upstream's 32/8 needs >24GB VRAM;
+16/8 fits 16GB cards only with the VAE-offload-for-generate
+(`generate_blocks` parks the 1.31GB VAE on CPU during denoising).
 
 Do not modify cache tensors from unrelated threads.
 
@@ -5755,6 +5827,49 @@ Calibration (real footage): complexity 0.06-0.13 and drift 0.01-0.10 read BELOW 
 Contention saga: 4 silent worker deaths (4-line log, no traceback, clean dmesg), ALL under GPU overlap with another agent's runs (exp-f vs determined_tu, exp-g vs silly_lamarr, exp-i × 2 vs vcont-seq); rule: verify GPU <2 GB used before EVERY GPU launch, single-GPU-job-at-a-time. Mechanism hunt (no supervisor timeout anywhere; worker stderr IS captured to the log so tracebacks would appear; EOF on stdout → 'closed stdout') proves non-Python death, but the source is unidentified — product fix deferred, never attempted blind.
 Collision note: experiments ran in the main tree pre-18:06 UTC; the live tree now carries another agent's worker rewrite (325e6d5 stream fix: 2-arg append_block + _seq_noise, ON TOP of the slice-4 precision work which is intact) plus Phase-6 slices C/D/E and uncommitted work; exp-i's seg1 conv crash is in THEIR rewritten path (traceback shows their 2-arg call), NOT the slice-4 code — do not fix. Slice-5 docs written in worktree fast-iteration (based on bd5c4cd); experiment artifacts live in the main tree under ./Voyage/output/exp-* (preserved, gitignored).
 Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qualitative judgment (final.mp4) pending a clean GPU run after the seg1 crash is fixed. Gates RED at base (pre-existing slice-E SyntaxError video_longlive.py:925; this docs-only change is unaffected; code last green 111/32).
+
+- Continuity fix done 2026-09-23: every segment started a new scene at
+  every block boundary (~6x frame-diff jumps, in-segment and
+  cross-segment). Root causes, all deviations from upstream's single-call
+  `inference()` path (§22.5): (1) per-block fresh noise RNGs instead of
+  one stream-level trajectory — fixed with a persistent session RNG
+  seeded by the first block's seed, state taped per segment
+  (`noise_rng_state`); (2) the attention preamble (local/sink/global-sink
+  module setup) never applied on the direct-`_inference_inner` path, so
+  `sink_size` stayed 0 and no history was ever prepended — fixed by
+  mirroring the preamble at session build; (3) KV capacity: local 8 +
+  sink 8 left zero rolling room (sink consumed the whole 8F cache) —
+  fixed with `local_attn_size=16, sink=8` (VideoConfig default, all
+  profiles). Full-res 16GB fit via VAE-offload-for-generate in
+  `generate_blocks` (VAE 1.31GB parked on CPU during denoising; measured
+  projection 14.44GB peak). Validation: draft teacup probes (local 8:
+  0.19-0.23 boundary spikes + full viewpoint change at chunk 2; local 16:
+  max 0.08, chunk-1 structurally invisible, chunk-2 flicker-level, same
+   composition across all frames) + full-res production-path run vcont-prod
+   (no-OOM, boundaries, eyeball). Bit-identical split-vs-single probe
+   proved the session plumbing equals upstream's path; slim tests pin the
+   `local_attn_size=16` default (tests/test_draft.py).
+- Gates green (157 pytest / mypy 34).
+- Continuity fix, part 2 (cache_start units + rebuild teardown), done
+  2026-09-23: post-validation forensics on a 2x3 full-res run showed
+  identical mid-chunk-1 white flashes + white-locked brightness + a 0.55
+  cross-segment jump in both segments — traced to `cache_start_frame`
+  units (§22.5 item 4): block indices (0,1,2) were passed where
+  `_inference_inner` expects frame indices, so chunks 1-2 read
+  zero-filled latents. Retrospective: the earlier vcont-prod segment 0
+  ran with absolute (0,8,16) = already-correct frames and remains the
+  true local-16 reference; the flashing run is invalidated (the
+  prompt-attractor/white-absorbing-state theory built on it is
+  discarded). Also fixed in the same pass: `handle_rebuild` session
+  teardown (14.97GB resume OOM). Re-validation run vcont-fixed (2x3
+  full-res, fixed code): both segments committed, no crash/OOM; seg0 is
+  md5-IDENTICAL to vcont-prod seg0 (the fix is a no-op for the
+  already-correct path); seg1 smooth (median 0.0052, max 0.0462 at the
+  frame-1 settling transient, chunk boundaries 0.004-0.015, no flash,
+  normal brightness); cross-segment 0.1467 with same-scene continuation
+  (eyeball: same neon sign, no viewpoint change — a brief ~5-frame
+  settling morph, not a cut).
+- Gates green (168 pytest / mypy 35 files).
 - LTXV alternative backend (Phase 7) slices 1-4 done 2026-09-24: Slice 1
   probe = GO bf16 at native 768x512 (stock `infer()` OOMs moving the fp32
   T5-XXL 18.8GB to GPU and `offload_to_cpu` does not prevent the upfront

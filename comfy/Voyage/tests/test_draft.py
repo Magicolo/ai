@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from voyage.config import (
     DraftConfig,
+    VideoConfig,
     apply_draft_overrides,
     default_config_toml,
     load_config,
@@ -65,3 +66,18 @@ def test_invalid_overrides_rejected(tmp_path) -> None:  # type: ignore[no-untype
         apply_draft_overrides(_base_config(tmp_path), blocks=0)
     with pytest.raises(ValidationError):
         apply_draft_overrides(_base_config(tmp_path), take_seconds=-1.0)
+
+
+def test_local_attn_size_defaults_to_continuity_capacity() -> None:
+    # 16 = sink 8 + one 8-frame block: the minimum KV capacity at which
+    # every chunk attends to real history (smaller caches evict the sink
+    # and each chunk denoises from noise+text alone — a fresh scene per
+    # chunk, measured ~6x boundary jumps).
+    assert VideoConfig().local_attn_size == 16
+
+
+def test_local_attn_size_survives_draft_profile(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    out = apply_draft_overrides(_base_config(tmp_path), draft=True)
+    assert out.video.local_attn_size == 16
+    with pytest.raises(ValidationError):
+        VideoConfig(local_attn_size=0)

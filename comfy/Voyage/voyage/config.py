@@ -45,8 +45,19 @@ class VideoConfig(BaseModel):
     # The worker derives its recovery profile from this, so tapes never
     # resume across numerics.
     quantization: Literal["fp8", "bf16"] = "fp8"
+    # Continuity investigation (§140): KV attention window in frames. The
+    # cache must hold sink + one block (capacity floor), else every chunk
+    # attends only to its own window and each block regenerates a fresh
+    # scene (~6x frame-diff jumps at every boundary, measured). 16 = sink
+    # 8F + 8F rolling (chunk-1 boundary structurally invisible, chunk-2
+    # flicker-level; draft-validated metric + eyeball). Full-res fits via
+    # the worker's VAE-offload-for-generate (breakdown: 13.16 + 2.59 -
+    # 1.31 = 14.44 GiB peak). Upstream uses 32 (needs >24GB VRAM).
+    local_attn_size: int = 16
 
-    @field_validator("width", "height", "fps", "segment_frames", "blocks_per_segment")
+    @field_validator(
+        "width", "height", "fps", "segment_frames", "blocks_per_segment", "local_attn_size"
+    )
     @classmethod
     def positive(cls, value: int) -> int:
         if value <= 0:

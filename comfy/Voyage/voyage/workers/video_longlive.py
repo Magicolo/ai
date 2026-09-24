@@ -112,7 +112,12 @@ def _enter_longlive_tree(models_dir: Path) -> None:
     os.chdir(VOYAGE_LONGLIVE_DIR)
 
 
-def build_longlive_config(generator_ckpt: Path, latent_shape: list[int]) -> Any:
+def build_longlive_config(
+    generator_ckpt: Path,
+    latent_shape: list[int],
+    local_attn_size: int = 8,
+    sink_size: int = 8,
+) -> Any:
     """Mirror configs/fp8/inference_fp8.yaml as an OmegaConf object.
 
     Factored out so memory probes and tests exercise the exact config the
@@ -125,6 +130,15 @@ def build_longlive_config(generator_ckpt: Path, latent_shape: list[int]) -> Any:
     local_attn_size=32 and 80×44 latents that cache alone is ~20 GB. Dropping
     the window to 8 brings it to ~5.2 GB (narrower temporal context, valid
     Phase 1 smoke tradeoff; revisit with KV eviction/quant in later phases).
+
+    CAPACITY FLOOR: the cache must hold sink + at least one block
+    (sink_size + num_frame_per_block <= local_attn_size) or the sink
+    consumes the whole cache and every chunk attends to a window with no
+    history (measured: fresh scene per chunk, ~6x boundary jumps).
+    pipeline.global_sink_size derives from sink_size (multi_shot_sink on),
+    so one param steers both. Validated pairs: 16/8 (draft, smooth),
+    12/4 (candidate for 16 GB full-res — smaller cache, rolling 1 block
+    + 4-frame anchor).
     """
     from omegaconf import OmegaConf  # type: ignore[import-not-found]
     from utils.config import normalize_config  # type: ignore[import-not-found]
@@ -134,7 +148,7 @@ def build_longlive_config(generator_ckpt: Path, latent_shape: list[int]) -> Any:
             "model_name": "Wan2.2-TI2V-5B",
             "timestep_shift": 5.0,
             "num_frame_per_block": 8,
-            "local_attn_size": 8,
+            "local_attn_size": local_attn_size,
         },
         "use_ema": False,
         "num_samples": 1,
@@ -144,7 +158,7 @@ def build_longlive_config(generator_ckpt: Path, latent_shape: list[int]) -> Any:
         "guidance_scale": 1.0,
         "inference": {
             "sampling_steps": 4,
-            "sink_size": 8,
+            "sink_size": sink_size,
             "guidance_scale": 1.0,
             "multi_shot_sink": True,
             "multi_shot_rope_offset": 8,
@@ -482,8 +496,20 @@ class LongLiveStreamSession:
             )
         # NOTE: no position reset — that is the whole point. Positions
         # persist in the cache dicts; only the per-call window advances.
-        # current/cache_start stay absolute and in lockstep (T2V: upstream
-        # advances both per chunk from the same start).
+        # current_start_frame stays ABSOLUTE (drives RoPE positions and the
+        # KV eviction/window math — the continuity-critical part), while
+        # cache_start_frame is SEGMENT-relative IN FRAMES (indexes this
+        # call's noise and output buffers, which span only this segment:
+        # 0, 8, 16 for a 3-block call). Upstream advances both by
+        # num_frame_per_block per chunk inside one inference() call
+        # (causal_diffusion_inference.py:698-699), and indexes noise[:,
+        # cache_start:cache_start+8] / output[:, cache_start:...] with it —
+        # so frames, not block indices. Passing block indices (0, 1, 2)
+        # silently denoised overlapping 1-frame-shifted noise slices and
+        # wrote outputs at [:, 1:9] / [:, 2:10], leaving chunks 1-2 mostly
+        # ZERO latents (decoded as a static white-lock); passing the
+        # absolute position crashed every post-first segment (noise[:,
+        # 24:32] on a 24-frame buffer = empty 0-frame DiT input).
         pipe._inference_inner(
             noise=self._seq_noise,
             batch_size=1,
@@ -503,7 +529,7 @@ class LongLiveStreamSession:
             clamp_i2v_first_chunk=False,
             return_latents=True,
             current_start_frame=self._next_start_frame,
-            cache_start_frame=self._next_start_frame,
+            cache_start_frame=start,
             raw_prompts=[[apply_scene_cut_prefix(prompt, scene_cut)]],
         )
         chunk = self._seq_output[:, start:end]
@@ -530,7 +556,13 @@ class LongLiveSession:
     """Resident pipeline: built once at `init`, reused per segment."""
 
     def __init__(
-        self, models_dir: Path, device: str, latent_shape: list[int], quantization: str = "fp8"
+        self,
+        models_dir: Path,
+        device: str,
+        latent_shape: list[int],
+        quantization: str = "fp8",
+        local_attn_size: int = 8,
+        sink_size: int = 8,
     ) -> None:
         import torch
         from pipeline import CausalDiffusionInferencePipeline  # type: ignore[import-not-found]
@@ -556,7 +588,9 @@ class LongLiveSession:
         self._latent_shape = list(latent_shape)
         torch.set_grad_enabled(False)
 
-        config = build_longlive_config(generator_ckpt, list(latent_shape))
+        config = build_longlive_config(
+            generator_ckpt, list(latent_shape), local_attn_size, sink_size
+        )
         pipeline = CausalDiffusionInferencePipeline(
             config,
             device=self._device,
@@ -564,13 +598,8 @@ class LongLiveSession:
         )
         pos_only = _install_pos_only_caches(pipeline)
         print(f"pos-only KV caches: {pos_only}", file=sys.stderr)
-        # RoPE setup mirrors inference() per-call preamble (which the direct
-        # _inference_inner path bypasses): relative RoPE on, temporal offset
-        # zeroed; per-shot offsets then evolve inside _inference_inner.
-        dit = pipeline._dit_model
-        dit.use_relative_rope = True
-        dit.rope_temporal_offset = 0.0
-        print("use_relative_rope: True", file=sys.stderr)
+        # NOTE: the inference() attention preamble is mirrored post-quantize
+        # below (module replacement must not drop it).
         # Mirror inference.py: unwrap the checkpoint container (keys:
         # generator + export metadata), strict-load, bf16, in-place FP8.
         import utils.nvfp4_checkpoint as nvfp4_ckpt  # type: ignore[import-not-found]
@@ -588,6 +617,27 @@ class LongLiveSession:
         else:
             print("keeping generator in BF16 (no FP8 quantization) ...", file=sys.stderr)
         pipeline.generator.model.eval().requires_grad_(False)
+        # Mirror inference()'s per-call attention preamble (the direct
+        # _inference_inner path bypasses it). WITHOUT this the attention
+        # modules keep construction values — notably sink_size=0, so the
+        # leading-frames sink is never prepended and every chunk attends
+        # only to its own sliding window (fresh scene per chunk, measured
+        # ~6x boundary jumps). All values are static per config, so once
+        # per session equals once per inference() call; placed after
+        # quantization to survive any module replacement.
+        dit = pipeline._dit_model
+        dit.local_attn_size = pipeline.local_attn_size
+        pipeline._set_all_modules_max_attention_size(pipeline.local_attn_size)
+        pipeline._set_all_modules_sink_size(pipeline.sink_size)
+        pipeline._set_all_modules_global_sink_size(pipeline.global_sink_size)
+        dit.use_relative_rope = True
+        dit.rope_temporal_offset = 0.0
+        print(
+            "attention preamble mirrored: local_attn_size="
+            f"{pipeline.local_attn_size} sink_size={pipeline.sink_size} "
+            f"global_sink_size={pipeline.global_sink_size} use_relative_rope=True",
+            file=sys.stderr,
+        )
         # Eager mode for Phase 1 (torch_compile off — no warmup samples yet).
         pipeline.vae.to(device=self._device)
         self._pipeline = pipeline
@@ -629,6 +679,16 @@ class LongLiveSession:
         if not prompts or not (len(prompts) == len(seeds) == len(scene_cuts)):
             raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
         torch = self._torch
+        pipe = self._pipeline
+        # VAE-offload-for-generate (mirrors the generator-offload-for-decode
+        # below): the VAE (measured 1.31 GiB, full-res) sits idle until the
+        # decode step, while the generate-time peak (DiT forward + KV cache
+        # + fp8 activation transients) is what bounds KV capacity — moving
+        # the VAE aside buys the headroom local_attn 16 needs at full res
+        # (breakdown: 13.16 + 2.59 - 1.31 = 14.44 GiB peak). Restored right
+        # after the block loop, before the tape write and decode.
+        pipe.vae.to("cpu")
+        torch.cuda.empty_cache()
         block_latents = []
         # One sequence per payload: full noise + output buffers, sliced per
         # block at absolute stream positions (mirrors one upstream
@@ -638,6 +698,7 @@ class LongLiveSession:
             for prompt, cut in zip(prompts, scene_cuts, strict=True):
                 block_latents.append(self._stream.append_block(prompt, cut))
         latents = torch.cat(block_latents, dim=1)
+        pipe.vae.to(self._device)
         # Recovery tail (DESIGN §27): last block's clean latents + embeds so
         # a restarted worker rebuilds causal context without re-encoding
         # (CPU T5 costs minutes). Written beside the segment video.
@@ -710,6 +771,8 @@ def _build_session() -> LongLiveSession:
         str(_INIT_PARAMS["device"]),
         list(_INIT_PARAMS["latent_shape"]),
         str(_INIT_PARAMS["quantization"]),
+        int(_INIT_PARAMS.get("local_attn_size", 8)),
+        int(_INIT_PARAMS.get("sink_size", 8)),
     )
 
 
@@ -735,6 +798,8 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
             "device": device,
             "latent_shape": latent_shape,
             "quantization": quantization,
+            "local_attn_size": int(payload.get("local_attn_size", 8)),
+            "sink_size": int(payload.get("sink_size", 8)),
         }
     )
     _SESSION = _build_session()
@@ -797,75 +862,6 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild causal context from a recovery.pt tape (DESIGN §27.1)."""
-    if _SESSION is None:
-        raise RuntimeError("video_longlive not initialized — send `init` first")
-    import torch
-
-    checked_request(payload, recovery_path=str)
-    with open(str(payload["recovery_path"]), "rb") as handle:
-        tape = torch.load(handle, map_location="cpu", weights_only=False)
-    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
-    if not isinstance(tape, dict) or tape.get("profile") != expected:
-        raise ValueError("recovery tape profile mismatch")
-    position = _SESSION.stream.resume_from_tape(tape)
-    return {"resumed": True, **position}
-
-
-def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
-    """Unload the video stack so audio can own the GPU (§40)."""
-    del payload
-    global _SESSION
-    if _SESSION is not None:
-        _SESSION.evict()
-        _SESSION = None
-    return {"evicted": True}
-
-
-def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the session after an eviction and resume from tape (§40).
-
-    Payload carries `recovery_path` (latest committed tape): the fresh
-    session continues the stream instead of starting a new one. Without
-    init params (never initialized) this is an error, not a silent fresh
-    start — the supervisor always inits before first use.
-    """
-    global _SESSION
-    import torch
-
-    checked_request(payload, recovery_path=str)
-    if not _INIT_PARAMS:
-        raise RuntimeError("video_longlive rebuilt before init")
-    _SESSION = _build_session()
-    with open(str(payload["recovery_path"]), "rb") as handle:
-        tape = torch.load(handle, map_location="cpu", weights_only=False)
-    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
-    if not isinstance(tape, dict) or tape.get("profile") != expected:
-        raise ValueError("recovery tape profile mismatch")
-    position = _SESSION.stream.resume_from_tape(tape)
-    return {"rebuilt": True, **position}
-
-
-def main() -> None:
-    serve(
-        {
-            "init": handle_init,
-            "health": handle_health,
-            "generate_blocks": handle_generate_blocks,
-            "evict_gpu": handle_evict_gpu,
-            "rebuild": handle_rebuild,
-            "checkpoint": lambda payload: {
-                "checkpoint_id": f"longlive-{payload.get('segment_id', 'none')}"
-            },
-            "resume": handle_resume,
-            "shutdown": lambda _payload: {"stopped": True},
-        }
-    )
-
-
-if __name__ == "__main__":
-    main()
 def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     """Time warmup + measured `generate_blocks` probes with VRAM peaks (§104).
 
@@ -922,4 +918,82 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild causal context from a recovery.pt tape (DESIGN §27.1)."""
+    if _SESSION is None:
+        raise RuntimeError("video_longlive not initialized — send `init` first")
+    import torch
+
+    checked_request(payload, recovery_path=str)
+    with open(str(payload["recovery_path"]), "rb") as handle:
+        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
+    if not isinstance(tape, dict) or tape.get("profile") != expected:
+        raise ValueError("recovery tape profile mismatch")
+    position = _SESSION.stream.resume_from_tape(tape)
+    return {"resumed": True, **position}
+
+
+def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
+    """Unload the video stack so audio can own the GPU (§40)."""
+    del payload
+    global _SESSION
+    if _SESSION is not None:
+        _SESSION.evict()
+        _SESSION = None
+    return {"evicted": True}
+
+
+def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the session after an eviction and resume from tape (§40).
+
+    Payload carries `recovery_path` (latest committed tape): the fresh
+    session continues the stream instead of starting a new one. Without
+    init params (never initialized) this is an error, not a silent fresh
+    start — the supervisor always inits before first use.
+
+    The previous session (if any — e.g. a crash-retry rebuild, not just
+    the post-evict path) is torn down FIRST with the same del + gc +
+    empty_cache sequence as evict(): at full-res local-16 the resident
+    stack is ~11.5GB, and building the fresh ~6GB session alongside it
+    OOMs the 16GB card (measured 14.97GB in resume replay).
+    """
+    global _SESSION
+    import torch
+
+    checked_request(payload, recovery_path=str)
+    if not _INIT_PARAMS:
+        raise RuntimeError("video_longlive rebuilt before init")
+    if _SESSION is not None:
+        _SESSION.evict()
+        _SESSION = None
+    _SESSION = _build_session()
+    with open(str(payload["recovery_path"]), "rb") as handle:
+        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
+    if not isinstance(tape, dict) or tape.get("profile") != expected:
+        raise ValueError("recovery tape profile mismatch")
+    position = _SESSION.stream.resume_from_tape(tape)
+    return {"rebuilt": True, **position}
+
+
+def main() -> None:
+    serve(
+        {
+            "init": handle_init,
+            "health": handle_health,
+            "generate_blocks": handle_generate_blocks,
             "benchmark": handle_benchmark,
+            "evict_gpu": handle_evict_gpu,
+            "rebuild": handle_rebuild,
+            "checkpoint": lambda payload: {
+                "checkpoint_id": f"longlive-{payload.get('segment_id', 'none')}"
+            },
+            "resume": handle_resume,
+            "shutdown": lambda _payload: {"stopped": True},
+        }
+    )
+
+
+if __name__ == "__main__":
+    main()
