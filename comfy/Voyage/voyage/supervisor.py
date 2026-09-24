@@ -82,8 +82,17 @@ def sha256_file(path: Path) -> str:
 VIDEO_WORKER_MODULES = {
     "fake": "voyage.workers.video",
     "longlive2": "voyage.workers.video_longlive",
+    "ltxv": "voyage.workers.video_ltxv",
 }
-"""Backend name → worker module. longlive2 only exists in the CUDA image."""
+"""Backend name → worker module. longlive2/ltxv only exist in the CUDA image."""
+
+STREAMING_VIDEO_BACKENDS = ("longlive2", "ltxv")
+"""Backends whose worker holds a resident session across blocks/segments.
+
+These get the multi-block prompts/seeds payload, the resume-hook restart
+path, and the acestep audio GPU swap (their DiT is GPU-resident, so audio
+must evict + rebuild around takes). Fake renders statelessly per segment.
+"""
 
 AUDIO_WORKER_MODULES = {
     "fake": "voyage.workers.audio",
@@ -117,13 +126,19 @@ class Supervisor:
         self._logs = run_dir / paths.LOGS_DIRNAME
         video_module = video_worker_module(config.video.backend)
         video_init: dict[str, Any] = {}
-        if config.video.backend == "longlive2":
+        if config.video.backend in STREAMING_VIDEO_BACKENDS:
             video_init = {
                 "models_dir": config.video.models_dir,
                 "device": config.video.device,
-                "latent_shape": list(config.video.latent_shape),
-                "quantization": config.video.quantization,
             }
+        if config.video.backend == "longlive2":
+            video_init.update(
+                {
+                    "latent_shape": list(config.video.latent_shape),
+                    "quantization": config.video.quantization,
+                    "local_attn_size": config.video.local_attn_size,
+                }
+            )
         self._video = SubprocessWorker(
             video_module,
             run_dir,
@@ -569,10 +584,13 @@ class Supervisor:
         The video session is evicted first, the (lazily loading) ACE stack
         renders, then audio is evicted and video rebuilds from the latest
         tape. Fake backends answer the same ops as no-ops, so the swap
-        only happens for the acestep+longlive2 pair — every other pairing
-        renders without touching video residency.
+        only happens for the acestep + resident-session video pair — every
+        other pairing renders without touching video residency.
         """
-        swap = self._config.audio.backend == "acestep" and self._config.video.backend == "longlive2"
+        swap = (
+            self._config.audio.backend == "acestep"
+            and self._config.video.backend in STREAMING_VIDEO_BACKENDS
+        )
         if swap:
             self._call_with_restart(self._video, "video", segment_id, "evict_gpu", {})
         try:
@@ -815,7 +833,8 @@ class Supervisor:
 
         # 3. Staged prompt plan (§18.2) + media generation.
         video_started = time.monotonic()
-        num_blocks = config.video.blocks_per_segment if config.video.backend == "longlive2" else 1
+        streaming = config.video.backend in STREAMING_VIDEO_BACKENDS
+        num_blocks = config.video.blocks_per_segment if streaming else 1
         prompt_plan = build_staged_prompt_plan(
             segment_id,
             style_spec,
@@ -843,14 +862,12 @@ class Supervisor:
             "fps": config.video.fps,
             "frames": config.video.segment_frames,
         }
-        if config.video.backend == "longlive2":
-            # Phase 2: one stream session appends N blocks (same prompt in
-            # this slice); per-block seeds ride the protocol but only the
-            # first seeds the worker's stream noise RNG (§22.5 — sequential
-            # draws continue the trajectory across blocks and segments).
-            # scene_cut fires on destination change (new shot); the worker
-            # translates it to the upstream cut prefix (zero-KV + sink
-            # re-pin inside _inference_inner).
+        if streaming:
+            # Resident-session backends take N blocks per commit. longlive2
+            # appends to one stream (only the first seed starts the noise
+            # RNG, §22.5; scene_cut re-pins the sink); ltxv chains
+            # text-to-video + tail-conditioned extensions (scene_cut forces
+            # a fresh start). Per-block seeds ride the same protocol shape.
             video_payload["prompts"] = list(block_prompts)
             video_payload["seeds"] = [
                 video_seed(config.seed, number, block) for block in range(num_blocks)
@@ -867,7 +884,7 @@ class Supervisor:
             segment_id,
             "generate_blocks",
             video_payload,
-            restart_hook=self._resume_video_worker if config.video.backend == "longlive2" else None,
+            restart_hook=self._resume_video_worker if streaming else None,
         )
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
@@ -931,6 +948,10 @@ class Supervisor:
                 # §23: RoPE mode is a first-class record — never change it
                 # silently across resume; compare on recovery.
                 "use_relative_rope": config.video.backend == "longlive2",
+                # Backend identity pins every segment to the renderer that
+                # produced it (tapes never resume across backends — the
+                # worker rejects foreign profiles loudly).
+                "video_backend": config.video.backend,
                 "blocks": num_blocks,
                 "recovery_tape": recovery_tape,
             },

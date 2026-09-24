@@ -38,12 +38,30 @@ finalizer concat path, and checksums run exactly as in production.
 | Role | Backend | Image | Notes |
 |------|---------|-------|-------|
 | video | `longlive2` | `voyage-video:latest` | resident BF16+FP8 stream, `fp8`\|`bf16` quantization |
+| video | `ltxv` | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
 | director | `qwen` | `voyage-director:latest` | Qwen3-8B, non-thinking, temp 0.7 |
 
 Select in TOML (`config.video.backend`, `config.audio.backend`,
 `config.director.backend`) or per-invocation for runs
 (`voyage run --director … --quantization …`).
+
+## LTXV chaining model (`ltxv`, Phase 7 alternative)
+
+Resident session like `longlive2` (multi-block payload, resume hook,
+acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
+`voyage/supervisor.py`), but chaining is explicit, not KV-cache: block 0
+renders text-to-video from cached CPU T5 bf16 embeds
+(`text_encoder=None` — the pipeline would otherwise move the 18.8 GB
+fp32 encoder to GPU); blocks 1+ render tail-conditioned extensions from
+the previous block's tail frame, frame 0 deduped. Each block writes a
+chain PNG; the last becomes the segment tail, the rest are deleted. The
+tail PNG doubles as the crash-recovery tape beside the segment video
+(`recovery.pt` carries profile `ltxv` — tapes never resume across
+backends); `scene_cut` forces a fresh start. Native 768×512; draft
+640×352 verified. Needs `models download ltxv-2b`. The `benchmark` op
+saves/restores tail state around its probes, so unlike longlive it does
+not advance any stream — safe to run mid-sequence.
 
 ## Experimental backends
 

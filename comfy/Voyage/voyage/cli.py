@@ -30,10 +30,12 @@ from voyage.model_registry import (
     download_director_models,
     download_inspector_models,
     download_longlive2_bf16,
+    download_ltxv_models,
     verify_audio_models,
     verify_director_models,
     verify_inspector_models,
     verify_longlive2_bf16,
+    verify_ltxv_models,
 )
 from voyage.persistence import (
     build_manifest,
@@ -139,6 +141,7 @@ def cmd_models(args: argparse.Namespace) -> int:
     action = args.models_action
     if action == "list":
         print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
+        print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("audio: fake (built-in) | acestep (ACE-Step 1.5 turbo + 0.6B planner)")
         print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
         print("inspector: skipped (built-in) | qwen3.5-9b (Qwen3.5-9B VLM, experimental)")
@@ -146,6 +149,8 @@ def cmd_models(args: argparse.Namespace) -> int:
     if action == "verify":
         ok, message = verify_longlive2_bf16(_models_dir(args))
         print(message)
+        lok, lmessage = verify_ltxv_models(_models_dir(args))
+        print(lmessage)
         dok, dmessage = verify_director_models(_models_dir(args))
         print(dmessage)
         aok, amessage = verify_audio_models(_models_dir(args))
@@ -153,9 +158,22 @@ def cmd_models(args: argparse.Namespace) -> int:
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        return 0 if (ok and dok and aok and iok) else 1
+        return 0 if (ok and lok and dok and aok and iok) else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
+        if target == "ltxv-2b":
+            models_dir = _models_dir(args)
+            print(f"downloading ltxv-2b into {models_dir} ...")
+            try:
+                record = download_ltxv_models(models_dir)
+            except Exception as exc:
+                print(f"download failed: {exc}", file=sys.stderr)
+                return 1
+            video = record["ltxv"]
+            assert isinstance(video, dict)
+            print(f"DiT: {video.get('checkpoint_bytes')} bytes")
+            print(f"manifest: {models_dir / 'manifest.json'}")
+            return 0
         if target == "director-qwen8b":
             return _download_director(_models_dir(args))
         if target == "audio-acestep":
@@ -164,7 +182,9 @@ def cmd_models(args: argparse.Namespace) -> int:
             return _download_inspector(_models_dir(args))
         if target != "longlive2-bf16":
             print(f"unknown models target {target!r}")
-            print("known: longlive2-bf16, director-qwen8b, audio-acestep, inspector-qwen35")
+            print(
+                "known: longlive2-bf16, ltxv-2b, director-qwen8b, audio-acestep, inspector-qwen35"
+            )
             return 2
         models_dir = _models_dir(args)
         print(f"downloading longlive2-bf16 into {models_dir} ...")

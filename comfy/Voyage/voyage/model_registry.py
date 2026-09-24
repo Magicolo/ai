@@ -145,6 +145,26 @@ MINILM_MIN_BYTES = 50_000_000
 MINILM_LICENSE = "Apache 2.0"
 
 
+# Phase 7 LTXV alternative backend: 2B distilled DiT + spatial upscaler
+# (0.9.8) plus the PixArt T5 tokenizer/encoder the pipeline needs for
+# CPU-precomputed bf16 embeds. Both HF repos ungated; weights verified
+# present in ~/.cache/voyage-models/ltxv-2b (Slice 1 probe). License: check
+# the weight repo for the exact Lightricks community-license text.
+LTXV_HF_REPO = "Lightricks/LTX-Video"
+LTXV_HF_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+LTXV_SUBDIR = "ltxv-2b"
+LTXV_DIT_FILE = "ltxv-2b-0.9.8-distilled.safetensors"
+LTXV_UPSC_FILE = "ltxv-spatial-upscaler-0.9.8.safetensors"
+LTXV_DIT_MIN_BYTES = 6_000_000_000
+LTXV_UPSC_MIN_BYTES = 400_000_000
+LTXV_TE_REPO = "PixArt-alpha/PixArt-XL-2-1024-MS"
+LTXV_TE_REVISION = "b89adadeccd9ead2adcb9fa2825d3fabec48d404"
+LTXV_TE_SUBDIR = "PixArt-XL-2-1024-MS"
+LTXV_TE_ALLOW = ["tokenizer/*", "text_encoder/*"]
+LTXV_COMMIT = "4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"
+LTXV_COMMIT_SHORT = "4b2d053"
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -435,10 +455,76 @@ def verify_audio_models(models_dir: Path) -> tuple[bool, str]:
     )
 
 
+def download_ltxv_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Phase 7 LTXV stack (DESIGN Phase 7).
+
+    2B-distilled DiT + spatial upscaler from Lightricks/LTX-Video plus the
+    PixArt T5 tokenizer/encoder subfolders the worker needs for
+    CPU-precomputed bf16 embeds. Merges into the shared manifest; returns
+    the merged record.
+    """
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    ltxv_dir = models_dir / LTXV_SUBDIR
+    ltxv_dir.mkdir(parents=True, exist_ok=True)
+    for filename in (LTXV_DIT_FILE, LTXV_UPSC_FILE):
+        hf_hub_download(
+            repo_id=LTXV_HF_REPO,
+            revision=LTXV_HF_REVISION,
+            filename=filename,
+            local_dir=str(ltxv_dir),
+        )
+    te_dir = models_dir / LTXV_TE_SUBDIR
+    snapshot_download(
+        repo_id=LTXV_TE_REPO,
+        revision=LTXV_TE_REVISION,
+        local_dir=str(te_dir),
+        allow_patterns=LTXV_TE_ALLOW,
+    )
+    dit_path = ltxv_dir / LTXV_DIT_FILE
+    record = _merge_manifest_record(
+        models_dir,
+        "ltxv",
+        {
+            "repo": LTXV_HF_REPO,
+            "revision": LTXV_HF_REVISION,
+            "model_dir": str(ltxv_dir),
+            "checkpoint_bytes": dit_path.stat().st_size,
+            "files": [LTXV_DIT_FILE, LTXV_UPSC_FILE],
+            "code_commit": LTXV_COMMIT,
+            "text_encoder_repo": LTXV_TE_REPO,
+            "text_encoder_revision": LTXV_TE_REVISION,
+        },
+    )
+    return record
+
+
+def verify_ltxv_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the LTXV stack."""
+    missing: list[str] = []
+    ltxv_dir = models_dir / LTXV_SUBDIR
+    dit_path = ltxv_dir / LTXV_DIT_FILE
+    if not dit_path.exists() or dit_path.stat().st_size < LTXV_DIT_MIN_BYTES:
+        missing.append(str(dit_path))
+    upsc_path = ltxv_dir / LTXV_UPSC_FILE
+    if not upsc_path.exists() or upsc_path.stat().st_size < LTXV_UPSC_MIN_BYTES:
+        missing.append(str(upsc_path))
+    te_dir = models_dir / LTXV_TE_SUBDIR
+    for pattern in LTXV_TE_ALLOW:
+        matches = list((te_dir / pattern[:-2]).glob("*"))
+        if not matches:
+            missing.append(f"{te_dir}/{pattern}")
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    return True, f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
+
+
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     return {
         "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
         "generator_ckpt": str(models_dir / "longlive2" / LONGLIVE_HF_FILE),
+        "ltxv_dir": str(models_dir / LTXV_SUBDIR),
         "qwen_dir": str(models_dir / QWEN_SUBDIR),
         "minilm_dir": str(models_dir / MINILM_SUBDIR),
         "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),

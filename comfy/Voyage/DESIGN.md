@@ -5755,3 +5755,39 @@ Calibration (real footage): complexity 0.06-0.13 and drift 0.01-0.10 read BELOW 
 Contention saga: 4 silent worker deaths (4-line log, no traceback, clean dmesg), ALL under GPU overlap with another agent's runs (exp-f vs determined_tu, exp-g vs silly_lamarr, exp-i × 2 vs vcont-seq); rule: verify GPU <2 GB used before EVERY GPU launch, single-GPU-job-at-a-time. Mechanism hunt (no supervisor timeout anywhere; worker stderr IS captured to the log so tracebacks would appear; EOF on stdout → 'closed stdout') proves non-Python death, but the source is unidentified — product fix deferred, never attempted blind.
 Collision note: experiments ran in the main tree pre-18:06 UTC; the live tree now carries another agent's worker rewrite (325e6d5 stream fix: 2-arg append_block + _seq_noise, ON TOP of the slice-4 precision work which is intact) plus Phase-6 slices C/D/E and uncommitted work; exp-i's seg1 conv crash is in THEIR rewritten path (traceback shows their 2-arg call), NOT the slice-4 code — do not fix. Slice-5 docs written in worktree fast-iteration (based on bd5c4cd); experiment artifacts live in the main tree under ./Voyage/output/exp-* (preserved, gitignored).
 Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qualitative judgment (final.mp4) pending a clean GPU run after the seg1 crash is fixed. Gates RED at base (pre-existing slice-E SyntaxError video_longlive.py:925; this docs-only change is unaffected; code last green 111/32).
+- LTXV alternative backend (Phase 7) slices 1-4 done 2026-09-24: Slice 1
+  probe = GO bf16 at native 768x512 (stock `infer()` OOMs moving the fp32
+  T5-XXL 18.8GB to GPU and `offload_to_cpu` does not prevent the upfront
+  `.to(device)`, so the worker passes `text_encoder=None` + CPU-precomputed
+  bf16 embeds — 25s encode, cacheable; attention masks moved to CUDA
+  manually; `negative_prompt=None` with negative embeds; VAE bf16 halves
+  resident 8.23->5.91GB; load 6s, t2v 25f 5.0s = 0.20s/f @6.68GB peak,
+  extension 24f 5.8s = 0.24s/f @7.89GB peak; dawn-lake quality, no
+  solarization, extension continuous). Pins: code Lightricks/LTX-Video
+  @4b2d053, weights rev 8984fa25 (2B-distilled 0.9.8 6.3GB + spatial
+  upscaler 0.5GB, ungated), TE PixArt-XL-2-1024-MS rev b89adade (18G fp32
+  2-shard + tokenizer, `cp -rL` into voyage-models after verify flagged
+  hub-only). Slice 2: `voyage/workers/video_ltxv.py` (resident
+  LTXVSession, full op surface, benchmark saves/restores tail state) +
+  registry `download/verify_ltxv_models` + CLI list/verify/download
+  ltxv-2b + Dockerfile.video ltx layer (`--no-deps`, transformers stays
+  4.57.6) + tests/test_ltxv.py (9 tests). Slice 3: supervisor routing
+  (`ltxv` module + `STREAMING_VIDEO_BACKENDS` constant covering init
+  payload split, acestep swap, num_blocks, restart hook; metrics.json
+  `video_backend`; `use_relative_rope` stays longlive2-only). Slice 4
+  live on idle 4060 Ti (/tmp/ltxv-e2e1, seed 11, fake audio,
+  deterministic director): seg0 25 native frames VALID, seg1 cross-seg
+  0.021 vs 0.018 within, seg2 `--blocks 2` = 49f (25+24, frame-0 dedupe
+  OK), VALID 99f total, finalize 768x432 h264 + AAC; benchmark op
+  29.4s/block, 6.54GB peak (one fail-then-retry); kill-test
+  /tmp/ltxv-kill (`pkill -9 -f video_ltxv` at 96% util mid-seg1-denoise
+  -> `worker_restart` attempt 1 -> `video_resumed` -> seg1 25f, VALID
+  50f, cross-seg 0.021 vs 0.046 within); draft /tmp/ltxv-draft VALID 25f
+  @640x352 (non-native sizes work). Two worker bugs fixed from log
+  forensics: (1) randn device flake (upstream overrides device with the
+  CPU `_execution_device` under `offload_to_cpu=True` vs the CUDA
+  generator, ~40% block failure) -> `offload_to_cpu=False`; (2)
+  stale-tail intra-call chaining (`_tail_png` updated only after the
+  block loop; seg2 f025->f026 jumped 0.114) -> per-block chain PNGs,
+  last renamed to tail, intermediates deleted.
+- Gates green (168 pytest / mypy 35 files).

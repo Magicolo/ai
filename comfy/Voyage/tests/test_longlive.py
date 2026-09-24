@@ -24,6 +24,7 @@ def test_models_dir_layout_keys(tmp_path: Path) -> None:
     assert set(layout) == {
         "wan_dir",
         "generator_ckpt",
+        "ltxv_dir",
         "qwen_dir",
         "minilm_dir",
         "acestep_dir",

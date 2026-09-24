@@ -54,6 +54,16 @@ RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
 # 4.57.6; MiniLM embedding is verified against it below.
 RUN pip install transformers==4.57.6
 
+# LTXV 2B-distilled alternative backend (Phase 7, DESIGN §140): native
+# ltx-video library at the probe-verified pin (NOT diffusers — the image
+# has no LTX pipelines). --no-deps: ltx-video demands
+# transformers>=4.47.2,<4.52.0, which would downgrade the 4.57.6 LongLive
+# needs; the T5 code path used here is stable across 4.x (probe-verified).
+# The [inference] extra (imageio[ffmpeg], av, torchvision) plus
+# sentencepiece/einops/timm land explicitly below.
+RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightricks/LTX-Video@4b2d053057623ddd4d0a1d3e9cd28890e9ef487f" \
+    && pip install "imageio[ffmpeg]" av sentencepiece einops timm
+
 # Voyage supervisor package (pure-python here; torch lives only behind the
 # worker module import). --no-deps: pydantic already pinned above.
 COPY pyproject.toml README.md /app/

@@ -220,6 +220,7 @@ seed = {seed}
 min_free_space_gib = 5.0
 
 [video]
+# "fake" (built-in testsrc) | "longlive2" (CUDA image) | "ltxv" (CUDA image)
 backend = "fake"
 profile = "fake-432p"
 width = 768
