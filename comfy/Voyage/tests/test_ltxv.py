@@ -6,7 +6,10 @@ heavy imports inside handlers, so importing it here is safe.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from voyage import model_registry
 from voyage.config import VideoConfig, default_config_toml, load_config
@@ -31,7 +34,9 @@ def test_probe_schedules_match_slice1() -> None:
     assert video_ltxv.FIRST_PASS["stg_scale"] == 0
     assert video_ltxv.FIRST_PASS["skip_block_list"] == [42]
     assert video_ltxv.SECOND_PASS["timesteps"] == [0.9094, 0.725, 0.4219]
-    assert video_ltxv.NATIVE_BLOCK_FRAMES == 25
+    assert video_ltxv.SEGMENT_TARGET_FRAMES == 121
+    assert video_ltxv.CONDITIONING_TAIL_FRAMES == 25
+    assert video_ltxv.COMMITTED_NOVEL_FRAMES == 96
     assert video_ltxv.RECOVERY_PROFILE == "ltxv"
 
 
@@ -127,3 +132,104 @@ def test_ltxv_supervisor_init_payload(tmp_path: Path) -> None:
         "models_dir": config.video.models_dir,
         "device": "cuda:0",
     }
+
+
+def test_spatial_granularity_accepts_native_preset() -> None:
+    video_ltxv.validate_spatial_size(768, 512)
+    video_ltxv.validate_spatial_size(1216, 704)
+
+
+def test_spatial_granularity_rejects_spec_text_size() -> None:
+    """768x432 (§5.3 draft text) is not /32-aligned — it would pad to 448."""
+    with pytest.raises(ValueError, match="not divisible by 32"):
+        video_ltxv.validate_spatial_size(768, 432)
+
+
+def test_frame_count_accepts_upstream_valid_counts() -> None:
+    for valid in (9, 17, 25, 33, 49, 97, 121, 257):
+        video_ltxv.validate_frame_count(valid)
+
+
+def test_frame_count_rejects_non_conforming_counts() -> None:
+    for invalid in (24, 48, 96, 100, 120):
+        with pytest.raises(ValueError, match="8n\\+1"):
+            video_ltxv.validate_frame_count(invalid)
+
+
+def test_conditioning_start_must_be_multiple_of_eight() -> None:
+    video_ltxv.validate_conditioning_start(0, 121)
+    video_ltxv.validate_conditioning_start(8, 121)
+    with pytest.raises(ValueError, match="multiple of 8"):
+        video_ltxv.validate_conditioning_start(1, 121)
+    with pytest.raises(ValueError, match="out of range"):
+        video_ltxv.validate_conditioning_start(121, 121)
+
+
+def test_prefix_discard_accounting() -> None:
+    """121-frame clip minus the 25-frame prefix commits 96 novel frames."""
+    discarded, novel = video_ltxv.split_prefix_novel(121, 25)
+    assert (discarded, novel) == (25, 96)
+    discarded_fresh, novel_fresh = video_ltxv.split_prefix_novel(121, 0)
+    assert (discarded_fresh, novel_fresh) == (0, 121)
+    with pytest.raises(ValueError, match="out of range"):
+        video_ltxv.split_prefix_novel(121, 122)
+
+
+def test_prompt_plan_hash_is_deterministic() -> None:
+    first = video_ltxv.prompt_plan_hash(["amber dunes", "teal spires"])
+    assert first == video_ltxv.prompt_plan_hash(["amber dunes", "teal spires"])
+    assert first != video_ltxv.prompt_plan_hash(["amber dunes", "teal spires!"])
+
+
+def test_recovery_tape_matches_spec_shape(tmp_path: Path) -> None:
+    tail = tmp_path / "video_tail.mp4"
+    tail.write_bytes(b"tail-bytes")
+    tape = video_ltxv.build_recovery_tape(
+        source_segment_id="000123",
+        conditioning_tail_path=str(tail),
+        conditioning_tail_sha256=video_ltxv.sha256_file(tail),
+        prompts=["amber dunes"],
+        seeds=[123456],
+        width=768,
+        height=512,
+        fps=24,
+    )
+    assert tape["backend"] == "ltxv"
+    assert tape["state_mode"] == "reconstructable_prefix"
+    assert tape["source_segment_id"] == "000123"
+    assert tape["conditioning_tail_path"] == str(tail)
+    assert tape["seed"] == 123456
+    assert tape["model_revision"] == model_registry.LTXV_HF_REVISION
+    assert tape["pipeline_revision"] == model_registry.LTXV_COMMIT
+    assert len(tape["profile_hash"]) == 64
+    # Round-trips through JSON (the on-disk format) and validates.
+    loaded = json.loads(json.dumps(tape))
+    assert video_ltxv.parse_recovery_tape(loaded) == loaded
+
+
+def test_recovery_tape_rejects_legacy_torch_format(tmp_path: Path) -> None:
+    legacy = {"profile": "ltxv", "tail_png": str(tmp_path / "video_tail.png")}
+    with pytest.raises(ValueError, match="pre-Stream-A"):
+        video_ltxv.parse_recovery_tape(legacy)
+
+
+def test_recovery_tape_rejects_missing_tail() -> None:
+    tape = video_ltxv.build_recovery_tape(
+        source_segment_id="000124",
+        conditioning_tail_path="/nonexistent/video_tail.mp4",
+        conditioning_tail_sha256="0" * 64,
+        prompts=["amber dunes"],
+        seeds=[7],
+        width=768,
+        height=512,
+        fps=24,
+    )
+    with pytest.raises(ValueError, match="conditioning tail missing"):
+        video_ltxv.parse_recovery_tape(tape)
+
+
+def test_load_tape_json_rejects_torch_pickle_bytes(tmp_path: Path) -> None:
+    tape_path = tmp_path / "recovery.pt"
+    tape_path.write_bytes(b"\x80\x04torch-pickle-not-json")
+    with pytest.raises(ValueError, match="pre-Stream-A"):
+        video_ltxv._load_tape_json(str(tape_path))

@@ -490,6 +490,63 @@ Because LTX is a conditioned extension rather than a persistent AR cache, the di
 
 The adapter must expose whether a prompt change occurred relative to the previous segment, allowing the benchmark and later visual inspector to correlate prompt changes with boundary artifacts.
 
+### As-built (Stream A, 2026-09-24)
+
+Upstream validation (all state 0.9.x frame/spatial rules, checked 2026-09-24):
+
+- Frame counts satisfy `(F-1) % 8 == 0` (8n+1: 9, 17, 25, …, 121, 257); non-conforming
+  requests are padded with -1 then cropped. Sources:
+  `https://github.com/Lightricks/LTX-Video` (README "Parameter Guide" + "Extending a
+  video" note), `https://raw.githubusercontent.com/Lightricks/LTX-Video/main/README.md`
+  (same text), `https://huggingface.co/Lightricks/LTX-Video/blob/main/README.md` (same
+  text). Extension inputs must be 8n+1 video segments (9/17/25/…) with the conditioning
+  target frame a multiple of 8; `InferenceConfig` defaults to 121 frames.
+- Spatial sizes must be divisible by 32 (one-stage) and by 64 for two-stage multiscale
+  (`https://ltx.io/blog/run-video-generation-model-locally`: "width and height must be
+  divisible by 64 for two-stage pipelines and by 32 for one-stage"). Best below 720x1280
+  and 257 frames; Replicate's native LTX entry renders 24 fps at 768x512
+  (`https://replicate.com/lightricks/ltx-video`).
+- Verdict: **keep native 768x512** (768 % 32 == 0, 512 % 32 == 0, and both % 64 == 0).
+  The 768x432 draft text is rejected: 432 % 32 == 16, so the pipeline would pad to
+  768x448 then crop — silent binning with no benefit. `validate_spatial_size` refuses
+  non-/32 sizes instead of padding; `validate_frame_count` enforces 8n+1;
+  `validate_conditioning_start` enforces the multiple-of-8 target.
+
+Segment accounting (implemented in `voyage/workers/video_ltxv.py`): one
+`SEGMENT_TARGET_FRAMES = 121` clip per block, conditioned at start frame 0 on the
+25-frame tail video when one exists (`CONDITIONING_TAIL_FRAMES = 25`, itself 8n+1);
+fresh starts (no tail, missing tail, scene cut) commit all 121 frames, conditioned clips
+discard the 25-frame prefix and commit 96 novel frames (`COMMITTED_NOVEL_FRAMES`). All
+counts in the result (`requested/generated/conditioning/novel/committed/prefix_discarded`)
+are measured from the real tensors per TASK §4.3, never assumed. Multi-block payloads
+chain extensions (each block after the first conditions on the previous block's fresh
+tail video); the worker also returns `prompt_changed` (vs the previous segment's prompt)
+for the continuation-quality rule.
+
+Conditioning tail: **replaced the single-frame tail PNG with `video_tail.mp4`** (last 25
+committed frames, written beside `video.mp4`, sha256 recorded). Rationale: the extension
+API needs an 8n+1 *video* prefix, and a single image carries no motion — the PNG was
+image-conditioning, not the spec's prefix replay. No PNG is written anymore.
+
+Recovery tape: **§5.3 JSON written to `segments/<id>/recovery.pt`** (filename kept so the
+supervisor's `recovery.pt` discovery is unchanged; content is JSON, atomically
+written). Fields: backend/state_mode/source_segment_id/conditioning_tail_path+sha256/
+prompt_plan_hash/seed(+seeds)/model_revision/pipeline_revision/profile_hash plus
+geometry and an extra `last_prompt` for truthful `prompt_changed` after resume. **Clean
+break is intentional: pre-Stream-A torch-pickle tapes (`{"profile": "ltxv", "tail_png"}`)
+fail resume/rebuild with an explicit "unresumable by design" error — re-render.**
+
+Deferred: the 81/97/121 benchmark matrix and any TeaCache/Q8/FP8-kernel study (TASK
+§30.2 follow-up). Fresh-segment benchmark probes commit 121 frames; extension (96
+novel) throughput must be measured separately once the matrix runs.
+
+Addendum (same day, after Stream A E2E): the `ltxv` preset in `config.py` was moved
+768x512 → **1024x576** (`ltxv-576p`) by the rhythm-cut stack slice. That geometry also
+satisfies the granularity verdict above (1024 % 32 == 0, 576 % 32 == 0, both % 64 == 0,
+true 16:9) — the worker is geometry-agnostic (`validate_spatial_size` + padding), so no
+Stream A code change was needed. All Stream A live evidence below is at 768x512; a
+1024x576 render (2.25x pixels) still needs its own VRAM/throughput probe on an idle GPU.
+
 ---
 
 ## 5.4 CausVid backend

@@ -1669,7 +1669,7 @@ code/config work the merged spec now requires.
   3-frame overlap), recovery tape, `models download/verify causvid-*`.
 - Deliverable: `docs/UPSTREAM_CAUSVID_NOTES.md` (does not exist).
 
-## 30.2 LTXV proposal-vs-built drift — reconcile
+## 30.2 LTXV proposal-vs-built drift — reconciled (Stream A, 2026-09-24)
 
 - Proposal (§5.3): 768×432, 121-frame segments, 25-frame conditioning tail
   (mp4 prefix replay).
@@ -1677,8 +1677,23 @@ code/config work the merged spec now requires.
   frames, tail-PNG chaining (`<stem>_tail.png`), `recovery.pt{profile:ltxv,
   tail_png}`, bf16-first with torchao-fp8 OOM fallback, `generate --backend
   ltxv` default.
-- Decide: realign code toward the 121f/768×432 proposal or amend §5.3 to the
-  as-built geometry. Either way remove the drift.
+- Resolution (Stream A): code realigned toward §5.3 accounting (121-frame
+  target / 25-frame video tail / 96 novel committed with prefix-discard,
+  `video_tail.mp4` + sha256, §5.3 JSON tape in `recovery.pt` with a clean
+  break from old torch tapes); geometry amended toward as-built native
+  **768×512** (evidence: 432 % 32 != 0 → pads to 768x448; see §5.3 as-built
+  for URLs). Drift removed.
+- Follow-up (explicitly out of Stream A scope): the 81/97/121 benchmark
+  matrix + TeaCache/Q8/FP8-kernel study; extension-throughput (96 novel)
+  still unmeasured. Also stale: `voyage/cli.py::_frames_per_segment` still
+  plans `generate --duration` with the pre-Stream-A 25/24-frame math
+  (`_LTXV_NATIVE_BLOCK_FRAMES`) — `cli.py` was out of Stream A scope, so
+  duration planning over-estimates segment counts until that helper is
+  updated to 121 fresh / 96 extension (worker-reported frames remain the
+  timeline truth). Also `run --run <relative-path>` doubles segment paths
+  (`output/<run>/output/<run>/...`) because workers spawn with CWD=run_dir
+  — pass the absolute in-container path (`/app/output/<run>`) until the
+  supervisor normalizes run_dir (same cli/supervisor family).
 - Deliverable: `docs/UPSTREAM_LTXV_NOTES.md` (does not exist; only
   `UPSTREAM_LONG_LIVE_PATCHES.md` does).
 
