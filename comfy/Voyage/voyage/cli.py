@@ -225,6 +225,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         or args.blocks is not None
         or args.take_seconds is not None
         or args.quantization is not None
+        or getattr(args, "beats_per_segment", None) is not None
+        or getattr(args, "drift_every_n", None) is not None
     ):
         config = apply_draft_overrides(
             config,
@@ -233,6 +235,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             blocks=args.blocks,
             take_seconds=args.take_seconds,
             quantization=args.quantization,
+            beats_per_segment=getattr(args, "beats_per_segment", None),
+            drift_every_n_segments=getattr(args, "drift_every_n", None),
         )
         print(
             "effective settings: "
@@ -241,6 +245,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"{config.video.width}x{config.video.height} "
             f"latent={list(config.video.latent_shape)} "
             f"take_seconds={config.audio.take_seconds} "
+            f"beats_per_segment={config.audio.beats_per_segment} "
+            f"drift_every_n={config.voyage.drift_every_n_segments} "
             f"quantization={config.video.quantization}"
         )
     if not _require_cuda_stack(config):
@@ -550,9 +556,18 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         finalize_run(
             run_dir,
             output,
+            # Finalize keeps the generation resolution (no downscale): the
+            # run config snapshot carries what the segments rendered at,
+            # so old 768x512 runs refinalize natively too.
+            width=config.video.width,
+            height=config.video.height,
             fps=config.video.fps,
             skip_bad=args.skip_bad,
             min_free_space_gib=config.min_free_space_gib,
+            sample_rate=config.audio.sample_rate,
+            channels=config.audio.channels,
+            overlap_fraction=config.audio.final_overlap_fraction,
+            overlap_cap_seconds=config.audio.final_overlap_cap_seconds,
         )
     except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
@@ -677,13 +692,19 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if not _require_cuda_stack(config):
         return 1
     _warn_if_no_cuda(config)
+    # `generate` enables the full stack by default: qwen director drift,
+    # beat-grid audio and overlap-blend finalize all ride the run config
+    # written at init; explicit flags still win.
+    director = args.director if args.director is not None else "qwen"
     effective = apply_draft_overrides(
         config,
         draft=args.draft,
-        director=args.director,
+        director=director,
         blocks=args.blocks,
         take_seconds=args.take_seconds,
         quantization=args.quantization,
+        beats_per_segment=args.beats_per_segment,
+        drift_every_n_segments=args.drift_every_n,
     )
     frames_per_segment = _frames_per_segment(effective)
     segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
@@ -698,10 +719,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
             run=str(run_dir),
             segments=segments,
             draft=args.draft,
-            director=args.director,
+            director=director,
             blocks=args.blocks,
             take_seconds=args.take_seconds,
             quantization=args.quantization,
+            beats_per_segment=args.beats_per_segment,
+            drift_every_n=args.drift_every_n,
         )
     )
     errors = validate_run(run_dir)
@@ -996,6 +1019,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("fp8", "bf16"),
         help="override DiT quantization (fp8 default, bf16 for clean highlights)",
     )
+    run.add_argument(
+        "--beats-per-segment",
+        type=int,
+        default=None,
+        help="override beats per segment for the rhythm grid (default 4, doubles to hold >=60 BPM)",
+    )
+    run.add_argument(
+        "--drift-every-n",
+        type=int,
+        default=None,
+        help="director drifts every Nth segment (default 1); other segments hold",
+    )
     run.set_defaults(func=cmd_run)
 
     gen = sub.add_parser(
@@ -1056,6 +1091,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=("fp8", "bf16"),
         help="override DiT quantization (fp8 default, bf16 for clean highlights)",
+    )
+    gen.add_argument(
+        "--beats-per-segment",
+        type=int,
+        default=None,
+        help="override beats per segment for the rhythm grid (default 4, doubles to hold >=60 BPM)",
+    )
+    gen.add_argument(
+        "--drift-every-n",
+        type=int,
+        default=None,
+        help="director drifts every Nth segment (default 1); other segments hold",
     )
     gen.set_defaults(func=cmd_generate)
 

@@ -261,6 +261,148 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
     return frames, video_duration, audio_duration
 
 
+def _segment_timeline(usable: list[Path], fps: int) -> tuple[list[float], list[float], float]:
+    """Per-segment [start, end) video-times from committed metrics + total.
+
+    The timeline follows frame counts (the supervisor's truthful
+    accounting), not container durations, so the blended audio matches
+    the concatenated video sample-exactly.
+    """
+    starts: list[float] = []
+    ends: list[float] = []
+    cursor = 0.0
+    for segment in usable:
+        try:
+            metrics = json.loads((segment / "metrics.json").read_text(encoding="utf-8"))
+            frames = int(metrics.get("frames", 0))
+        except (ValueError, KeyError, AttributeError) as exc:
+            raise MediaError(f"segment {segment.name} has unreadable metrics.json: {exc}") from exc
+        if frames <= 0:
+            raise MediaError(f"segment {segment.name} has non-positive frame count {frames}")
+        starts.append(cursor)
+        cursor += frames / fps
+        ends.append(cursor)
+    return starts, ends, cursor
+
+
+def _concat_fallback_audio(inputs: list[Path], dest: Path) -> Path:
+    """Join segment audio.wav files with a plain concat (no blend)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    for source in inputs:
+        argv += ["-i", str(source)]
+    filter_graph = "".join(f"[{i}:a]" for i in range(len(inputs)))
+    filter_graph += f"concat=n={len(inputs)}:v=0:a=1[aout]"
+    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
+    proc = run_capture(argv)
+    if proc.returncode != 0:
+        raise MediaError(f"final audio concat failed: {proc.stderr[-2000:]}")
+    return dest
+
+
+def build_final_audio(
+    run_dir: Path,
+    usable: list[Path],
+    tmpdir: Path,
+    fps: int,
+    sample_rate: int,
+    channels: int,
+    overlap_fraction: float = 0.10,
+    overlap_cap_seconds: float = 0.5,
+) -> Path:
+    """Blend committed segments into one timeline-exact final mix (§56).
+
+    Each segment boundary gets an overlap crossfade: segment windows are
+    extended by half the overlap on each side and re-sliced from the
+    takes ledger (takes are continuous, so the extension is real musical
+    content — not time-stretched), then chained with acrossfade. Total
+    length stays exactly the video timeline, so no A/V drift.
+
+    Falls back to a plain concat of the per-segment audio.wav previews
+    when the takes ledger is unavailable (pre-take runs) — the old
+    hard-splice behavior, clicks included. Per-segment previews are
+    never rewritten: the blend exists only in the returned final mix.
+    """
+    from voyage.audio.planner import AudioPlanner, load_takes
+
+    dest = tmpdir / "final_audio.wav"
+    if len(usable) == 1:
+        proc = run_capture(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(usable[0] / "audio.wav"),
+                "-c:a",
+                "pcm_s16le",
+                str(dest),
+            ]
+        )
+        if proc.returncode != 0:
+            raise MediaError(f"final audio copy failed: {proc.stderr[-2000:]}")
+        return dest
+    starts, ends, timeline = _segment_timeline(usable, fps)
+    durations = [end - start for start, end in zip(starts, ends, strict=True)]
+    overlap = min(overlap_fraction * min(durations), overlap_cap_seconds)
+    ledger = run_dir / "audio" / "takes.jsonl"
+    takes: list[Any] = load_takes(ledger) if ledger.exists() else []
+    planner = AudioPlanner(takes=takes)
+    if not takes or overlap < 0.05:
+        return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+    half = overlap / 2.0
+    windows: list[Path] = []
+    for index, segment in enumerate(usable):
+        window_start = max(starts[index] - (half if index > 0 else 0.0), 0.0)
+        window_end = min(ends[index] + (half if index < len(usable) - 1 else 0.0), timeline)
+        # Slice the takes covering this (possibly extended) window; a take
+        # joint inside the window yields two slices joined as usual.
+        slices: list[Path] = []
+        cursor = window_start
+        piece = 0
+        while cursor < window_end - 1e-6:
+            serving = planner.take_for_time(cursor)
+            if serving is None or not serving.path or not Path(serving.path).exists():
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+            piece_end = min(serving.covers_until(), window_end)
+            if piece_end <= cursor:
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+            slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
+            slice_take(
+                Path(serving.path),
+                cursor - serving.covers_from,
+                piece_end - cursor,
+                slice_path,
+                sample_rate,
+                channels,
+            )
+            slices.append(slice_path)
+            cursor = piece_end
+            piece += 1
+        window_path = tmpdir / f"{segment.name}_window.wav"
+        if len(slices) == 1:
+            slices[0].replace(window_path)
+        else:
+            assemble_segment_audio(slices, window_path, overlap)
+        windows.append(window_path)
+    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    for window in windows:
+        argv += ["-i", str(window)]
+    filter_graph = ""
+    current = "[0:a]"
+    for index in range(1, len(windows)):
+        out = f"[a{index:02d}]"
+        filter_graph += f"{current}[{index}:a]acrossfade=d={overlap:.3f}:c1=tri:c2=tri{out};"
+        current = out
+    filter_graph += f"{current}anull[aout]"
+    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
+    proc = run_capture(argv)
+    if proc.returncode != 0:
+        raise MediaError(f"final audio blend failed: {proc.stderr[-2000:]}")
+    return dest
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -269,14 +411,22 @@ def finalize_run(
     fps: int = 24,
     skip_bad: bool = False,
     min_free_space_gib: float = 0.0,
+    sample_rate: int = 48000,
+    channels: int = 2,
+    overlap_fraction: float = 0.10,
+    overlap_cap_seconds: float = 0.5,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
-    Exactly one final encode: scale/pad to 768×432, mux audio, validate,
+    Exactly one final encode: scale/pad to WxH, mux audio, validate,
     atomically publish. With skip_bad, corrupt segments are skipped with
     a warning instead of aborting the whole finalize. A positive
     `min_free_space_gib` runs the §53 preflight first so a full disk
     fails fast instead of mid-encode.
+
+    Audio joints get a proportional overlap crossfade (re-sliced from
+    the takes ledger — previews untouched); pass overlap_fraction=0 to
+    keep the legacy hard splice.
     """
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
@@ -315,7 +465,7 @@ def finalize_run(
 
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        # Per-segment A/V mux, then concat the muxed parts.
+        # Per-segment video-only parts, then concat the parts.
         parts: list[Path] = []
         for segment in usable:
             part = tmpdir / f"{segment.name}.mp4"
@@ -327,17 +477,13 @@ def finalize_run(
                     "-y",
                     "-i",
                     str(segment / "video.mp4"),
-                    "-i",
-                    str(segment / "audio.wav"),
                     "-c:v",
                     "libx264",
                     "-pix_fmt",
                     "yuv420p",
                     "-preset",
                     "veryfast",
-                    "-c:a",
-                    "aac",
-                    "-shortest",
+                    "-an",
                     str(part),
                 ]
             )
@@ -346,6 +492,17 @@ def finalize_run(
             parts.append(part)
         concat_list = tmpdir / "concat.txt"
         concat_list.write_text("".join(f"file '{part}'\n" for part in parts), encoding="utf-8")
+        # Blended final mix (overlap re-sliced from takes; previews untouched).
+        final_audio = build_final_audio(
+            run_dir,
+            usable,
+            tmpdir,
+            fps,
+            sample_rate,
+            channels,
+            overlap_fraction,
+            overlap_cap_seconds,
+        )
         staged = tmpdir / "final.mp4"
         vf = (
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
@@ -363,8 +520,14 @@ def finalize_run(
                 "0",
                 "-i",
                 str(concat_list),
+                "-i",
+                str(final_audio),
                 "-vf",
                 vf,
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -375,6 +538,7 @@ def finalize_run(
                 "aac",
                 "-b:a",
                 "256k",
+                "-shortest",
                 str(staged),
             ]
         )

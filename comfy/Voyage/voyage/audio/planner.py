@@ -33,6 +33,7 @@ class AudioTake:
     covers_from: float  # video-time (seconds) the take starts covering
     duration: float  # take length in seconds
     segment_index: int  # first video segment this take may serve
+    bpm: float | None = None  # grid BPM this take was rendered at (None = legacy)
 
     def covers_until(self) -> float:
         """Exclusive video-time end of this take's coverage."""
@@ -40,7 +41,7 @@ class AudioTake:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable ledger form."""
-        return {
+        record: dict[str, Any] = {
             "take_id": self.take_id,
             "path": self.path,
             "caption": self.caption,
@@ -49,10 +50,14 @@ class AudioTake:
             "duration": self.duration,
             "segment_index": self.segment_index,
         }
+        if self.bpm is not None:
+            record["bpm"] = self.bpm
+        return record
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AudioTake:
-        """Rebuild from a ledger line."""
+        """Rebuild from a ledger line (pre-BPM lines carry no bpm key)."""
+        bpm_raw = raw.get("bpm")
         return cls(
             take_id=str(raw["take_id"]),
             path=str(raw["path"]),
@@ -61,6 +66,7 @@ class AudioTake:
             covers_from=float(raw["covers_from"]),
             duration=float(raw["duration"]),
             segment_index=int(raw["segment_index"]),
+            bpm=float(bpm_raw) if bpm_raw is not None else None,
         )
 
 
@@ -81,6 +87,11 @@ class AudioPlanner:
     take_seconds: float = 45.0
     ahead_seconds: float = 20.0
     takes: list[AudioTake] = field(default_factory=list)
+    # When set, fresh-take durations snap to whole multiples of one
+    # segment so takes chain on segment-aligned boundaries (beat-grid
+    # downbeats stay on segment boundaries across take joints). None
+    # keeps the legacy unquantized length (old runs, unit tests).
+    segment_seconds: float | None = None
 
     def coverage_until(self) -> float:
         """Video-time covered by rendered takes (0.0 when the ledger is empty)."""
@@ -151,13 +162,18 @@ class AudioPlanner:
     ) -> AudioTake:
         """Skeleton for a take the caller will render (path filled in after)."""
         take_id = f"take_{len(self.takes):04d}"
+        duration = self.take_seconds
+        if self.segment_seconds is not None:
+            from voyage.audio.beat import quantize_take_seconds
+
+            duration = quantize_take_seconds(self.take_seconds, self.segment_seconds)
         return AudioTake(
             take_id=take_id,
             path="",
             caption=caption,
             seed=seed,
             covers_from=covers_from,
-            duration=self.take_seconds,
+            duration=duration,
             segment_index=segment_index,
         )
 

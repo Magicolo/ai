@@ -10,6 +10,7 @@ from __future__ import annotations
 import select
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,11 @@ class SubprocessWorker:
         self._timeout = timeout
         self._proc: subprocess.Popen[str] | None = None
         self._counter = 0
+        # Serializes concurrent callers (the supervisor's parallel director
+        # prefetch shares the director worker with the commit path — the
+        # JSONL stream cannot interleave two requests). Single-threaded
+        # behavior is unchanged.
+        self._call_lock = threading.Lock()
 
     def start(self) -> None:
         rotate_log(self._log_path)
@@ -147,30 +153,31 @@ class SubprocessWorker:
         if proc is None or proc.stdin is None or proc.stdout is None:
             raise FatalWorkerError(f"worker {self._module} is not running")
         effective_timeout = self._timeout if timeout is None else timeout
-        self._counter += 1
-        request = WorkerRequest(id=f"req-{self._counter:06d}", op=op, payload=payload)
-        try:
-            proc.stdin.write(encode_request(request))
-            proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise RecoverableWorkerError(f"worker {self._module} pipe broken") from exc
-        deadline = time.monotonic() + effective_timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RecoverableWorkerError(
-                    f"worker {self._module} timed out after {effective_timeout}s on {op}"
-                )
-            ready, _, _ = select.select([proc.stdout], [], [], remaining)
-            if not ready:
-                raise RecoverableWorkerError(
-                    f"worker {self._module} timed out after {effective_timeout}s on {op}"
-                )
-            line = proc.stdout.readline()
-            if not line:
-                raise RecoverableWorkerError(f"worker {self._module} closed stdout")
-            break
-        response = decode_response(line)
+        with self._call_lock:
+            self._counter += 1
+            request = WorkerRequest(id=f"req-{self._counter:06d}", op=op, payload=payload)
+            try:
+                proc.stdin.write(encode_request(request))
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise RecoverableWorkerError(f"worker {self._module} pipe broken") from exc
+            deadline = time.monotonic() + effective_timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RecoverableWorkerError(
+                        f"worker {self._module} timed out after {effective_timeout}s on {op}"
+                    )
+                ready, _, _ = select.select([proc.stdout], [], [], remaining)
+                if not ready:
+                    raise RecoverableWorkerError(
+                        f"worker {self._module} timed out after {effective_timeout}s on {op}"
+                    )
+                line = proc.stdout.readline()
+                if not line:
+                    raise RecoverableWorkerError(f"worker {self._module} closed stdout")
+                break
+            response = decode_response(line)
         if response.id != request.id:
             raise FatalWorkerError(f"worker {self._module} id mismatch: {response.id}")
         if not response.ok:

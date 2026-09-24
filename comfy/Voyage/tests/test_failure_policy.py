@@ -7,6 +7,7 @@ All run against fake backends (real media, no GPU) in-container.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -142,6 +143,7 @@ def test_worker_call_times_out_on_silent_worker() -> None:
         )
         worker._counter = 0
         worker._timeout = 600.0
+        worker._call_lock = threading.Lock()
         started = time.monotonic()
         with pytest.raises(RecoverableWorkerError, match="timed out"):
             worker.call("health", {}, timeout=0.2)

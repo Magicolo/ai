@@ -77,6 +77,7 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
     )
     output = Path(str(payload["output_path"]))
     output.parent.mkdir(parents=True, exist_ok=True)
+    bpm_raw = payload.get("bpm")
     with tempfile.TemporaryDirectory(prefix="voyage-take-") as staging:
         rendered = render_take(
             _require_stack(),
@@ -89,6 +90,7 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
             src_audio=payload.get("reference_audio"),
             repaint_start=float(payload.get("repaint_start", 0.0)),
             repaint_end=float(payload.get("repaint_end", -1.0)),
+            bpm=int(bpm_raw) if bpm_raw is not None else None,
         )
         _convert(
             rendered,

@@ -6484,3 +6484,70 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - TASK.md gained §30 transition checklist (CausVid remaining, LTXV drift,
   config/interface duality, missing benchmark/audit artifacts).
 - Verification: §22.5 + §140 entries confirmed present; gates below.
+
+## 2026-09-24 — rhythm-cut music-video stack (clipping fix + beat grid + 1024x576 + parallel director)
+
+- User report on a 1m ltxv `generate` (run-id boba): audible clip at every
+  segment joint; motion jumps per segment (kept as a rhythm feature);
+  final felt low-res (768x512 segments downscaled to 768x432 with side
+  pillars); no prompt evolution in 60 s. Agreed via Q&A: overlap
+  crossfade (proportional 10% capped, final-only), adaptive-k beat grid
+  (4 → 8 → 16 … until BPM >= 60), native 1024x576 with finalize keeping
+  generation size (new runs), director drift every segment with the LLM
+  running parallel to segment generation (Qwen3-8B on CPU, must finish
+  before video gen; deterministic hold on miss).
+- Audio joints (`media.py`): `finalize_run` used the concat demuxer on
+  per-segment A/V muxes — a hard splice by design. New `build_final_audio`
+  re-slices each segment window (extended half the overlap per side,
+  clamped to the timeline) from the takes ledger and chains
+  `acrossfade d=overlap`; total stays exactly the video timeline (no A/V
+  drift). Overlap = min(0.10 x shortest segment, 0.5 s cap); <0.05 s or a
+  missing ledger degrades to the legacy hard-splice concat. Per-segment
+  `audio.wav` previews stay hard-cut. Final encode is now video-concat +
+  blended mix with explicit `-map 0:v:0 -map 1:a:0` (plus `-shortest`
+  safety). New `AudioConfig` fields `beats_per_segment=4`,
+  `final_overlap_fraction=0.10`, `final_overlap_cap_seconds=0.5`.
+- Beat grid (`voyage/audio/beat.py`, new): `beats_for_segment` (adaptive
+  k doubling to hold >= 60 BPM: 4 s LTXV = 4 beats = 60 BPM; 2 s fake =
+  4 beats = 120 BPM; 5.04 s cold-start = 8 beats ~ 95 BPM) +
+  `quantize_take_seconds` (takes snap to whole segments so downbeats stay
+  on boundaries). `AudioTake.bpm` recorded in the ledger (absent on legacy
+  lines); planner `segment_seconds` quantizes fresh takes (None = legacy).
+  `acestep.render_take` takes explicit `bpm` (else energy mapping);
+  supervisor computes the grid BPM per segment, passes it in the audio
+  payload (`take_rendered` metric logs beats/bpm). ACE honors tempo as a
+  hint — alignment is approximate, documented as such.
+- Resolution: ltxv preset stays 768x512, but `cmd_finalize` now forwards
+  the run config's generation size instead of the 768x432 default — the
+  pillar/downscale loss is gone (768x512 in, 768x512 out; old runs
+  refinalize natively too). Native 1024x576 was tried and reverted the
+  same day: the forward needs ~15.6 GB (13.9 resident + 1.7 transient),
+  beyond the 16 GB card even via the dynamic-fp8 fallback — which itself
+  exposed a latent `torchao.quantization.quant` import that no longer
+  exists in pinned torchao 0.13.0 (fixed to `quant_api`; the worker runs
+  from the bind mount, no image rebuild). 1024x576 needs a dedicated
+  memory-optimization pass (VAE tiling/chunked decode); model
+  post-upscale stays a Zoomy concern per `docs/MODELS.md`.
+- Director: `generate` defaults `--director` to qwen when unspecified
+  (file default stays deterministic; explicit flags win). New
+  `VoyageConfig.drift_every_n_segments=1` — non-drift segments hold via
+  the deterministic path (`drift_hold` metric). Parallel prefetch:
+  after each accept, the raw N+1 proposal is submitted to a 1-thread
+  executor and runs during video+audio render (CPU vs GPU, no
+  contention); the next commit consumes it as the accept loop's first
+  candidate when it targets the right segment and no fresh inspect
+  amendments exist (`director_prefetch_hit/miss` metrics). Store writes
+  stay on the commit path. `SubprocessWorker.call` gained a lock so the
+  shared director stream cannot interleave. Qwen/embedder loads are
+  offline-first (`HF_HUB_OFFLINE=1` default, explicit 0 re-enables) so
+  missing weights fail fast to the deterministic fallback instead of
+  hanging on a download.
+- CLI: `--beats-per-segment` / `--drift-every-n` on `run` + `generate`.
+- Tests: `test_rhythm.py` (beat math, quantization, ledger), updated
+  ltxv preset asserts, `test_generation_stack.py` (config/validators/
+  toml/overrides, drift cadence, prefetch hit, blend duration-exactness,
+  overlap-0 legacy path, no-ledger fallback, generate-with-default-qwen
+  offline-fallback e2e), `test_failure_policy` partial-worker lock fix.
+- Gates green (279 pytest / mypy strict / ruff + format). GPU
+  verification: 768x512 ltxv segments + blend + BPM log + Qwen CPU timing
+  on idle GPU (1024x576 reverted — see resolution note above).

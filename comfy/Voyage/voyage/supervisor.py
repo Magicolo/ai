@@ -19,7 +19,9 @@ import os
 import signal
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from voyage import paths
@@ -168,6 +170,15 @@ class Supervisor:
         )
         self._workers_running = False
         self._stop_flag = False
+        # Parallel director prefetch (§20): while segment N renders video
+        # (GPU) + audio, one background thread pre-computes the raw LLM
+        # proposal for N+1 on CPU. The commit path still owns validation →
+        # novelty → style → accept, so a stale/slow proposal degrades to a
+        # synchronous decide — never corrupt state. Keyed by target segment
+        # number; results for any other number are discarded.
+        self._prefetch_executor: ThreadPoolExecutor | None = None
+        self._prefetch_target: int | None = None
+        self._prefetch_future: Future[dict[str, Any] | None] | None = None
         # Restarts used per worker since the current run started (Phase 6
         # slice B budget). Reset by run_segments; direct commit_one_segment
         # callers share the counters for the supervisor's lifetime.
@@ -202,12 +213,19 @@ class Supervisor:
         self._audio.start()
         self._director.start()
         self._workers_running = True
+        if self._prefetch_executor is None:
+            self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
 
     def stop_workers(self) -> None:
         self._video.stop()
         self._audio.stop()
         self._director.stop()
         self._workers_running = False
+        executor, self._prefetch_executor = self._prefetch_executor, None
+        self._prefetch_target = None
+        self._prefetch_future = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _log_metric(self, event: dict[str, object]) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._config.run_id, **event})
@@ -415,6 +433,79 @@ class Supervisor:
     def _stop_requested_via_file(self) -> bool:
         return read_state(self._run_dir).status == "STOP_REQUESTED"
 
+    def _prefetch_decide_for_next(
+        self,
+        config: ProjectConfig,
+        number: int,
+        decision: EvolutionDecision,
+        store: ConceptStore,
+        style_spec: StyleSpec,
+    ) -> None:
+        """Submit a background raw LLM proposal for segment number+1.
+
+        The speculative next-state derives entirely from the just-accepted
+        decision (current/destination = its destination, index + 1), so no
+        commit output is needed. Only the raw worker reply is prefetched —
+        validation, novelty, style and store writes stay on the commit
+        path. Failures (including worker restarts, which stay synchronous)
+        degrade to None: the next commit decides synchronously.
+        """
+        executor = self._prefetch_executor
+        if executor is None or not self._workers_running:
+            return
+        if self._prefetch_future is not None and not self._prefetch_future.done():
+            return
+        target = number + 1
+        self._prefetch_target = target
+        spec_state = SimpleNamespace(
+            decision_index=decision.decision_index + 1,
+            phase=decision.phase,
+            current_concept=decision.destination_concept,
+            destination_concept=decision.destination_concept,
+            committed_segments=0,
+            timeline_frames=0,
+        )
+        try:
+            payload = self._decide_payload(config, spec_state, store, style_spec)
+        except VoyageError:
+            self._prefetch_target = None
+            return
+
+        def _call() -> dict[str, Any] | None:
+            try:
+                return self._director.call("decide", payload)
+            except VoyageError:
+                return None
+
+        self._prefetch_future = executor.submit(_call)
+
+    def _take_prefetch(self, number: int, segment_id: str) -> dict[str, Any] | None:
+        """Consume the prefetched raw proposal when it targets this segment.
+
+        Hit = future done with a dict result (used as the accept loop's
+        first candidate, still fully validated). Anything else is a miss:
+        the next commit decides synchronously. Stale targets are dropped.
+        """
+        future, target = self._prefetch_future, self._prefetch_target
+        self._prefetch_future = None
+        self._prefetch_target = None
+        if future is None or target != number:
+            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            return None
+        if not future.done():
+            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            return None
+        try:
+            raw = future.result()
+        except Exception:  # noqa: BLE001 — prefetch must never break a commit
+            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            return None
+        if not isinstance(raw, dict):
+            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            return None
+        self._log_metric({"event": "director_prefetch_hit", "segment_id": segment_id})
+        return raw
+
     def _embed_texts(self, texts: list[str]) -> list[list[float]] | None:
         """Embed via the director worker; None when unavailable (fallback)."""
         try:
@@ -480,6 +571,7 @@ class Supervisor:
         segment_id: str,
         measured_context: str = "",
         amendments: list[str] | None = None,
+        prefetched_raw: dict[str, Any] | None = None,
     ) -> EvolutionDecision:
         """§74 transaction: validate → novelty → style → accept.
 
@@ -489,18 +581,52 @@ class Supervisor:
         inspector measured the previous segment, its §43 amendments are
         applied to each stage post-validation, pre-style-check — amended
         text still passes ProposalRejected, so the charter always wins.
+
+        Drift cadence: only every Nth segment (config
+        drift_every_n_segments, 1 = drift each segment) consults the LLM;
+        other segments hold the current concept via the deterministic
+        director (recorded, novelty_accepted=False).
         """
+        drift_every = max(1, config.voyage.drift_every_n_segments)
+        if state.next_segment_number % drift_every != 0:
+            hold = DeterministicDirector(style_spec.prompt).propose(
+                decision_index=state.decision_index,
+                current_concept=state.current_concept,
+                destination_concept=state.destination_concept,
+                phase=state.phase,
+            )
+            store.append(
+                hold.destination_concept,
+                accepted=True,
+                summary=f"drift cadence hold (every {drift_every})",
+                segment=state.next_segment_number,
+            )
+            hold.novelty_accepted = False
+            self._log_metric(
+                {"event": "drift_hold", "segment_id": segment_id, "every": drift_every}
+            )
+            return hold
         max_attempts = max(1, config.voyage.novelty_max_attempts)
         feedback = ""
         last_score = 0.0
+        prefetch_pending = prefetched_raw is not None and not amendments
         for _attempt in range(max_attempts):
-            raw = self._call_with_restart(
-                self._director,
-                "director",
-                segment_id,
-                "decide",
-                self._decide_payload(config, state, store, style_spec, feedback, measured_context),
-            )
+            if prefetch_pending:
+                # First candidate comes from the parallel prefetch window
+                # (still fully validated below — a stale proposal just
+                # burns one attempt, then the loop calls the worker live).
+                prefetch_pending = False
+                raw: dict[str, Any] = prefetched_raw or {}
+            else:
+                raw = self._call_with_restart(
+                    self._director,
+                    "director",
+                    segment_id,
+                    "decide",
+                    self._decide_payload(
+                        config, state, store, style_spec, feedback, measured_context
+                    ),
+                )
             try:
                 decision = EvolutionDecision.model_validate(raw)
             except Exception as exc:
@@ -635,13 +761,22 @@ class Supervisor:
             take_seconds=audio_cfg.take_seconds,
             ahead_seconds=audio_cfg.ahead_seconds,
             takes=load_takes(ledger),
+            segment_seconds=duration,
         )
         caption = decision.audio.music_caption or audio_cfg.music_style
         energy = min(1.0, max(0.0, decision.audio.energy))
         seed = audio_seed(config.seed, number, len(planner.takes))
+        # Beat grid: the take BPM derives from this segment's duration so
+        # cuts land on beats (adaptive k: 4 → 8 → 16 … until BPM >= 60).
+        # ACE treats tempo as a hint, so alignment is approximate.
+        from voyage.audio.beat import beats_for_segment
+
+        beats, grid_bpm = beats_for_segment(duration, audio_cfg.beats_per_segment)
+        take_bpm = int(round(grid_bpm))
         plan = planner.plan(video_time, caption, seed, number)
         if plan.action in ("render", "repaint") and plan.take is not None:
             take = plan.take
+            take.bpm = float(take_bpm)
             take_file = audio_dir / f"{take.take_id}.wav"
             payload: dict[str, object] = {
                 "segment_id": segment_id,
@@ -652,6 +787,7 @@ class Supervisor:
                 "sample_rate": audio_cfg.sample_rate,
                 "channels": audio_cfg.channels,
                 "duration_seconds": take.duration,
+                "bpm": take_bpm,
             }
             if plan.action == "repaint" and plan.current is not None:
                 current = plan.current
@@ -670,6 +806,8 @@ class Supervisor:
                     "take_id": take.take_id,
                     "action": plan.action,
                     "reason": plan.reason,
+                    "beats": beats,
+                    "bpm": take_bpm,
                 }
             )
         # Slice the takes covering [video_time, video_time + duration).
@@ -825,11 +963,27 @@ class Supervisor:
         inspect_started = time.monotonic()
         measured_context, amendments = self._inspect_previous_segment(config, number, style_spec)
         stage_seconds["inspect"] = round(time.monotonic() - inspect_started, 3)
+        # Prefetched raw proposal (computed during the previous segment's
+        # render window). Usable only without fresh inspect amendments —
+        # those postdate the prefetch payload.
+        prefetched_raw = self._take_prefetch(number, segment_id)
+        if amendments:
+            prefetched_raw = None
         director_started = time.monotonic()
         decision = self._accept_director_decision(
-            config, state, store, style_spec, segment_id, measured_context, amendments
+            config,
+            state,
+            store,
+            style_spec,
+            segment_id,
+            measured_context,
+            amendments,
+            prefetched_raw=prefetched_raw,
         )
         stage_seconds["director"] = round(time.monotonic() - director_started, 3)
+        # Prefetch the next segment's raw proposal while this one renders
+        # (CPU director vs GPU video — no contention by construction).
+        self._prefetch_decide_for_next(config, number, decision, store, style_spec)
 
         # 3. Staged prompt plan (§18.2) + media generation.
         video_started = time.monotonic()

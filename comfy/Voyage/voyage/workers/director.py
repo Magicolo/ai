@@ -48,20 +48,37 @@ budget bounded (Step 0 probe: 92s for 128 tokens)."""
 
 def _load_qwen(model_id: str) -> tuple[Any, Any]:
     if "model" not in _QWEN:
+        import os
+
         import torch
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=False)
+        # Offline-first: use cached weights when present, fail fast when
+        # absent (a missing Qwen stack must degrade to the deterministic
+        # fallback in seconds — never hang a commit on a model download).
+        # Explicit HF_HUB_OFFLINE=0 re-enables downloads.
+        offline = os.environ.get("HF_HUB_OFFLINE", "1") != "0"
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id, trust_remote_code=False, local_files_only=offline
+        )
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=torch.bfloat16, device_map="cpu", trust_remote_code=False
+                model_id,
+                dtype=torch.bfloat16,
+                device_map="cpu",
+                trust_remote_code=False,
+                local_files_only=offline,
             )
         except Exception:
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, dtype=torch.float32, device_map="cpu", trust_remote_code=False
+                model_id,
+                dtype=torch.float32,
+                device_map="cpu",
+                trust_remote_code=False,
+                local_files_only=offline,
             )
         model.eval()
         _QWEN["model"] = model

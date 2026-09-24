@@ -95,12 +95,17 @@ def render_take(
     src_audio: str | Path | None = None,
     repaint_start: float = 0.0,
     repaint_end: float = -1.0,
+    bpm: int | None = None,
 ) -> Path:
     """Render one FLAC take; continuation via task_type=repaint + src_audio.
 
     Repaint semantics (probe-verified): the 0..repaint_start head is
     preserved near bit-exact while repaint_start..repaint_end is
     regenerated — the mechanism the slow loop uses to extend music.
+
+    `bpm` overrides the energy-derived tempo (beat-grid takes pass the
+    grid BPM so segment cuts land on beats); None keeps the legacy
+    energy mapping.
     """
     from acestep.inference import GenerationConfig, GenerationParams, generate_music
 
@@ -109,7 +114,7 @@ def render_take(
     params = GenerationParams(
         caption=caption,
         lyrics="",
-        bpm=bpm_for_energy(energy),
+        bpm=bpm if bpm is not None else bpm_for_energy(energy),
         duration=max(MIN_DURATION_SECONDS, duration_seconds),
         seed=seed,
         task_type=task_type,

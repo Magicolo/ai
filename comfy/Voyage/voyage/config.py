@@ -78,6 +78,19 @@ class AudioConfig(BaseModel):
     take_seconds: float = 45.0
     ahead_seconds: float = 20.0
     crossfade_seconds: float = 2.0
+    # Rhythm grid (§35): each committed segment spans `beats_per_segment`
+    # beats; the take BPM derives from the segment duration (adaptive k:
+    # 4 → 8 → 16 … until BPM >= 60 — see voyage.audio.beat). Takes chain
+    # on segment-aligned boundaries so cuts land on beats (approximately:
+    # ACE honors tempo as a hint, not a sample-exact grid).
+    beats_per_segment: int = 4
+    # Finalize-only joint blend (§56): overlap = min(fraction × shortest
+    # adjoining segment, cap). Previews (per-segment audio.wav) stay
+    # hard-cut; the blend applies at finalize from take re-slices, so no
+    # commit-format change and no A/V drift (overlap content comes from
+    # the takes, not by shortening the timeline).
+    final_overlap_fraction: float = 0.10
+    final_overlap_cap_seconds: float = 0.5
     # ACE-Step backend only: mirrors VideoConfig — host path (or /models
     # mount in the GPU image) holding acestep/checkpoints/, and the torch
     # device the resident stack loads on. Fake backend ignores both.
@@ -94,6 +107,27 @@ class AudioConfig(BaseModel):
     @field_validator("take_seconds", "ahead_seconds", "crossfade_seconds")
     @classmethod
     def non_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("must be non-negative")
+        return value
+
+    @field_validator("beats_per_segment")
+    @classmethod
+    def positive_beats(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+
+    @field_validator("final_overlap_fraction")
+    @classmethod
+    def overlap_fraction_range(cls, value: float) -> float:
+        if not 0.0 <= value <= 0.5:
+            raise ValueError("final_overlap_fraction must be within [0, 0.5]")
+        return value
+
+    @field_validator("final_overlap_cap_seconds")
+    @classmethod
+    def overlap_cap_non_negative(cls, value: float) -> float:
         if value < 0:
             raise ValueError("must be non-negative")
         return value
@@ -131,8 +165,12 @@ class VoyageConfig(BaseModel):
     novelty_max_attempts: int = 3
     max_worker_restarts: int = 3
     rpc_timeout_seconds: float = 600.0
+    # Thematic drift cadence: the director must propose a novel destination
+    # every Nth segment (1 = drift each segment). Non-drift segments hold
+    # the current concept via the deterministic fallback (still recorded).
+    drift_every_n_segments: int = 1
 
-    @field_validator("blocks_per_prompt_stage", "novelty_max_attempts")
+    @field_validator("blocks_per_prompt_stage", "novelty_max_attempts", "drift_every_n_segments")
     @classmethod
     def positive(cls, value: int) -> int:
         if value <= 0:
@@ -262,6 +300,9 @@ energy = 0.5
 take_seconds = 45.0
 ahead_seconds = 20.0
 crossfade_seconds = 2.0
+beats_per_segment = 4
+final_overlap_fraction = 0.1
+final_overlap_cap_seconds = 0.5
 models_dir = "/models"
 device = "{audio_device}"
 
@@ -284,6 +325,7 @@ novelty_threshold = 0.85
 novelty_max_attempts = 3
 max_worker_restarts = 3
 rpc_timeout_seconds = 600.0
+drift_every_n_segments = 1
 
 [experimental]
 visual_inspector = false
@@ -321,6 +363,8 @@ def apply_draft_overrides(
     blocks: int | None = None,
     take_seconds: float | None = None,
     quantization: str | None = None,
+    beats_per_segment: int | None = None,
+    drift_every_n_segments: int | None = None,
 ) -> ProjectConfig:
     """Apply the draft profile + targeted run overrides (fast loop).
 
@@ -331,6 +375,7 @@ def apply_draft_overrides(
     video = config.video
     audio = config.audio
     director_cfg = config.director
+    voyage_cfg = config.voyage
     if draft:
         profile = config.draft
         video = VideoConfig(
@@ -351,15 +396,26 @@ def apply_draft_overrides(
         video = VideoConfig(**{**video.model_dump(), "quantization": quantization})
     if take_seconds is not None:
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": take_seconds})
-    return config.model_copy(update={"video": video, "audio": audio, "director": director_cfg})
+    if beats_per_segment is not None:
+        audio = AudioConfig(**{**audio.model_dump(), "beats_per_segment": beats_per_segment})
+    if drift_every_n_segments is not None:
+        voyage_cfg = VoyageConfig(
+            **{**voyage_cfg.model_dump(), "drift_every_n_segments": drift_every_n_segments}
+        )
+    return config.model_copy(
+        update={"video": video, "audio": audio, "director": director_cfg, "voyage": voyage_cfg}
+    )
 
 
 _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
     # `generate --backend` presets (single source of truth, also used by
-    # default_config_toml). ltxv mirrors the verified Phase 7 E2E toml
-    # (native 768x512 on CUDA); longlive2 ignores geometry (it denoises
-    # latent_shape -> 1280x704) so only backend+device change; fake is the
-    # config default, spelled out for explicitness.
+    # default_config_toml). ltxv renders native 768x512 on CUDA (both /32
+    # and /64 clean for the two-stage multiscale pipeline; 1024x576 was
+    # tried 2026-09-24 but needs ~15.6 GB in the forward — beyond the
+    # 16 GB card even via the dynamic-fp8 fallback — so it stays reverted
+    # until a memory-optimization pass lands); longlive2 ignores geometry
+    # (it denoises latent_shape -> 1280x704) so only backend+device change;
+    # fake is the config default, spelled out for explicitness.
     "fake": {
         "backend": "fake",
         "profile": "fake-432p",

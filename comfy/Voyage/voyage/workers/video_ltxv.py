@@ -156,7 +156,7 @@ class LTXVSession:
 
     def _quantize_fp8_fallback(self) -> None:
         """In-place torchao dynamic-fp8 DiT quant (OOM fallback, once)."""
-        from torchao.quantization.quant import (  # type: ignore[import-not-found]
+        from torchao.quantization.quant_api import (  # type: ignore[import-not-found]
             Float8DynamicActivationFloat8WeightConfig,
             quantize_,
         )
