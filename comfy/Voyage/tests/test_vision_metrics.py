@@ -10,8 +10,10 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
+import pytest
 from numpy.typing import NDArray
 
+from voyage.errors import MediaError
 from voyage.vision.metrics import (
     frame_histogram,
     histogram_distance,
@@ -127,6 +129,40 @@ def test_summarize_single_frame_degrades_gracefully() -> None:
     assert summary["scene_boundary_strength"] == 0.0
     assert summary["semantic_change_rate"] == 0.0
     assert summary["style_similarity"] == 1.0
+
+
+def test_visual_complexity_zero_on_empty_input() -> None:
+    """Issue 067: empty input returns 0.0 like the motion/palette siblings."""
+    assert visual_complexity([]) == 0.0
+
+
+def test_style_similarity_zero_on_empty_input_with_reference() -> None:
+    """Issue 067: no frames means no overlap, not an IndexError."""
+    assert style_similarity([], frame_histogram(_solid(100))) == 0.0
+    assert style_similarity([], None) == 1.0
+
+
+def test_summarize_empty_segment_degrades_gracefully() -> None:
+    """Issue 067: an empty segment summarizes instead of raising."""
+    summary = summarize_segment([], None)
+    assert summary == {
+        "motion_energy": 0.0,
+        "visual_complexity": 0.0,
+        "semantic_change_rate": 0.0,
+        "palette_distance": 0.0,
+        "style_similarity": 1.0,
+        "scene_boundary_strength": 0.0,
+    }
+    anchored = summarize_segment([], frame_histogram(_solid(100)))
+    assert anchored["style_similarity"] == 0.0
+
+
+def test_frame_histogram_rejects_empty_frame() -> None:
+    """Issue 067: empty frames raise a typed error, never a NaN array."""
+    with pytest.raises(MediaError, match="non-empty frame"):
+        frame_histogram(np.zeros((0, 0, 3), dtype=np.uint8))
+    with pytest.raises(MediaError, match="non-empty frame"):
+        frame_histogram(np.zeros((0, 5, 3), dtype=np.uint8))
 
 
 def test_sample_frames_decodes_testsrc_clip(tmp_path: Path) -> None:

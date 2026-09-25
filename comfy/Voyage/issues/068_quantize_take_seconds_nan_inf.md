@@ -1,6 +1,6 @@
 # 068 — `quantize_take_seconds` nan/inf escapes the documented `ValueError` contract
 
-- Status: open
+- Status: fixed
 - Severity: medium (bare `round()` internals leak; `inf` segment silently yields
   `inf` take)
 - Area: audio beat math — `voyage/audio/beat.py:45-58`,
@@ -63,4 +63,16 @@ ValueError: cannot convert float NaN to integer
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (`beat.py:45-58`, `test_rhythm.py:36-42,61-65` — all match);
   re-ran nan/inf probes (outputs pasted above).
-- Open: implement + tests.
+- 2026-09-25 (fix): FIXED — added shared `_require_finite` helper in
+  `voyage/audio/beat.py:24-33` (raises `ValueError "<label> must be finite"`)
+  and called it for both float inputs of `quantize_take_seconds`
+  (`voyage/audio/beat.py:69-70`) and for `segment_seconds`/`min_bpm` in
+  `beats_for_segment` (`voyage/audio/beat.py:47-48`), ahead of the existing
+  positivity checks. nan/inf/-inf now raise `ValueError` on every path
+  (no more bare `round()` message, `OverflowError`, or silent `inf`).
+  Tests: `test_beats_for_segment_rejects_non_finite` +
+  `test_quantize_take_seconds_rejects_non_finite` in `tests/test_rhythm.py`.
+  Gates: ruff + format + mypy strict clean on all scope files, 424 pytest
+  passed in-container.
+- Resolution: fixed as above; `ValueError` contract holds for all
+  non-finite inputs.

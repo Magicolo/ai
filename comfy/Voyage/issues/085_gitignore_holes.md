@@ -58,3 +58,19 @@ Append `*.mp4 *.wav *.flac *.pt *.log .coverage coverage.xml` (scoped so
   live (`.gitignore:1-6` unchanged; `check-ignore` pasted above — only
   `.coverage` matches, via parent gitignore).
 - Open: extend `.gitignore`.
+- 2026-09-25 (fix): relevance re-verified live — `Voyage/.gitignore:1-6`
+  still caches + `output/` only, so the issue was live. Appended exactly
+  the candidate list in `Voyage/.gitignore:7-16` (`*.mp4 *.wav *.flac *.pt
+  *.log .coverage coverage.xml`) with a scoping comment. Verified:
+  `git check-ignore -v` matches all seven artifact probes via the new
+  Voyage rules; `Voyage/reports/*.md` still not ignored; `output/`
+  artifacts still covered by the existing `output/` rule; `git ls-files`
+  shows no tracked file matching the new patterns (nothing already
+  committed is affected). Note: `metrics.jsonl` (named in the technical
+  description but not in the candidate list) remains committable — left
+  for a follow-up decision, not silently added.
+
+## Resolution
+
+- Status: fixed.
+- Files: `Voyage/.gitignore:7-16`.

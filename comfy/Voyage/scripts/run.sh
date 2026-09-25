@@ -22,7 +22,14 @@ cd "$(dirname "$0")/.."
 # --backend <name> / --backend=<name> (defaulting to ltxv for `generate`);
 # for run-like commands with --run DIR, read it from DIR/voyage.toml.
 # Explicit VOYAGE_IMAGE / VOYAGE_GPUS always win.
+#
+# Argument-contract: --backend and --run are each accepted in BOTH the
+# separate-arg form (--run DIR) and the equals form (--run=DIR). The sniff
+# loop below must keep the two flags symmetric — a dropped form leaves
+# run_dir/backend unset and silently selects the slim image for a CUDA run
+# (issues 037/069). Covers only flag parsing; values are validated later.
 requested_backend=""
+run_dir=""
 prev_arg=""
 for arg in "$@"; do
   if [ "$prev_arg" = "--backend" ] || [ "$prev_arg" = "--run" ]; then
@@ -34,6 +41,8 @@ for arg in "$@"; do
     prev_arg=""
   elif [[ "$arg" == --backend=* ]]; then
     requested_backend="${arg#--backend=}"
+  elif [[ "$arg" == --run=* ]]; then
+    run_dir="${arg#--run=}"
   elif [[ "$arg" == --backend || "$arg" == --run ]]; then
     prev_arg="$arg"
   else
@@ -43,10 +52,15 @@ done
 if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
   requested_backend="ltxv"
 fi
+# Section-aware TOML sniff via the stdlib parser: reads the [video] backend
+# only, so [audio]/[director] backends (or indentation/layout changes) can
+# never select the wrong image. Unparseable/missing key -> empty (slim
+# default), never a launcher failure.
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/voyage.toml" ]; then
-  requested_backend="$(grep -E '^backend *= *"' "$run_dir/voyage.toml" \
-    | head -n 1 | sed -E 's/.*"(.*)".*/\1/')"
+  requested_backend="$(RUN_DIR="$run_dir" python3 -c \
+    'import os, tomllib; print(tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")).get("video", {}).get("backend", ""))' \
+    2>/dev/null || true)"
 fi
 needs_cuda=0
 case "${requested_backend:-}" in

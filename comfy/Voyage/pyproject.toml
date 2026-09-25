@@ -33,6 +33,10 @@ include = ["voyage*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# issues/ holds verbatim evidence quotes — ruff format rewrites md fences
+# (e.g. wraps expressions in parens), corrupting them. Never format it
+# (ruff check ignores markdown already, so lint coverage is unaffected).
+exclude = ["issues/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "A", "C4", "DTZ", "W"]

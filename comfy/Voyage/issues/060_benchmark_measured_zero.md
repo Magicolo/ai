@@ -1,6 +1,6 @@
 # 060 — Benchmark `measured=0` (and negative `warmup`) crashes all 5 workers with `ZeroDivisionError`
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (any RPC caller can crash the worker; `checked_request` does
   not cover these fields)
 - Area: workers — `handle_benchmark` in all five worker modules
@@ -69,3 +69,17 @@ the shared helper from 019's `video_common.py` when it exists.
   `video_causvid.py:996-997,1025,1036-1037`, `audio_acestep.py:118-119,141,
   150-151` — all match); re-ran director probe (`ZeroDivisionError` confirmed).
 - Open: validate + test per worker.
+- 2026-09-25: FIXED. Shared `validate_benchmark_counts(warmup, measured)`
+  in `voyage/workers/loop.py:62` (`warmup < 0 or measured <= 0` →
+  `ValueError`); called first in all five `handle_benchmark` handlers —
+  `director.py:374`, `audio_acestep.py:152`, `video_longlive.py:1036`,
+  `video_ltxv.py:768`, `video_causvid.py:1005` — before any session/stack
+  check or state mutation, so bad counts fail fast on CPU with a typed
+  error instead of `ZeroDivisionError` (and `warmup=0, measured>0` stays
+  valid per the existing stage-shape tests). Reordered `audio_acestep`
+  (validation before `_require_stack`), `video_ltxv`/`video_causvid`
+  (validation before `_SESSION` check and, for ltxv, before the tail-state
+  save). Tests: `Voyage/tests/test_benchmark_counts.py` (7 tests: helper
+  accept/reject, per-worker rejection, stack-not-loaded/session-untouched
+  ordering). Gates: `ruff check` clean, `ruff format --check voyage tests`
+  clean, `mypy voyage` strict clean (40 files), `pytest` 472 passed.

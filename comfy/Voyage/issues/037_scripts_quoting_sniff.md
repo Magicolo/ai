@@ -80,3 +80,26 @@ The backend sniff silently picks the slim image for a CUDA run, so a one-charact
   also honors an explicit `--backend` flag first — the grep fallback path is
   where the bug lives).
 - Open: implement + shellcheck in gates.
+- 2026-09-25 (fix): relevance re-verified live — `qualify.sh:31-33` literal
+  `'$run_dir'` and `run.sh:48-49` grep/sed sniff both still present, so the
+  issue was live. Fixed in `Voyage/scripts/qualify.sh:31-35` (run dir now
+  travels via `-e RUN_DIR="$run_dir"` + single-quoted `python -c` reading
+  `os.environ["RUN_DIR"]` — no shell interpolation of the path) and
+  `Voyage/scripts/run.sh:51-58` (grep/sed replaced with a stdlib `tomllib`
+  sniff reading only the `[video]` backend; unparseable/missing key falls
+  back to empty via `|| true`, never a launcher failure). Verified:
+  `bash -n` clean on all 7 scripts; `VOYAGE_DRY_RUN=1` dry-runs — a trap
+  TOML with `[audio] backend="fake"` first selects `voyage-video:latest`
+  (old grep returned `fake` → wrong slim image), broken TOML still exits 0
+  with slim defaults, and a hostile `RUN_DIR` (`it's-broken";touch PWNED;…`)
+  passes through byte-exact with no `PWNED` file created. shellcheck
+  unavailable (absent on host, not in the voyage image — noted, not run).
+  NOT done (left open): candidate 3 — scoped `/tmp` mount (`run.sh:98`
+  still `-v /tmp:/tmp`) and `VOYAGE_MODELS` validation; changing the tmp
+  mount risks breaking container temp drivers, needs its own task.
+
+## Resolution
+
+- Status: fixed (partial — candidates 1+2 done; candidate 3 `/tmp` scoping +
+  `VOYAGE_MODELS` validation deferred, see log above).
+- Files: `Voyage/scripts/qualify.sh:31-35`, `Voyage/scripts/run.sh:51-58`.

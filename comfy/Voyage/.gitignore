@@ -4,3 +4,13 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 output/
+# Stray run artifacts (issue 085): a misdirected --output or local probe at
+# the Voyage root must never commit, esp. multi-hundred-MB media. Scoped to
+# artifact extensions only — reports/*.md and tracked sources unaffected.
+*.mp4
+*.wav
+*.flac
+*.pt
+*.log
+.coverage
+coverage.xml

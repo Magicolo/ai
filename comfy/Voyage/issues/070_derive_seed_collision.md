@@ -1,6 +1,6 @@
 # 070 — `derive_seed` label-join ambiguity: distinct label tuples collide
 
-- Status: open
+- Status: fixed
 - Severity: medium (silent stream merging — the exact failure the module
   docstring claims to prevent)
 - Area: seeds — `Voyage/voyage/seeds.py:14-17`
@@ -50,4 +50,14 @@ from 040's fake-seed issue, which is worker behavior, not derivation.)
   cited lines live (`seeds.py:14-17` — match); re-ran probe
   (`derive_seed(7,'a:b','c')==derive_seed(7,'a','b:c')` → `True 952123984`,
   confirmed).
-- Open: implement + test.
+- 2026-09-25 (fix): FIXED — `derive_seed` in `voyage/seeds.py:14-25` now
+  length-prefixes each label (`"<len>:<label>"` joined with `":"`), so
+  `("a:b","c")` and `("a","b:c")` encode distinctly. Verified live: the
+  colliding pair now separates while identical inputs stay stable. Note:
+  derived values change for all existing label tuples (new encoding); no
+  golden values are pinned in tests or code (checked), and current call
+  sites use single-token labels. Tests:
+  `test_derive_seed_separates_colon_labels` in `tests/test_unit.py`
+  (extends the existing stability/separation test). Gates: ruff + format +
+  mypy strict clean on all scope files, 424 pytest passed in-container.
+- Resolution: fixed as above; label tuples are unambiguously encoded.

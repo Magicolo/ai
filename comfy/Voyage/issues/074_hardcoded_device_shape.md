@@ -1,6 +1,6 @@
 # 074 — Hardcoded device/shape constants: LTXV mask `.to("cuda")`; LongLive `stream_start_frame - 8*len`
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: low (breaks `cuda:1`; misreports on config change)
 - Area: worker constants — `voyage/workers/video_ltxv.py:319`,
   `voyage/workers/video_longlive.py:842`
@@ -62,3 +62,21 @@ int(pipe.num_frame_per_block)*len(prompts)`.
   cited lines live (`video_ltxv.py:319`, `video_longlive.py:842` — both match);
   re-ran `rg` probes (outputs pasted above).
 - Open: implement + multi-device/config test.
+- 2026-09-25: FIXED. LTXV `_encode`
+  (`voyage/workers/video_ltxv.py:326`) now moves the attention mask with
+  `.to(self._device)` instead of `.to("cuda")`, so `cuda:1` sessions no
+  longer split mask/DiT across devices. LongLive `generate_blocks`
+  (`voyage/workers/video_longlive.py:899-902`) reports
+  `stream_start_frame` via the pure helper `stream_start_frame_for_call`
+  (`:85`, `next - block_size * count`) fed by the pipe's runtime
+  `num_frame_per_block` (getattr default = `NUM_FRAME_PER_BLOCK`, which
+  only slim test doubles lack — the real pipeline always carries it, and
+  the default keeps the out-of-scope `test_longlive_stages.py` fakes
+  green). Tests: `test_encode_moves_mask_to_session_device` (fake
+  session with `_device="cuda:1"`, records mask destination) in
+  `Voyage/tests/test_ltxv_failure_hygiene.py`; helper units +
+  `test_generate_blocks_reports_pipe_block_size` (6-frame pipe reports 94
+  = 106-6*2, where the old literal reported 90) in
+  `Voyage/tests/test_longlive_init_validation.py`. Gates: `ruff check`
+  clean, `ruff format --check voyage tests` clean, `mypy voyage` strict
+  clean (40 files), `pytest` 472 passed.

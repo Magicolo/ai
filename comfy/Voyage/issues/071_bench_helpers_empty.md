@@ -1,6 +1,6 @@
 # 071 — `bench.timing_stats([])` crashes; `summarize_gauges` mixes `"unknown"` strings into numeric fields
 
-- Status: open
+- Status: fixed
 - Severity: medium (helper contract holes; string-typed numerics flow into
   soak/CLI untyped)
 - Area: bench helpers — `Voyage/voyage/bench.py:12-19,38-49`,
@@ -58,4 +58,16 @@ gaps, which are about GPU artifacts/markers.)
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (`bench.py:12-19`, `:38-49`; `test_benchmark.py:109-118`
   happy-path only — all match); re-ran both probes (outputs pasted above).
-- Open: implement + tests.
+- 2026-09-25 (fix): FIXED — `timing_stats` in `voyage/bench.py:12-20` now
+  raises `ValueError` on empty input (typed error instead of
+  `ZeroDivisionError`); `summarize_gauges` in `voyage/bench.py:38-57`
+  returns `None` (not `"unknown"`) for absent gauge fields, keeping the
+  numeric fields typed `float | None`. Non-empty paths are unchanged
+  (existing `test_benchmark.py` happy-path + soak assertions unaffected —
+  full suite green). Tests: `test_timing_stats_rejects_empty` (plus
+  single-measurement pin), `test_summarize_gauges_empty_returns_none`,
+  `test_summarize_gauges_non_empty_stays_numeric` in `tests/test_unit.py`
+  (`test_benchmark.py` is outside this batch's scope and untouched).
+  Gates: ruff + format + mypy strict clean on all scope files, 424 pytest
+  passed in-container.
+- Resolution: fixed as above; empty/unknown paths are typed and pinned.

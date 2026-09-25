@@ -28,6 +28,9 @@ fi
 ./scripts/run.sh benchmark video --run "$run_dir" --warmup 1 --measured 3
 ./scripts/run.sh run --run "$run_dir" --segments 3
 ./scripts/run.sh validate --run "$run_dir"
-docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/app" voyage:latest \
-  python -c "import json; from tests.test_qualification import summarize_run; \
-print(json.dumps(summarize_run('$run_dir'), indent=2))"
+# Run dir travels via the environment (never shell-interpolated into the
+# python snippet): paths with spaces/quotes would otherwise break the
+# quoting or inject code (single quotes inside double quotes do not expand).
+docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
+  python -c 'import json, os; from tests.test_qualification import summarize_run; \
+print(json.dumps(summarize_run(os.environ["RUN_DIR"]), indent=2))'

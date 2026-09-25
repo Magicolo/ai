@@ -13,12 +13,33 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from voyage.audio.acestep import AceStepStack, evict, initialize, render_take
-from voyage.workers.loop import checked_request, serve
+from voyage.audio.acestep import (
+    AceStepStack,
+    evict,
+    initialize,
+    render_take,
+    validate_bpm,
+    validate_duration_seconds,
+    validate_reference_audio,
+    validate_task_type,
+)
+from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
 _stack: AceStepStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
+
+
+def validate_sample_rate(sample_rate: int) -> None:
+    """Reject non-positive output sample rates (issue 063)."""
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive (got {sample_rate})")
+
+
+def validate_channels(channels: int) -> None:
+    """Reject non-mono/stereo channel counts (issue 063)."""
+    if channels not in (1, 2):
+        raise ValueError(f"channels must be 1 or 2 (got {channels})")
 
 
 def _require_stack() -> AceStepStack:
@@ -75,28 +96,44 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
         channels=int,
         duration_seconds=float,
     )
+    # Issue 063: validate every numeric/enum field before any filesystem
+    # or GPU side effect — invalid takes fail here, not deep in ACE/ffmpeg.
+    bpm_raw = payload.get("bpm")
+    parsed_bpm = int(bpm_raw) if bpm_raw is not None else None
+    validate_bpm(parsed_bpm)
+    duration = float(payload["duration_seconds"])
+    validate_duration_seconds(duration)
+    sample_rate = int(payload["sample_rate"])
+    validate_sample_rate(sample_rate)
+    channels = int(payload["channels"])
+    validate_channels(channels)
+    raw_task_type = payload.get("task_type", "text2music")
+    if not isinstance(raw_task_type, str):
+        raise ValueError(f"task_type must be a string (got {raw_task_type!r})")
+    validate_task_type(raw_task_type)
+    reference_audio = payload.get("reference_audio")
+    validate_reference_audio(reference_audio)
     output = Path(str(payload["output_path"]))
     output.parent.mkdir(parents=True, exist_ok=True)
-    bpm_raw = payload.get("bpm")
     with tempfile.TemporaryDirectory(prefix="voyage-take-") as staging:
         rendered = render_take(
             _require_stack(),
             caption=str(payload["style"]),
-            duration_seconds=float(payload["duration_seconds"]),
+            duration_seconds=duration,
             seed=int(payload["seed"]),
             save_path=Path(staging) / "take.flac",
             energy=float(payload["energy"]),
-            task_type=str(payload.get("task_type", "text2music")),
-            src_audio=payload.get("reference_audio"),
+            task_type=raw_task_type,
+            src_audio=reference_audio,
             repaint_start=float(payload.get("repaint_start", 0.0)),
             repaint_end=float(payload.get("repaint_end", -1.0)),
-            bpm=int(bpm_raw) if bpm_raw is not None else None,
+            bpm=parsed_bpm,
         )
         _convert(
             rendered,
             output,
-            sample_rate=int(payload["sample_rate"]),
-            channels=int(payload["channels"]),
+            sample_rate=sample_rate,
+            channels=channels,
         )
     return {
         "artifacts": [str(output)],
@@ -110,13 +147,14 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     Requires the resident ACE stack (`init` first); without it this is an
     error, not a silent fake measurement.
     """
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    validate_benchmark_counts(warmup, measured)
     import time
 
     import torch
 
     _require_stack()
-    warmup = int(payload.get("warmup", 1))
-    measured = int(payload.get("measured", 3))
     probe: dict[str, Any] = {
         "segment_id": str(payload.get("segment_id", "benchmark")),
         "style": str(payload.get("style", "pastel neon line-art, peaceful")),

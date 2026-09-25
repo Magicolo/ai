@@ -54,3 +54,18 @@ Add `.dockerignore` excluding `output/`, `.git`, `*_cache/`, `issues/`,
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   absence live (still no `.dockerignore`); `output/` now `418M` (was 406M).
 - Open: add `.dockerignore`.
+- 2026-09-25 (fix): relevance re-verified live — `ls Voyage/.dockerignore`
+  still nonexistent, so the issue was live. Created `Voyage/.dockerignore`
+  excluding `output/`, `.git`, `*_cache/`, `issues/`, `reports/` per the
+  candidate. Safety: all three Dockerfiles only `COPY pyproject.toml`,
+  `README.md`, `voyage/`, `tests/` (`Dockerfile:9-11`,
+  `worker/Dockerfile.video:87-88`, `worker/Dockerfile.director:29-31`) —
+  none match an ignore pattern, so no build input is excluded. Verified:
+  new-file content reviewed; no `COPY . .` exists anywhere; full
+  `docker build` context-size demo skipped as too heavy (no GPU/full-gates
+  per task brief).
+
+## Resolution
+
+- Status: fixed.
+- Files: `Voyage/.dockerignore` (new, 8 lines).

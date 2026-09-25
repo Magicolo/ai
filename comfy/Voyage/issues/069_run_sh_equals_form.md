@@ -66,3 +66,22 @@ python (see 037) to kill the whole class.
   cited lines live (`run.sh:21-36` sniff loop, `:40-44` toml sniff — match;
   only `--backend=*` has an `=` branch, `--run` does not).
 - Open: implement + shell test.
+- 2026-09-25 (fix): relevance re-verified live — `run.sh:27-42` still had
+  only the `--backend=*` equals branch, so `--run=DIR` still fell through
+  to `else prev_arg=""` and the issue was live. Fixed in
+  `Voyage/scripts/run.sh:25-58`: added
+  `elif [[ "$arg" == --run=* ]]; then run_dir="${arg#--run=}"` mirroring the
+  `--backend=*` branch, initialized `run_dir=""` up front, and added the
+  argument-contract comment (both flags accepted in both forms; covers
+  parsing only). No shell-test file added — `tests/` is outside this task's
+  file scope, so the comment-level contract stands in for it. Verified:
+  `bash -n` clean; `VOYAGE_DRY_RUN=1 ./scripts/run.sh run
+  --run=/tmp/…/cuda-run --segments 2` (toml `[video] backend="ltxv"`)
+  prints `image=voyage-video:latest` / `gpus=--gpus all`, identical to the
+  separate-arg control; `--backend=` precedence over the TOML sniff
+  re-checked green.
+
+## Resolution
+
+- Status: fixed.
+- Files: `Voyage/scripts/run.sh:25-58`.

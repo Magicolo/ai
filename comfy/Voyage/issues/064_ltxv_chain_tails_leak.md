@@ -1,6 +1,6 @@
 # 064 — LTXV multi-block temp tails leak on failure; short-novel tail silently short; `fps` never validated
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (orphan `_chain*.mp4` in segment dirs; short anchor committed
   as 25-frame; bad fps reaches `mimsave`)
 - Area: LTXV worker — `voyage/workers/video_ltxv.py:488-493,498,529-545,490-493`
@@ -84,3 +84,17 @@ a short anchor); validate `fps>0` in `generate_blocks` (and
   `:529-545` tail write/commit — all match); re-ran `rg` lifecycle probe
   (success-path only, confirmed).
 - Open: implement + failure-path test.
+- 2026-09-25: FIXED in `voyage/workers/video_ltxv.py`: new `validate_fps`
+  (`:117`, fps>0) called in `generate_blocks` (`:503`) and at the top of
+  `handle_generate_blocks` (`:715`, before the session check); the block
+  loop wrapped in try/except (`:513-567`) that unlinks committed
+  `chain_tails` plus the in-flight `pending_tail` on any failure, so the
+  OOM-retry path leaves no `_chain*.mp4` orphans; tail-length assert
+  (`:546-552`, `tail_clip.shape[2] == conditioning_tail_frames`) fails
+  loudly instead of committing a short anchor. Success path untouched
+  (single-tail rename, multi-tail last-wins + stale unlink). Tests:
+  `Voyage/tests/test_ltxv_failure_hygiene.py` (block-1 failure cleanup,
+  short-tail rejection + cleanup, fresh-success commit without orphans,
+  fps unit/handler rejection). Gates: `ruff check` clean, `ruff
+  format --check voyage tests` clean, `mypy voyage` strict clean (40
+  files), `pytest` 472 passed.

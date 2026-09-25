@@ -1,6 +1,6 @@
 # 009 — TOML injection / self-DoS via unescaped `style`/`run_id` in `default_config_toml`
 
-- Status: open
+- Status: fixed
 - Severity: major (config integrity)
 - Area: robustness — config generation
 - Rank rationale: a style string with a quote breaks the generated TOML or
@@ -72,3 +72,16 @@ probe's `str` call failed with `AttributeError: 'str' object has no attribute
 - 2026-09-25 (repair pass): added `## Why this is an issue`; injection probe
   re-run live (`injection-parses: True`, foreign `[evil]` table); refs verified
   current (`config.py:271,289-290`; `tui_state.py:285`).
+- 2026-09-25 (fix): FIXED — added local `_toml_basic_string` escaper in
+  `voyage/config.py:272-288` (backslash/quote/newline/CR/tab, mirrors the TUI
+  escaper; kept local per the batch split — `tui_state.py` untouched, a later
+  batch owns the shared-helper move) and applied it to `run_id`/`style` in
+  `default_config_toml` (`voyage/config.py:307-313`). Verified live: hostile
+  styles (`x"[video]...`, `x"[evil]...`) parse with no foreign table and
+  round-trip byte-identical through `load_config`; safe styles render
+  identically to before. Tests: `test_config_toml_escapes_style_injection` +
+  `test_config_toml_escapes_quotes_and_newlines` in `tests/test_unit.py`.
+  Gates: ruff + format + mypy strict clean on all scope files, 424 pytest
+  passed in-container (full `gates.sh` still flags 18 pre-existing
+  `issues/*.md` format nits outside this batch's scope).
+- Resolution: fixed as above; no foreign-table injection, round-trip pinned.

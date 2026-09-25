@@ -33,8 +33,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION
-from voyage.workers.loop import checked_request, serve
+from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
 DIT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
 UPSC_FILENAME = "ltxv-spatial-upscaler-0.9.8.safetensors"
@@ -110,6 +112,12 @@ def validate_frame_count(frame_count: int) -> None:
             f"LTXV frame count {frame_count} violates the 8n+1 constraint "
             "((F-1)%8 must be 0; e.g. 25, 121, 257)"
         )
+
+
+def validate_fps(fps: int) -> None:
+    """Reject non-positive frame rates before they reach `mimsave`/tape (issue 064)."""
+    if fps <= 0:
+        raise ValueError(f"LTXV fps must be positive (got {fps})")
 
 
 def validate_conditioning_start(start_frame: int, target_frames: int) -> None:
@@ -315,8 +323,9 @@ class LTXVSession:
         with torch.inference_mode():
             embeds = self._text_encoder(inputs.input_ids)[0].to(torch.bfloat16)
         # Masks ride into CUDA cross-attention; the pipeline only moves
-        # embeds, so the mask must be moved here (probe lesson).
-        result = (embeds, inputs.attention_mask.to("cuda"))
+        # embeds, so the mask must be moved here (probe lesson). Issue
+        # 074: the session device, not a hardcoded "cuda" (breaks cuda:1).
+        result = (embeds, inputs.attention_mask.to(self._device))
         self._embed_cache[text] = result
         return result
 
@@ -491,48 +500,70 @@ class LTXVSession:
         validate_frame_count(segment_target_frames)
         validate_frame_count(conditioning_tail_frames)
         validate_conditioning_start(0, segment_target_frames)
+        validate_fps(fps)
 
         torch = self._torch
         output_path.parent.mkdir(parents=True, exist_ok=True)
         novel_clips: list[Any] = []
         chain_tails: list[Path] = []
+        pending_tail: Path | None = None
         generated_total = 0
         conditioning_total = 0
         resident_tail = self._conditioning_tail_path
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
-        for index, (prompt, seed) in enumerate(zip(prompts, seeds, strict=True)):
-            if index == 0:
-                tail_candidate = resident_tail
-                if tail_candidate is None or scene_cuts[0] or not Path(tail_candidate).exists():
-                    conditioning: str | None = None
+        try:
+            for index, (prompt, seed) in enumerate(zip(prompts, seeds, strict=True)):
+                if index == 0:
+                    tail_candidate = resident_tail
+                    if tail_candidate is None or scene_cuts[0] or not Path(tail_candidate).exists():
+                        conditioning: str | None = None
+                    else:
+                        conditioning = tail_candidate
                 else:
-                    conditioning = tail_candidate
-            else:
-                if not chain_tails:
-                    raise RuntimeError("LTXV block chain lost its tail video")
-                # Chain onto the previous block's freshly rendered tail video
-                # — NOT the stale resident tail (which still points at the
-                # previous segment until this call commits below).
-                conditioning = str(chain_tails[-1])
-            block = self._generate_block(
-                prompt, seed, width, height, segment_target_frames, fps, conditioning
-            )
-            generated_frames = int(block.shape[2])
-            generated_total += generated_frames
-            if conditioning is None:
-                novel = block
-            else:
-                conditioning_total += conditioning_tail_frames
-                _, novel_count = split_prefix_novel(generated_frames, conditioning_tail_frames)
-                novel = block[:, :, generated_frames - novel_count :, :, :]
-            novel_clips.append(novel)
-            # Temporary tail video for the next block in this call: last 25
-            # committed frames. The final block's tail becomes video_tail.mp4.
-            tail_clip = novel[:, :, -conditioning_tail_frames:, :, :]
-            chain_tail = output_path.parent / f"{output_path.stem}_chain{index:02d}.mp4"
-            _save_mp4(tail_clip, chain_tail, fps)
-            chain_tails.append(chain_tail)
-            del tail_clip
+                    if not chain_tails:
+                        raise RuntimeError("LTXV block chain lost its tail video")
+                    # Chain onto the previous block's freshly rendered tail video
+                    # — NOT the stale resident tail (which still points at the
+                    # previous segment until this call commits below).
+                    conditioning = str(chain_tails[-1])
+                block = self._generate_block(
+                    prompt, seed, width, height, segment_target_frames, fps, conditioning
+                )
+                generated_frames = int(block.shape[2])
+                generated_total += generated_frames
+                if conditioning is None:
+                    novel = block
+                else:
+                    conditioning_total += conditioning_tail_frames
+                    _, novel_count = split_prefix_novel(generated_frames, conditioning_tail_frames)
+                    novel = block[:, :, generated_frames - novel_count :, :, :]
+                novel_clips.append(novel)
+                # Temporary tail video for the next block in this call: last 25
+                # committed frames. The final block's tail becomes video_tail.mp4.
+                tail_clip = novel[:, :, -conditioning_tail_frames:, :, :]
+                # Issue 064: a short `novel` slices short (negative-slice
+                # semantics) — committing that as a full 25-frame anchor
+                # would silently degrade the next block, so fail loudly.
+                tail_frames = int(tail_clip.shape[2])
+                if tail_frames != conditioning_tail_frames:
+                    raise ValueError(
+                        f"LTXV tail has {tail_frames} frames, expects "
+                        f"{conditioning_tail_frames} — refusing a short anchor"
+                    )
+                pending_tail = output_path.parent / f"{output_path.stem}_chain{index:02d}.mp4"
+                _save_mp4(tail_clip, pending_tail, fps)
+                chain_tails.append(pending_tail)
+                pending_tail = None
+                del tail_clip
+        except Exception:
+            # Issue 064: the OOM-retry path must not leave `_chain*.mp4`
+            # orphans beside the segment (they confuse recovery/tape
+            # accounting) — unlink committed tails plus the in-flight one.
+            if pending_tail is not None:
+                pending_tail.unlink(missing_ok=True)
+            for stale_tail in chain_tails:
+                stale_tail.unlink(missing_ok=True)
+            raise
         video = novel_clips[0] if len(novel_clips) == 1 else torch.cat(novel_clips, dim=2)
         committed_frames = int(video.shape[2])
         _save_mp4(video, output_path, fps)
@@ -621,7 +652,9 @@ def _save_mp4(images: Any, path: Path, fps: int) -> None:
         frames = video.permute(1, 2, 3, 0).float().cpu().numpy()
     else:
         frames = video.permute(0, 2, 3, 1).float().cpu().numpy()
-    frames = (frames * 255).astype("uint8")
+    # Issue 065: clip before uint8 — VAE overshoot outside [0, 1] wraps
+    # modulo 256 without it (1.01 becomes near-black; cf. causvid).
+    frames = np.clip(frames * 255.0, 0, 255).astype("uint8")
     if frames.shape[-1] == 4:
         frames = frames[..., :3]
     imageio.mimsave(str(path), list(frames), fps=fps, codec="libx264")
@@ -677,6 +710,9 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
+    # Issue 064: reject a bad frame rate before the session check so the
+    # boundary fails fast (and stays CPU-testable without a GPU session).
+    validate_fps(int(payload["fps"]))
     if _SESSION is None:
         raise RuntimeError("video_ltxv not initialized — send `init` first")
     if "prompts" in payload or "seeds" in payload:
@@ -727,6 +763,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     session between segments (still prefer scratch). Requires `init` first.
     Each probe commits a full 121-frame fresh segment (no prefix to drop).
     """
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_ltxv not initialized — send `init` first")
     import tempfile
@@ -739,8 +778,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     session._conditioning_tail_path = None
     session._last_prompt = None
     try:
-        warmup = int(payload.get("warmup", 1))
-        measured = int(payload.get("measured", 3))
         walls: list[float] = []
         peaks: list[float] = []
         committed = 0

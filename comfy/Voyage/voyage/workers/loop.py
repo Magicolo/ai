@@ -57,3 +57,19 @@ def checked_request(payload: dict[str, Any], **required: type) -> None:
     for key, _type in required.items():
         if key not in payload:
             raise KeyError(f"missing payload field: {key}")
+
+
+def validate_benchmark_counts(warmup: int, measured: int) -> None:
+    """Reject benchmark counts that would measure nothing (issue 060).
+
+    Every worker's `handle_benchmark` divides by `len(walls)` and peaks,
+    so `measured <= 0` (or a negative `warmup`, which makes `range(...)`
+    empty the same way) is a `ZeroDivisionError`. Call this first —
+    before any session/stack check — so bad counts fail fast on CPU
+    without loading GPU state.
+    """
+    if warmup < 0 or measured <= 0:
+        raise ValueError(
+            "benchmark needs warmup >= 0 and measured >= 1 "
+            f"(got warmup={warmup}, measured={measured})"
+        )

@@ -12,7 +12,15 @@ _MAX_SEED = 2**31 - 1
 
 
 def derive_seed(run_seed: int, *labels: str | int) -> int:
-    key = (str(run_seed) + ":" + ":".join(str(label) for label in labels)).encode()
+    """Derive a separated stream seed via BLAKE2b.
+
+    Why length-prefixing: plain colon-joining maps ("a:b", "c") and
+    ("a", "b:c") to the identical key string, silently merging two RNG
+    streams (issue 070). Prefixing each label with its length keeps the
+    encoding unambiguous for any future ":"-containing label.
+    """
+    encoded_labels = ":".join(f"{len(str(label))}:{label}" for label in labels)
+    key = f"{run_seed}:{encoded_labels}".encode()
     digest = hashlib.blake2b(key, digest_size=8).digest()
     return int.from_bytes(digest, "big") % (_MAX_SEED + 1)
 

@@ -15,8 +15,22 @@ no I/O, no torch.
 
 from __future__ import annotations
 
+import math
+
 MIN_BPM = 60.0
 """Below this a beat feels like separate events, not rhythm."""
+
+
+def _require_finite(measured_value: float, field_label: str) -> float:
+    """Reject nan/inf with the documented ValueError contract.
+
+    Why a shared helper: bare round() internals leak confusing messages
+    (nan) or the wrong exception class (OverflowError for inf), while an
+    infinite segment silently yields an infinite take downstream (issue 068).
+    """
+    if not math.isfinite(measured_value):
+        raise ValueError(f"{field_label} must be finite (got {measured_value})")
+    return measured_value
 
 
 def beats_for_segment(
@@ -30,6 +44,8 @@ def beats_for_segment(
     and ``beats`` the smallest doubling of ``base_beats`` whose BPM
     reaches ``min_bpm``. Raises ValueError on non-positive durations.
     """
+    _require_finite(segment_seconds, "segment duration")
+    _require_finite(min_bpm, "minimum tempo")
     if segment_seconds <= 0:
         raise ValueError(f"segment duration must be positive (got {segment_seconds})")
     if base_beats <= 0:
@@ -50,6 +66,8 @@ def quantize_take_seconds(take_seconds: float, segment_seconds: float) -> float:
     segment cuts stay on the grid across take joints. Raises ValueError
     on non-positive inputs.
     """
+    _require_finite(take_seconds, "take length")
+    _require_finite(segment_seconds, "segment duration")
     if take_seconds <= 0:
         raise ValueError(f"take length must be positive (got {take_seconds})")
     if segment_seconds <= 0:

@@ -1,6 +1,6 @@
 # 065 — `video_ltxv._save_mp4` missing `np.clip`: out-of-range floats wrap modulo 256
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (silent visual corruption — bright pixels flip to black)
 - Area: LTXV worker — `voyage/workers/video_ltxv.py:615-627` line 624
 - Rank rationale: pass-2 worker finding; the sibling worker already does it
@@ -9,7 +9,7 @@
 ## Technical description
 
 ```python
-frames = (frames * 255).astype("uint8")            # ltxv.py:624 — wraps
+frames = (frames * 255).astype("uint8")  # ltxv.py:624 — wraps
 ```
 
 vs the correct sibling `voyage/workers/video_causvid.py:600-602`:
@@ -59,3 +59,11 @@ unit test with `[1.01, -0.01]` inputs (pure numpy, no GPU).
   cited lines live (`video_ltxv.py:615-627`, wrap at `:624`;
   `video_causvid.py:598-602`, clip at `:601` — both match).
 - Open: one-line fix + test.
+- 2026-09-25: FIXED. `voyage/workers/video_ltxv.py:657` now mirrors the
+  causvid sibling exactly: `np.clip(frames * 255.0, 0, 255).astype("uint8")`
+  (top-level `numpy` import at `:36`). Test:
+  `test_save_mp4_clips_overshoot_instead_of_wrapping` in
+  `Voyage/tests/test_ltxv_failure_hygiene.py` (pure numpy + stubbed
+  imageio: 1.01→255, -0.01→0, 1.0→255, 0.5→127, dtype uint8). Gates: `ruff
+  check` clean, `ruff format --check voyage tests` clean, `mypy voyage`
+  strict clean (40 files), `pytest` 472 passed.

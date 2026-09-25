@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 LifecycleStatus = Literal[
     "CREATED",
@@ -44,6 +44,19 @@ class PromptStage(BaseModel):
     block_start: int
     block_end: int
     prompt: str
+
+    @model_validator(mode="after")
+    def block_range_ordered(self) -> PromptStage:
+        """Reject inverted ranges that break segment ordering.
+
+        Why: an inverted range flows into directory names and ordering
+        checks that assume block_end >= block_start (issue 091).
+        """
+        if self.block_end < self.block_start:
+            raise ValueError(
+                f"block_end must be >= block_start (got {self.block_start}..{self.block_end})"
+            )
+        return self
 
 
 class PromptPlan(BaseModel):

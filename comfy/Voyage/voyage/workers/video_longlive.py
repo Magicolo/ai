@@ -31,12 +31,66 @@ VOYAGE_MODELS_DIR = Path(os.environ.get("VOYAGE_MODELS_DIR", "/models"))
 if str(VOYAGE_LONGLIVE_DIR) not in sys.path:
     sys.path.insert(0, str(VOYAGE_LONGLIVE_DIR))
 
-from voyage.workers.loop import checked_request, serve  # noqa: E402
+from voyage.workers.loop import checked_request, serve, validate_benchmark_counts  # noqa: E402
 
 # Upstream scene-cut signal: prompt prefix detected by _is_scene_cut when
 # multi_shot_sink is on (ours: true). Embeddings always use the bare prompt;
 # only raw_prompts carry the prefix (conditioning vs boundary signal split).
 SCENE_CUT_PREFIX = "The scene transitions. "
+
+NUM_FRAME_PER_BLOCK = 8
+"""Latent frames per block: baked into the config below and the capacity floor."""
+
+
+def validate_latent_shape(latent_shape: list[int]) -> list[int]:
+    """Accept a 5-dim [B, T, C, H, W] latent shape with positive dims (issue 066)."""
+    if len(latent_shape) != 5 or not all(
+        isinstance(dimension, int) and dimension > 0 for dimension in latent_shape
+    ):
+        raise ValueError(
+            f"LongLive latent shape must be 5 positive ints [B, T, C, H, W] (got {latent_shape!r})"
+        )
+    return list(latent_shape)
+
+
+def validate_local_attn_size(local_attn_size: int) -> None:
+    """Reject non-positive windows; -1 is the upstream full-context sentinel (066)."""
+    if local_attn_size != -1 and local_attn_size <= 0:
+        raise ValueError(
+            f"LongLive local_attn_size must be positive or -1 (got {local_attn_size})",
+        )
+
+
+def validate_sink_size(sink_size: int) -> None:
+    """Reject negative sink sizes (issue 066)."""
+    if sink_size < 0:
+        raise ValueError(f"LongLive sink_size must be >= 0 (got {sink_size})")
+
+
+def validate_attn_capacity(local_attn_size: int, sink_size: int) -> None:
+    """Enforce the cache capacity floor (issue 066).
+
+    The cache must hold sink + at least one block or the sink eats the
+    whole window and every chunk attends with no history (measured fresh
+    scene per chunk). Skipped for the -1 full-context sentinel.
+    """
+    if local_attn_size != -1 and sink_size + NUM_FRAME_PER_BLOCK > local_attn_size:
+        raise ValueError(
+            "LongLive cache too small: sink_size + "
+            f"{NUM_FRAME_PER_BLOCK} (one block) must fit local_attn_size "
+            f"(got sink={sink_size}, local={local_attn_size})"
+        )
+
+
+def stream_start_frame_for_call(
+    next_start_frame: int, num_frame_per_block: int, block_count: int
+) -> int:
+    """First stream frame of this call (issue 074).
+
+    Pure helper so the report tracks the pipe's runtime block size instead
+    of a hardcoded literal when the configuration changes.
+    """
+    return next_start_frame - num_frame_per_block * block_count
 
 
 def apply_scene_cut_prefix(prompt: str, scene_cut: bool) -> str:
@@ -186,7 +240,7 @@ def build_longlive_config(
         "model_kwargs": {
             "model_name": "Wan2.2-TI2V-5B",
             "timestep_shift": 5.0,
-            "num_frame_per_block": 8,
+            "num_frame_per_block": NUM_FRAME_PER_BLOCK,
             "local_attn_size": local_attn_size,
         },
         "use_ema": False,
@@ -839,7 +893,14 @@ class LongLiveSession:
             "width": width,
             "height": height,
             "blocks": len(prompts),
-            "stream_start_frame": self._stream.next_start_frame - 8 * len(prompts),
+            # Issue 074: the pipe's runtime block size, not a hardcoded 8
+            # (the getattr default only serves slim test doubles — the real
+            # pipeline always carries num_frame_per_block from the config).
+            "stream_start_frame": stream_start_frame_for_call(
+                self._stream.next_start_frame,
+                int(getattr(pipe, "num_frame_per_block", NUM_FRAME_PER_BLOCK)),
+                len(prompts),
+            ),
             "recovery_path": str(recovery_path),
         }
         if timer is not None:
@@ -868,28 +929,36 @@ def _build_session() -> LongLiveSession:
 
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     global _SESSION
-    import torch
 
     checked_request(payload, models_dir=str, device=str, latent_shape=list)
     models_dir = Path(str(payload["models_dir"]))
     device = str(payload.get("device", "cuda:0"))
     if not device.startswith("cuda"):
         raise RuntimeError(f"video_longlive requires a CUDA device (got {device!r})")
-    if not torch.cuda.is_available():
-        raise RuntimeError("video_longlive requires a CUDA GPU")
+    # Issue 066: pure shape/size validation first (fail fast on CPU, no
+    # torch needed) — bad dims used to explode deep in session build.
     raw_shape = payload["latent_shape"]
     assert isinstance(raw_shape, list)
-    latent_shape = [int(v) for v in raw_shape]
+    latent_shape = validate_latent_shape([int(value) for value in raw_shape])
+    local_attn_size = int(payload.get("local_attn_size", 8))
+    sink_size = int(payload.get("sink_size", 8))
+    validate_local_attn_size(local_attn_size)
+    validate_sink_size(sink_size)
+    validate_attn_capacity(local_attn_size, sink_size)
     quantization = str(payload.get("quantization", "fp8"))
     profile = profile_for_quantization(quantization)
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("video_longlive requires a CUDA GPU")
     _INIT_PARAMS.update(
         {
             "models_dir": models_dir,
             "device": device,
             "latent_shape": latent_shape,
             "quantization": quantization,
-            "local_attn_size": int(payload.get("local_attn_size", 8)),
-            "sink_size": int(payload.get("sink_size", 8)),
+            "local_attn_size": local_attn_size,
+            "sink_size": sink_size,
         }
     )
     _SESSION = _build_session()
@@ -962,6 +1031,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     Requires `init` first; without a session this is an error, not a
     silent fake measurement.
     """
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_longlive not initialized — send `init` first")
     import tempfile
@@ -969,8 +1041,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
 
     import torch
 
-    warmup = int(payload.get("warmup", 1))
-    measured = int(payload.get("measured", 3))
     profile_stages = bool(payload.get("profile_stages", False))
     probe: dict[str, Any] = {
         "segment_id": str(payload.get("segment_id", "benchmark")),

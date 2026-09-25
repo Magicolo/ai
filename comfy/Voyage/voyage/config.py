@@ -8,6 +8,7 @@ the run manifest so runs are traceable to exact configuration.
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -107,8 +108,8 @@ class AudioConfig(BaseModel):
     @field_validator("take_seconds", "ahead_seconds", "crossfade_seconds")
     @classmethod
     def non_negative(cls, value: float) -> float:
-        if value < 0:
-            raise ValueError("must be non-negative")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("must be a finite non-negative number")
         return value
 
     @field_validator("beats_per_segment")
@@ -128,8 +129,8 @@ class AudioConfig(BaseModel):
     @field_validator("final_overlap_cap_seconds")
     @classmethod
     def overlap_cap_non_negative(cls, value: float) -> float:
-        if value < 0:
-            raise ValueError("must be non-negative")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("must be a finite non-negative number")
         return value
 
     @field_validator("energy")
@@ -268,6 +269,25 @@ def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int
     return value
 
 
+def _toml_basic_string(raw_value: str) -> str:
+    """Quote free-text as a TOML basic string.
+
+    Why a local escaper: style/run_id are creator free-text persisted into
+    the run charter, so a quote or newline would otherwise break the
+    generated TOML or inject live tables (issue 009). Mirrors the TUI
+    escaper; kept here (not imported) because the TUI helper belongs to a
+    later batch.
+    """
+    escaped_value = (
+        raw_value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped_value}"'
+
+
 def default_config_toml(run_id: str, style: str, seed: int, video_backend: str = "fake") -> str:
     preset = _video_preset(video_backend)
     backend = str(preset.get("backend", video_backend))
@@ -284,10 +304,12 @@ def default_config_toml(run_id: str, style: str, seed: int, video_backend: str =
     audio_preset = _audio_preset(video_backend)
     audio_backend = audio_preset["backend"]
     audio_device = audio_preset["device"]
+    escaped_run_id = _toml_basic_string(run_id)
+    escaped_style = _toml_basic_string(style)
     return f"""\
 schema_version = 1
-run_id = "{run_id}"
-style = "{style}"
+run_id = {escaped_run_id}
+style = {escaped_style}
 seed = {seed}
 min_free_space_gib = 5.0
 

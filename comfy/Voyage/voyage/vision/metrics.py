@@ -89,6 +89,10 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
 
 def frame_histogram(frame: Frame, bins: int = HISTOGRAM_BINS) -> Histogram:
     """Compact RGB distribution descriptor: each channel sums to 1."""
+    # Issue 067: an empty frame divides 0/0 into a NaN array (warning
+    # only) that then poisons drift/style decisions — fail loudly instead.
+    if frame.size == 0:
+        raise MediaError(f"frame_histogram needs a non-empty frame (got shape {frame.shape})")
     parts = [
         np.histogram(frame[:, :, channel], bins=bins, range=(0, 256))[0].astype(np.float64)
         for channel in range(3)
@@ -121,6 +125,10 @@ def motion_energy(frames: list[Frame]) -> float:
 
 def visual_complexity(frames: list[Frame]) -> float:
     """Share of edge pixels (Sobel magnitude over threshold), averaged."""
+    # Issue 067: empty input returns 0.0 like the motion/palette/boundary
+    # siblings — no ZeroDivisionError, uniform contract for the supervisor.
+    if not frames:
+        return 0.0
     scored = []
     for frame in frames:
         gray = _to_gray(frame)
@@ -158,6 +166,10 @@ def style_similarity(frames: list[Frame], reference: Histogram | None) -> float:
     """
     if reference is None:
         return 1.0
+    # Issue 067: no frames means no overlap (not an IndexError) — keeps
+    # `summarize_segment([])` total instead of raising halfway through.
+    if not frames:
+        return 0.0
     mid = frames[len(frames) // 2]
     return histogram_intersection(frame_histogram(mid), reference)
 

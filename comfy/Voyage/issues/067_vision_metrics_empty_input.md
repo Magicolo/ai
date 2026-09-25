@@ -1,6 +1,6 @@
 # 067 — `vision/metrics.py` empty-input crashes + NaN histogram (inconsistent guards)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (typed-error contract missing on pure functions the
   supervisor calls with sampled frames)
 - Area: vision metrics — `voyage/vision/metrics.py:90-97,122-130,161`
@@ -21,7 +21,8 @@
 ```python
 def visual_complexity(frames: list[Frame]) -> float:
     scored = []
-    for frame in frames: ...
+    for frame in frames:
+        ...
     return float(sum(scored) / len(scored))
 ```
 
@@ -67,3 +68,15 @@ hist empty-frame = [nan nan ...]
   `:161` style-similarity mid-frame — all match; guarding siblings at
   `:110-113`/`:135-137`/`:142-143`/`:167-168` confirmed).
 - Open: implement + tests.
+- 2026-09-25: FIXED in `voyage/vision/metrics.py` with the guard-everywhere
+  contract: `visual_complexity([])` → 0.0 (`:130`, like the
+  motion/palette/boundary siblings), `style_similarity([], ref)` → 0.0
+  (`:171`, no `IndexError`; `None` ref still → 1.0), so
+  `summarize_segment([], ...)` degrades gracefully instead of raising
+  halfway; `frame_histogram` on a zero-size frame raises `MediaError`
+  (`:94`) instead of emitting a NaN array with only a warning. Tests: 4
+  new cases in `Voyage/tests/test_vision_metrics.py`
+  (complexity-empty, similarity-empty-anchored/unanchored,
+  summarize-empty exact dict, histogram-empty twice). Gates: `ruff check`
+  clean, `ruff format --check voyage tests` clean, `mypy voyage` strict
+  clean (40 files), `pytest` 472 passed.

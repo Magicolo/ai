@@ -16,6 +16,7 @@ residency, never co-resident with LongLive.
 
 from __future__ import annotations
 
+import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,44 @@ PLANNER_MODEL = "acestep-5Hz-lm-0.6B"
 PROJECT_SUBDIR = "acestep"
 MIN_DURATION_SECONDS = 1.0
 """ACE-Step rejects anything below 1.0s (the floor zoomy hit in §10)."""
+VALID_TASK_TYPES = ("text2music", "repaint")
+"""ACE-Step generation modes used by the voyage (fresh take vs continuation)."""
+MIN_BPM = 1
+MAX_BPM = 300
+"""Explicit-tempo bounds: 0 bypassed the energy clamp, absurd values fail late."""
+
+
+def validate_bpm(bpm: int | None) -> None:
+    """Reject explicit tempos outside the musical range (issue 063)."""
+    if bpm is not None and (bpm < MIN_BPM or bpm > MAX_BPM):
+        raise ValueError(f"bpm must be None or {MIN_BPM}..{MAX_BPM} (got {bpm})")
+
+
+def validate_duration_seconds(duration_seconds: float) -> None:
+    """Reject non-positive/non-finite durations (issue 063).
+
+    Positive-but-short values still hit the ACE 1.0 s floor in
+    `render_take` (an upstream requirement, not a silent coercion);
+    zero/negative/NaN/inf are caller bugs and fail here instead.
+    """
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
+        raise ValueError(f"duration_seconds must be finite and > 0 (got {duration_seconds})")
+
+
+def validate_task_type(task_type: str) -> None:
+    """Reject unknown ACE-Step generation modes (issue 063)."""
+    if task_type not in VALID_TASK_TYPES:
+        raise ValueError(f"task_type must be one of {VALID_TASK_TYPES} (got {task_type!r})")
+
+
+def validate_reference_audio(src_audio: str | Path | None) -> None:
+    """Reject non-path or missing repaint sources (issue 063)."""
+    if src_audio is None:
+        return
+    if not isinstance(src_audio, (str, Path)) or not Path(src_audio).is_file():
+        raise ValueError(
+            f"reference_audio must be an existing audio file or None (got {src_audio!r})"
+        )
 
 
 @dataclass
@@ -109,6 +148,10 @@ def render_take(
     """
     from acestep.inference import GenerationConfig, GenerationParams, generate_music
 
+    validate_bpm(bpm)
+    validate_duration_seconds(duration_seconds)
+    validate_task_type(task_type)
+    validate_reference_audio(src_audio)
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     params = GenerationParams(

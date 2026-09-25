@@ -42,6 +42,17 @@ def test_beats_for_segment_rejects_non_positive() -> None:
         beats_for_segment(2.0, 0)
 
 
+def test_beats_for_segment_rejects_non_finite() -> None:
+    with pytest.raises(ValueError):
+        beats_for_segment(float("nan"), 4)
+    with pytest.raises(ValueError):
+        beats_for_segment(float("inf"), 4)
+    with pytest.raises(ValueError):
+        beats_for_segment(2.0, 4, float("nan"))
+    with pytest.raises(ValueError):
+        beats_for_segment(2.0, 4, float("inf"))
+
+
 @pytest.mark.parametrize(
     ("take_seconds", "segment_seconds", "expected"),
     [
@@ -63,6 +74,17 @@ def test_quantize_take_seconds_rejects_non_positive() -> None:
         quantize_take_seconds(0.0, 2.0)
     with pytest.raises(ValueError):
         quantize_take_seconds(45.0, 0.0)
+
+
+def test_quantize_take_seconds_rejects_non_finite() -> None:
+    with pytest.raises(ValueError):
+        quantize_take_seconds(float("nan"), 4.0)
+    with pytest.raises(ValueError):
+        quantize_take_seconds(float("inf"), 4.0)
+    with pytest.raises(ValueError):
+        quantize_take_seconds(45.0, float("nan"))
+    with pytest.raises(ValueError):
+        quantize_take_seconds(45.0, float("inf"))
 
 
 def test_planner_quantizes_fresh_takes_to_segment_grid() -> None:

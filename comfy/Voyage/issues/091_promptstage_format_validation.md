@@ -1,6 +1,6 @@
 # 091 — `PromptStage` accepts inverted ranges; `format_segment_id` accepts negatives/huge
 
-- Status: open
+- Status: fixed
 - Severity: low (constructible invalid values break the `%06d`
   lexicographic/contiguous invariant `validate_run` relies on)
 - Area: models/paths validation — `Voyage/voyage/models.py:42-47`,
@@ -51,4 +51,16 @@ in `format_segment_id`; add the direct unit tests 038 already asked for.
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (`models.py:42-47`, `paths.py:31-32` — both match); re-ran
   both probes (inverted range constructs, `-1→'-00001'` — confirmed).
-- Open: implement + tests.
+- 2026-09-25 (fix): FIXED — `PromptStage` gained a
+  `@model_validator(mode="after")` in `voyage/models.py:48-58` rejecting
+  `block_end < block_start` (`ValueError`); `format_segment_id` in
+  `voyage/paths.py:31-41` rejects out-of-range numbers (`ValueError` unless
+  `0 <= number <= 999999`). Verified live: inverted ranges and `-1`/`1000000`
+  raise; `0`/`42`/`999999` format exactly; both `prompts.py` construction
+  sites use ordered ranges (unaffected). Tests:
+  `test_prompt_stage_rejects_inverted_range` (plus valid/equal-bound pins)
+  + `test_format_segment_id_range` in `tests/test_unit.py`. Gates: ruff +
+  format + mypy strict clean on all scope files, 424 pytest passed
+  in-container.
+- Resolution: fixed as above; invalid ranges/ids are unconstructible and
+  pinned by direct unit tests.

@@ -1,0 +1,9 @@
+# Build-context hygiene (issue 084): images only COPY pyproject.toml,
+# README.md, voyage/ and tests/ — everything below just inflates the
+# transferred context (output/ alone is ~400 MB of frames/videos) and
+# churns the layer cache on every render. Keep COPY sources unlisted here.
+output/
+.git
+*_cache/
+issues/
+reports/

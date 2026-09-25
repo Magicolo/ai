@@ -14,6 +14,7 @@ voyage (§44).
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any, cast
 
@@ -26,7 +27,7 @@ from voyage.director import (
     deterministic_decision,
 )
 from voyage.models import EvolutionDecision, TransitionPhase
-from voyage.workers.loop import checked_request, serve
+from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
 _CONFIG: dict[str, Any] = {"backend": "deterministic"}
 _QWEN: dict[str, Any] = {}
@@ -45,9 +46,27 @@ INSPECT_PROMPT = (
 """Tight single-frame prompt: one frame per segment keeps the ~2min CPU
 budget bounded (Step 0 probe: 92s for 128 tokens)."""
 
+MAX_NEW_TOKENS_LIMIT = 4096
+"""Upper bound for `max_new_tokens`: unbounded budgets run away on CPU."""
+
+
+def validate_max_new_tokens(max_new_tokens: int) -> None:
+    """Reject token budgets that generate nothing or run away (issue 075)."""
+    if max_new_tokens < 1 or max_new_tokens > MAX_NEW_TOKENS_LIMIT:
+        raise ValueError(f"max_new_tokens must be 1..{MAX_NEW_TOKENS_LIMIT} (got {max_new_tokens})")
+
+
+def validate_temperature(temperature: float) -> None:
+    """Reject non-finite/negative sampling temperatures (issue 075)."""
+    if not math.isfinite(temperature) or temperature < 0.0:
+        raise ValueError(f"temperature must be finite and >= 0 (got {temperature})")
+
 
 def _load_qwen(model_id: str) -> tuple[Any, Any]:
-    if "model" not in _QWEN:
+    # Issue 075: reload (not reuse) when the id changed — a long-lived
+    # worker re-`init` with a new model must not keep deciding with the
+    # old weights. Single resident entry (no per-id growth, cf. issue 030).
+    if "model" not in _QWEN or _QWEN.get("model_id") != model_id:
         import os
 
         import torch
@@ -83,6 +102,7 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
         model.eval()
         _QWEN["model"] = model
         _QWEN["tokenizer"] = tokenizer
+        _QWEN["model_id"] = model_id
     return _QWEN["model"], _QWEN["tokenizer"]
 
 
@@ -93,7 +113,8 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
     processor code (Step 0 probe). The weights (~19GB BF16) live in
     system RAM — never on the 16GB GPU.
     """
-    if "model" not in _INSPECTOR:
+    # Issue 075: same reload-on-id-change contract as `_load_qwen`.
+    if "model" not in _INSPECTOR or _INSPECTOR.get("model_id") != model_id:
         import torch
         from transformers import AutoModelForMultimodalLM, AutoProcessor
 
@@ -108,14 +129,17 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
         model.eval()
         _INSPECTOR["model"] = model
         _INSPECTOR["processor"] = processor
+        _INSPECTOR["model_id"] = model_id
     return _INSPECTOR["model"], _INSPECTOR["processor"]
 
 
 def _load_embedder(model_id: str) -> Any:
-    if "model" not in _EMBEDDER:
+    # Issue 075: same reload-on-id-change contract as `_load_qwen`.
+    if "model" not in _EMBEDDER or _EMBEDDER.get("model_id") != model_id:
         from sentence_transformers import SentenceTransformer
 
         _EMBEDDER["model"] = SentenceTransformer(model_id, device="cpu")
+        _EMBEDDER["model_id"] = model_id
     return _EMBEDDER["model"]
 
 
@@ -166,6 +190,7 @@ def handle_inspect(payload: dict[str, Any]) -> dict[str, Any]:
     checked_request(payload, frame_path=str)
     model_id = str(payload.get("model_id") or _CONFIG.get("inspector_model_id", INSPECTOR_MODEL_ID))
     max_new_tokens = int(payload.get("max_new_tokens", 256))
+    validate_max_new_tokens(max_new_tokens)
     attempts = [INSPECT_PROMPT, INSPECT_PROMPT + " JSON object only. No prose."]
     last_error = "no attempts"
     for attempt_prompt in attempts:
@@ -236,6 +261,8 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     model_id = str(payload.get("model_id") or _CONFIG.get("model_id", "Qwen/Qwen3-8B"))
     temperature = float(payload.get("temperature", 0.7))
     max_new_tokens = int(payload.get("max_new_tokens", 1024))
+    validate_temperature(temperature)
+    validate_max_new_tokens(max_new_tokens)
     enable_thinking = bool(payload.get("enable_thinking", False))
     decision_index = int(payload["decision_index"])
     phase = cast("TransitionPhase", str(payload.get("phase", "ESTABLISH")))
@@ -314,7 +341,12 @@ def handle_decide(payload: dict[str, Any]) -> dict[str, Any]:
 
 def handle_embed(payload: dict[str, Any]) -> dict[str, Any]:
     checked_request(payload, texts=list)
-    texts = [str(item) for item in payload["texts"]]
+    raw_texts = payload["texts"]
+    if not isinstance(raw_texts, list) or not raw_texts:
+        raise ValueError("embed needs a non-empty texts list")
+    if not all(isinstance(item, str) for item in raw_texts):
+        raise ValueError("embed texts must all be strings (no silent coercion)")
+    texts = list(raw_texts)
     model_id = str(
         payload.get("embedding_model_id")
         or _CONFIG.get("embedding_model_id", "sentence-transformers/all-MiniLM-L6-v2")
@@ -339,6 +371,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     """Time warmup + measured deterministic decisions (startup excluded)."""
     warmup = int(payload.get("warmup", 1))
     measured = int(payload.get("measured", 3))
+    validate_benchmark_counts(warmup, measured)
     probe = {
         "decision_index": 0,
         "phase": "DRIFT",

@@ -59,7 +59,7 @@ from voyage.model_registry import (
     CAUSVID_SUBDIR,
     WAN21_SUBDIR,
 )
-from voyage.workers.loop import checked_request, serve
+from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
 RECOVERY_PROFILE = "causvid"
 STATE_MODE = "reconstructable_prefix"
@@ -1000,6 +1000,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     is saved and restored around the probes (still prefer scratch).
     Reports generated (decoded) vs committed (novel) frames per rollout.
     """
+    warmup = int(payload.get("warmup", 1))
+    measured = int(payload.get("measured", 3))
+    validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_causvid not initialized — send `init` first")
     import tempfile
@@ -1014,8 +1017,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     session._pending_tail_path = None
     session._last_prompt = None
     try:
-        warmup = int(payload.get("warmup", 1))
-        measured = int(payload.get("measured", 3))
         walls: list[float] = []
         peaks: list[float] = []
         generated = 0

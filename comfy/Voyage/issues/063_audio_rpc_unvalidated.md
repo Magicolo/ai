@@ -1,6 +1,6 @@
 # 063 — Audio RPC numeric/enum fields unvalidated (`bpm=0`, `sample_rate=0`, negative duration clamped, free-form `task_type`)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (silent wrong-length/failed renders; ffmpeg errors escape as
   untyped `RuntimeError`)
 - Area: workers/audio contract — `voyage/workers/audio_acestep.py:80-99`,
@@ -11,7 +11,7 @@
 ## Technical description
 
 ```python
-# workers/audio_acestep.py:80-99
+# workers/audio_acestep.py:80-99 (verbatim quote — do NOT run ruff format on this file, see log)
 bpm=int(bpm_raw) if bpm_raw is not None else None,   # 0 passes
 task_type=str(payload.get("task_type","text2music")), # any string
 src_audio=payload.get("reference_audio"),             # no type check
@@ -74,3 +74,18 @@ str-existing-path-or-None.
   match); re-ran `bpm_for_energy` probe (`0.5→110`, `-10→60`, `10→140`,
   clamp confirmed, explicit-bpm bypass stands).
 - Open: validate + tests (each field).
+- 2026-09-25: FIXED. Canonical validators in `voyage/audio/acestep.py:33-68`
+  (`VALID_TASK_TYPES`, `MIN/MAX_BPM`, `validate_bpm` None-or-1..300,
+  `validate_duration_seconds` finite->0 rejecting zero/negative/NaN/inf,
+  `validate_task_type` text2music/repaint, `validate_reference_audio`
+  None-or-existing-file) enforced at the top of `render_take`
+  (`acestep.py:151-154`) and at the worker boundary in
+  `voyage/workers/audio_acestep.py:103-115` (plus worker-local
+  `validate_sample_rate` >0 at `:33` and `validate_channels` 1|2 at `:39`),
+  all before any directory/stack side effect. Positive-but-short
+  durations keep the deliberate ACE 1.0 s floor (upstream requirement);
+  only non-positive/non-finite are rejected. Tests:
+  `Voyage/tests/test_audio_request_validation.py` (13 tests: every field
+  accept/reject + handler ordering before `_require_stack`). Gates: `ruff
+  check` clean, `ruff format --check voyage tests` clean, `mypy voyage`
+  strict clean (40 files), `pytest` 472 passed.

@@ -5,6 +5,17 @@ order = rank order. Each file is self-contained (technical description, rational
 evidence with live command output, reproduction, source refs, fix candidates, log)
 so an agent with no project knowledge can pick it up.
 
+## Resolution status (orchestrator-maintained)
+
+- Batch 1 DONE 2026-09-25 (validation hardening, 3 parallel tracks, gates 472
+  green): RESOLVED 009, 062 (config part; TUI part open for batch 2), 068, 070,
+  071, 091, 060, 063, 064, 065, 066, 067, 074, 075, 037 (candidates 1+2; scoped
+  /tmp mount + VOYAGE_MODELS validation deferred as logged follow-ups), 069,
+  084, 085 (metrics.jsonl follow-up logged). Open remainders: 062-TUI, 092
+  gate-scope. Infra: pyproject top-level `exclude=["issues/"]` (evidence fences
+  must never be formatted — ruff rewrites them into false code; a
+  `[tool.ruff.format] exclude` key is ignored by ruff 0.16.9, verified live).
+
 ## Critical (liveness / state integrity / RCE)
 
 - 001_rpc_readline_deadline_bypass — `select`+blocking-`readline` hangs past timeout

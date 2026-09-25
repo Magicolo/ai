@@ -1,6 +1,6 @@
 # 062 — TUI `take_seconds` accepts `nan`/`inf`; `AudioConfig` validator accepts them too
 
-- Status: open
+- Status: partially fixed (config-validator part done; TUI part open for a later batch)
 - Severity: medium (non-finite take length flows into planning + ACE payload)
 - Area: TUI + config validation — `voyage/tui_state.py:156-167`,
   `voyage/config.py:107-112`
@@ -59,4 +59,19 @@ validator (`if value < 0 or not math.isfinite(value)`). Consider one shared
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (`tui_state.py` take block `:156-167`,
   `config.py:107-112` `non_negative` — both match).
-- Open: implement + tests (nan/inf/negative per field).
+- 2026-09-25 (fix, config part ONLY per batch split — `tui_state.py`
+  untouched): FIXED the `AudioConfig` half — `non_negative`
+  (`voyage/config.py:107-112`) and `overlap_cap_non_negative`
+  (`voyage/config.py:130-133`) now reject non-finite via
+  `math.isfinite` (`ValueError: must be a finite non-negative number`).
+  `final_overlap_fraction`/`energy` already reject nan/inf through their
+  range checks (verified live). Note: `DraftConfig.take_seconds`
+  (`voyage/config.py:234-239`) shares the old pattern and is left for a
+  later batch; it funnels into `AudioConfig` via `apply_draft_overrides`,
+  so invalid values still fail at that layer. Tests:
+  `test_audio_config_rejects_non_finite_take_seconds` +
+  `test_audio_config_rejects_negative_take_seconds` in `tests/test_unit.py`.
+  Gates: ruff + format + mypy strict clean on all scope files, 424 pytest
+  passed in-container.
+- Open (later batch): `field_errors` finiteness rejection in
+  `voyage/tui_state.py:156-167` + nan/inf/negative tests per field.

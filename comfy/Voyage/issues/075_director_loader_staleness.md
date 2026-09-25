@@ -1,6 +1,6 @@
 # 075 — Director loaders ignore `model_id` after first load; `embed`/`decide`/`inspect` params unvalidated
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: low (stale-model confusion in long-lived worker; `0`/huge token
   budgets reach the model)
 - Area: director worker — `voyage/workers/director.py:49-50,89-96,114-115,
@@ -75,3 +75,17 @@ change; require `texts` non-empty; clamp `max_new_tokens>=1` (upper-bound, e.g.
   all match: note `handle_embed` def sits at `:320`, inside the cited range);
   re-ran loader-guard `rg` (past above).
 - Open: implement + tests.
+- 2026-09-25: FIXED in `voyage/workers/director.py`: all three loaders
+  (`_load_qwen` `:69`, `_load_inspector` `:117`, `_load_embedder` `:138`)
+  now store `model_id` alongside the resident entry and reload when the
+  id changes (single resident entry — no per-id growth per issue 030);
+  `handle_embed` (`:342`) requires a non-empty `texts` list of strings
+  (no silent `str()` coercion); new `validate_max_new_tokens` (`:53`,
+  1..4096) enforced in `handle_inspect` (`:193`) and `_qwen_decide`
+  (`:265`); new `validate_temperature` (`:59`, finite >= 0) enforced in
+  `_qwen_decide` (`:264`). All checks run before any model load. Tests:
+  `Voyage/tests/test_director_request_validation.py` (11 tests:
+  bounds, same-id cache hit, changed-id reload attempt + no clobber,
+  embed/inspect/decide rejections). Gates: `ruff check` clean, `ruff
+  format --check voyage tests` clean, `mypy voyage` strict clean (40
+  files), `pytest` 472 passed.

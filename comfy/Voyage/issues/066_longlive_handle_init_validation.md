@@ -1,6 +1,6 @@
 # 066 — `video_longlive.handle_init` accepts any `latent_shape`/`local_attn_size`/`sink_size` (CausVid validates, LongLive doesn't)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium (late `IndexError` / negative-size CUDA alloc far from the bad
   input)
 - Area: LongLive worker RPC validation — `voyage/workers/video_longlive.py:873,
@@ -72,3 +72,19 @@ into `handle_init`.
   `video_causvid.py:114-124`/`168-176` validators — all match); re-ran contrast
   probe (CausVid rejects `[1,2]`; LongLive has no `validate_*` hit).
 - Open: implement + tests.
+- 2026-09-25: FIXED in `voyage/workers/video_longlive.py`: ported
+  `validate_latent_shape` (`:45`, 5 positive ints, causvid mirror),
+  `validate_local_attn_size` (`:56`, positive or the -1 full-context
+  sentinel), `validate_sink_size` (`:64`, >= 0), and
+  `validate_attn_capacity` (`:70`, sink + one block must fit local,
+  skipped for -1) using the new `NUM_FRAME_PER_BLOCK = 8` constant
+  (`:41`, also reused by `build_longlive_config` at `:243` so the floor
+  and the config share one source). `handle_init` (`:931-947`) parses
+  and validates all four before the CUDA check (`import torch` moved
+  below the pure checks, mirroring causvid's fail-fast ordering), so bad
+  dims raise `ValueError` on CPU instead of `IndexError`/negative CUDA
+  allocs deep in session build. Tests:
+  `Voyage/tests/test_longlive_init_validation.py` (shape/attn/capacity
+  units + `handle_init` rejection without GPU). Gates: `ruff check`
+  clean, `ruff format --check voyage tests` clean, `mypy voyage` strict
+  clean (40 files), `pytest` 472 passed.
