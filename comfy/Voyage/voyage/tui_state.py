@@ -124,7 +124,7 @@ def _flat_folder_name(raw: str) -> bool:
 def field_errors(state: GenerateFormState) -> dict[str, str]:
     """Per-field error messages keyed by form field name (empty = valid).
 
-    The TUI renders these inline (red borders + help panel) and
+    The TUI renders these inline (invalid highlighting + help panel) and
     :func:`validate` flattens them for the one-line errors display.
     """
     from voyage.cli import parse_duration

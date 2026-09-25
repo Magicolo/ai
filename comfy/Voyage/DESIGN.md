@@ -6843,6 +6843,43 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   `scroll_visible` since Generate sits below the fold at 120x40).
   Gates: 350 pytest / mypy strict (39 files) / ruff + format clean.
 
+## 2026-09-24 — Launcher-TUI compact pass (title + single-line rows + stable focus)
+
+- Why: user follow-up — no project title, form too airy, and some
+  fields (e.g. backend) changed the vertical spacing on focus.
+- What changed (`voyage/tui.py`): `#app-title` heads the form
+  ("Voyage — one-shot music-video generator"); every field row is
+  now a single line (the Style editor stays 3) via borderless
+  `$surface` wells — focus/invalid recolor the background only
+  (`$surface-lighten-1` / `$error-muted`), so geometry is identical
+  in every state by construction; empty `#errors-line` /
+  `#gpu-warning` are hidden (`_set_line` toggles `display`) instead
+  of occupying dead rows; checkbox/button/hint margins tightened.
+- How verified: repro-first Pilot (`tests/test_tui_app.py`: title
+  present, all non-style rows height 1, focus + invalid toggles on
+  every field keep all row/widget heights bit-identical, empty
+  notice lines take no space). Full gates after: TUI scope green
+  (ruff + format + mypy on touched files, full pytest); the only
+  gates red is the concurrent agent's in-flight
+  `voyage/workers/video_causvid.py` (mypy, out of scope, untouched).
+- Hero-title follow-up (same day): `#app-title` moved out of
+  `#form-columns` to a full-width screen-level hero above the form —
+  massive 5x35 block-letter `TITLE_ART` (bold, accent, centered) plus
+  an italic muted subtitle, with spacing below; persists during runs.
+  Textual has no font scaling, so presence comes from size + color.
+  Full gates green after (387 pytest).
+- Clipping + stuck-view follow-up (same day): the 5-row art was
+  clipped by `#app-title { height: 5 }` (padding-top stole a row) —
+  height is now `auto`; content-height views overflowed small
+  terminals with nowhere to scroll, so `#form-view` / `#run-view`
+  are `height: 1fr` and scroll internally (backend row reachable via
+  `scroll_visible` at 120x24); the worker's `except Exception`
+  missed `BaseException` (a `SystemExit`-class failure left a stuck
+  run view), now `except BaseException` with `CancelledError`
+  re-raised. Repro-first Pilot (title reserves art+pad rows,
+  constrained-scrollable form, real fake-backend click-to-✓,
+  SystemExit recovery); TUI scope green (58 tests).
+
 ## 2026-09-24 — CausVid worker live (first E2E generation)
 
 - Worker `voyage/workers/video_causvid.py` renders: three 16 GB fitment
@@ -6875,3 +6912,57 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Gates: ruff + format + mypy strict + 387 pytest green. Open:
   overlap sweep (1/2/3+), resume-vs-uninterrupted A/B, 24 fps finalize
   stage (`presentation_fps`), manual eyeball review.
+
+## 2026-09-25 — Launcher-TUI liveness pass (blank dropdowns + proof-of-alive)
+
+- Why: user report — dropdown fields clipped vertically / blank
+  focusable boxes under the fields / Generate "still freezes" with no
+  monitoring view. SVG-text screenshots of the headless app proved the
+  first two are one bug: the `Select` value line renders blank (labels
+  fine, `Input` values fine).
+- Root cause (bisected property by property on Textual 8.2.8): an
+  explicit `height` on `Select` — even the same 3 rows the tall border
+  computes to — collapses the value line to blank. `border` /
+  `background` / `padding` are innocent. Fix: Selects keep bordered
+  chrome with `height: auto` (geometry fixed at 3 rows by the border;
+  focus/invalid recolor the border only, spacing constant), rows use
+  `tall=True`; the `height must stay auto` NOTE in
+  (`voyage/tui.py`) guards the regression.
+- Freeze investigation: probes proved the machinery sound — run view
+  switches synchronously, `run_worker(thread=True)` never blocks the
+  loop (Tab moves focus mid-run), CUDA fast-fail returns to the form
+  in ~1s. The remaining failure modes were silence, not deadlock:
+  (a) nothing painted before worker boot, (b) no motion during
+  minute-long silent stretches (Qwen weight load), (c) exit-code
+  failures hid the reason (stderr went to the hidden run log). Fixes:
+  synchronous headline + `▶ starting` line before boot (namespace is
+  now built up-front, so settings errors also surface on the form),
+  1s elapsed heartbeat on the run head (ticks iff the loop is alive;
+  stopped with the run), and the worker's last captured line appended
+  to nonzero-exit errors.
+- Proof (all in `tests/test_tui_app.py`): SVG-text asserts for all
+  three dropdown values, Select row height >= 3, slow-run Tab-moves-
+  focus mid-run, segment line lands in history before completion,
+  fast-fail restores the form with the CUDA reason, elapsed tick
+  appears within ~2.5s and the timer stops at finish.
+
+## 2026-09-25 — run.sh bare-TUI CUDA default (ltxv with no variables)
+
+- User report: explicit `VOYAGE_IMAGE=voyage-video VOYAGE_GPUS=1` works,
+  bare `run.sh` must work too. Root cause: bare launch (TUI, backend
+  picked interactively) carried no CLI backend signal, so run.sh fell
+  through to the slim CPU image with no `--gpus` — ltxv then fast-failed
+  (or hung at worker init) inside a torch-less container.
+- Fix (`scripts/run.sh`): when invoked bare (`$# == 0`) probe
+  `nvidia-smi -L`; GPU present → `voyage-video:latest` + `--gpus all`
+  (explicit `VOYAGE_IMAGE`/`VOYAGE_GPUS` still win); no GPU → stay slim
+  (fake smoke runs; CUDA picks fast-fail to the form with the relaunch
+  hint). `VOYAGE_DRY_RUN=1` seam prints `image=`/`gpus=` and exits
+  (test-only, never runs docker).
+- Proof: `tests/test_run_sh.py` (7 tests, isolated PATH of symlinked
+  coreutils + fake nvidia-smi ok/fail/absent, temp HOME): bare+gpu →
+  video+gpus, bare w/o gpu or failing smi → slim+none, explicit image /
+  `VOYAGE_GPUS=0` win, `generate` → CUDA without host GPU, explicit
+  `--backend fake` stays slim on a GPU box. Docs: OPERATIONS TUI +
+  run.sh paragraphs rewritten, `cli._cuda_stack_error` / `_require`
+  docstring mention bare launches.

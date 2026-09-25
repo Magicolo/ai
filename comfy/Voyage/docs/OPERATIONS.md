@@ -60,9 +60,15 @@ the run log so stray prints can't fight Textual's screen
 (`voyage/tui.py:780`). Stop writes STOP_REQUESTED to the run-dir state
 — the same control plane as `voyage stop` — so the run exits at the
 next segment boundary and still validates + finalizes. Note: the
-default backend is `ltxv` (CUDA); on a GPU box run the TUI in the
-video image (`VOYAGE_IMAGE=voyage-video:latest ./scripts/run.sh`, plus
-`VOYAGE_GPUS=1`) or pick `fake` for CPU smoke runs.
+default backend is `ltxv` (CUDA); bare `./scripts/run.sh` on a GPU box
+already launches the video image with `--gpus all` (host GPU probe, no
+variables needed), so ltxv just works — on a GPU-less box it stays slim,
+so pick `fake` for CPU smoke runs. The run view
+paints synchronously on Generate (headline + `▶ starting` line before
+the worker boots), ticks an elapsed timer on the headline every second
+while the event loop is alive, and streams segment lines as they
+commit; a nonzero exit returns to the form with the worker's last line
+appended (e.g. the CUDA-stack reason), never a stuck view.
 
 ### Form fields (one list, required first)
 
@@ -90,10 +96,14 @@ video image (`VOYAGE_IMAGE=voyage-video:latest ./scripts/run.sh`, plus
   4 beats doubling to hold >=60 BPM; drift every segment; seed 0)
   plus draft / force / skip-bad / verbose / no-color checkboxes.
 
-Invalid fields get a red border (`field-invalid`,
-`voyage/tui.py:301`) and errors render live in `#errors-line`;
+Invalid fields get flagged (`field-invalid`: red-tinted background on
+text fields, red border on dropdowns) and errors render live in
+`#errors-line`;
 Generate is blocked until they clear, with the derived
-segments/frames plan in `#plan-line`.
+segments/frames plan in `#plan-line`. Dropdowns keep their bordered
+chrome at a fixed 3 rows — an explicit height blanks the value line on
+Textual 8 (verified by SVG-text test), so the border color alone
+carries focus/invalid and spacing never shifts.
 
 ### Focus-driven help panel
 
@@ -167,7 +177,10 @@ visible GPU a warning is printed (the worker will fail at init). `run.sh`
 selects the container automatically: a CUDA backend (`ltxv`, `longlive2`,
 `acestep` — from `--backend` or the run's `voyage.toml`) switches to
 `voyage-video:latest` with `--gpus all` and pins `-w /app`, unless
-`VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. A CUDA backend in an image
+`VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. Bare `run.sh` (the TUI,
+backend picked interactively) counts as CUDA-needing when the host has a
+GPU (`nvidia-smi -L` probe), so ltxv works with no explicit variables;
+without a GPU it stays slim. A CUDA backend in an image
 without torch fails fast with a pointer to `voyage-video` instead of a
 cryptic worker error.
 

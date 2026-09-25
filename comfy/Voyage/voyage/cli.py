@@ -746,7 +746,7 @@ def _cuda_stack_error(backend: str) -> str:
         f"error: video backend {backend!r} needs the CUDA worker stack (torch), "
         "but torch is not importable in this container; re-run with "
         "VOYAGE_IMAGE=voyage-video:latest and VOYAGE_GPUS=1 (run.sh selects "
-        "both automatically for CUDA backends)"
+        "both automatically for CUDA backends and GPU-box bare launches)"
     )
 
 
@@ -754,8 +754,9 @@ def _require_cuda_stack(config: ProjectConfig) -> bool:
     """Fast-fail when a CUDA backend is configured but torch is unavailable.
 
     Workers are in-container subprocesses, so the container image must carry
-    the worker stack (run.sh selects voyage-video automatically; direct
-    `docker run` users must pass the image + --gpus all themselves).
+    the worker stack (run.sh selects voyage-video automatically for CUDA
+    backends and GPU-box bare launches; direct `docker run` users must
+    pass the image + --gpus all themselves).
     find_spec locates torch without importing it — the supervisor never
     imports GPU libraries (§83).
     """

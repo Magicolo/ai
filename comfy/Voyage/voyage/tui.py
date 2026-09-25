@@ -11,10 +11,13 @@ sink swapped from stdout to the TUI via the ``progress_sink`` namespace
 slot (see ``cmd_run``/``cmd_generate``).
 
 Form behavior: a single compact field list (required first), one row
-per setting with a fixed-width label; focusing any field shows its
+per setting with a fixed-width label: single-line borderless wells
+(1 line each; the Style editor is 3), empty notice lines hidden so they
+take no space. Focus/invalid recolor the background only, so row
+geometry is identical in every state. Focusing any field shows its
 description in the side help panel (stacked below the form on narrow
 terminals). Every change re-validates per field: invalid widgets get a
-red border and the panel shows the message. The Style editor takes
+red-tinted background and the panel shows the message. The Style editor takes
 focus on mount so typing lands immediately. ``tui_state`` persistence /
 GPU-warning helpers are consumed defensively via ``getattr`` so the app
 mounts and generates either way. Quit while a run is active arms a
@@ -37,6 +40,7 @@ finalizes the partial run.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import sys
 import time
@@ -47,6 +51,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.timer import Timer
 from textual.widgets import (
     Button,
     Checkbox,
@@ -108,6 +113,18 @@ _HELP_OVERVIEW = (
 # Below this width the help panel stacks under the form instead of
 # sitting beside it.
 NARROW_WIDTH = 100
+
+# Massive block-letter hero art (5 rows x 35 cols, centered by CSS).
+# Textual cannot scale fonts, so presence comes from size + accent color.
+TITLE_ART = "\n".join(
+    [
+        "█   █  ███  █   █   █    ████ █████",
+        "█   █ █   █ █   █  █ █  █     █    ",
+        "█   █ █   █  █ █  █████ █ ███ ████ ",
+        " █ █  █   █   █   █   █ █   █ █    ",
+        "  █    ███    █   █   █  ███  █████",
+    ]
+)
 
 
 def run_tui() -> int:
@@ -181,6 +198,12 @@ def _save_last_settings(state: GenerateFormState) -> None:
         saver(state)
     except Exception:
         pass
+
+
+def _buffer_tail(buffer: io.StringIO) -> str:
+    """Last non-empty captured worker line (the reason behind an exit code)."""
+    lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 class TuiProgress(SegmentProgress):
@@ -285,38 +308,111 @@ class VoyageApp(App[None]):
         text-style: bold;
         color: $primary;
     }
+    /* Full-width hero title above the form/help columns: centered,
+    massive block-letter art. Height is automatic so the art rows plus
+    the top pad always fit — a fixed height clipped the bottom row. */
+    #app-title {
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        padding-top: 1;
+        height: auto;
+    }
+    #app-subtitle {
+        text-align: center;
+        text-style: italic;
+        color: $text-muted;
+        margin-bottom: 1;
+        height: 1;
+    }
+    /* The two views each claim the leftover screen height and scroll
+    internally — content-height views overflowed small terminals and
+    clipped fields (e.g. backend) with nowhere to scroll to. */
+    #form-view {
+        height: 1fr;
+    }
     .field-row {
         layout: horizontal;
-        height: auto;
+        height: 1;
         margin: 0 1;
+    }
+    .field-row-tall {
+        height: 3;
     }
     .field-row > .field-label {
         width: 17;
         color: $text-muted;
         padding-right: 1;
     }
+    /* Inputs stay borderless single-line wells. Selects keep their
+    bordered chrome at height 3: stripping it (border:none + height:1)
+    rendered the value line blank — blank focusable boxes — while the
+    border color alone carries focus/invalid, so geometry never shifts. */
+    .field-row Input, #field-style {
+        border: none;
+        background: $surface;
+        padding: 0 1;
+    }
+    .field-row Input {
+        height: 1;
+    }
+    /* NOTE: height must stay auto — an explicit height (even the same
+    3 rows the border computes to) collapses the value line to blank on
+    Textual 8.2.8. The tall border fixes the geometry at 3 rows; focus
+    and invalid only recolor it, so spacing is constant. */
+    .field-row Select {
+        height: auto;
+        border: tall $surface;
+        background: $surface;
+        padding: 0 1;
+    }
+    /* The closed value line carries its own tall border (2 rows) on top
+    of the Select border. Drop the inner border so the composed widget
+    totals exactly 3 rows; never force an explicit height (that blanks
+    the value line on Textual 8). Recoloring stays on the outer border. */
+    .field-row SelectCurrent {
+        border: none;
+        padding: 0 1;
+        height: auto;
+    }
     #field-style {
         height: 3;
     }
-    Input.field-invalid, TextArea.field-invalid, Select.field-invalid {
+    Input:focus, TextArea:focus {
+        background: $surface-lighten-1;
+    }
+    Select:focus {
+        border: tall $accent;
+        background: $surface-lighten-1;
+    }
+    Input.field-invalid, TextArea.field-invalid {
+        background: $error-muted;
+    }
+    Select.field-invalid {
         border: tall $error;
+    }
+    #form-col Checkbox {
+        height: 1;
+        margin: 0 1;
     }
     #gpu-warning {
         color: $warning;
+        display: none;
         margin: 0 1;
     }
     #plan-line {
         color: $success;
-        margin: 1 1 0 1;
+        margin: 0 1;
     }
     #errors-line {
         color: $error;
+        display: none;
         margin: 0 1;
     }
     #button-row {
         align: center middle;
         height: auto;
-        margin: 1 1;
+        margin: 1 1 0 1;
     }
     #button-generate {
         margin-right: 2;
@@ -324,9 +420,10 @@ class VoyageApp(App[None]):
     #key-hints, #run-keys {
         text-align: center;
         color: $text-muted;
-        margin: 0 1 1 1;
+        margin: 0 1;
     }
     #run-view {
+        height: 1fr;
         margin: 0 1;
     }
     #run-head {
@@ -351,9 +448,6 @@ class VoyageApp(App[None]):
     #run-buttons Button {
         margin-right: 2;
     }
-    Input:focus, TextArea:focus, Select:focus {
-        border: tall $accent;
-    }
     Button:focus {
         text-style: bold reverse;
     }
@@ -372,6 +466,11 @@ class VoyageApp(App[None]):
         self._run_dir: Path | None = None
         self._running = False
         self._quit_armed = False
+        # Elapsed-time heartbeat for the run view (ticks iff the event
+        # loop is alive — the visible answer to "is it frozen?").
+        self._run_head_base = ""
+        self._run_t0 = 0.0
+        self._heartbeat: Timer | None = None
         # Plain-text record of every run-view line (RichLog exposes no
         # public line count; this keeps the progress assertable).
         self.run_history: list[str] = []
@@ -381,17 +480,27 @@ class VoyageApp(App[None]):
         label: str,
         field: str,
         widget: Input | Select[str] | TextArea,
+        tall: bool = False,
     ) -> Horizontal:
         """One compact label + widget row (widget id must match FIELD_WIDGET_IDS)."""
         del field  # documented by the widget id; kept for call-site readability
+        classes = "field-row field-row-tall" if tall else "field-row"
         return Horizontal(
             Static(label, classes="field-label"),
             widget,
-            classes="field-row",
+            classes=classes,
         )
+
+    def _set_line(self, selector: str, text: str) -> None:
+        """Update a notice line, hiding it entirely when empty (no dead rows)."""
+        line = self.query_one(selector, Static)
+        line.update(text)
+        line.display = bool(text)
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static(TITLE_ART, id="app-title")
+        yield Static("one-shot music-video generator", id="app-subtitle")
         with ScrollableContainer(id="form-view"):
             with Horizontal(id="form-columns"):
                 with Vertical(id="form-col"):
@@ -404,6 +513,7 @@ class VoyageApp(App[None]):
                             id="field-style",
                             tooltip=FIELD_HELP["style"],
                         ),
+                        tall=True,
                     )
                     yield self._field_row(
                         "Name *",
@@ -434,6 +544,7 @@ class VoyageApp(App[None]):
                             id="field-backend",
                             tooltip=FIELD_HELP["backend"],
                         ),
+                        tall=True,
                     )
                     yield Static("", id="gpu-warning")
                     yield self._field_row(
@@ -447,6 +558,7 @@ class VoyageApp(App[None]):
                             id="field-director",
                             tooltip=FIELD_HELP["director"],
                         ),
+                        tall=True,
                     )
                     yield self._field_row(
                         "Quantization ▾",
@@ -459,6 +571,7 @@ class VoyageApp(App[None]):
                             id="field-quantization",
                             tooltip=FIELD_HELP["quantization"],
                         ),
+                        tall=True,
                     )
                     yield self._field_row(
                         "Blocks",
@@ -626,10 +739,10 @@ class VoyageApp(App[None]):
             state = self._read_form()
         except Exception:
             return
-        self.query_one("#plan-line", Static).update(f"plan: {plan_summary(state)}")
+        self._set_line("#plan-line", f"plan: {plan_summary(state)}")
         errors = field_errors(state)
         self._apply_field_errors(errors)
-        self.query_one("#errors-line", Static).update(" · ".join(errors.values()))
+        self._set_line("#errors-line", " · ".join(errors.values()))
         self._refresh_help(errors)
 
     def _refresh_help(self, errors: dict[str, str] | None = None) -> None:
@@ -664,7 +777,7 @@ class VoyageApp(App[None]):
             backend = str(self.query_one("#field-backend", Select).value)
         except Exception:
             backend = self.initial_state.backend
-        self.query_one("#gpu-warning", Static).update(_backend_gpu_warning(backend))
+        self._set_line("#gpu-warning", _backend_gpu_warning(backend))
 
     def on_input_changed(self, _event: Input.Changed) -> None:
         self._refresh_plan_and_errors()
@@ -719,18 +832,25 @@ class VoyageApp(App[None]):
         try:
             state = self._read_form()
         except Exception as exc:
-            self.query_one("#errors-line", Static).update(f"cannot read form: {exc}")
+            self._set_line("#errors-line", f"cannot read form: {exc}")
             return
         errors = field_errors(state)
         self._apply_field_errors(errors)
         if errors:
-            self.query_one("#errors-line", Static).update(" · ".join(errors.values()))
+            self._set_line("#errors-line", " · ".join(errors.values()))
             return
-        self.query_one("#errors-line", Static).update("")
+        self._set_line("#errors-line", "")
         _save_last_settings(state)
         self._quit_armed = False
         counts = plan_counts(state)
         total = counts[0] if counts is not None else 0
+        try:
+            namespace = to_generate_namespace(state)
+        except ValueError as exc:
+            self._set_line("#errors-line", f"invalid settings: {exc}")
+            return
+        run_dir = self._run_dir_for(namespace)
+        head = f"▶ generating · {namespace.backend} · {total} segment(s) → {run_dir}"
         try:
             self.query_one("#form-view", ScrollableContainer).display = False
             run_view = self.query_one("#run-view", Vertical)
@@ -743,37 +863,66 @@ class VoyageApp(App[None]):
             self.query_one("#run-result", Static).update("")
             self.query_one("#button-stop", Button).disabled = False
             self._running = True
+            # Synchronous first paint: the run view already says what is
+            # starting before the worker thread boots (no silent gap).
+            self._run_head_base = head
+            self._run_t0 = time.monotonic()
+            self.query_one("#run-head", Static).update(head)
+            self.append_run_line("▶ starting — workers are warming up …")
+            self._start_heartbeat()
             self.set_focus(self.query_one("#button-stop", Button))
             self.refresh(layout=True)
         except Exception as exc:
             self.query_one("#form-view", ScrollableContainer).display = True
             self.query_one("#run-view", Vertical).display = False
             self._running = False
-            self.query_one("#errors-line", Static).update(f"cannot open run view: {exc}")
+            self._stop_heartbeat()
+            self._set_line("#errors-line", f"cannot open run view: {exc}")
             return
         self.run_worker(
-            lambda: self._generate_in_thread(state, total),
+            lambda: self._generate_in_thread(namespace, run_dir, total),
             thread=True,
             exclusive=True,
             description="voyage generate",
         )
 
+    def _start_heartbeat(self) -> None:
+        """Tick the run-head elapsed timer (stops with the run)."""
+        self._stop_heartbeat()
+        try:
+            self._heartbeat = self.set_interval(1.0, self._tick_run_head)
+        except Exception:
+            self._heartbeat = None
+
+    def _stop_heartbeat(self) -> None:
+        heartbeat, self._heartbeat = self._heartbeat, None
+        if heartbeat is not None:
+            try:
+                heartbeat.stop()
+            except Exception:
+                pass
+
+    def _tick_run_head(self) -> None:
+        """Elapsed-time suffix — advances only while the loop is alive."""
+        if not self._running or not self._run_head_base:
+            return
+        try:
+            elapsed = time.monotonic() - self._run_t0
+            self.query_one("#run-head", Static).update(
+                f"{self._run_head_base} · {elapsed:.0f}s elapsed"
+            )
+        except Exception:
+            pass
+
     def _run_dir_for(self, args: argparse.Namespace) -> Path:
         output = args.output or str(Path("output") / args.run_id)
         return Path(output).resolve()
 
-    def _generate_in_thread(self, state: GenerateFormState, total: int) -> None:
+    def _generate_in_thread(self, namespace: argparse.Namespace, run_dir: Path, total: int) -> None:
         from voyage.cli import cmd_generate
         from voyage.errors import VoyageError
 
-        try:
-            namespace = to_generate_namespace(state)
-        except ValueError as exc:
-            self.call_from_thread(self._finish_generation, f"✗ invalid settings: {exc}")
-            return
-        run_dir = self._run_dir_for(namespace)
         self._run_dir = run_dir
-        self.call_from_thread(self._open_run_view, namespace, run_dir, total)
         namespace.progress_sink = TuiProgress(self, total)
         buffer = io.StringIO()
         try:
@@ -782,14 +931,21 @@ class VoyageApp(App[None]):
         except VoyageError as exc:
             self._flush_captured_output(buffer)
             self.call_from_thread(self._finish_generation, f"✗ generation failed: {exc}")
-        except Exception as exc:  # defensive: never trap the worker silently
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # defensive: never trap the worker silently
             self._flush_captured_output(buffer)
             self.call_from_thread(self._finish_generation, f"✗ unexpected error: {exc!r}")
         else:
+            tail = _buffer_tail(buffer)
             self._flush_captured_output(buffer)
             if code == 0:
                 final = namespace.final_video or str(run_dir / "final.mp4")
                 self.call_from_thread(self._finish_generation, f"✓ generated {final}")
+            elif tail:
+                self.call_from_thread(
+                    self._finish_generation, f"✗ generation exited with code {code}: {tail}"
+                )
             else:
                 self.call_from_thread(
                     self._finish_generation, f"✗ generation exited with code {code}"
@@ -803,9 +959,14 @@ class VoyageApp(App[None]):
                 self.call_from_thread(self.append_run_line, text)
 
     def _open_run_view(self, namespace: argparse.Namespace, run_dir: Path, total: int) -> None:
-        self.query_one("#run-head", Static).update(
-            f"▶ generating · {namespace.backend} · {total} segment(s) → {run_dir}"
-        )
+        """Legacy worker-side run-head paint (kept for direct callers).
+
+        The normal path sets the run head synchronously in
+        ``_start_generation`` before the worker boots, so the run view is
+        never blank; this re-applies the same headline if invoked late.
+        """
+        self._run_head_base = f"▶ generating · {namespace.backend} · {total} segment(s) → {run_dir}"
+        self.query_one("#run-head", Static).update(self._run_head_base)
 
     def append_run_line(self, text: str) -> None:
         self.run_history.append(text)
@@ -817,11 +978,12 @@ class VoyageApp(App[None]):
     def _finish_generation(self, result: str) -> None:
         self._running = False
         self._quit_armed = False
+        self._stop_heartbeat()
         self.query_one("#button-stop", Button).disabled = True
         if result.startswith("✗"):
             # Failure: back to the form with the error visible (never a stuck view).
             self._show_form()
-            self.query_one("#errors-line", Static).update(result)
+            self._set_line("#errors-line", result)
             return
         self.query_one("#run-result", Static).update(result)
 
@@ -843,6 +1005,7 @@ class VoyageApp(App[None]):
     def _show_form(self) -> None:
         if self._running:
             return
+        self._stop_heartbeat()
         self.query_one("#run-view", Vertical).display = False
         self.query_one("#form-view", ScrollableContainer).display = True
         self._refresh_plan_and_errors()
