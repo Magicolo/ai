@@ -16,6 +16,32 @@ at `6b36d20ec6f7958d29d11a704dfa64611a9f2572`, cloned in
 `worker/Dockerfile.video`. Runtime patches on top: see
 `docs/UPSTREAM_LONG_LIVE_PATCHES.md`.
 
+## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB)
+
+| Artifact  | Repo / file | Revision |
+|-----------|-------------|----------|
+| DiT (`ltxv-2b-0.9.8-distilled.safetensors`, ~6.3 GB) + spatial upscaler (`ltxv-spatial-upscaler-0.9.8.safetensors`) | [Lightricks/LTX-Video](https://huggingface.co/Lightricks/LTX-Video) | `8984fa25007f376c1a299016d0957a37a2f797bb` |
+| Text encoder/tokenizer (`text_encoder/*`, `tokenizer/*`) | [PixArt-alpha/PixArt-XL-2-1024-MS](https://huggingface.co/PixArt-alpha/PixArt-XL-2-1024-MS) | `b89adadeccd9ead2adcb9fa2825d3fabec48d404` |
+
+Code (not weights): [Lightricks/LTX-Video](https://github.com/Lightricks/LTX-Video)
+at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, installed (`--no-deps`,
+`[inference]` extra) in `worker/Dockerfile.video`.
+
+## Video — CausVid DMD + Wan2.1-1.3B base (`models download causvid`, ~28 GB)
+
+| Artifact  | Repo / file | Revision |
+|-----------|-------------|----------|
+| DMD checkpoint (`autoregressive_checkpoint/model.pt`, ~10.6 GB) | [tianweiy/CausVid](https://huggingface.co/tianweiy/CausVid) | `b545eb2728fc9d1515023a270b847f7b24b3aa89` |
+| Base DiT (`diffusion_pytorch_model.safetensors`, ~5.7 GB) + VAE (`Wan2.1_VAE.pth`) + T5 (`models_t5_umt5-xxl-enc-bf16.pth`) + `google/umt5-xxl/` tokenizer | [Wan-AI/Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) | `37ec512624d61f7aa208f7ea8140a131f93afc9a` |
+
+Code (not weights): [tianweiy/CausVid](https://github.com/tianweiy/CausVid)
+at `adb6a5ecd07666b4d0290042915c8406e6d5ce22`, cloned in
+`worker/Dockerfile.video` (leaf deps only — never the upstream
+`requirements.txt`). The DMD checkpoint is CC BY-NC-SA 4.0
+(non-commercial, share-alike); the Wan2.1 base is Apache 2.0. Native
+geometry 832×480 @ 16 fps; full notes:
+`docs/UPSTREAM_CAUSVID_NOTES.md`.
+
 ## Director — Qwen3-8B + MiniLM (`models download director-qwen8b`, ~16 GB)
 
 | Artifact | Repo | Revision |

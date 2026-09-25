@@ -165,11 +165,12 @@ LTXV_COMMIT = "4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"
 LTXV_COMMIT_SHORT = "4b2d053"
 
 
-# Stream D CausVid prep scaffolding (DESIGN §5.4, TASK §§19/23.4/25.3, §30.1).
-# No worker yet (`voyage/workers/video_causvid.py` is a deferred worker slice);
-# this block only pins the upstream sources and exposes
-# download/verify entry points mirroring the ltxv pattern, so a future
-# `models download/verify causvid-*` CLI target has registry support ready.
+# Stream D CausVid backend (DESIGN §5.4, TASK §§19/23.4/25.3, §30.1).
+# Worker: `voyage/workers/video_causvid.py` (backend `causvid`, registered
+# in supervisor VIDEO_WORKER_MODULES + STREAMING_VIDEO_BACKENDS, CLI via
+# `generate --backend causvid` / `models download/verify causvid`); this
+# block pins the upstream sources and exposes the download/verify entry
+# points mirroring the ltxv pattern.
 # Pins probed 2026-09-24 (see docs/UPSTREAM_CAUSVID_NOTES.md for URLs,
 # geometry/fps/overlap notes, license implications, open worker questions).
 # Upstream code pin (git commit, not a floating branch; master HEAD at probe
@@ -576,8 +577,8 @@ def download_causvid_models(models_dir: Path) -> dict[str, Any]:
     The autoregressive DMD checkpoint from tianweiy/CausVid plus the
     Wan2.1-T2V-1.3B base subset (DiT shard + VAE + T5 + tokenizer) the
     worker needs underneath it. Merges into the shared manifest; returns
-    the merged record. Registry support only — the `models download
-    causvid` CLI wiring and the worker land in the CausVid worker track.
+    the merged record. Backs the `models download causvid` CLI target for
+    the `causvid` worker (`voyage/workers/video_causvid.py`).
     """
     from huggingface_hub import hf_hub_download, snapshot_download
 

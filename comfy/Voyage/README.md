@@ -7,8 +7,9 @@ JSONL-RPC protocol:
 
 - **director** — picks the next concept/shot (deterministic built-in, or
   Qwen3-8B + MiniLM novelty embeddings);
-- **video** — renders frames (fake testsrc built-in, or LongLive 2.0
-  causal stream on CUDA);
+- **video** — renders frames (fake testsrc built-in, LongLive 2.0
+  causal stream, LTXV 2B tail-chained extensions, or CausVid DMD causal
+  rollouts — all on CUDA);
 - **audio** — renders a slow loop of music takes (fake sine built-in, or
   ACE-Step 1.5 on CUDA) plus video-synced SFX.
 
@@ -38,6 +39,8 @@ Fake backends need nothing. Real backends need one download each
 
 ```bash
 ./scripts/run.sh models download longlive2-bf16   # ~48 GB video weights
+./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights
+./scripts/run.sh models download causvid        # ~28 GB CausVid DMD + Wan2.1-1.3B base
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
 ./scripts/run.sh models download audio-acestep    # ACE-Step checkpoints
 ./scripts/run.sh models download inspector-qwen35 # ~19 GB VLM (optional)
@@ -53,6 +56,8 @@ aborts if validation fails unless `--skip-bad`):
 VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
   --style "pastel neon line-art, peaceful"
 # -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
+# --backend causvid renders 832x480 @ 16 fps (CausVid DMD + Wan2.1-1.3B base);
+# --backend longlive2 renders 1280x704 @ 24 fps; --backend fake needs no GPU.
 ```
 
 Step-by-step (for pause/resume and unbounded runs):

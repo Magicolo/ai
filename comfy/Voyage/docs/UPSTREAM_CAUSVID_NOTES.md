@@ -4,11 +4,13 @@ Pins live in code in `voyage/model_registry.py` (`CAUSVID_*` / `WAN21_*`,
 the single source of truth); this file mirrors them for humans. Every repo
 is **ungated** — no token required. Revisit every note if a pin moves.
 
-Status: prep scaffolding only. There is no worker yet —
-`voyage/workers/video_causvid.py` is explicitly a deferred worker slice
-(TASK §30.1) — and no `models download/verify causvid-*` CLI wiring
-in `voyage/cli.py` (the registry `download_causvid_models` /
-`verify_causvid_models` entry points exist so that slice has support ready).
+Status: worker landed. `voyage/workers/video_causvid.py` serves the
+`causvid` backend (registered in `voyage/supervisor.py`
+`VIDEO_WORKER_MODULES` + `STREAMING_VIDEO_BACKENDS`, `generate --backend
+causvid`, `models download/verify causvid` CLI wiring in `voyage/cli.py`
+backed by the registry `download_causvid_models` /
+`verify_causvid_models` entry points). The notes below stay as the
+pin/geometry/license record — revisit every note if a pin moves.
 
 ## Upstream pins (probed 2026-09-24)
 
@@ -19,7 +21,7 @@ in `voyage/cli.py` (the registry `download_causvid_models` /
 | Base model | [Wan-AI/Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) | `37ec512624d61f7aa208f7ea8140a131f93afc9a` |
 | Paper | [causvid.github.io](https://causvid.github.io/) (arXiv [2412.07772](https://arxiv.org/abs/2412.07772), CVPR 2025) | — |
 
-## What to download (registry-ready, CLI wiring deferred)
+## What to download (registry + CLI wired)
 
 From `tianweiy/CausVid` (CC BY-NC-SA 4.0): only
 `autoregressive_checkpoint/model.pt` — the causal DMD generator the
@@ -95,8 +97,8 @@ in the run manifest, remain the license record.
 
 1. RESOLVED 2026-09-24: `model.pt` = 11,352,649,716 bytes; floor is now
    10 GB (`CAUSVID_CKPT_MIN_BYTES`) with ~12% headroom.
-2. `models download/verify causvid-*` CLI wiring in `voyage/cli.py`
-   (registry functions already exist).
+2. RESOLVED: `models download/verify causvid` CLI wiring in
+   `voyage/cli.py` (backed by the registry functions).
 3. Checkpoint choice: `autoregressive_checkpoint` vs
    `autoregressive_checkpoint_warp_4step_cfg2` vs `bidirectional_checkpoint2`
    — benchmark which the worker loads.

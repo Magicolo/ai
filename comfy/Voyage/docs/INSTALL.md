@@ -73,6 +73,8 @@ never leave root-owned `__pycache__` in the bind mount.
 
 ```bash
 ./scripts/run.sh models download longlive2-bf16   # video (~48 GB)
+./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB)
+./scripts/run.sh models download causvid        # CausVid DMD + Wan2.1-1.3B base (~28 GB)
 ./scripts/run.sh models download director-qwen8b  # director (~16 GB)
 ./scripts/run.sh models download audio-acestep    # audio checkpoints
 ./scripts/run.sh models download inspector-qwen35 # VLM (~19 GB, optional)

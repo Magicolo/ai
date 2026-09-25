@@ -39,6 +39,7 @@ finalizer concat path, and checksums run exactly as in production.
 |------|---------|-------|-------|
 | video | `longlive2` | `voyage-video:latest` | resident BF16+FP8 stream, `fp8`\|`bf16` quantization |
 | video | `ltxv` | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
+| video | `causvid` | `voyage-video:latest` | DMD causal generator + Wan2.1-1.3B base, 832×480 @ 16 fps native, bf16 |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
 | director | `qwen` | `voyage-director:latest` | Qwen3-8B, non-thinking, temp 0.7 |
 
@@ -60,8 +61,28 @@ tail PNG doubles as the crash-recovery tape beside the segment video
 (`recovery.pt` carries profile `ltxv` — tapes never resume across
 backends); `scene_cut` forces a fresh start. Native 768×512; draft
 640×352 verified. Needs `models download ltxv-2b`. The `benchmark` op
-saves/restores tail state around its probes, so unlike longlive it does
-not advance any stream — safe to run mid-sequence.
+ saves/restores tail state around its probes, so unlike longlive it does
+ not advance any stream — safe to run mid-sequence.
+
+## CausVid chaining model (`causvid`, Stream D alternative)
+
+ Resident session like `longlive2` (multi-block payload, resume hook,
+ acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
+ `voyage/supervisor.py`), but chaining is explicit, not KV-cache: each
+ rollout renders from fresh `torch.randn([1, 21, 16, 60, 104])` bf16 noise
+ on CUDA via `pipeline.inference(noise, text_prompts, return_latents=True,
+ start_latents=...)`, then continuation state advances as
+ `cat([VAE-re-encoded tail slice, latents[:, -(overlap-1):]])`. Committed
+ per rollout: all but the last `4*(overlap-1)+1` decoded frames (overlap 3
+ → drop 9 → **72 novel frames/rollout**); DMD steps `[1000, 757, 522, 0]`
+ from `configs/wan_causal_dmd.yaml` @ pin. Each segment writes a tail MP4
+ beside the video; the tail doubles as the crash-recovery tape
+ (`recovery.pt` carries profile `causvid` — tapes never resume across
+ backends); `scene_cut` forces a fresh start. Native 832×480 @ 16 fps (the
+ worker refuses any other fps — never relabeled); draft geometry is not
+ supported. Needs `models download causvid`. The `benchmark` op
+ saves/restores tail state around its probes, so like ltxv it does not
+ advance any stream — safe to run mid-sequence.
 
 ## Experimental backends
 
