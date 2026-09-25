@@ -14,6 +14,13 @@ from __future__ import annotations
 
 from voyage.models import PromptPlan, PromptStage, StyleSpec
 
+# Motion-pace bands derived from the charter's motion_energy_max (§18.1
+# step 4): at/below calm the camera barely drifts, at/below slow it
+# glides, above slow it may travel at a moderate pace. Thresholds are
+# charter-relative, not perceptual absolutes — tune against StyleSpec.
+_MOTION_CALM_MAX = 0.35
+_MOTION_SLOW_MAX = 0.6
+
 # Fragments that attempt to override the human-owned style charter (§18.1
 # step 5). Matched case-insensitively as substrings; the check is
 # deliberately narrow so legitimate scene language never trips it.
@@ -30,9 +37,9 @@ STYLE_OVERRIDE_MARKERS = (
 
 def motion_constraints(style: StyleSpec) -> str:
     """Camera/motion tail derived from the charter (§18.1 step 4)."""
-    if style.motion_energy_max <= 0.35:
+    if style.motion_energy_max <= _MOTION_CALM_MAX:
         pace = "very slow"
-    elif style.motion_energy_max <= 0.6:
+    elif style.motion_energy_max <= _MOTION_SLOW_MAX:
         pace = "slow"
     else:
         pace = "moderate"

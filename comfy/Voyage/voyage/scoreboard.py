@@ -1,4 +1,10 @@
-"""Segment scoreboard view (fast-iteration slice 3).
+"""Segment scoreboard view (fast-iteration slice 3, DESIGN §59).
+
+Why this module exists: `voyage status` shows the live tail, but
+iteration needs a per-segment table — frames, per-stage seconds,
+deterministic visual metrics with deltas, director destination/phase,
+and view paths — across the whole run, including segments committed
+before a daily log rotation (DESIGN §60, via `logrotate`).
 
 `scoreboard_rows` reads one run directory and returns one dict per
 committed segment: frame counts, per-stage seconds, deterministic visual
@@ -25,6 +31,9 @@ METRIC_KEYS = [
     "scene_boundary_strength",
 ]
 """The six §43 deterministic metrics, in summarize_segment order."""
+
+_DELTA_ROUND_DIGITS = 3
+"""Decimal places for per-segment metric deltas (enough to see drift)."""
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -94,9 +103,10 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
             if previous is None:
                 deltas = dict.fromkeys(current, 0.0)
             else:
-                deltas = {
-                    key: round(current[key] - previous.get(key, current[key]), 3) for key in current
-                }
+                deltas = {}
+                for key in current:
+                    baseline = previous.get(key, current[key])
+                    deltas[key] = round(current[key] - baseline, _DELTA_ROUND_DIGITS)
         destination = transition.get("destination")
         row = {
             "segment_id": segment.name,

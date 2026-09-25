@@ -13,28 +13,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import validate_run
-from voyage.config import default_config_toml, load_config
+from voyage.config import load_config
 from voyage.errors import MediaError
-from voyage.media import av_drift_seconds, check_av_alignment
+from voyage.media import av_drift_seconds, check_av_alignment, validate_audio
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "alignment") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    from voyage.persistence import build_manifest, initial_state, write_manifest, write_state
-
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _commit(run_dir: Path, count: int) -> list[str]:
@@ -79,18 +68,19 @@ def test_validate_rejects_drifted_stored_durations(tmp_path: Path) -> None:
     assert any("drift" in error and "000000" in error for error in errors)
 
 
-def test_commit_rejects_av_drifted_audio(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_commit_rejects_av_drifted_audio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Commit-side wiring: drifted probed audio durations fail the commit."""
     import voyage.supervisor as supervisor_module
 
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    real_validate_audio = supervisor_module.validate_audio
+    # The supervisor calls its own module-global `validate_audio` (bound by
+    # `from voyage.media import ...`, which mypy strict does not treat as an
+    # explicit re-export), so the drift wrapper must patch the supervisor
+    # namespace while delegating to the defining module's original.
 
     def _drifted(path: Path, sample_rate: int, channels: int) -> dict[str, object]:
-        info = real_validate_audio(path, sample_rate, channels)
+        info = validate_audio(path, sample_rate, channels)
         return {**info, "duration": float(info["duration"]) + 10.0}
 
     monkeypatch.setattr(supervisor_module, "validate_audio", _drifted)

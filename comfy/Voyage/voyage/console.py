@@ -1,4 +1,4 @@
-"""Beautiful console progress for runs (console-only layer).
+"""Beautiful console progress for runs (console-only layer, DESIGN §59).
 
 Why this module exists: long GPU stages (video render, ACE-Step takes,
 Qwen director calls) used to run silent for minutes — the only feedback
@@ -24,6 +24,10 @@ import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Protocol, TextIO
+
+_SPINNER_TICK_SECONDS = 0.2
+"""Live-elapsed refresh interval for the rich spinner (fast enough to feel
+alive, slow enough to never fight the render thread)."""
 
 
 def rich_available() -> bool:
@@ -164,7 +168,7 @@ class VoyageConsole:
             stop = threading.Event()
 
             def _tick() -> None:
-                while not stop.wait(0.2):
+                while not stop.wait(_SPINNER_TICK_SECONDS):
                     elapsed = time.monotonic() - started
                     status.update(f"◌ {head} ({elapsed:.1f}s)")
 

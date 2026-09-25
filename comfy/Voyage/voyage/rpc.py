@@ -18,7 +18,7 @@ from typing import Any, TextIO
 
 from voyage.errors import FatalWorkerError, RecoverableWorkerError
 from voyage.logrotate import rotate_log
-from voyage.models import WorkerRequest, WorkerResponse
+from voyage.models import WorkerErrorDetail, WorkerRequest, WorkerResponse
 
 OPS = (
     "init",
@@ -36,6 +36,23 @@ OPS = (
 #: without a newline is the same DoS as a partial line that never ends —
 #: the reader must stop accumulating at some point and fail the call.
 MAX_RESPONSE_LINE_BYTES = 8 * 1024 * 1024
+
+#: Bytes per os.read while accumulating a response line. Small enough to
+#: notice the `\\n`/cap/deadline promptly, large enough to avoid a syscall
+#: per byte on multi-megabyte results; any value works, this one just
+#: avoids re-tuning the loop.
+RESPONSE_READ_CHUNK_BYTES = 65536
+
+#: Default per-call timeout in seconds. Mirrors the `[voyage]`
+#: `rpc_timeout_seconds` config default — the config stays the single
+#: source of truth wherever a supervisor exists; this covers bare
+#: SubprocessWorker use (tests, probes) with the same budget.
+DEFAULT_RPC_TIMEOUT_SECONDS = 600.0
+
+#: Grace given to a worker to exit after its stdin closes before SIGKILL.
+#: wait() returns once the kill lands, so this bounds stop() instead of
+#: hanging the supervisor on an unresponsive child.
+WORKER_STOP_GRACE_SECONDS = 10.0
 
 
 def encode_request(request: WorkerRequest) -> str:
@@ -59,8 +76,6 @@ def success(request_id: str, result: dict[str, Any]) -> WorkerResponse:
 
 
 def failure(request_id: str, code: str, message: str, retryable: bool = True) -> WorkerResponse:
-    from voyage.models import WorkerErrorDetail
-
     return WorkerResponse(
         id=request_id,
         ok=False,
@@ -83,7 +98,7 @@ class SubprocessWorker:
         log_path: Path,
         init_op: str | None = "init",
         init_payload: dict[str, Any] | None = None,
-        timeout: float = 600.0,
+        timeout: float = DEFAULT_RPC_TIMEOUT_SECONDS,
     ) -> None:
         self._module = module
         self._workdir = workdir
@@ -138,14 +153,14 @@ class SubprocessWorker:
             except (BrokenPipeError, OSError):
                 pass  # Peer already dead (e.g. SIGKILL); still reap below.
         try:
-            proc.wait(timeout=10)
+            proc.wait(timeout=WORKER_STOP_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             proc.kill()
             # Reap after the kill (issue 058): without this wait the child
             # stays a zombie — wait() returns once SIGKILL lands, so this
             # cannot block beyond a short grace.
             try:
-                proc.wait(timeout=10)
+                proc.wait(timeout=WORKER_STOP_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 pass
         finally:
@@ -191,6 +206,10 @@ class SubprocessWorker:
         try:
             os.set_blocking(raw_fd, False)
         except (OSError, ValueError):
+            # Best-effort only: select() already gated this fd readable, so
+            # a single os.read still returns promptly even if the flag
+            # change fails (odd fds in tests) — and the deadline bounds us
+            # regardless.
             pass
         deadline = time.monotonic() + effective_timeout
         buffer = bytearray()
@@ -206,7 +225,7 @@ class SubprocessWorker:
                     f"worker {self._module} timed out after {effective_timeout}s on {op}"
                 )
             try:
-                chunk = os.read(raw_fd, 65536)
+                chunk = os.read(raw_fd, RESPONSE_READ_CHUNK_BYTES)
             except BlockingIOError:
                 continue  # Spurious readiness; the deadline still bounds us.
             except OSError as exc:
@@ -254,7 +273,12 @@ class SubprocessWorker:
             line = self._read_response_line(proc, op, effective_timeout)
             try:
                 response = decode_response(line)
-            except Exception as exc:
+            except ValueError as exc:
+                # Narrow on purpose: the line is already str, so the only
+                # failure is schema validation (pydantic ValidationError
+                # subclasses ValueError). Anything else (MemoryError and
+                # friends) propagates raw instead of masquerading as a
+                # worker protocol error.
                 raise RecoverableWorkerError(
                     f"worker {self._module} sent a malformed response line: {exc}"
                 ) from exc

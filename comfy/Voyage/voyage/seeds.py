@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import hashlib
 
+#: Top of the derived-seed range: seeds stay in [0, 2**31 - 1] because
+#: downstream consumers (sampler RNGs, worker payloads, the seed column in
+#: metrics) assume non-negative int32. No range check on `run_seed` itself
+#: — config accepts any int and the modulo below already folds every
+#: integer input into range, so validation would reject working runs.
 _MAX_SEED = 2**31 - 1
 
 

@@ -4,12 +4,19 @@ Same `generate_audio` contract as the fake audio worker, but renders real
 music takes with the resident ACE-Step stack (DESIGN §37). ACE renders
 FLAC at its native 48kHz; the worker converts to the requested WAV shape
 so downstream validation and assembly never branch on backend.
+
+GPU ban (§12): the only top-level ACE import is `voyage.audio.acestep`,
+which itself keeps `torch`/`acestep` behind function-local imports — this
+module never imports `torch` at top level. `torch` appears only inside
+`handle_benchmark` for peak-memory accounting, behind a `find_spec` guard.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +35,24 @@ from voyage.workers.loop import checked_request, serve, validate_benchmark_count
 _stack: AceStepStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
+
+BYTES_PER_GIB = 1024**3
+"""Byte-to-GiB divisor for VRAM peak reporting (benchmark only)."""
+
+
+def _require_torch() -> None:
+    """Fail fast with ImportError when `torch` is absent (slim image).
+
+    The benchmark's peak-memory accounting needs `torch.cuda`; without the
+    guard the bare import raises ImportError anyway, but naming the needing
+    op keeps the failure attributable. Same class as the historical
+    failure, so slim-image behavior is unchanged.
+    """
+    if importlib.util.find_spec("torch") is None:
+        raise ImportError(
+            "audio_acestep benchmark needs optional dependency 'torch' "
+            "(slim image carries the fake audio worker only)"
+        )
 
 
 def validate_sample_rate(sample_rate: int) -> None:
@@ -52,7 +77,21 @@ def _require_stack() -> AceStepStack:
 
 
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
+    """Record where/how the ACE stack will load (no GPU touched here).
+
+    Init only records: the stack loads lazily on first render so the
+    process can start while video still owns the GPU (sequential residency,
+    DESIGN §40). Optional fields are type-checked when present so a
+    mistyped `init` fails as INVALID_PAYLOAD instead of misdirecting the
+    later load.
+    """
     global _models_dir, _device
+    if "models_dir" in payload and not isinstance(payload["models_dir"], str):
+        raise TypeError(
+            f"init field 'models_dir' must be str, got {type(payload['models_dir']).__name__}"
+        )
+    if "device" in payload and not isinstance(payload["device"], str):
+        raise TypeError(f"init field 'device' must be str, got {type(payload['device']).__name__}")
     _models_dir = str(payload.get("models_dir", "/models"))
     _device = str(payload.get("device", "cuda:0"))
     return {"status": "READY", "backend": "acestep", "device": _device, "loaded": False}
@@ -64,6 +103,14 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int) -> None:
+    """Convert the native ACE FLAC take to the requested WAV shape (ffmpeg arg-list).
+
+    No shell: the arg-list form keeps spaces in paths safe. A non-zero
+    ffmpeg exit raises RuntimeError (not a VoyageError), so the worker loop
+    maps it to retryable WORKER_ERROR — a convert failure after a good
+    render smells transient (disk/memory/ffmpeg), worth one supervisor
+    restart rather than an instant Fatal.
+    """
     command = [
         "ffmpeg",
         "-y",
@@ -113,7 +160,10 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
     validate_task_type(raw_task_type)
     reference_audio = payload.get("reference_audio")
     validate_reference_audio(reference_audio)
-    output = Path(str(payload["output_path"]))
+    output_raw = str(payload["output_path"])
+    if not output_raw.strip():
+        raise ValueError("output_path must be non-empty")
+    output = Path(output_raw)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="voyage-take-") as staging:
         rendered = render_take(
@@ -150,8 +200,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     warmup = int(payload.get("warmup", 1))
     measured = int(payload.get("measured", 3))
     validate_benchmark_counts(warmup, measured)
-    import time
-
+    _require_torch()
     import torch
 
     _require_stack()
@@ -166,14 +215,16 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     }
     walls: list[float] = []
     peaks: list[float] = []
-    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
-        for index in range(warmup + measured):
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as staging_directory:
+        for take_index in range(warmup + measured):
             torch.cuda.reset_peak_memory_stats()
             started = time.monotonic()
-            handle_generate_audio({**probe, "output_path": str(Path(tmp) / f"t{index}.wav")})
+            handle_generate_audio(
+                {**probe, "output_path": str(Path(staging_directory) / f"t{take_index}.wav")}
+            )
             elapsed = time.monotonic() - started
-            peak_gib = torch.cuda.max_memory_allocated() / 1024**3
-            if index >= warmup:
+            peak_gib = torch.cuda.max_memory_allocated() / BYTES_PER_GIB
+            if take_index >= warmup:
                 walls.append(elapsed)
                 peaks.append(peak_gib)
     mean = sum(walls) / len(walls)
@@ -201,6 +252,7 @@ def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_shutdown(payload: dict[str, Any]) -> dict[str, Any]:
+    """Release the ACE stack and stop the worker loop."""
     del payload
     global _stack
     if _stack is not None:
@@ -209,7 +261,18 @@ def handle_shutdown(payload: dict[str, Any]) -> dict[str, Any]:
     return {"stopped": True}
 
 
+def handle_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Derive a checkpoint id (the stack itself is not serializable)."""
+    return {"checkpoint_id": f"audio-{payload.get('segment_id', 'none')}"}
+
+
+def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
+    """Acknowledge a checkpoint id; the stack rebuilds lazily on next render."""
+    return {"resumed": True, "checkpoint_id": payload.get("checkpoint_id")}
+
+
 def main() -> None:
+    """Serve the ACE-Step audio op map over the shared JSONL loop."""
     serve(
         {
             "init": handle_init,
@@ -217,13 +280,8 @@ def main() -> None:
             "generate_audio": handle_generate_audio,
             "benchmark": handle_benchmark,
             "evict_gpu": handle_evict_gpu,
-            "checkpoint": lambda payload: {
-                "checkpoint_id": f"audio-{payload.get('segment_id', 'none')}"
-            },
-            "resume": lambda payload: {
-                "resumed": True,
-                "checkpoint_id": payload.get("checkpoint_id"),
-            },
+            "checkpoint": handle_checkpoint,
+            "resume": handle_resume,
             "shutdown": handle_shutdown,
         }
     )

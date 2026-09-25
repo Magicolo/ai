@@ -37,9 +37,15 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         os.replace(tmp_name, destination)
         fsync_dir(destination.parent)
     except BaseException:
+        # BaseException (not Exception) on purpose: the temp file must not
+        # litter the run dir even on KeyboardInterrupt/SystemExit. The error
+        # is always re-raised below — this is cleanup, never swallowing.
         try:
             os.unlink(tmp_name)
         except OSError:
+            # Best-effort: the replace may already have consumed the temp
+            # path, or the directory may be gone — either way there is
+            # nothing left worth failing the original error for.
             pass
         raise
 

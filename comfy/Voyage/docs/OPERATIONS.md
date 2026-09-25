@@ -58,7 +58,7 @@ Non-TTY invocations and images without `textual` get guidance + exit 2
 dependency (slim image via `pyproject.toml`, worker images via explicit
 `pip install`). The worker thread's stdout/stderr are redirected into
 the run log so stray prints can't fight Textual's screen
-(`voyage/tui.py:780`). Stop writes STOP_REQUESTED to the run-dir state
+(`voyage/tui.py:955`, `with redirect_stdout(buffer), redirect_stderr(buffer)`). Stop writes STOP_REQUESTED to the run-dir state
 — the same control plane as `voyage stop` — so the run exits at the
 next segment boundary and still validates + finalizes. Note: the
 default backend is `ltxv` (CUDA); bare `./scripts/run.sh` on a GPU box
@@ -73,12 +73,12 @@ appended (e.g. the CUDA-stack reason), never a stuck view.
 
 ### Form fields (one list, required first)
 
-`voyage/tui.py:379-470`; verbose help in `FIELD_HELP`,
+`voyage/tui.py:495` (`_field_row`; fields yielded at `:527-641`); verbose help in `FIELD_HELP`,
 `voyage/tui_state.py`:
 
 - Style (required) — human-owned string, baked into the run config
   and every prompt; compact multiline editor (height 3), focused on
-  mount (`AUTO_FOCUS`, `voyage/tui.py:258`) so typing lands with no
+  mount (`AUTO_FOCUS`, `voyage/tui.py:296`) so typing lands with no
   click.
 - Name (required) — the run name; doubles as the output folder
   (`output/<name>`) and final video (`output/<name>/final.mp4`) —
@@ -109,11 +109,11 @@ carries focus/invalid and spacing never shifts.
 ### Focus-driven help panel
 
 The form sits beside a help panel (`#form-columns` /
-`#help-panel`, `voyage/tui.py:544-548`) showing an overview plus the
+`#help-panel`, `voyage/tui.py:702-707`) showing an overview plus the
 focused field's `FIELD_HELP` text and its current error
 (`#help-body`, updated on `DescendantFocus`). On terminals narrower
 than 100 cells the panel stacks below the form (`NARROW_WIDTH`,
-`voyage/tui.py:110`).
+`voyage/tui.py:115`).
 
 ### Key map (mouse optional)
 

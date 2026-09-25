@@ -10,6 +10,11 @@ next launch prefills the form from ``LAST_SETTINGS_PATH`` via
 :func:`load_last_settings` (Stream B), and every Generate stores the
 submitted form via :func:`save_last_settings`. Both directions stay
 silent on I/O failure so a bad home directory can never break the UI.
+
+DESIGN §140 (launcher-TUI as-built): bare ``voyage`` configures the
+one-shot ``generate`` command; plan math below stays single-sourced
+with ``cli._frames_per_segment`` (issue 024) so TUI predictions can
+never drift from CLI truth.
 """
 
 from __future__ import annotations
@@ -28,6 +33,12 @@ except ImportError:  # Python 3.10 worker image (upstream env)
 BACKENDS = ("ltxv", "longlive2", "causvid", "fake")
 DIRECTORS = ("qwen", "deterministic")
 QUANTIZATIONS = ("fp8", "bf16")
+
+_FALLBACK_FRAMES_PER_SEGMENT = 48
+"""Frames/segment for unknown backends (mirrors fake `segment_frames`)."""
+
+_FALLBACK_FPS = 24
+"""FPS for unknown backends (mirrors `_frames_per_segment` default)."""
 
 # Home for the last submitted TUI form (TOML). Stream B loads it at launch
 # to prefill the form and saves it on every Generate.
@@ -122,10 +133,15 @@ def _positive_int(raw: str, field_name: str, errors: list[str]) -> int | None:
 # "." — initializing inside output/ itself would scatter run files among
 # every other run (issue 080). ".." stays rejected via the substring check
 # in _flat_folder_name (traversal, issue 008's class).
+# COM/LPT indices cover COM1-COM9 + LPT1-LPT9; the end is exclusive,
+# matching range().
+_WINDOWS_INDEX_FIRST = 1
+_WINDOWS_INDEX_LAST_EXCLUSIVE = 10
+
 _RESERVED_FOLDER_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
-    | {f"com{index}" for index in range(1, 10)}
-    | {f"lpt{index}" for index in range(1, 10)}
+    | {f"com{index}" for index in range(_WINDOWS_INDEX_FIRST, _WINDOWS_INDEX_LAST_EXCLUSIVE)}
+    | {f"lpt{index}" for index in range(_WINDOWS_INDEX_FIRST, _WINDOWS_INDEX_LAST_EXCLUSIVE)}
 )
 
 
@@ -169,10 +185,10 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
             f"director must be one of {', '.join(DIRECTORS)}, got {state.director!r}"
         )
     if state.blocks.strip():
-        slot: list[str] = []
-        _positive_int(state.blocks.strip(), "blocks", slot)
-        if slot:
-            errors["blocks"] = slot[0]
+        blocks_errors: list[str] = []
+        _positive_int(state.blocks.strip(), "blocks", blocks_errors)
+        if blocks_errors:
+            errors["blocks"] = blocks_errors[0]
     if state.take_seconds.strip():
         try:
             take = float(state.take_seconds.strip())
@@ -192,15 +208,15 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
             f"quantization must be one of {', '.join(QUANTIZATIONS)}, got {state.quantization!r}"
         )
     if state.beats_per_segment.strip():
-        beats_slot: list[str] = []
-        _positive_int(state.beats_per_segment.strip(), "beats-per-segment", beats_slot)
-        if beats_slot:
-            errors["beats_per_segment"] = beats_slot[0]
+        beats_errors: list[str] = []
+        _positive_int(state.beats_per_segment.strip(), "beats-per-segment", beats_errors)
+        if beats_errors:
+            errors["beats_per_segment"] = beats_errors[0]
     if state.drift_every_n.strip():
-        drift_slot: list[str] = []
-        _positive_int(state.drift_every_n.strip(), "drift-every-n", drift_slot)
-        if drift_slot:
-            errors["drift_every_n"] = drift_slot[0]
+        drift_errors: list[str] = []
+        _positive_int(state.drift_every_n.strip(), "drift-every-n", drift_errors)
+        if drift_errors:
+            errors["drift_every_n"] = drift_errors[0]
     return errors
 
 
@@ -261,6 +277,10 @@ def _planning_frames_and_fps(backend: str, blocks: int) -> tuple[int, int]:
     from voyage.cli import _frames_per_segment
     from voyage.config import ProjectConfig, VideoBackendName, VideoConfig, _video_preset
 
+    if backend not in BACKENDS:
+        # Unknown backends fall back to fake geometry (the backend
+        # Literal below would otherwise raise ValidationError instead).
+        return _FALLBACK_FRAMES_PER_SEGMENT, _FALLBACK_FPS
     try:
         preset_fps = _video_preset(backend).get("fps", 24)
         fps = preset_fps if isinstance(preset_fps, int) and preset_fps > 0 else 24

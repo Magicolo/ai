@@ -13,8 +13,10 @@ voyage (§44).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
+import os
 import time
 from typing import Any, cast
 
@@ -50,6 +52,27 @@ MAX_NEW_TOKENS_LIMIT = 4096
 """Upper bound for `max_new_tokens`: unbounded budgets run away on CPU."""
 
 
+def _require_module(module_name: str) -> None:
+    """Fail fast with ImportError when an optional model stack is absent.
+
+    Why a `find_spec` guard instead of a bare import: the worker loop maps
+    `ImportError` (like any unexpected exception) to retryable WORKER_ERROR,
+    but the message from a bare `import torch` deep inside a loader names
+    the module without saying which model stack needed it. The guard raises
+    the same `ImportError` class the loaders historically raised (pinned by
+    `test_director_request_validation`), with the needing stack named, and
+    — because it runs before any cache mutation — a failed load never
+    clobbers the resident entry. GPU stays behind these lazy imports (§12
+    hard ban: no `torch`/`transformers`/`sentence_transformers` at module
+    scope, verified by grep).
+    """
+    if importlib.util.find_spec(module_name) is None:
+        raise ImportError(
+            f"director worker needs optional dependency {module_name!r} "
+            "for this backend (slim image carries the deterministic backend only)"
+        )
+
+
 def validate_max_new_tokens(max_new_tokens: int) -> None:
     """Reject token budgets that generate nothing or run away (issue 075)."""
     if max_new_tokens < 1 or max_new_tokens > MAX_NEW_TOKENS_LIMIT:
@@ -67,8 +90,8 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
     # worker re-`init` with a new model must not keep deciding with the
     # old weights. Single resident entry (no per-id growth, cf. issue 030).
     if "model" not in _QWEN or _QWEN.get("model_id") != model_id:
-        import os
-
+        _require_module("torch")
+        _require_module("transformers")
         import torch
         from transformers import (
             AutoModelForCausalLM,
@@ -115,6 +138,8 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
     """
     # Issue 075: same reload-on-id-change contract as `_load_qwen`.
     if "model" not in _INSPECTOR or _INSPECTOR.get("model_id") != model_id:
+        _require_module("torch")
+        _require_module("transformers")
         import torch
         from transformers import AutoModelForMultimodalLM, AutoProcessor
 
@@ -136,6 +161,7 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
 def _load_embedder(model_id: str) -> Any:
     # Issue 075: same reload-on-id-change contract as `_load_qwen`.
     if "model" not in _EMBEDDER or _EMBEDDER.get("model_id") != model_id:
+        _require_module("sentence_transformers")
         from sentence_transformers import SentenceTransformer
 
         _EMBEDDER["model"] = SentenceTransformer(model_id, device="cpu")
@@ -145,6 +171,7 @@ def _load_embedder(model_id: str) -> Any:
 
 def _inspector_generate(model_id: str, frame_path: str, prompt: str, max_new_tokens: int) -> str:
     """Run one non-thinking VLM pass over a single frame PNG (greedy)."""
+    _require_module("torch")
     import torch
 
     model, processor = _load_inspector(model_id)
@@ -208,6 +235,12 @@ def handle_inspect(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_json(text: str) -> dict[str, Any]:
+    """Pull the first `{...}` object out of chatty model output (pure).
+
+    Strips markdown fences first (the strict retry prompt still returns
+    fenced JSON often); raises ValueError when no object survives so the
+    §51 chain can retry or fall back deterministically.
+    """
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
@@ -230,6 +263,7 @@ def _qwen_generate(
     max_new_tokens: int,
     enable_thinking: bool,
 ) -> str:
+    _require_module("torch")
     import torch
 
     model, tokenizer = _load_qwen(model_id)
@@ -265,7 +299,7 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     validate_max_new_tokens(max_new_tokens)
     enable_thinking = bool(payload.get("enable_thinking", False))
     decision_index = int(payload["decision_index"])
-    phase = cast("TransitionPhase", str(payload.get("phase", "ESTABLISH")))
+    phase = cast(TransitionPhase, str(payload.get("phase", "ESTABLISH")))
     user_message = build_director_user_message(
         style_charter=str(payload.get("style_charter", "")),
         current_world=str(payload.get("current_world", "")),
@@ -327,7 +361,7 @@ def handle_decide(payload: dict[str, Any]) -> dict[str, Any]:
         style=str,
     )
     director = DeterministicDirector(style=str(payload["style"]))
-    phase = cast("TransitionPhase", str(payload["phase"]))
+    phase = cast(TransitionPhase, str(payload["phase"]))
     decision = director.propose(
         decision_index=int(payload["decision_index"]),
         current_concept=str(payload["current_concept"]),
@@ -357,6 +391,17 @@ def handle_embed(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
+    """Record the director backend + model ids (no weights load here).
+
+    Optional fields are type-checked when present so a mistyped `init`
+    fails as INVALID_PAYLOAD (fatal) instead of misdirecting every later
+    `decide`. Weights stay lazy: a long-lived worker re-`init` with a new
+    id reloads on next use (issue 075), and the process can start while
+    video still owns the GPU.
+    """
+    for key in ("backend", "model_id", "embedding_model_id", "inspector_model_id"):
+        if key in payload and not isinstance(payload[key], str):
+            raise TypeError(f"init field {key!r} must be str, got {type(payload[key]).__name__}")
     _CONFIG.update(
         {
             key: payload[key]
@@ -365,6 +410,24 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
         }
     )
     return {"status": "READY", "backend": _CONFIG["backend"]}
+
+
+def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
+    """Liveness probe reporting which optional stacks are resident."""
+    del payload
+    return {
+        "status": "READY",
+        "backend": _CONFIG["backend"],
+        "qwen_loaded": "model" in _QWEN,
+        "embedder_loaded": "model" in _EMBEDDER,
+        "inspector_loaded": "model" in _INSPECTOR,
+    }
+
+
+def handle_shutdown(payload: dict[str, Any]) -> dict[str, Any]:
+    """Stop the worker loop; resident CPU stacks die with the process."""
+    del payload
+    return {"stopped": True}
 
 
 def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
@@ -381,11 +444,11 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         "backend": "deterministic",
     }
     walls: list[float] = []
-    for index in range(warmup + measured):
+    for decision_index in range(warmup + measured):
         started = time.monotonic()
-        handle_decide({**probe, "decision_index": index})
+        handle_decide({**probe, "decision_index": decision_index})
         elapsed = time.monotonic() - started
-        if index >= warmup:
+        if decision_index >= warmup:
             walls.append(elapsed)
     mean = sum(walls) / len(walls)
     return {
@@ -398,21 +461,16 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Serve the director op map over the shared JSONL loop."""
     serve(
         {
             "init": handle_init,
-            "health": lambda _payload: {
-                "status": "READY",
-                "backend": _CONFIG["backend"],
-                "qwen_loaded": "model" in _QWEN,
-                "embedder_loaded": "model" in _EMBEDDER,
-                "inspector_loaded": "model" in _INSPECTOR,
-            },
+            "health": handle_health,
             "decide": handle_decide,
             "embed": handle_embed,
             "inspect": handle_inspect,
             "benchmark": handle_benchmark,
-            "shutdown": lambda _payload: {"stopped": True},
+            "shutdown": handle_shutdown,
         }
     )
 

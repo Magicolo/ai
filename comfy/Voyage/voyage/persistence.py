@@ -9,11 +9,19 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
+import voyage
 from voyage import paths
 from voyage.atomic import atomic_write_json, read_json
 from voyage.config import ProjectConfig
 from voyage.errors import StateError
 from voyage.models import RunState
+
+#: Timeline geometry recorded in the run manifest. Informational only —
+#: no reader scales media from it (the supervisor's frame counts are the
+#: timeline truth); kept as named constants so a future geometry change
+#: updates the manifest in exactly one place.
+FINAL_VIDEO_WIDTH = 768
+FINAL_VIDEO_HEIGHT = 432
 
 
 def build_manifest(
@@ -26,7 +34,7 @@ def build_manifest(
         "schema_version": paths.SCHEMA_VERSION,
         "run_id": config.run_id,
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),  # noqa: UP017 — worker image is py3.10, datetime.UTC needs 3.11+
-        "voyage_version": __import__("voyage").__version__,
+        "voyage_version": voyage.__version__,
         "config_sha256": config_sha256,
         "style": config.style,
         "hardware": hardware,
@@ -43,8 +51,8 @@ def build_manifest(
         "seed": config.seed,
         "timeline": {
             "fps": config.video.fps,
-            "final_width": 768,
-            "final_height": 432,
+            "final_width": FINAL_VIDEO_WIDTH,
+            "final_height": FINAL_VIDEO_HEIGHT,
         },
         "committed_segments": 0,
     }
@@ -80,7 +88,14 @@ def read_state(run_dir: Path) -> RunState:
         raise StateError(f"missing {paths.STATE_FILENAME} in {run_dir}")
     try:
         return RunState.model_validate(read_json(path))
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
+        # Same taxonomy as read_manifest above (issue 002): unreadable
+        # files (OSError) and torn/hand-edited JSON or schema violations
+        # (ValueError covers JSONDecodeError, UnicodeDecodeError, and
+        # pydantic ValidationError) read as StateError. Anything else
+        # (MemoryError and friends) propagates raw — masking resource
+        # exhaustion as corrupt state would send recovery down the
+        # wrong path.
         raise StateError(f"invalid state file {path}: {exc}") from exc
 
 

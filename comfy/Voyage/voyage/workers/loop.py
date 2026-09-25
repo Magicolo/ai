@@ -1,4 +1,20 @@
-"""Shared worker main loop: read JSONL requests, dispatch, write JSONL."""
+"""Shared worker main loop: read JSONL requests, dispatch, write JSONL.
+
+Every worker process (`audio`, `video`, `director`, `audio_acestep`, and the
+GPU video workers owned by other tracks) runs this loop — exactly one copy
+of the framing, stdout quarantine, and error taxonomy (DESIGN §§45-46 for
+the transport, §48 for the error classes). Handlers stay pure
+`dict-in/dict-out` so the JSON-serializable boundary is visible in their
+signatures; all fallible per-op checks live in `checked_request` /
+`validate_*` and run before any model work.
+
+Error taxonomy over the wire (issue 007): deterministic failures carry
+`retryable=False` so the supervisor maps them straight to `FatalWorkerError`
+instead of burning restart budget; unexpected failures keep the default
+`retryable=True` so the supervisor restarts once. Upstream model code prints
+to stdout, so each handler runs under `redirect_stdout(sys.stderr)` — stdout
+is reserved for RPC framing (see `voyage/rpc.py`).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +29,22 @@ from voyage.errors import VoyageError
 from voyage.rpc import decode_request, encode_response, failure, success
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
+"""One op handler: JSON-serializable payload in, JSON-serializable result out."""
+
+ERROR_MALFORMED = "MALFORMED"
+"""Torn JSONL line with a salvageable id: retrying the same bytes cannot succeed."""
+
+ERROR_UNKNOWN_OP = "UNKNOWN_OP"
+"""No handler registered for the requested op: a supervisor/worker version skew."""
+
+ERROR_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+"""Handler is a stub in this image (e.g. GPU op on a fake worker)."""
+
+ERROR_INVALID_PAYLOAD = "INVALID_PAYLOAD"
+"""Deterministic payload/plumbing failure past `checked_request` (bad numbers, keys)."""
+
+ERROR_WORKER = "WORKER_ERROR"
+"""Unexpected failure: retryable so the supervisor's restart path engages."""
 
 
 def serve(handlers: dict[str, Handler]) -> None:
@@ -37,7 +69,7 @@ def serve(handlers: dict[str, Handler]) -> None:
                     encode_response(
                         failure(
                             salvaged_id,
-                            "MALFORMED",
+                            ERROR_MALFORMED,
                             f"malformed request: {decode_exc}",
                             retryable=False,
                         )
@@ -49,7 +81,9 @@ def serve(handlers: dict[str, Handler]) -> None:
         if handler is None:
             stdout.write(
                 encode_response(
-                    failure(request.id, "UNKNOWN_OP", f"unknown op: {request.op}", retryable=False)
+                    failure(
+                        request.id, ERROR_UNKNOWN_OP, f"unknown op: {request.op}", retryable=False
+                    )
                 )
             )
             stdout.flush()
@@ -62,7 +96,9 @@ def serve(handlers: dict[str, Handler]) -> None:
                 result = handler(request.payload)
         except NotImplementedError as exc:
             stdout.write(
-                encode_response(failure(request.id, "NOT_IMPLEMENTED", str(exc), retryable=False))
+                encode_response(
+                    failure(request.id, ERROR_NOT_IMPLEMENTED, str(exc), retryable=False)
+                )
             )
         except VoyageError as exc:
             # Preserve the error class over the wire (issue 007): the code
@@ -80,7 +116,7 @@ def serve(handlers: dict[str, Handler]) -> None:
                 encode_response(
                     failure(
                         request.id,
-                        "INVALID_PAYLOAD",
+                        ERROR_INVALID_PAYLOAD,
                         f"{type(exc).__name__}: {exc}",
                         retryable=False,
                     )
@@ -88,7 +124,7 @@ def serve(handlers: dict[str, Handler]) -> None:
             )
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
-            stdout.write(encode_response(failure(request.id, "WORKER_ERROR", str(exc))))
+            stdout.write(encode_response(failure(request.id, ERROR_WORKER, str(exc))))
         else:
             stdout.write(encode_response(success(request.id, result)))
         stdout.flush()
@@ -105,13 +141,15 @@ def _salvaged_request_id(line: str) -> str | None:
     return None
 
 
-def checked_request(payload: dict[str, Any], **required: type) -> None:
+def checked_request(payload: dict[str, Any], **required: type[Any]) -> None:
     """Fail fast on missing or mistyped payload fields (issue 007).
 
-    Presence alone let `{"frames": "abc"}` through to burn a GPU load
-    before failing deep inside the worker — the type is now enforced here,
-    before any model work. Plain ints satisfy a float requirement (JSON has
-    no int/float distinction worth dying over); bools never satisfy int.
+    The op boundary contract for every worker handler: presence plus type
+    are enforced here, before any filesystem side effect or model work, so
+    a bad payload surfaces as INVALID_PAYLOAD (fatal) instead of burning a
+    GPU load and failing deep inside the worker. Plain ints satisfy a float
+    requirement (JSON has no int/float distinction worth dying over); bools
+    never satisfy int.
     """
     for key, expected in required.items():
         if key not in payload:

@@ -15,6 +15,16 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 
+#: Segment-number bounds (issue 091): the six-digit `%06d` id doubles as
+#: the lexicographic/contiguous invariant validate_run relies on, so the
+#: range is closed — negative inputs previously rendered as '-00001' and
+#: huge ids grew past six digits into directory names and ordering checks.
+MIN_SEGMENT_NUMBER = 0
+MAX_SEGMENT_NUMBER = 999999
+#: Width of the zero-padded segment id; kept as a constant (not a bare
+#: `06` in the format spec) so the padding visibly tracks the max above.
+SEGMENT_ID_WIDTH = 6
+
 CONFIG_FILENAME = "voyage.toml"
 MANIFEST_FILENAME = "run_manifest.json"
 STATE_FILENAME = "state.json"
@@ -32,6 +42,7 @@ _LAYOUT_ANCHORS = frozenset({"segments", "audio", "novelty", "logs"})
 def segment_dir(run_dir: Path, segment_id: str) -> Path:
     return run_dir / SEGMENTS_DIRNAME / segment_id
 
+
 def format_segment_id(number: int) -> str:
     """Format a segment number as a zero-padded six-digit id.
 
@@ -40,9 +51,12 @@ def format_segment_id(number: int) -> str:
     — -1 previously rendered as '-00001' and huge ids grew past six
     digits into directory names and ordering checks.
     """
-    if number < 0 or number > 999999:
-        raise ValueError(f"segment number must be within [0, 999999] (got {number})")
-    return f"{number:06d}"
+    if number < MIN_SEGMENT_NUMBER or number > MAX_SEGMENT_NUMBER:
+        raise ValueError(
+            f"segment number must be within"
+            f" [{MIN_SEGMENT_NUMBER}, {MAX_SEGMENT_NUMBER}] (got {number})"
+        )
+    return f"{number:0{SEGMENT_ID_WIDTH}d}"
 
 
 def resolve_stored_path(run_dir: Path, stored: str | Path) -> Path:

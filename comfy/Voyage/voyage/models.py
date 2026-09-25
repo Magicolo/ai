@@ -81,6 +81,27 @@ class StyleSpec(BaseModel):
     surrealism: float = 0.70
     transition_smoothness: float = 0.90
 
+    @model_validator(mode="after")
+    def bands_ordered(self) -> StyleSpec:
+        """Reject inverted calibration bands that silently mis-flag.
+
+        Why: the inspector compares measured metrics against these
+        min/max pairs — an inverted band (min > max) would flag every
+        segment or none, with no error at the comparison site.
+        """
+        for minimum_name, maximum_name in (
+            ("motion_energy_min", "motion_energy_max"),
+            ("visual_complexity_min", "visual_complexity_max"),
+            ("semantic_drift_min", "semantic_drift_max"),
+        ):
+            minimum = getattr(self, minimum_name)
+            maximum = getattr(self, maximum_name)
+            if maximum < minimum:
+                raise ValueError(
+                    f"{maximum_name} must be >= {minimum_name} (got {minimum}..{maximum})"
+                )
+        return self
+
 
 TransitionMechanism = Literal[
     "material_metamorphosis",
@@ -167,14 +188,20 @@ class RunState(BaseModel):
     schema_version: int = 1
     run_id: str
     status: LifecycleStatus = "CREATED"
-    next_segment_number: int = 0
-    committed_segments: int = 0
-    timeline_frames: int = 0
+    # Counters only ever advance from zero (validate_run relies on the
+    # contiguous/non-negative invariant), so negatives are corrupt state,
+    # not data — fail loud at the read_state boundary instead of letting
+    # a torn write strand the run. fps is deliberately unguarded: the CLI
+    # tolerates legacy fps=0 states, and audio_buffer_seconds takes
+    # planner-computed floats whose sign this layer cannot judge.
+    next_segment_number: int = Field(default=0, ge=0)
+    committed_segments: int = Field(default=0, ge=0)
+    timeline_frames: int = Field(default=0, ge=0)
     fps: int = 24
     current_concept: str = ""
     destination_concept: str = ""
     phase: TransitionPhase = "ESTABLISH"
-    decision_index: int = 0
+    decision_index: int = Field(default=0, ge=0)
     video_checkpoint: dict[str, Any] = Field(default_factory=dict)
     audio_buffer_seconds: float = 0.0
     last_error: str | None = None

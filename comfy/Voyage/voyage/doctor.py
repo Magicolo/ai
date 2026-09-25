@@ -32,15 +32,27 @@ MODELS_DIR_ENVIRONMENT_VARIABLE = "VOYAGE_MODELS_DIR"
 MODELS_DIR_DEFAULT = "/models"
 """Container mount point when the env var is unset."""
 
+_SUBPROCESS_TIMEOUT_SECONDS = 15
+"""Wall-clock cap per probe subprocess (nvidia-smi/ffmpeg must fail fast)."""
+
+_BYTES_PER_GIB = 1024**3
+"""Byte-to-GiB divisor for the disk-free fact (matches `cli.cmd_status`)."""
+
 
 def _capture(argv: list[str]) -> str | None:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0:
+    if completed.returncode != 0:
         return None
-    return proc.stdout.strip() or None
+    return completed.stdout.strip() or None
 
 
 def _torch_cuda() -> bool | None:
@@ -61,7 +73,7 @@ def _torch_cuda() -> bool | None:
 def _disk_free_gib(path: Path) -> float | None:
     """Free space at `path` in GiB, None when the stat fails."""
     try:
-        return shutil.disk_usage(path).free / (1024**3)
+        return shutil.disk_usage(path).free / _BYTES_PER_GIB
     except OSError:
         return None
 
@@ -109,8 +121,8 @@ def check_models(present_dir: Path | None = None) -> dict[str, Any]:
     for name, verify in verifiers:
         try:
             ok, message = verify(target)
-        except Exception as exc:
-            ok, message = False, f"{name} check failed: {exc}"
+        except Exception as error:
+            ok, message = False, f"{name} check failed: {error}"
         checks[name] = {"ok": bool(ok), "message": str(message)}
     return {
         "dir": str(target),

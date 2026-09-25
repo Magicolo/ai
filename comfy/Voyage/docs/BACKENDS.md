@@ -26,7 +26,7 @@ models must fail `init` loudly, never render silently wrong media.
 | Role | Backend | What it renders |
 |------|---------|-----------------|
 | video | `fake` | deterministic `testsrc` 320×180-class H.264 |
-| audio | `fake` | `sine` tone, WAV slices / FLAC takes |
+| audio | `fake` | `sine` tone, WAV slices / WAV takes |
 | director | `deterministic` | rule-based decisions, no embeddings |
 | inspector | `skipped` | visual feedback off |
 

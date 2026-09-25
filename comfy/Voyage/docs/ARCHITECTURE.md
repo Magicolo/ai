@@ -17,8 +17,8 @@
 ## Process ownership
 
 - **Supervisor** (`voyage/supervisor.py`): the only process that reads or
-  writes `state.json`, `manifest.json`, segment dirs, the concept store,
-  the audio ledger, and `metrics.jsonl`. Workers receive file paths in
+  writes `state.json`, `run_manifest.json` (`voyage/paths.py:29`),
+  segment dirs, the concept store, the audio ledger, and `metrics.jsonl`. Workers receive file paths in
   RPC payloads and write only the media files they are told to.
 - **Workers**: stateless across segments except the video stream session
   (KV caches persist across blocks *and* segments by design — that is the
@@ -47,8 +47,9 @@ video from tape. `del` alone frees nothing — eviction is
 
 ## What lives where in a run dir
 
-`config.toml`, `manifest.json`, `state.json`, `concepts.json` (legacy),
-`novelty/` (vectors + index + jsonl), `segments/NNNNNN/` (video.mp4,
-audio.wav, world/transition/prompt-plan/audio-state/metrics.json,
-sha256.json, recovery.pt on GPU backends, DONE), `logs/` (metrics.jsonl,
+`voyage.toml` (`voyage/paths.py:28`), `run_manifest.json` (`:29`),
+`state.json` (`:30`), `concepts.jsonl` (`:31`), `novelty/` (vectors +
+index + jsonl), `segments/NNNNNN/` (video.mp4, audio.wav,
+world/transition/prompt-plan/audio-state/metrics.json, sha256.json,
+recovery.pt on GPU backends, DONE), `logs/` (metrics.jsonl,
 *-worker.log, bench outputs), `final.mp4` after finalize.

@@ -5,5 +5,15 @@
 output/
 .git
 *_cache/
+__pycache__/
+*.pyc
+# Stray run artifacts at the Voyage root (mirrors .gitignore): a
+# misdirected --output or local probe must never inflate the build
+# context or churn the layer cache, esp. multi-hundred-MB media.
+*.mp4
+*.wav
+*.flac
+*.pt
+*.log
 issues/
 reports/

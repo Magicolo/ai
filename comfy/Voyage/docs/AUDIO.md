@@ -15,9 +15,13 @@ Music is **not** rendered per segment. A ledger (`takes.jsonl`) tracks
 takes of `take_seconds = 45 s`; each commit extends coverage only when
 the buffered audio ahead of the video timeline drops within
 `ahead_seconds = 20 s` (invariant: `take_seconds > ahead_seconds`, pinned
-by test). Take files are FLAC (ACE-Step's native container); segment
-slices are WAV. Take filenames must end `.wav`/`.flac` to match their
-codec — the flac muxer rejects `pcm_s16le` mislabeled as `.wav`.
+by test). Takes land as WAV on disk (`voyage/supervisor.py:1095`,
+`take_file = audio_dir / f"{take.take_id}.wav"`; the ACE worker renders
+FLAC staging then converts to the requested WAV shape,
+`voyage/workers/audio_acestep.py:66-80`, so downstream never branches on
+backend); segment slices are WAV too. Take filenames must end `.wav`
+to match their codec (`pcm_s16le`) — the flac muxer rejects `pcm_s16le`
+mislabeled as `.wav`.
 
 ## Music continuation
 
@@ -38,5 +42,6 @@ shortest slice; every assembly step verifies non-empty outputs.
 ## Final mix
 
 `finalize` muxes each segment's video.mp4 + audio.wav, concats, and
-encodes once (768×432, fps, AAC 256 kHz) with checksum, frame-range, and
+encodes once (768×432 @ 24 fps, `voyage/media.py:465-467`, AAC 256k
+bitrate at 48 kHz sample rate, `voyage/media.py:606-608`) with checksum, frame-range, and
 A/V-alignment checks (§56 steps 4–6). Config: 48 kHz stereo throughout.
