@@ -139,7 +139,12 @@ class _FakeTorch:
         self.cuda = _FakeCuda()
         self.bfloat16 = "bfloat16"
         self.generator_seeds: list[int] = []
+        self.global_seeds: list[int] = []
         self.randn_calls: list[dict[str, Any]] = []
+
+    def manual_seed(self, seed: int) -> None:
+        """Record global-RNG seeding (real torch seeds CPU + all CUDA)."""
+        self.global_seeds.append(seed)
 
     def Generator(self, device: str = "cpu") -> _FakeGenerator:
         del device
@@ -502,6 +507,18 @@ def test_committed_markers_prove_tail_drop(tmp_path: Path, monkeypatch: pytest.M
         assert _marker(frame) == int(index / 81 * 255)
     for offset, frame in enumerate(tail_frames):
         assert _marker(frame) == int((63 + offset) / 81 * 255)
+
+
+def test_rollout_seeds_global_rng_from_rollout_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream inference draws unseeded global-CUDA RNG per call (measured:
+    advances cuda0 state; same-seed rollouts diverged ~0.5 latent mean-abs)
+    — each rollout must seed it from its seed or nothing is reproducible."""
+    session, torch, _pipeline, _media = _test_session(monkeypatch)
+    session._run_rollout("amber dunes", 777, None, {"prompt_embeds": "x"})
+    session._run_rollout("amber dunes", 778, None, {"prompt_embeds": "x"})
+    assert torch.global_seeds == [777, 778]
 
 
 def test_scene_cut_starts_fresh_then_chains(

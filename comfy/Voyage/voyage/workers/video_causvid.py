@@ -537,9 +537,16 @@ class CausvidSession:
         One shuttle per call — callers pre-encode the whole segment up
         front so N rollouts cost one 11 GB roundtrip, not N (repeated
         alloc/free cycles fragment the allocator into OOMs).
+
+        The collect + empty_cache before the move matters on resident
+        sessions: the previous segment leaves cached-but-unused blocks that
+        fragment the 11 GB T5 placement (measured: 2nd-segment shuttle OOM
+        at 14.72 GiB in use without it).
         """
         torch = self._torch
         pipeline = self._pipeline
+        gc.collect()
+        torch.cuda.empty_cache()
         pipeline.text_encoder.to("cuda")
         try:
             conditional: dict[str, Any] = pipeline.text_encoder([prompt])
@@ -604,7 +611,21 @@ class CausvidSession:
     def _run_rollout(
         self, prompt: str, seed: int, start: Any | None, conditional: dict[str, Any]
     ) -> _Rollout:
-        """Fresh noise → inference → uint8 frames (no commit, no state change)."""
+        """Fresh noise → inference → uint8 frames (no commit, no state change).
+
+        Seeds the global torch RNG (CPU + all CUDA) from the rollout seed
+        first: upstream ``pipeline.inference`` draws unseeded global-CUDA
+        randomness per call (measured live 2026-09-25: one rollout advances
+        the cuda0 RNG state; same-seed/same-conditional fresh rollouts
+        diverged ~0.5 latent mean-abs while T5 double-encodes bit-identical).
+        Without this, every rollout is irreproducible across processes and
+        segment boundaries cut. The explicit per-seed Generator in
+        ``_fresh_noise`` is unaffected (separate stream); the single-threaded
+        worker loop (§46) makes the global seeding race-free. Deliberate
+        deviation from the upstream script (which rides the global RNG) —
+        same class as the per-rollout Generator.
+        """
+        self._torch.manual_seed(seed)
         noise = self._fresh_noise(seed)
         video, latents = self._infer(noise, prompt, start, conditional)
         decoded = int(video.shape[1])
