@@ -273,6 +273,21 @@ class TuiProgress(SegmentProgress):
         self._app.call_from_thread(self._app.advance_run_bar, done, total)
 
 
+def _read_text_field(app: VoyageApp, widget_id: str) -> str:
+    """Raw text of a single-line Input (empty means the preset default)."""
+    return app.query_one(widget_id, Input).value
+
+
+def _read_choice_field(app: VoyageApp, widget_id: str) -> str:
+    """Current value of a dropdown Select as a plain string."""
+    return str(app.query_one(widget_id, Select).value)
+
+
+def _read_flag_field(app: VoyageApp, widget_id: str) -> bool:
+    """Checked state of a form Checkbox."""
+    return app.query_one(widget_id, Checkbox).value
+
+
 class VoyageApp(App[None]):
     """Configure `generate`, then watch it run."""
 
@@ -697,32 +712,23 @@ class VoyageApp(App[None]):
         columns.set_class(self.size.width < NARROW_WIDTH, "narrow")
 
     def _read_form(self) -> GenerateFormState:
-        def text(widget_id: str) -> str:
-            return self.query_one(widget_id, Input).value
-
-        def choice(widget_id: str) -> str:
-            return str(self.query_one(widget_id, Select).value)
-
-        def flag(widget_id: str) -> bool:
-            return self.query_one(widget_id, Checkbox).value
-
         return GenerateFormState(
-            backend=choice("#field-backend"),
-            duration=text("#field-duration"),
+            backend=_read_choice_field(self, "#field-backend"),
+            duration=_read_text_field(self, "#field-duration"),
             style=self.query_one("#field-style", TextArea).text,
-            name=text("#field-name"),
-            seed=text("#field-seed"),
-            force=flag("#flag-force"),
-            skip_bad=flag("#flag-skip-bad"),
-            draft=flag("#flag-draft"),
-            director=choice("#field-director"),
-            blocks=text("#field-blocks"),
-            take_seconds=text("#field-take-seconds"),
-            quantization=choice("#field-quantization"),
-            beats_per_segment=text("#field-beats"),
-            drift_every_n=text("#field-drift"),
-            verbose=flag("#flag-verbose"),
-            no_color=flag("#flag-no-color"),
+            name=_read_text_field(self, "#field-name"),
+            seed=_read_text_field(self, "#field-seed"),
+            force=_read_flag_field(self, "#flag-force"),
+            skip_bad=_read_flag_field(self, "#flag-skip-bad"),
+            draft=_read_flag_field(self, "#flag-draft"),
+            director=_read_choice_field(self, "#field-director"),
+            blocks=_read_text_field(self, "#field-blocks"),
+            take_seconds=_read_text_field(self, "#field-take-seconds"),
+            quantization=_read_choice_field(self, "#field-quantization"),
+            beats_per_segment=_read_text_field(self, "#field-beats"),
+            drift_every_n=_read_text_field(self, "#field-drift"),
+            verbose=_read_flag_field(self, "#flag-verbose"),
+            no_color=_read_flag_field(self, "#flag-no-color"),
         )
 
     def _apply_field_errors(self, errors: dict[str, str]) -> None:
@@ -995,11 +1001,23 @@ class VoyageApp(App[None]):
         if not state_path.exists():
             self.append_run_line("■ run has not initialized yet — stopping is a no-op")
             return
+        from voyage.errors import StateError
         from voyage.persistence import read_state, write_state
 
-        state = read_state(self._run_dir)
+        # A corrupt state.json must surface as a feedback line, not an
+        # exception out of the button/key handler (issue 078) — Stop is
+        # the control-plane action reached for when things already go wrong.
+        try:
+            state = read_state(self._run_dir)
+        except (StateError, OSError) as exc:
+            self.append_run_line(f"■ cannot stop: state unreadable ({exc})")
+            return
         state.status = "STOP_REQUESTED"
-        write_state(self._run_dir, state)
+        try:
+            write_state(self._run_dir, state)
+        except OSError as exc:
+            self.append_run_line(f"■ cannot stop: state write failed ({exc})")
+            return
         self.append_run_line("■ stop requested — finishing the current segment …")
 
     def _show_form(self) -> None:

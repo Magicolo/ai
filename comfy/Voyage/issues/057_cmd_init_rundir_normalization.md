@@ -1,6 +1,6 @@
 # 057 — `cmd_init` skips `_run_dir_arg` normalization (relative-path doubling only half-fixed)
 
-- Status: open (known-open, `TASK.md:1698-1701` §30.2)
+- Status: resolved (2026-09-25, CLI track)
 - Severity: medium (correctness — documented `output/<run>/output/<run>/…`
   doubling re-triggerable)
 - Area: CLI paths — `voyage/cli.py:60-66,101-102,791-794`, `rpc.py:99-112`
@@ -70,4 +70,16 @@ note against present code; close or file separately.
   `cmd_validate:609` all use `_run_dir_arg` (Evidence pasted). TASK §30.2
   "Resolved" text now over-claims immunity — flagged, not edited (TASK is
   outside scope). Added `## Why this is an issue`.
-- Open: one-line fix + regression test.
+- 2026-09-25 (CLI track): FIXED. `cmd_init` is now
+  `run_dir = resolve_run_dir(args.output)` (`voyage/cli.py:140`, one line
+  as specced; `resolve_run_dir` is the canonical 008 helper aliasing
+  `_run_dir_arg`). Regression test:
+  `tests/test_cli_hardening.py::test_init_then_run_with_relative_paths`
+  (relative init + relative run commits `000000` DONE on fake backends).
+  25/24 duration-math note re-checked: stale — no
+  `_LTXV_NATIVE_BLOCK_FRAMES` exists in current `cli.py`;
+  `_frames_per_segment` already plans the 96-novel ltxv / (8B-1)*4+1
+  longlive2 / 72-novel causvid steady states (pinned by
+  `tests/test_generate.py` 96/192/29/93/72 asserts). TASK §30.2 "Resolved"
+  immunity claim now holds for init too (TASK itself not edited — outside
+  scope, flagged in the original log). Gates green.

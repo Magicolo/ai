@@ -1,6 +1,6 @@
 # 078 — TUI Stop path has no exception guard; corrupt `state.json` escapes the handler
 
-- Status: open
+- Status: resolved (fixed 2026-09-25, TUI track)
 - Severity: low (exception out of button/key handler; no `■ …` feedback line)
 - Area: TUI — `voyage/tui.py:990-1003` (was `:985-998` before concurrent
   edits shifted lines)
@@ -66,3 +66,14 @@ stop: state unreadable …")`.
   lines (`:985-998` → `:990-1003`); re-ran corrupt-`state.json` probe
   (`StateError` confirmed, pasted above).
 - Open: implement + corrupt-state Pilot test.
+- 2026-09-25 (fix, TUI track): relevance re-verified live
+  (`_request_stop` still called bare `read_state` after the
+  `exists()` check). Implemented the candidate in `voyage/tui.py`:
+  `read_state` wrapped in try/except `(StateError, OSError)` and
+  `write_state` in try/except `OSError`, both surfacing
+  `■ cannot stop: state unreadable/write failed (…)` feedback lines
+  (function-level `StateError` import, matching file style). Tests:
+  `test_tui.py::test_stop_with_corrupt_state_reports_feedback`
+  (headless Pilot: run marked running + garbage `state.json` →
+  `cannot stop` line, still running, no exception). Gates:
+  `scripts/gates.sh` GREEN (ruff + format + mypy strict + 563 pytest).

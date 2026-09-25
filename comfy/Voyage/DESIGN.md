@@ -3238,6 +3238,16 @@ RAM: 64 GB
 
 Do not hard-code these identities into application logic.
 
+As-built (§64-doctor-coverage-2026-09-25, issue 048): `probe()`
+covers python/ffmpeg+ffprobe/ffmpeg-version/nvidia-smi GPU lines/
+`torch.cuda.is_available()` behind a `find_spec` guard (None when torch
+is absent)/root disk-free/models-dir presence with a per-backend
+`verify_*` summary; the `models_ok` flag is False unless the dir exists
+and every check passes. Not covered: compute capability, CUDA runtime
+version, FlashAttention/Triton, checkpoint compat, fs permissions,
+worker interpreters, ACE-Step — see `docs/TROUBLESHOOTING.md`; full
+weight checks stay behind `models verify`.
+
 ---
 
 # 65. Hardware profile selection

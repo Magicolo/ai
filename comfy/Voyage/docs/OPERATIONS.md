@@ -36,8 +36,9 @@ only (logs/metrics stay plain):
 Colors/animation engage only on a real TTY with `rich` installed
 (`rich>=13.7` is a core dependency, pinned into the worker images that
 install with `--no-deps`); pipes and tests get identical plain words.
-`--verbose` / `--no-color` also parse on `status`, `validate`,
-`finalize`, `benchmark`, `soak`, and `inspect`.
+`--verbose` / `--no-color` are honored on `run`, `generate`,
+`finalize`, and `soak` only — `status`, `validate`, `benchmark`, and
+`inspect` print plain text and do not accept those flags.
 
 ## Interactive launcher TUI (bare `voyage`)
 
@@ -215,4 +216,10 @@ alignment, and publishes atomically (sources never mutated). Use
 - Every commit logs a `resource_gauges` event (RSS peak, disk free,
   worker VRAM) — the input to `soak` trend reports.
 - Logs rotate daily (`metrics.jsonl`, `*-worker.log`; 30-day prune).
+  History readers span the rotation: `iter_metric_files(run_dir)`
+  (`voyage/logrotate.py`) yields dated siblings oldest-first with the
+  live file last, so `inspect scoreboard` keeps pre-rotation stages.
+  `status` last-commit stages and `soak`/`benchmark` averages still read
+  the live file only — concatenate siblings (or adopt the helper) when a
+  run is older than one day.
 - `benchmark` / `soak` harnesses: see `docs/BENCHMARKING.md`.

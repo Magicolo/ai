@@ -15,6 +15,7 @@ silent on I/O failure so a bad home directory can never break the UI.
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,18 +44,13 @@ def _default_settings_path() -> Path:
     return Path.home() / ".config" / "voyage" / "tui-last.toml"
 
 
-# Frames each committed segment carries per backend (mirrors
-# voyage.cli._frames_per_segment: LTXV block 0 renders 25 native frames,
-# each extension block adds 24 new ones; CausVid commits 72 novel frames
-# per rollout at overlap 3 (16 fps native); other backends use
-# segment_frames).
-_LTXV_FIRST_BLOCK_FRAMES = 25
-_CAUSVID_NOVEL_PER_ROLLOUT = 72
-_DEFAULT_SEGMENT_FRAMES = 48
-_FPS = 24
-# Native frame rate per backend (mirrors the config presets); backends
-# absent here plan at _FPS.
-_BACKEND_FPS = {"causvid": 16}
+# Planning math is NOT duplicated here: _planning_frames_and_fps below calls
+# cli._frames_per_segment (frames) + the config video preset (fps) — the
+# same values cmd_generate plans with. There is no module-level constant
+# to drift (issue 024: the old 25/24 ltxv + flat-48 longlive2 math is gone).
+# Native frame rate per backend lives in the config video preset; unknown
+# backends plan at 24fps (mirrors _frames_per_segment's segment_frames
+# default).
 
 FIELD_HELP = {
     "backend": "Video backend preset (geometry + device + audio pairing). "
@@ -121,10 +117,28 @@ def _positive_int(raw: str, field_name: str, errors: list[str]) -> int | None:
     return value
 
 
+# Windows device names can never be photo-folders on any host checkout, so
+# the TUI rejects them (case-insensitive, extension-insensitive) alongside
+# "." — initializing inside output/ itself would scatter run files among
+# every other run (issue 080). ".." stays rejected via the substring check
+# in _flat_folder_name (traversal, issue 008's class).
+_RESERVED_FOLDER_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
 def _flat_folder_name(raw: str) -> bool:
     """Whether the value is usable as a single output folder name."""
     text = raw.strip()
-    return bool(text) and "/" not in text and "\\" not in text and ".." not in text
+    if not text or "/" in text or "\\" in text or ".." in text:
+        return False
+    if text in (".",):
+        return False
+    if text.split(".")[0].lower() in _RESERVED_FOLDER_NAMES:
+        return False
+    return True
 
 
 def field_errors(state: GenerateFormState) -> dict[str, str]:
@@ -167,9 +181,11 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
                 f"take-seconds must be a positive number, got {state.take_seconds!r}"
             )
         else:
-            if take <= 0:
+            # nan slips past every comparison (nan <= 0 is False) and inf
+            # passes positivity, so finiteness is checked first (issue 062).
+            if not math.isfinite(take) or take <= 0:
                 errors["take_seconds"] = (
-                    f"take-seconds must be positive, got {state.take_seconds!r}"
+                    f"take-seconds must be a positive finite number, got {state.take_seconds!r}"
                 )
     if state.quantization not in QUANTIZATIONS:
         errors["quantization"] = (
@@ -229,8 +245,41 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
     )
 
 
-def plan_counts(state: GenerateFormState) -> tuple[int, int, float] | None:
-    """(segments, frames, seconds) for the current form, or None if invalid."""
+def _planning_frames_and_fps(backend: str, blocks: int) -> tuple[int, int]:
+    """(frames_per_segment, fps) for TUI planning, from the CLI single source.
+
+    Import-direction note (verified live 2026-09-25): voyage.cli never
+    imports voyage.tui_state at module level — its only TUI touch is the
+    lazy ``from voyage.tui import run_tui`` inside ``launch_tui`` — so
+    these function-level imports cannot cycle (same pattern as the
+    existing parse_duration/segments_for_duration imports below).
+    Frames come from ``cli._frames_per_segment`` on a planning-only
+    ProjectConfig and fps from the config video preset: the same values
+    ``cmd_generate`` plans with. Unknown backends fall back to 48 frames
+    @ 24fps, mirroring ``_frames_per_segment``'s segment_frames default.
+    """
+    from voyage.cli import _frames_per_segment
+    from voyage.config import ProjectConfig, VideoConfig, _video_preset
+
+    try:
+        preset_fps = _video_preset(backend).get("fps", 24)
+        fps = preset_fps if isinstance(preset_fps, int) and preset_fps > 0 else 24
+    except ValueError:
+        fps = 24
+    planning_config = ProjectConfig(
+        style="planning",
+        video=VideoConfig(backend=backend, blocks_per_segment=blocks, fps=fps),
+    )
+    return _frames_per_segment(planning_config), fps
+
+
+def _plan_details(state: GenerateFormState) -> tuple[int, int, float, int, int] | None:
+    """Full plan struct, or None when duration/blocks do not parse.
+
+    Single source (issue 024): frames/fps come from
+    :func:`_planning_frames_and_fps` (CLI truth). Both public planners
+    build on this struct and never re-derive frame math.
+    """
     from voyage.cli import parse_duration, segments_for_duration
 
     try:
@@ -245,18 +294,19 @@ def plan_counts(state: GenerateFormState) -> tuple[int, int, float] | None:
             return None
         if blocks <= 0:
             return None
-    if state.backend == "ltxv":
-        frames_per_segment = _LTXV_FIRST_BLOCK_FRAMES + (blocks - 1) * (
-            _LTXV_FIRST_BLOCK_FRAMES - 1
-        )
-    elif state.backend == "causvid":
-        frames_per_segment = _CAUSVID_NOVEL_PER_ROLLOUT * blocks
-    else:
-        frames_per_segment = _DEFAULT_SEGMENT_FRAMES
-    fps = _BACKEND_FPS.get(state.backend, _FPS)
+    frames_per_segment, fps = _planning_frames_and_fps(state.backend, blocks)
     segments = segments_for_duration(duration_seconds, fps, frames_per_segment)
     planned_frames = segments * frames_per_segment
-    return segments, planned_frames, planned_frames / fps
+    return segments, planned_frames, planned_frames / fps, frames_per_segment, fps
+
+
+def plan_counts(state: GenerateFormState) -> tuple[int, int, float] | None:
+    """(segments, frames, seconds) for the current form, or None if invalid."""
+    details = _plan_details(state)
+    if details is None:
+        return None
+    segments, planned_frames, seconds, _frames_per_segment, _fps = details
+    return segments, planned_frames, seconds
 
 
 def plan_summary(state: GenerateFormState) -> str:
@@ -274,21 +324,10 @@ def plan_summary(state: GenerateFormState) -> str:
             return f"cannot plan: blocks must be a positive integer, got {state.blocks!r}"
         if blocks <= 0:
             return f"cannot plan: blocks must be positive, got {state.blocks!r}"
-    counts = plan_counts(state)
-    if counts is None:  # defensive: inputs above already parsed cleanly
+    details = _plan_details(state)
+    if details is None:  # defensive: inputs above already parsed cleanly
         return "cannot plan: check duration/blocks"
-    segments, planned_frames, seconds = counts
-    if state.backend == "ltxv":
-        blocks = int(state.blocks.strip()) if state.blocks.strip() else 1
-        frames_per_segment = _LTXV_FIRST_BLOCK_FRAMES + (blocks - 1) * (
-            _LTXV_FIRST_BLOCK_FRAMES - 1
-        )
-    elif state.backend == "causvid":
-        blocks = int(state.blocks.strip()) if state.blocks.strip() else 1
-        frames_per_segment = _CAUSVID_NOVEL_PER_ROLLOUT * blocks
-    else:
-        frames_per_segment = _DEFAULT_SEGMENT_FRAMES
-    fps = _BACKEND_FPS.get(state.backend, _FPS)
+    segments, planned_frames, seconds, frames_per_segment, fps = details
     return (
         f"≈{seconds:.1f}s · {segments} segment(s) · {planned_frames} frames "
         f"· {state.backend} {frames_per_segment}f/segment @ {fps}fps"
@@ -296,7 +335,12 @@ def plan_summary(state: GenerateFormState) -> str:
 
 
 def _toml_string(raw: str) -> str:
-    """Quote a string as a TOML basic string."""
+    """Quote a string as a TOML basic string (every control escaped).
+
+    Short escapes cover backslash/quote/newline/return/tab; every other
+    C0 control (\\x00-\\x1f) becomes \\uXXXX so one stray byte can never
+    corrupt tui-last.toml into a total form reset (issue 072).
+    """
     escaped = (
         raw.replace("\\", "\\\\")
         .replace('"', '\\"')
@@ -304,6 +348,11 @@ def _toml_string(raw: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
+    for code in range(0x20):
+        control = chr(code)
+        if control in ("\n", "\r", "\t"):
+            continue
+        escaped = escaped.replace(control, f"\\u{code:04X}")
     return f'"{escaped}"'
 
 
@@ -402,8 +451,15 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
 
 
 def gpu_warning(backend: str) -> str:
-    """One-line CUDA/GPU notice for CUDA backends, else an empty string."""
-    if backend in ("ltxv", "longlive2", "causvid"):
+    """One-line CUDA/GPU notice for CUDA backends, else an empty string.
+
+    The CUDA set is cli._CUDA_BACKENDS (single source with the run.sh
+    image selection + the torch fast-fail, issue 024); acestep's
+    membership there is inert here because the TUI never offers it.
+    """
+    from voyage.cli import _CUDA_BACKENDS
+
+    if backend in _CUDA_BACKENDS:
         return (
             f"{backend} needs the CUDA worker image (VOYAGE_IMAGE=voyage-video) "
             "plus a GPU (--gpus all)."

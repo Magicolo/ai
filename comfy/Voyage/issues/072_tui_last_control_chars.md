@@ -1,6 +1,6 @@
 # 072 — `tui-last.toml` control characters corrupt the file; next launch silently resets the whole form
 
-- Status: open
+- Status: resolved (fixed 2026-09-25, TUI track)
 - Severity: low-medium (total form reset, not just the offending field)
 - Area: TUI settings persistence — `voyage/tui_state.py:285-294`
   (`_toml_string`), `:350-363` (`load_last_settings`)
@@ -55,3 +55,14 @@ in `field_errors` for style/name). Share the escaper with 009's config fix.
   cited lines live (`tui_state.py:285-294` `_toml_string`, `:350-363`
   `load_last_settings` — both match; unescaped `\x00-\x1f` range confirmed).
 - Open: implement + roundtrip tests.
+- 2026-09-25 (fix, TUI track): relevance re-verified live (raw `\x01`
+  in file bytes, load reset every field to defaults). Implemented the
+  `\uXXXX` candidate in `_toml_string` (`voyage/tui_state.py`): short
+  escapes kept for backslash/quote/`\n`/`\r`/`\t`, every other C0
+  control (`\x00-\x1f`) emitted as `\uXXXX`. Live probe: file holds no
+  raw control byte and `style='a\x01b\x00c\x0bd\x0ce\x1ff'` round-trips
+  exactly with sibling fields intact. Tests: `test_tui_state.py`
+  `test_last_settings_round_trip_control_characters` (5 payloads incl.
+  NUL/`\x01`/VT/FF/US/tab — byte-clean file + exact round-trip).
+  Gates: `scripts/gates.sh` GREEN (ruff + format + mypy strict +
+  563 pytest).

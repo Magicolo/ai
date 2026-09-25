@@ -75,3 +75,32 @@ verified stack.
   `docs/TROUBLESHOOTING.md:16`, `docs/INSTALL.md:54` all current. No changes
   needed to references; added `## Why this is an issue`.
 - Open: extend doctor + wire into all builds.
+- 2026-09-25 (fix, scope `voyage/doctor.py` only — `cli.py`/Dockerfiles
+  belong to other tracks): re-verified live — `probe()` still returned
+  the six old keys with `torch_cuda: None` always. Extended `probe()`
+  (all new facts best-effort, never raise): `torch_cuda` via
+  `find_spec`-guarded lazy `torch.cuda.is_available()` (§83-safe, None
+  when torch absent/broken), `disk_free_gib` via `shutil.disk_usage`,
+  `ffmpeg_version` first line, `models` presence summary
+  (`dir`/`exists`/`manifest` + per-backend `verify_*` results via a lazy
+  `model_registry` import) plus a `models_ok` flag that is False unless
+  the dir exists and every check passes. `cmd_doctor` output text is
+  unchanged (cli.py out of scope) — the facts are in `probe()` for the
+  CLI track to print; exit code still ffmpeg-only. Remaining §64 gaps
+  (compute capability, CUDA runtime, FlashAttention/Triton, checkpoint
+  compat, permissions, worker interpreters, ACE-Step) documented in
+  `docs/TROUBLESHOOTING.md` + `docs/INSTALL.md`; as-built coverage note
+  appended under DESIGN §64 (`§64-doctor-coverage-2026-09-25`). Tests:
+  new `tests/test_doctor.py` (8 tests: key matrix, torch
+  absent/present/broken, disk failure, empty/missing models dir). Scoped
+  gates green: ruff + format + mypy strict on `doctor.py`, 8/8 pytest.
+  Full `gates.sh` is red on concurrent agents' files (`cli.py`
+  `_last_commit_stages` F821 + E501, `tui_state.py` F401/F821) — none in
+  this scope. The Dockerfile-build-gate half (run doctor in all three
+  builds vs drop the false gate) is left for the Docker track.
+
+## Resolution
+
+FIXED (doctor half): `voyage/doctor.py` now reports torch-CUDA, disk,
+and models facts; docs name the remaining gaps. Build-gate half
+explicitly deferred (Dockerfiles out of scope).

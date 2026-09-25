@@ -15,6 +15,16 @@ so an agent with no project knowledge can pick it up.
   gate-scope. Infra: pyproject top-level `exclude=["issues/"]` (evidence fences
   must never be formatted — ruff rewrites them into false code; a
   `[tool.ruff.format] exclude` key is ignored by ruff 0.16.9, verified live).
+- Batch 2 DONE 2026-09-25 (CLI/TUI/observability, 3 parallel tracks, gates 569
+  green): RESOLVED 008, 050 (remove + OPERATIONS correction), 051 (CLI subset;
+  TUI help/Literal/models-info deferred as logged), 057, 061, 073, 079, 024
+  (single-source planning via function-level cli imports — no cycle; BACKENDS/
+  gpu_warning causvid had landed concurrently), 062-TUI, 072, 078, 080 (both
+  layers; orchestrator ported reserved-names to cli.py in review), 048
+  (doctor half; Dockerfile gate deferred), 049 (scoreboard rotation readers via
+  logrotate.iter_metric_files + status novelty/slowest-stage/Age; soak/status
+  reader adoption is a hook note). NEW 093 filed in review (VoyageApp._running
+  collision + racy Pilot scroll/click, from batch-2 bisection notes).
 
 ## Critical (liveness / state integrity / RCE)
 

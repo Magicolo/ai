@@ -1,6 +1,6 @@
 # 051 — CLI `--help` leaves required values anonymous; `models_target` bare; three error-path papercuts
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track — CLI-side subset; TUI/OPERATIONS-duration + models-info deferred, see log)
 - Severity: medium-low (discoverability + one real path bug: `stop --finalize`
   reintroduces the doubling fix)
 - Area: CLI polish — `voyage/cli.py:101-132,213-216,489-494,675-694,
@@ -108,4 +108,28 @@ stderr; flesh out `models info` or drop the stub.
   message (:762-766, still `config.video.backend` — bug stands); corrected
   Area line refs (`:744-766` → `:749-766`, added `:213-216` for
   `models_target`). Added `## Why this is an issue`.
-- Open: help/error polish batch.
+- 2026-09-25 (CLI track): FIXED the CLI-side subset in `voyage/cli.py`:
+  (a) `help=` added to every anonymous required (init --output/--run-id/
+  --style/--seed/--force; run/generate/pause/resume/stop/validate/finalize/
+  soak/inspect --run; soak --segments; stop --finalize; benchmark
+  --warmup/--measured/--segments; models action/target/dir) and
+  `choices=[longlive2-bf16, ltxv-2b, causvid, director-qwen8b, audio-acestep,
+  inspector-qwen35]` on `models_target` (typos now fail at parse with
+  `invalid choice` on stderr); (b) duration help unified to
+  `_DURATION_EXAMPLES` (`'5s','90','1m30s','2m','1h','1h2m3.5s'` + rounds-up
+  note, shared by the error string and `--duration` help) and the regex
+  extended to signed numbers so `-5s` hits `duration must be positive`
+  instead of the regex branch; (c1) `cmd_stop --finalize` builds the output
+  via `resolve_run_dir(args.run)` (:588); (c2) `_cuda_offenders()` (:858)
+  qualifies video/audio so audio-only CUDA blames e.g. `audio 'acestep'`,
+  and `_cuda_stack_error` says plain `backend ...` (:~850); (c3)
+  `unknown models target` + `known:` go to stderr (:~316-322). Deferred as
+  out of scope (tui_state.py/config.py/OPERATIONS-duration not touched):
+  TUI `FIELD_HELP["duration"]` + OPERATIONS duration unification, `Literal`
+  on `DirectorConfig.backend`, `models info` stub (kept), inspect
+  positional-before-`--run` usage order (argparse definition order), and
+  the console stdout/stderr split (by design: error→stderr,
+  progress→stdout). Tests: `tests/test_cli_hardening.py` (models choices
+  parse + programmatic-stderr, duration forms + `-5s` positivity, stop
+  finalize no-doubling via monkeypatched `cmd_finalize`, audio-blame).
+  Gates green.

@@ -51,7 +51,12 @@ plus the Qwen3-8B director and Qwen3.5-9B VLM inspector on CPU
 
 - NVIDIA driver supporting CUDA 12.8, nvidia-container-toolkit installed.
 - Pass `--gpus all`: `VOYAGE_GPUS=1 ./scripts/run.sh …`.
-- `voyage doctor` reports driver/GPU/ffmpeg facts before you start.
+- `voyage doctor` reports driver/GPU/ffmpeg facts plus torch-CUDA,
+  disk-free, and a models presence summary before you start. Full
+  weight-file checks stay behind `models verify`; remaining doctor gaps
+  (compute capability, CUDA runtime, FlashAttention/Triton, checkpoint
+  compat, permissions, worker interpreters) are listed in
+  TROUBLESHOOTING.
 
 ## ffmpeg
 

@@ -19,7 +19,12 @@ import datetime
 import re
 from pathlib import Path
 
+from voyage import paths
+
 DEFAULT_KEEP_DAYS = 30
+
+METRICS_FILENAME = "metrics.jsonl"
+"""Live metrics filename; rotated siblings are `metrics-YYYY-MM-DD.jsonl`."""
 
 _ROTATED_SUFFIX = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})$")
 
@@ -68,6 +73,37 @@ def append_line(path: Path, line: str, keep_days: int = DEFAULT_KEEP_DAYS) -> No
     rotate_log(path, keep_days)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def iter_metric_files(run_dir: Path) -> list[Path]:
+    """Live `metrics.jsonl` plus rotated siblings, oldest-first (issue 049).
+
+    Rotation keeps history complete but splits it across dated siblings;
+    every reader that needs full history (scoreboard stages, status
+    last-commit, soak/benchmark averages) must iterate this list instead
+    of opening the live file directly. The live file sorts last so its
+    events win on duplicate segment ids. Never raises: a missing/unreadable
+    logs dir yields whatever subset exists (possibly empty).
+    """
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    live = logs_dir / METRICS_FILENAME
+    try:
+        siblings = sorted(
+            sibling
+            for sibling in logs_dir.glob(f"{live.stem}-*{live.suffix}")
+            if sibling.is_file()
+            and (match := _ROTATED_SUFFIX.match(sibling.stem)) is not None
+            and match.group("stem") == live.stem
+        )
+    except OSError:
+        siblings = []
+    files = list(siblings)
+    try:
+        if live.is_file():
+            files.append(live)
+    except OSError:
+        pass
+    return files
 
 
 def _prune_siblings(path: Path, keep_days: int) -> None:

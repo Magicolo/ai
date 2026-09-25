@@ -1,6 +1,6 @@
 # 073 — CLI `--director` is a free string while TUI allowlists; bogus values fail late at the worker
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track — choices done; model Literal deferred, see log)
 - Severity: low-medium (late `RecoverableWorkerError` for a typo; TUI rejects
   inline)
 - Area: CLI/config — `voyage/cli.py:1143-1146` (`run`), `:1217-1220`
@@ -52,4 +52,14 @@ TUI with `director='bogus'` → inline `director must be one of qwen, determinis
   cited lines live (`cli.py:1143-1146` run flag, `:1217-1220` generate flag,
   `config.py:143-153` `DirectorConfig`, `tui_state.py:147-150` allowlist —
   all match; no `choices=`/`Literal` on either CLI flag).
-- Open: implement + tests.
+- 2026-09-25 (CLI track): FIXED the CLI half. `choices=("qwen",
+  "deterministic")` on both `--director` flags (`voyage/cli.py:1320` run,
+  `:1395` generate — same pair as the TUI `DIRECTORS` allowlist), so
+  `bogus`/`QWEN`/trailing-space typos fail at parse (exit 2,
+  `invalid choice`) instead of a late worker `RecoverableWorkerError`.
+  `Literal` on `DirectorConfig.backend` NOT applied — `config.py` is
+  outside this track's scope (programmatic construction still accepts
+  anything; noted for the config-owning track). Tests:
+  `tests/test_cli_hardening.py` (run rejects `bogus`; generate parser
+  accepts `qwen`/default-None and rejects `QWEN`; deterministic director
+  runs 1 fake segment). Gates green.

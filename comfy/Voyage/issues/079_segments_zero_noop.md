@@ -1,6 +1,6 @@
 # 079 — `--segments 0`/negative silently a no-op with exit 0
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track)
 - Severity: low (zero work reported as success)
 - Area: CLI — `voyage/cli.py:1131-1136` (`run`), `:1301` (`soak`),
   `run_segments` (`while count is None or len(committed) < count`)
@@ -55,4 +55,13 @@ Reject `--segments <= 0` in `cmd_run`/`cmd_soak` (stderr + return 2); same for
   cited lines live (`cli.py:1129-1136` run `--segments`, `:1301-1305` soak
   `--segments`, `supervisor.py:390-412` `run_segments`, `cli.py:345-350`
   success line — all match); re-ran argparse probe (0/-5 parse fine).
-- Open: implement + tests (CLI-side and worker-side together).
+- 2026-09-25 (CLI track): FIXED CLI-side. `cmd_run` (`voyage/cli.py:~323`),
+  `cmd_soak` (`:~1158`) and `cmd_benchmark` end-to-end (`:~1091`) reject
+  `--segments <= 0` with `error: --segments must be positive` on stderr +
+  exit 2; new `_check_benchmark_counts()` (`:1041`, mirrors the worker
+  `validate_benchmark_counts` rule warmup >= 0 / measured >= 1 from 060)
+  guards the video/audio benchmark path before any worker spawns. Worker-side
+  enforcement stays 060's (untouched, other track). Tests:
+  `tests/test_cli_hardening.py` (run `0`/`-3`, soak `0`, benchmark
+  warmup `-1` / measured `0` / end-to-end `0` — all exit 2 with the
+  stderr marker). Gates green.

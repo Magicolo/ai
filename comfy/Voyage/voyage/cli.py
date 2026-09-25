@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from types import FrameType
 
+from pydantic import ValidationError
+
 from voyage import paths
 from voyage.concepts import ConceptStore
 from voyage.config import (
@@ -65,6 +67,52 @@ def _run_dir_arg(value: str) -> Path:
     return Path(value).resolve()
 
 
+def resolve_run_dir(value: str) -> Path:
+    """Canonical run-dir resolution (issue 008/057: one helper, every verb).
+
+    Absolute + normalized so worker CWD-relative payloads never double up.
+    Kept as a named alias of `_run_dir_arg` (which predates it and stays
+    for backward-compatible imports) — new code should call this one.
+    """
+    return _run_dir_arg(value)
+
+
+_RESERVED_FOLDER_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+"""Windows-reserved basenames, mirrored from the TUI (issue 080)."""
+
+
+def is_flat_folder_name(value: str) -> bool:
+    """Whether the value is usable as a single output folder name (008).
+
+    Mirrors the TUI `_flat_folder_name` check (`tui_state.py`): rejects
+    path separators and parent-dotdot so a crafted `--run-id` cannot
+    escape `output/` (imported locally here, not from the TUI, because
+    the TUI imports this module's `parse_duration` — reverse import
+    would be circular). Also rejects `.` and reserved basenames (080).
+    """
+    text = value.strip()
+    if not text or "/" in text or "\\" in text or ".." in text:
+        return False
+    if text in (".",):
+        return False
+    return text.split(".")[0].lower() not in _RESERVED_FOLDER_NAMES
+
+
+def _check_run_id(run_id: str) -> int:
+    """Reject traversal `--run-id` at the CLI layer (issue 008)."""
+    if not is_flat_folder_name(run_id):
+        print(
+            f"error: --run-id must be a flat folder name (no slashes), got {run_id!r}",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def get_console(args: argparse.Namespace) -> VoyageConsole:
     """Console for a subcommand (flags default off for test Namespaces)."""
     return VoyageConsole(
@@ -99,7 +147,9 @@ def launch_tui() -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    run_dir = Path(args.output)
+    if _check_run_id(args.run_id) != 0:
+        return 2
+    run_dir = resolve_run_dir(args.output)
     if run_dir.exists() and any(run_dir.iterdir()) and not args.force:
         print(f"refusing to init non-empty directory {run_dir} (use --force)", file=sys.stderr)
         return 2
@@ -244,7 +294,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         if target == "inspector-qwen35":
             return _download_inspector(_models_dir(args))
         if target != "longlive2-bf16":
-            print(f"unknown models target {target!r}")
+            print(f"unknown models target {target!r}", file=sys.stderr)
             known_targets = ", ".join(
                 [
                     "longlive2-bf16",
@@ -255,7 +305,7 @@ def cmd_models(args: argparse.Namespace) -> int:
                     "inspector-qwen35",
                 ]
             )
-            print(f"known: {known_targets}")
+            print(f"known: {known_targets}", file=sys.stderr)
             return 2
         models_dir = _models_dir(args)
         print(f"downloading longlive2-bf16 into {models_dir} ...")
@@ -281,6 +331,12 @@ def _load_run(run: Path) -> tuple[ProjectConfig, str]:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if args.segments is not None and args.segments <= 0:
+        print(
+            f"error: --segments must be positive, got {args.segments}",
+            file=sys.stderr,
+        )
+        return 2
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
     if (
@@ -292,16 +348,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         or getattr(args, "beats_per_segment", None) is not None
         or getattr(args, "drift_every_n", None) is not None
     ):
-        config = apply_draft_overrides(
-            config,
-            draft=args.draft,
-            director=args.director,
-            blocks=args.blocks,
-            take_seconds=args.take_seconds,
-            quantization=args.quantization,
-            beats_per_segment=getattr(args, "beats_per_segment", None),
-            drift_every_n_segments=getattr(args, "drift_every_n", None),
-        )
+        try:
+            config = apply_draft_overrides(
+                config,
+                draft=args.draft,
+                director=args.director,
+                blocks=args.blocks,
+                take_seconds=args.take_seconds,
+                quantization=args.quantization,
+                beats_per_segment=getattr(args, "beats_per_segment", None),
+                drift_every_n_segments=getattr(args, "drift_every_n", None),
+            )
+        except ValidationError as exc:
+            print(f"error: invalid numeric override: {exc}", file=sys.stderr)
+            return 2
         print(
             "effective settings: "
             f"director={config.director.backend} "
@@ -352,7 +412,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _format_uptime(manifest: dict[str, object]) -> str:
-    """HH:MM:SS since the manifest's created_at, else 'unknown'."""
+    """HH:MM:SS of wall time since the manifest's created_at, else 'unknown'.
+
+    This is the run's age, not active render time: a long-paused run
+    reports days here. Callers qualify the label when not RUNNING (049).
+    """
     created = manifest.get("created_at")
     if not isinstance(created, str):
         return "unknown"
@@ -367,6 +431,42 @@ def _format_uptime(manifest: dict[str, object]) -> str:
     hours, rest = divmod(int(elapsed.total_seconds()), 3600)
     minutes, seconds = divmod(rest, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _latest_novelty(run_dir: Path) -> str:
+    """Newest concept-novelty verdict for `status` (issue 049, §59 Novelty).
+
+    Read-only: the newest ConceptStore record decides (`accepted` /
+    `hold`), `no concepts yet` before the first commit, `unknown` when
+    the store cannot be read. Rotation-blindness of the metrics log is
+    a separate track (scoreboard/logrotate readers) — this store is
+    never rotated, so the verdict survives it.
+    """
+    try:
+        store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
+        records = store.records()
+    except Exception:
+        return "unknown"
+    if not records:
+        return "no concepts yet"
+    latest = records[-1]
+    verdict = "accepted" if latest.accepted else "hold"
+    return f"{verdict} (record {latest.id})"
+
+
+def _slowest_stage(stages: dict[str, object]) -> str | None:
+    """Slowest numeric stage as `name (Xs)` for `status` (issue 049).
+
+    OPERATIONS promises slowest stages; the raw per-stage dump stays,
+    this one line names the bottleneck. Non-numeric values are ignored.
+    """
+    numeric = {
+        name: float(value) for name, value in stages.items() if isinstance(value, (int, float))
+    }
+    if not numeric:
+        return None
+    name = max(numeric, key=lambda key: numeric[key])
+    return f"{name} ({numeric[name]}s)"
 
 
 def _last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
@@ -408,7 +508,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     seconds = state.timeline_frames / state.fps if state.fps else 0
     print(f"Voyage: {state.run_id}")
     print(f"Status: {state.status}")
-    print(f"Uptime: {_format_uptime(manifest)}")
+    age = _format_uptime(manifest)
+    if state.status == "RUNNING":
+        print(f"Uptime: {age}")
+    else:
+        print(f"Uptime: {age} (age since init; not running)")
     print()
     print("Video")
     print(f"  Backend: {config.video.backend if config else 'unknown'}")
@@ -430,6 +534,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Current: {state.current_concept[:100]}")
     print(f"  Destination: {state.destination_concept[:100]}")
     print(f"  Phase: {state.phase}")
+    print(f"  Novelty: {_latest_novelty(run_dir)}")
     print()
     print("Audio")
     print(f"  Backend: {config.audio.backend if config else 'unknown'}")
@@ -453,6 +558,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Stages (last commit {segment_id})")
         for stage, stage_seconds in stages.items():
             print(f"  {stage}: {stage_seconds}s")
+        slowest = _slowest_stage(stages)
+        if slowest is not None:
+            print(f"  Slowest stage: {slowest}")
     print()
     print("Storage")
     try:
@@ -489,7 +597,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 def cmd_stop(args: argparse.Namespace) -> int:
     code = _set_status(_run_dir_arg(args.run), "STOP_REQUESTED")
     if code == 0 and args.finalize:
-        args.output = str(Path(args.run) / "final.mp4")
+        args.output = str(resolve_run_dir(args.run) / "final.mp4")
         return cmd_finalize(args)
     return code
 
@@ -635,7 +743,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_finalize(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
-    output = Path(args.output)
+    output = Path(args.output).resolve()
     try:
         finalize_run(
             run_dir,
@@ -672,18 +780,27 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     return 0
 
 
+_DURATION_EXAMPLES = "'5s', '90', '1m30s', '2m', '1h', '1h2m3.5s'"
+
 _DURATION_PATTERN = re.compile(
-    r"(?:(?P<hours>\d+(?:\.\d+)?)h)?"
-    r"(?:(?P<minutes>\d+(?:\.\d+)?)m)?"
-    r"(?:(?P<seconds>\d+(?:\.\d+)?)s?)?"
+    r"(?:(?P<hours>-?\d+(?:\.\d+)?)h)?"
+    r"(?:(?P<minutes>-?\d+(?:\.\d+)?)m)?"
+    r"(?:(?P<seconds>-?\d+(?:\.\d+)?)s?)?"
 )
 
 
 def parse_duration(raw: str) -> float:
-    """Human-readable duration ('5s', '90', '1m30s', '2m', '1h') -> seconds."""
+    """Human-readable duration -> seconds (e.g. '5s', '90', '1m30s', '2m').
+
+    Accepts hours (`1h`), fractional (`2.5m`, `1.5h`), combined
+    (`1h2m3.5s`), bare (`90`) and whitespace-padded values. Signed
+    numbers parse so negatives reach the positivity error below
+    instead of the regex error. Rounds up to whole segments downstream
+    (`segments_for_duration`), so the video never runs short.
+    """
     match = _DURATION_PATTERN.fullmatch(raw.strip())
     if match is None or not any(match.groupdict().values()):
-        raise ValueError(f"invalid duration {raw!r} (examples: '5s', '90', '1m30s', '2m')")
+        raise ValueError(f"invalid duration {raw!r} (examples: {_DURATION_EXAMPLES})")
     total = 0.0
     for name, scale in (("hours", 3600.0), ("minutes", 60.0), ("seconds", 1.0)):
         value = match.group(name)
@@ -743,11 +860,25 @@ def _torch_available() -> bool:
 
 def _cuda_stack_error(backend: str) -> str:
     return (
-        f"error: video backend {backend!r} needs the CUDA worker stack (torch), "
+        f"error: backend {backend!r} needs the CUDA worker stack (torch), "
         "but torch is not importable in this container; re-run with "
         "VOYAGE_IMAGE=voyage-video:latest and VOYAGE_GPUS=1 (run.sh selects "
         "both automatically for CUDA backends and GPU-box bare launches)"
     )
+
+
+def _cuda_offenders(config: ProjectConfig) -> list[str]:
+    """CUDA backends configured on this run, video/audio qualified (051).
+
+    The old message always blamed the video backend even when only the
+    audio stack needed CUDA (e.g. acestep-audio + fake-video on CPU).
+    """
+    offenders: list[str] = []
+    if config.video.backend in _CUDA_BACKENDS:
+        offenders.append(f"video {config.video.backend!r}")
+    if config.audio.backend in _CUDA_BACKENDS:
+        offenders.append(f"audio {config.audio.backend!r}")
+    return offenders
 
 
 def _require_cuda_stack(config: ProjectConfig) -> bool:
@@ -763,7 +894,9 @@ def _require_cuda_stack(config: ProjectConfig) -> bool:
     needs_cuda = config.video.backend in _CUDA_BACKENDS or config.audio.backend in _CUDA_BACKENDS
     if not needs_cuda or _torch_available():
         return True
-    print(_cuda_stack_error(config.video.backend), file=sys.stderr)
+    offenders = _cuda_offenders(config)
+    label = " + ".join(offenders) if offenders else config.video.backend
+    print(_cuda_stack_error(label), file=sys.stderr)
     return False
 
 
@@ -789,10 +922,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if args.backend in _CUDA_BACKENDS and not _torch_available():
         print(_cuda_stack_error(args.backend), file=sys.stderr)
         return 1
+    if _check_run_id(args.run_id) != 0:
+        return 2
     # Resolve once: workers spawn with CWD=run_dir, so every downstream path
     # (payloads, takes, slices) must be absolute or they double up.
     output = Path(args.output) if args.output else Path("output") / args.run_id
-    run_dir = output.resolve()
+    run_dir = resolve_run_dir(str(output))
     init_args = argparse.Namespace(
         output=str(run_dir),
         run_id=args.run_id,
@@ -812,16 +947,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # beat-grid audio and overlap-blend finalize all ride the run config
     # written at init; explicit flags still win.
     director = args.director if args.director is not None else "qwen"
-    effective = apply_draft_overrides(
-        config,
-        draft=args.draft,
-        director=director,
-        blocks=args.blocks,
-        take_seconds=args.take_seconds,
-        quantization=args.quantization,
-        beats_per_segment=args.beats_per_segment,
-        drift_every_n_segments=args.drift_every_n,
-    )
+    try:
+        effective = apply_draft_overrides(
+            config,
+            draft=args.draft,
+            director=director,
+            blocks=args.blocks,
+            take_seconds=args.take_seconds,
+            quantization=args.quantization,
+            beats_per_segment=args.beats_per_segment,
+            drift_every_n_segments=args.drift_every_n,
+        )
+    except ValidationError as exc:
+        print(f"error: invalid numeric override: {exc}", file=sys.stderr)
+        return 2
     frames_per_segment = _frames_per_segment(effective)
     segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
     planned_frames = segments * frames_per_segment
@@ -872,7 +1011,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
             return 1
         print("continuing with --skip-bad ...", file=sys.stderr)
-    final = Path(args.final_video) if args.final_video else run_dir / "final.mp4"
+    final = Path(args.final_video).resolve() if args.final_video else run_dir / "final.mp4"
     final.parent.mkdir(parents=True, exist_ok=True)
     final_code = cmd_finalize(
         argparse.Namespace(run=str(run_dir), output=str(final), skip_bad=args.skip_bad)
@@ -911,6 +1050,22 @@ def _benchmark_env() -> dict[str, object]:
     return {"gpu": gpu, "torch": torch_version, "cuda_available": cuda_available}
 
 
+def _check_benchmark_counts(warmup: int, measured: int) -> int:
+    """CLI-side mirror of the worker `validate_benchmark_counts` (079/060).
+
+    Fail at parse-adjacent time (stderr + 2) instead of a worker-side
+    ZeroDivisionError: warmup >= 0 and measured >= 1.
+    """
+    if warmup < 0 or measured <= 0:
+        print(
+            "error: benchmark needs warmup >= 0 and measured >= 1 "
+            f"(got warmup={warmup}, measured={measured})",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     from voyage.bench import format_report, summarize_gauges
 
@@ -918,6 +1073,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     warmup = int(args.warmup)
     measured = int(args.measured)
     if target in ("video", "audio"):
+        if _check_benchmark_counts(warmup, measured) != 0:
+            return 2
         if not args.run:
             print("benchmark video/audio requires --run <dir>", file=sys.stderr)
             return 2
@@ -942,6 +1099,12 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     # end-to-end: a throwaway run (never mutates the user's data) whose
     # per-stage means + gauge deltas are the steady-state report.
     segments = int(args.segments)
+    if segments <= 0:
+        print(
+            f"error: --segments must be positive, got {segments}",
+            file=sys.stderr,
+        )
+        return 2
     with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
         init_args = argparse.Namespace(
             output=str(Path(tmp) / "run"),
@@ -1003,6 +1166,12 @@ def cmd_soak(args: argparse.Namespace) -> int:
 
     run_dir = _run_dir_arg(args.run)
     segments = int(args.segments)
+    if segments <= 0:
+        print(
+            f"error: --segments must be positive, got {segments}",
+            file=sys.stderr,
+        )
+        return 2
     config, _digest = _load_run(run_dir)
     console = get_console(args)
     console.rule(f"voyage soak · {segments} segments")
@@ -1105,11 +1274,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=False)
 
     init = sub.add_parser("init", help="Create a new run directory")
-    init.add_argument("--output", required=True)
-    init.add_argument("--run-id", default="voyage")
-    init.add_argument("--style", required=True)
-    init.add_argument("--seed", type=int, default=0)
-    init.add_argument("--force", action="store_true")
+    init.add_argument("--output", required=True, help="run directory to create")
+    init.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
+    init.add_argument("--style", required=True, help="permanent style charter for the run")
+    init.add_argument("--seed", type=int, default=0, help="master seed for the run")
+    init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     init.add_argument(
         "--backend",
         choices=("fake", "longlive2", "ltxv", "causvid"),
@@ -1122,18 +1291,35 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=cmd_doctor)
 
     models = sub.add_parser("models", help="Model management")
-    models.add_argument("models_action", choices=["list", "download", "verify", "info"])
-    models.add_argument("models_target", nargs="?", default="longlive2-bf16")
-    models.add_argument("--models-dir", default=None)
+    models.add_argument(
+        "models_action",
+        choices=["list", "download", "verify", "info"],
+        help="list backends, download weights, verify files, or show pointers",
+    )
+    models.add_argument(
+        "models_target",
+        nargs="?",
+        default="longlive2-bf16",
+        choices=[
+            "longlive2-bf16",
+            "ltxv-2b",
+            "causvid",
+            "director-qwen8b",
+            "audio-acestep",
+            "inspector-qwen35",
+        ],
+        help="weight bundle for download (default longlive2-bf16)",
+    )
+    models.add_argument("--models-dir", default=None, help="model root (default /models)")
     models.set_defaults(func=cmd_models)
 
     run = sub.add_parser("run", help="Generate segments (infinite unless --segments)")
-    run.add_argument("--run", required=True)
+    run.add_argument("--run", required=True, help="run directory (absolute or relative)")
     run.add_argument(
         "--segments",
         type=int,
         default=None,
-        help="segments to generate; omit to run until pause/stop/SIGINT",
+        help="segments to generate (must be positive; omit to run until pause/stop/SIGINT)",
     )
     run.add_argument(
         "--draft",
@@ -1143,19 +1329,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--director",
         default=None,
-        help="override the director backend (e.g. deterministic, qwen)",
+        choices=("qwen", "deterministic"),
+        help="override the director backend",
     )
     run.add_argument(
         "--blocks",
         type=int,
         default=None,
-        help="override video blocks per segment",
+        help="override video blocks per segment (must be positive)",
     )
     run.add_argument(
         "--take-seconds",
         type=float,
         default=None,
-        help="override audio take length in seconds",
+        help="override audio take length in seconds (must be positive)",
     )
     run.add_argument(
         "--quantization",
@@ -1167,13 +1354,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--beats-per-segment",
         type=int,
         default=None,
-        help="override beats per segment for the rhythm grid (default 4, doubles to hold >=60 BPM)",
+        help="override beats per segment (must be positive; default 4, doubles to hold >=60 BPM)",
     )
     run.add_argument(
         "--drift-every-n",
         type=int,
         default=None,
-        help="director drifts every Nth segment (default 1); other segments hold",
+        help="director drifts every Nth segment (must be positive; default 1); other segments hold",
     )
     _add_console_args(run)
     run.set_defaults(func=cmd_run)
@@ -1192,13 +1379,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--duration",
         type=parse_duration,
         required=True,
-        help="target length, e.g. '5s', '90', '1m30s', '2m' (rounds up to whole segments)",
+        help=f"target length, e.g. {_DURATION_EXAMPLES} (rounds up to whole segments)",
     )
-    gen.add_argument("--style", required=True)
-    gen.add_argument("--run-id", default="voyage")
+    gen.add_argument("--style", required=True, help="permanent style charter for the run")
+    gen.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
     gen.add_argument("--output", default=None, help="run directory (default output/<run-id>)")
-    gen.add_argument("--seed", type=int, default=0)
-    gen.add_argument("--force", action="store_true")
+    gen.add_argument("--seed", type=int, default=0, help="master seed for the run")
+    gen.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     gen.add_argument(
         "--final-video",
         default=None,
@@ -1217,19 +1404,20 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument(
         "--director",
         default=None,
-        help="override the director backend (e.g. deterministic, qwen)",
+        choices=("qwen", "deterministic"),
+        help="override the director backend",
     )
     gen.add_argument(
         "--blocks",
         type=int,
         default=None,
-        help="override video blocks per segment",
+        help="override video blocks per segment (must be positive)",
     )
     gen.add_argument(
         "--take-seconds",
         type=float,
         default=None,
-        help="override audio take length in seconds",
+        help="override audio take length in seconds (must be positive)",
     )
     gen.add_argument(
         "--quantization",
@@ -1241,43 +1429,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--beats-per-segment",
         type=int,
         default=None,
-        help="override beats per segment for the rhythm grid (default 4, doubles to hold >=60 BPM)",
+        help="override beats per segment (must be positive; default 4, doubles to hold >=60 BPM)",
     )
     gen.add_argument(
         "--drift-every-n",
         type=int,
         default=None,
-        help="director drifts every Nth segment (default 1); other segments hold",
+        help="director drifts every Nth segment (must be positive; default 1); other segments hold",
     )
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 
     status = sub.add_parser("status", help="Show run status")
-    status.add_argument("--run", required=True)
-    _add_console_args(status)
+    status.add_argument("--run", required=True, help="run directory to report on")
     status.set_defaults(func=cmd_status)
 
     pause = sub.add_parser("pause", help="Request a safe pause")
-    pause.add_argument("--run", required=True)
+    pause.add_argument("--run", required=True, help="run directory to pause")
     pause.set_defaults(func=cmd_pause)
 
     resume = sub.add_parser("resume", help="Resume from last commit")
-    resume.add_argument("--run", required=True)
+    resume.add_argument("--run", required=True, help="run directory to resume")
     resume.set_defaults(func=cmd_resume)
 
     stop = sub.add_parser("stop", help="Safely stop generation")
-    stop.add_argument("--run", required=True)
-    stop.add_argument("--finalize", action="store_true")
+    stop.add_argument("--run", required=True, help="run directory to stop")
+    stop.add_argument(
+        "--finalize",
+        action="store_true",
+        help="run the finalizer inline after requesting stop",
+    )
     stop.set_defaults(func=cmd_stop)
 
     validate = sub.add_parser("validate", help="Offline consistency check (read-only)")
-    validate.add_argument("--run", required=True)
-    _add_console_args(validate)
+    validate.add_argument("--run", required=True, help="run directory to check")
     validate.set_defaults(func=cmd_validate)
 
     finalize = sub.add_parser("finalize", help="Assemble the final MP4")
-    finalize.add_argument("--run", required=True)
-    finalize.add_argument("--output", required=True)
+    finalize.add_argument("--run", required=True, help="run directory to finalize")
+    finalize.add_argument("--output", required=True, help="final mp4 path to write")
     finalize.add_argument(
         "--skip-bad",
         action="store_true",
@@ -1287,28 +1477,41 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.set_defaults(func=cmd_finalize)
 
     benchmark = sub.add_parser("benchmark", help="Performance probes")
-    benchmark.add_argument("benchmark_target", choices=["video", "audio", "end-to-end"])
-    benchmark.add_argument("--run", default="", help="run dir (required for video/audio targets)")
-    benchmark.add_argument("--warmup", type=int, default=1)
-    benchmark.add_argument("--measured", type=int, default=3)
     benchmark.add_argument(
-        "--segments", type=int, default=2, help="segments for the end-to-end target"
+        "benchmark_target",
+        choices=["video", "audio", "end-to-end"],
+        help="which probe to run",
     )
-    _add_console_args(benchmark)
+    benchmark.add_argument(
+        "--run", default="", help="run directory (required for video/audio targets)"
+    )
+    benchmark.add_argument("--warmup", type=int, default=1, help="warmup iterations (must be >= 0)")
+    benchmark.add_argument(
+        "--measured", type=int, default=3, help="measured iterations (must be >= 1)"
+    )
+    benchmark.add_argument(
+        "--segments",
+        type=int,
+        default=2,
+        help="segments for the end-to-end target (must be positive)",
+    )
     benchmark.set_defaults(func=cmd_benchmark)
 
     soak = sub.add_parser("soak", help="Stability run with a resource-trend report")
-    soak.add_argument("--run", required=True)
-    soak.add_argument("--segments", type=int, required=True)
+    soak.add_argument("--run", required=True, help="run directory to soak-test")
+    soak.add_argument(
+        "--segments", type=int, required=True, help="segments to run (must be positive)"
+    )
     _add_console_args(soak)
     soak.set_defaults(func=cmd_soak)
 
     inspect = sub.add_parser("inspect", help="Inspect run artifacts")
     inspect.add_argument(
-        "inspect_target", choices=["concepts", "segments", "media", "metrics", "scoreboard"]
+        "inspect_target",
+        choices=["concepts", "segments", "media", "metrics", "scoreboard"],
+        help="which artifact view to print",
     )
-    inspect.add_argument("--run", required=True)
-    _add_console_args(inspect)
+    inspect.add_argument("--run", required=True, help="run directory to inspect")
     inspect.set_defaults(func=cmd_inspect)
 
     return parser

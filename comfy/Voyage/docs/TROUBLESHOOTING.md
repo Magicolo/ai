@@ -13,7 +13,12 @@
 
 ## CUDA failures
 
-- `voyage doctor` first: driver, `nvidia-smi`, CUDA visibility.
+- `voyage doctor` first: driver, `nvidia-smi`, CUDA visibility,
+  torch-CUDA match, disk free, models-dir presence with a per-backend
+  `verify_*` summary. It does NOT yet check compute capability, CUDA
+  runtime version, FlashAttention/Triton, checkpoint compat, fs
+  permissions, or worker interpreters — and `models verify` remains the
+  authority for weight files (doctor only summarizes presence + size).
 - transformers must be 4.57.6 in the video image (5.x breaks LongLive).
 - `quantization`: `bf16` fits and kills the fp8 highlight blowout;
   saturated extremes can still blow out — prompt care at peak brights.

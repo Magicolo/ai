@@ -1,6 +1,6 @@
 # 050 — `--verbose`/`--no-color` parsed but ignored on 3 verbs
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track — remove + docs, per cheapest candidate)
 - Severity: medium (silent flag-dropping; docs claim "two verbosity levels
   everywhere")
 - Area: CLI polish — `voyage/cli.py:76-88,1254-1311`, `voyage/console.py:86-108`
@@ -73,4 +73,12 @@ former + docs correction.
   `get_console` call, so the silent set is status/validate/inspect/benchmark
   (four verbs, not three); description and candidates corrected. Added
   `## Why this is an issue` + real `rg` output.
-- Open: wire or remove + docs fix.
+- 2026-09-25 (CLI track): FIXED via remove + docs correction. `_add_console_args`
+  removed from the `status`/`validate`/`benchmark`/`inspect` subparsers
+  (`voyage/cli.py` `build_parser` — wired set is now exactly
+  run/finalize/generate/soak, matching the four `get_console` call sites);
+  `docs/OPERATIONS.md:39-41` corrected to "honored on run, generate,
+  finalize, and soak only". Tests: `tests/test_console.py`
+  `test_run_cli_accepts_verbose_and_no_color` narrowed to run-only plus new
+  `test_status_cli_rejects_console_flags` (status/validate/inspect reject
+  the flags with exit 2). Gates green (ruff + format + mypy + pytest).

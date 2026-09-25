@@ -17,7 +17,7 @@ import pytest
 from voyage import paths
 from voyage.cli import cmd_status
 from voyage.config import default_config_toml, load_config
-from voyage.logrotate import append_line
+from voyage.logrotate import append_line, iter_metric_files
 from voyage.persistence import (
     build_manifest,
     initial_state,
@@ -99,6 +99,46 @@ def test_worker_start_rotates_stale_log(tmp_path: Path) -> None:
     assert len(rotated) == 1
     assert rotated[0].read_text(encoding="utf-8") == "old worker output\n"
     assert "old worker output" not in log.read_text(encoding="utf-8")
+
+
+def test_metric_file_iterator_lists_live_only_without_rotation(tmp_path: Path) -> None:
+    """No rotation yet → the iterator yields just the live file."""
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    live = logs_dir / "metrics.jsonl"
+    live.write_text('{"event": "one"}\n', encoding="utf-8")
+    assert iter_metric_files(run_dir) == [live]
+
+
+def test_metric_file_iterator_spans_rotation_oldest_first(tmp_path: Path) -> None:
+    """Rotate-then-read: the dated sibling sorts before the live file."""
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    live = logs_dir / "metrics.jsonl"
+    live.write_text('{"event": "old"}\n', encoding="utf-8")
+    _backdate(live, 2)
+    append_line(live, '{"event": "new"}')
+    rotated = logs_dir / f"metrics-{_day_ago(2)}.jsonl"
+    assert iter_metric_files(run_dir) == [rotated, live]
+
+
+def test_metric_file_iterator_ignores_non_dated_siblings(tmp_path: Path) -> None:
+    """Undated lookalikes never leak into the history stream."""
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    live = logs_dir / "metrics.jsonl"
+    live.write_text("", encoding="utf-8")
+    stray = logs_dir / "metrics-backup.jsonl"
+    stray.write_text("", encoding="utf-8")
+    assert iter_metric_files(run_dir) == [live]
+
+
+def test_metric_file_iterator_missing_logs_dir(tmp_path: Path) -> None:
+    """A run without logs yet yields no files instead of raising."""
+    assert iter_metric_files(tmp_path / "absent-run") == []
 
 
 def test_metric_events_carry_run_id(tmp_path: Path) -> None:

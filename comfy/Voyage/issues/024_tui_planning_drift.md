@@ -1,6 +1,6 @@
 # 024 — TUI planning math is stale vs CLI truth; `causvid` omitted; plan derived twice
 
-- Status: open
+- Status: resolved (fixed 2026-09-25, TUI track)
 - Severity: major (wrong segment estimates; backend rejected; paired lists
   already disagree)
 - Area: UX correctness — `tui_state.plan_counts` / `plan_summary` / `gpu_warning`
@@ -91,5 +91,35 @@ backends × blocks 1..3.
   and `gpu_warning` probes executed live by orchestrator.
 - Open: implement single-source planning + tests.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; corrected
-  `plan_counts` 242-250→226-250, `plan_summary` 272-281→253-282, `_read_form`
+  `plan_counts` 242-250→226-250, `plan_summary` 253-282, `_read_form`
   656-663→699-726, constants 46-51→49-51.
+- 2026-09-25 (fix, TUI track): relevance re-verified live — ltxv drift
+  (25/49/73 vs CLI 96/192/288) and longlive2 drift (48 vs 29/61/93)
+  confirmed on host; causvid/fake already correct, and `BACKENDS` +
+  causvid plan branch + `gpu_warning` causvid were already landed by
+  commit `1c3b46a` (kept, not re-done). Import-direction check FIRST:
+  `voyage/cli.py` never imports `voyage.tui_state` at module level — its
+  only TUI touch is the lazy `from voyage.tui import run_tui` inside
+  `launch_tui` (`cli.py:90-98`) — so function-level imports from
+  `tui_state` into `cli` cannot cycle (same pattern as the pre-existing
+  `parse_duration` import; `cli.is_flat_folder_name`'s docstring
+  documents this direction). No shared-table move into `config.py`
+  needed (also out of scope). Implemented direct single source in
+  `voyage/tui_state.py`: `_planning_frames_and_fps` (frames from
+  `cli._frames_per_segment` on a planning-only `ProjectConfig`,
+  fps from the config video preset) + `_plan_details` struct
+  (`plan_counts` returns its first 3 fields, `plan_summary` formats all
+  5 — no recompute); stale `_LTXV_FIRST_BLOCK_FRAMES` /
+  `_DEFAULT_SEGMENT_FRAMES` / `_FPS` / `_BACKEND_FPS` constants deleted;
+  `gpu_warning` derives from `cli._CUDA_BACKENDS`; `_read_form`
+  closures lifted to module-level `_read_text_field` /
+  `_read_choice_field` / `_read_flag_field` in `voyage/tui.py`.
+  Live 12-case matrix (4 backends x blocks 1..3, host `PYTHONPATH=Voyage`):
+  TUI == CLI exactly in all 12. Tests: `test_tui_state.py`
+  `test_plan_counts_match_cli_truth_all_backends_and_blocks` (cross-test
+  vs `cli._frames_per_segment` + preset fps),
+  `test_plan_summary_uses_single_source_struct`,
+  `test_gpu_warning_derives_from_shared_cuda_set`; `test_tui.py` stale
+  ltxv expectations corrected (5seg/125f → 2seg/192f + 96f/segment;
+  new longlive2 29f fragment test). Gates: `scripts/gates.sh` GREEN
+  (ruff + format + mypy strict + 563 pytest).

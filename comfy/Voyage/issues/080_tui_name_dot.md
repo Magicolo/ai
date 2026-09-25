@@ -1,6 +1,6 @@
 # 080 — TUI `name="."` passes the flat-folder check, targets the shared `output/` dir
 
-- Status: open
+- Status: resolved (fixed 2026-09-25, TUI track; CLI half deferred — see log)
 - Severity: low (run initializes inside the shared directory; `init --force`
   writes run files among all runs)
 - Area: TUI validation — `voyage/tui_state.py:118-121,202-203`
@@ -51,3 +51,20 @@ apply the same hardened check at the CLI layer (see 008/057).
   cited lines live (`tui_state.py:118-121` `_flat_folder_name`,
   `:202-203` output construction — both match; `"."` passes the check).
 - Open: implement + tests.
+- 2026-09-25 (fix, TUI track): relevance re-verified live (`"."`
+  passed `_flat_folder_name`, no field error). Implemented in
+  `voyage/tui_state.py`: `_flat_folder_name` rejects `"."` plus a
+  `_RESERVED_FOLDER_NAMES` set (con/prn/aux/nul/com1-9/lpt1-9,
+  case- and extension-insensitive); `..`/slashes logic untouched.
+  CLI half (`cli.is_flat_folder_name`, `cli.py:80-90`, same dot hole
+  per this issue's evidence) NOT touched — `cli.py` is outside this
+  batch's file scope; left for the `cli.py` owner (same one-line
+  hardened check applies). Tests: `test_tui_state.py`
+  `test_flat_folder_name_rejects_dot_and_reserved` (15 cases) +
+  `test_flat_folder_name_accepts_ordinary_names` (6 cases, incl.
+  `a.b`/`comet`/`null` near-misses). Gates: `scripts/gates.sh` GREEN
+  (ruff + format + mypy strict + 563 pytest).
+- 2026-09-25 (review): CLI half now ported by the orchestrator —
+  `cli._RESERVED_FOLDER_NAMES` + dot rejection in `is_flat_folder_name`
+  (`cli.py:80-103`), tests extended in `test_cli_hardening.py`. Issue fully
+  resolved on both layers.

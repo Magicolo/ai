@@ -115,18 +115,27 @@ def test_plan_summary_causvid_reports_72f_at_16fps() -> None:
 
 def test_plan_summary_default_is_five_seconds() -> None:
     summary = plan_summary(_valid_state())
-    assert "5 segment(s)" in summary
-    assert "125 frames" in summary
+    assert "2 segment(s)" in summary
+    assert "192 frames" in summary
+    assert "96f/segment" in summary
     assert "ltxv" in summary
 
 
 def test_plan_summary_reports_block_math() -> None:
     state = _valid_state()
     state.blocks = "2"
-    summary = plan_summary(_valid_state())
-    assert "125 frames" in summary
+    assert "192 frames" in plan_summary(state)
     state.blocks = "1"
-    assert plan_summary(state) == summary
+    assert "192 frames" in plan_summary(state)
+
+
+def test_plan_summary_longlive2_reports_29f_at_24fps() -> None:
+    state = _valid_state()
+    state.backend = "longlive2"
+    summary = plan_summary(state)
+    assert "longlive2" in summary
+    assert "29f/segment" in summary
+    assert "24fps" in summary
 
 
 def test_plan_summary_reports_bad_input() -> None:
@@ -220,3 +229,32 @@ def test_app_structure_matches_form_fields() -> None:
             assert isinstance(app.initial_state, GenerateFormState)
 
     asyncio.run(_check())
+
+
+def test_stop_with_corrupt_state_reports_feedback(tmp_path: Path) -> None:
+    """Stop-button guard: a corrupt state.json surfaces a feedback line.
+
+    Drives the real app (Pilot): with a run marked running but its
+    state.json holding garbage, _request_stop must append a "cannot
+    stop" line instead of raising out of the handler (issue 078).
+    """
+    pytest.importorskip("textual")
+    import asyncio
+
+    from voyage.tui import VoyageApp
+
+    async def _run() -> None:
+        app = VoyageApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            run_dir = tmp_path / "output" / "stuck-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.json").write_text("{bad json", encoding="utf-8")
+            app._run_dir = run_dir
+            app._running = True
+            app._request_stop()
+            await pilot.pause()
+            assert any("cannot stop" in line for line in app.run_history)
+            assert app._running
+
+    asyncio.run(_run())

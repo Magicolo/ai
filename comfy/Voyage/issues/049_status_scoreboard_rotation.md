@@ -1,6 +1,6 @@
 # 049 — `status` drifted from §59; scoreboard/`status`/soak blind after rotation
 
-- Status: open
+- Status: open (STATUS half resolved 2026-09-25 CLI track; ROTATION half untouched — other track)
 - Severity: medium (stale contract + silent history loss the day after a run ends)
 - Area: observability — `cli.py:396-466`, `scoreboard.py:37-60`,
   `logrotate.py:35-88`
@@ -91,4 +91,60 @@ Commands above; rotate-then-read sequence.
   `scoreboard.py:37-60` (live-file-only reader); `logrotate.py:35-88` all
   current. Fixed stale OPERATIONS ref `:196-202` → `:206-207` (the status
   promise moved). Added `## Why this is an issue` + real Evidence output.
-- Open: fix readers + update spec/docs to match.
+- 2026-09-25 (CLI track): STATUS half FIXED in `voyage/cli.py` (code side —
+  spec/docs update deferred since DESIGN/OPERATIONS-status are outside this
+  track's scope): (1) `Novelty:` line under World (`:525`) from new
+  `_latest_novelty()` (`:424`, newest ConceptStore record →
+  `accepted (record …)` / `hold (…)` / `no concepts yet` / `unknown`;
+  the concept store is never rotated so the verdict survives rotation);
+  (2) `Slowest stage: <name> (<s>s)` under the last-commit stages (`:551`)
+  from new `_slowest_stage()` (`:445`, max of numeric stage seconds —
+  the per-stage dump stays, this line names the bottleneck per the
+  OPERATIONS "slowest stages" promise); (3) `Uptime:` keeps its label
+  (matches §59's example verbatim AND `tests/test_observability.py`
+  asserts the substring — renaming would break the observability track)
+  but is now RUNNING-gated (`:500-503`): plain `Uptime: HH:MM:SS` while
+  RUNNING, `Uptime: HH:MM:SS (age since init; not running)` otherwise,
+  with `_format_uptime` documented as wall-clock age. `Workers: idle`
+  wording and the `Current block` gap intentionally unchanged (worker
+  lifecycle text belongs to the supervisor track; block position isn't
+  in state). SPLIT NOTE: the ROTATION half (glob `metrics*.jsonl` in
+  `scoreboard._stages_by_segment`, `cli._last_commit_stages`, soak/
+  benchmark readers, or `inspect metrics --all`) is NOT touched —
+  `scoreboard.py`/`logrotate.py` are outside this scope and
+  `_last_commit_stages` still reads the live file only. Tests:
+  `tests/test_cli_hardening.py` (fresh-run novelty + age qualifier,
+  post-commit novelty/slowest, RUNNING hides qualifier, `_slowest_stage`
+  unit). Gates green.
+- 2026-09-25 (fix, readers half only — `cli.py` status-drift half
+  belongs to the CLI track, `cli.py` untouched): re-verified live —
+  `_stages_by_segment` still opened the live file only. Added
+  `iter_metric_files(run_dir)` in `voyage/logrotate.py` (live
+  `metrics.jsonl` + `metrics-YYYY-MM-DD.jsonl` siblings, oldest-first,
+  live last so it wins duplicates; dated-name guard mirrors prune;
+  never raises) and rewired `scoreboard._stages_by_segment` to merge
+  across it. `OPERATIONS.md` long-run monitoring now records the
+  rotation-spanning contract. Tests: 4 new in
+  `tests/test_observability.py` (live-only, rotation order,
+  non-dated-sibling exclusion, missing dir) + 1 rotation-then-read in
+  `tests/test_scoreboard.py` (pre-rotation stages survive). Scoped
+  gates green: ruff + format + mypy strict, 21/21 pytest across the
+  three files. Full `gates.sh` red on concurrent agents' files only.
+
+## Hook note for the CLI track (status/soak adoption)
+
+In `voyage/logrotate.py`: `iter_metric_files(run_dir: Path) -> list[Path]`
+— live file plus rotated siblings, oldest-first, live last; never
+raises. Adopt as: `_last_commit_stages` should scan
+`reversed(iter_metric_files(run_dir))` and take the first
+`segment_committed` hit (fixes the day-after silent Stages loss);
+`cmd_soak` and `cmd_benchmark end-to-end` should concatenate parsed
+events across `iter_metric_files(run_dir)` instead of reading the live
+file only (fixes post-rotation silent history loss).
+
+## Resolution
+
+FIXED (readers half): rotation-blind history loss fixed for
+scoreboard via the shared helper; `status`/`soak` adoption left for
+the CLI track per the hook above. Status-vs-§59 drift (Novelty/Current
+block/slowest-stages/Uptime) untouched — other track.

@@ -1,6 +1,6 @@
 # 062 — TUI `take_seconds` accepts `nan`/`inf`; `AudioConfig` validator accepts them too
 
-- Status: partially fixed (config-validator part done; TUI part open for a later batch)
+- Status: resolved (fixed 2026-09-25, TUI track — both halves done)
 - Severity: medium (non-finite take length flows into planning + ACE payload)
 - Area: TUI + config validation — `voyage/tui_state.py:156-167`,
   `voyage/config.py:107-112`
@@ -75,3 +75,17 @@ validator (`if value < 0 or not math.isfinite(value)`). Consider one shared
   passed in-container.
 - Open (later batch): `field_errors` finiteness rejection in
   `voyage/tui_state.py:156-167` + nan/inf/negative tests per field.
+- 2026-09-25 (fix, TUI track): relevance re-verified live (`nan`/`inf`
+  passed `field_errors` with no error). Implemented `math.isfinite`
+  rejection in `field_errors` (`voyage/tui_state.py`: `if not
+  math.isfinite(take) or take <= 0`, message `positive finite number`).
+  Plan-math half: `to_generate_namespace` already calls `validate`
+  first and raises `ValueError` on any field error, so a nan/inf take
+  can no longer reach planning math or the ACE payload — covered by
+  test (`to_generate_namespace` raises on nan/inf). Duration needs no
+  fix (`parse_duration`'s `\d+` regex rejects nan/inf with ValueError,
+  verified live). Tests: `test_tui_state.py`
+  `test_take_seconds_rejects_non_finite` (nan/inf/-inf/NAN/Infinity →
+  field error + namespace raises), `test_take_seconds_rejects_non_positive`,
+  `test_take_seconds_accepts_positive_finite`. Gates: `scripts/gates.sh`
+  GREEN (ruff + format + mypy strict + 563 pytest).

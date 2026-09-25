@@ -1,6 +1,6 @@
 # 008 — CLI path traversal: `--run-id`/`--output`/`--run`/`--final-video` unvalidated
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track)
 - Severity: major (security / robustness)
 - Area: supply chain + CLI input validation
 - Rank rationale: writes outside the run tree from a crafted flag; the TUI
@@ -63,3 +63,19 @@ Escapes `Voyage/output/` to a sibling of the repo checkout.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; traversal probe
   re-run live (escapes `Voyage/output/`); refs verified current
   (`cli.py:101-102,638,793`; `tui_state.py:118-121`).
+- 2026-09-25 (CLI track): FIXED. `voyage/cli.py` gained `resolve_run_dir()`
+  (:70, canonical alias of `_run_dir_arg` — new code calls this),
+  `is_flat_folder_name()` (:80, mirrors TUI `_flat_folder_name` locally;
+  importing the TUI would be circular since it imports `parse_duration`
+  from the CLI), and `_check_run_id()` (:93, stderr + exit 2).
+  `cmd_init` (:138-140) validates `--run-id` and resolves `--output`
+  through `resolve_run_dir` (also closes 057's one-liner); `cmd_generate`
+  (:913-918) validates `--run-id` and resolves via the helper;
+  `cmd_finalize` (:734) and generate's `--final-video` (:1002) resolve to
+  absolute. Explicit absolute `--output` (e.g. `/tmp/...`) stays allowed —
+  the constraint targets `--run-id` traversal, not user-chosen absolute
+  dirs. Tests: `tests/test_cli_hardening.py` (traversal init/generate
+  rejected with "flat folder" on stderr; absolute `--output` accepted;
+  helper returns absolute). Gates: ruff + format + mypy strict green;
+  pytest 562 passed + new tests (two full-suite runs each flaked a
+  different TUI Pilot test owned by another track — both pass alone).

@@ -251,10 +251,27 @@ def test_run_cli_shows_segment_prompts(tmp_path: Path, capsys: pytest.CaptureFix
 def test_run_cli_accepts_verbose_and_no_color(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verbosity flags parse on run/generate/status/finalize/soak."""
+    """Verbosity flags work on run (050: status no longer accepts them)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     assert main(["run", "--run", str(run_dir), "--segments", "1", "--verbose"]) == 0
     assert "seeds:" in capsys.readouterr().out
-    assert main(["status", "--run", str(run_dir), "--no-color"]) == 0
-    assert "Voyage: console" in capsys.readouterr().out
+    assert main(["run", "--run", str(run_dir), "--segments", "1", "--no-color"]) == 0
+    assert "SEGMENT 000001" in capsys.readouterr().out
+
+
+def test_status_cli_rejects_console_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`status`/`validate`/`inspect` don't accept --verbose/--no-color (050)."""
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["status", "--run", str(run_dir), "--no-color"])
+    assert exc_info.value.code == 2
+    with pytest.raises(SystemExit) as exc_info:
+        main(["validate", "--run", str(run_dir), "--verbose"])
+    assert exc_info.value.code == 2
+    with pytest.raises(SystemExit) as exc_info:
+        main(["inspect", "--run", str(run_dir), "segments", "--verbose"])
+    assert exc_info.value.code == 2

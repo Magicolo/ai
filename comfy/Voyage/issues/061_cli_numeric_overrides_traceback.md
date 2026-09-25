@@ -1,6 +1,6 @@
 # 061 — CLI numeric overrides raise unhandled `ValidationError` traceback instead of a clean error
 
-- Status: open
+- Status: resolved (2026-09-25, CLI track — except-and-exit-2 variant)
 - Severity: medium (Python traceback + non-2 exit for plain user input errors)
 - Area: CLI — `voyage/cli.py:283-304` (`cmd_run`), `:783-823` (`cmd_generate`),
   `voyage/config.py:173-178,114-119`
@@ -59,4 +59,15 @@ return 2), or add argparse-level `type=` validators for `--blocks/
   cited lines live (`cli.py:283-304` `cmd_run`, `:783-823` `cmd_generate`,
   `main` catches only `VoyageError` at `:1328-1332`, `config.py` positive
   validators at `:114-119`/`:173-178` — all match).
-- Open: implement + test (each flag, exit code 2, stderr message).
+- 2026-09-25 (CLI track): FIXED via the catch variant. `cmd_run`
+  (`voyage/cli.py:~340-352`) and `cmd_generate` (`:~940-952`) wrap
+  `apply_draft_overrides` in `try/except ValidationError` (imported from
+  pydantic at `:24`) printing `error: invalid numeric override: ...` to
+  stderr and returning 2 — no traceback, standard exit. (Argparse-level
+  `type=` validators were not added: positivity lives in the pydantic
+  models as the single source of truth; duplicating ranges in argparse
+  would drift. The `--blocks/--beats/--drift/--take-seconds` helps now
+  state "must be positive" per 051.) Tests:
+  `tests/test_cli_hardening.py` (`--blocks 0/-2`, `--take-seconds -1`,
+  `--beats-per-segment 0`, `--drift-every-n 0` on run + `--blocks 0` on
+  generate: all exit 2 with the stderr marker). Gates green.

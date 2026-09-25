@@ -14,11 +14,14 @@ import pytest
 from voyage.tui_state import (
     LAST_SETTINGS_PATH,
     GenerateFormState,
+    _flat_folder_name,
     field_errors,
     gpu_warning,
     load_last_settings,
     plan_counts,
+    plan_summary,
     save_last_settings,
+    to_generate_namespace,
 )
 
 
@@ -162,3 +165,121 @@ def test_name_must_be_flat() -> None:
     assert "name" in field_errors(GenerateFormState(style="x", name=""))
     assert "name" in field_errors(GenerateFormState(style="x", name="a/b"))
     assert "name" not in field_errors(GenerateFormState(style="x", name="my-run_01"))
+
+
+def test_plan_counts_match_cli_truth_all_backends_and_blocks() -> None:
+    """Single-source planning (issue 024): TUI == cli._frames_per_segment math.
+
+    Cross-test over every backend × blocks 1..3 against a planning-only
+    ProjectConfig with preset fps — the same inputs cmd_generate plans
+    with. Any drift on either side fails here.
+    """
+    from voyage.cli import _frames_per_segment, segments_for_duration
+    from voyage.config import ProjectConfig, VideoConfig, _video_preset
+
+    for backend in ("ltxv", "longlive2", "causvid", "fake"):
+        preset = _video_preset(backend)
+        raw_fps = preset.get("fps", 24)
+        assert isinstance(raw_fps, int)
+        for blocks in (1, 2, 3):
+            state = GenerateFormState(style="x", backend=backend, duration="5s", blocks=str(blocks))
+            config = ProjectConfig(
+                style="planning",
+                video=VideoConfig(backend=backend, blocks_per_segment=blocks, fps=raw_fps),
+            )
+            frames_per_segment = _frames_per_segment(config)
+            segments = segments_for_duration(5.0, raw_fps, frames_per_segment)
+            assert plan_counts(state) == (
+                segments,
+                segments * frames_per_segment,
+                pytest.approx(segments * frames_per_segment / raw_fps),
+            )
+
+
+def test_plan_summary_uses_single_source_struct() -> None:
+    """plan_summary formats plan_counts (no independent frame math)."""
+    for backend, expected_fragment in (
+        ("ltxv", "96f/segment @ 24fps"),
+        ("longlive2", "29f/segment @ 24fps"),
+        ("causvid", "72f/segment @ 16fps"),
+        ("fake", "48f/segment @ 24fps"),
+    ):
+        state = GenerateFormState(style="x", backend=backend, duration="5s")
+        counts = plan_counts(state)
+        assert counts is not None
+        segments, planned_frames, _seconds = counts
+        summary = plan_summary(state)
+        assert expected_fragment in summary
+        assert f"{segments} segment(s)" in summary
+        assert f"{planned_frames} frames" in summary
+
+
+def test_gpu_warning_derives_from_shared_cuda_set() -> None:
+    """gpu_warning agrees with cli._CUDA_BACKENDS (issue 024)."""
+    from voyage.cli import _CUDA_BACKENDS
+
+    for backend in ("ltxv", "longlive2", "causvid", "fake", "nope"):
+        assert bool(gpu_warning(backend)) == (backend in _CUDA_BACKENDS)
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "NAN", "Infinity"])
+def test_take_seconds_rejects_non_finite(raw: str) -> None:
+    """Non-finite take lengths never reach planning or the ACE payload."""
+    assert "take_seconds" in field_errors(GenerateFormState(style="x", take_seconds=raw))
+    with pytest.raises(ValueError, match="take-seconds"):
+        to_generate_namespace(GenerateFormState(style="x", take_seconds=raw))
+
+
+@pytest.mark.parametrize("raw", ["-5", "0", "-0.5"])
+def test_take_seconds_rejects_non_positive(raw: str) -> None:
+    assert "take_seconds" in field_errors(GenerateFormState(style="x", take_seconds=raw))
+
+
+def test_take_seconds_accepts_positive_finite() -> None:
+    assert "take_seconds" not in field_errors(GenerateFormState(style="x", take_seconds="30"))
+    assert to_generate_namespace(
+        GenerateFormState(style="x", take_seconds="30")
+    ).take_seconds == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ".",
+        "con",
+        "CON",
+        "prn",
+        "aux",
+        "nul",
+        "NUL",
+        "com1",
+        "COM9",
+        "lpt1",
+        "LPT9",
+        "con.txt",
+        "a/b",
+        "..",
+        "",
+    ],
+)
+def test_flat_folder_name_rejects_dot_and_reserved(raw: str) -> None:
+    """Single dot targets shared output/; reserved names are never folders."""
+    assert _flat_folder_name(raw) is False
+    assert "name" in field_errors(GenerateFormState(style="x", name=raw))
+
+
+@pytest.mark.parametrize("raw", ["my-run_01", "voyage", "run 2", "a.b", "comet", "null"])
+def test_flat_folder_name_accepts_ordinary_names(raw: str) -> None:
+    assert _flat_folder_name(raw) is True
+    assert "name" not in field_errors(GenerateFormState(style="x", name=raw))
+
+
+@pytest.mark.parametrize("raw", ["a\x01b", "hello\x00world", "x\x0by\x0cz", "tab\there", "q\x1f"])
+def test_last_settings_round_trip_control_characters(raw: str, tmp_path: Path) -> None:
+    """Every C0 control survives save/load; the file holds no raw control."""
+    settings_file = tmp_path / "tui-last.toml"
+    state = GenerateFormState(style=raw, backend="fake", name="myrun")
+    save_last_settings(state, settings_file)
+    file_bytes = settings_file.read_bytes()
+    assert all(byte >= 0x20 or byte == 0x0A for byte in file_bytes)
+    assert load_last_settings(settings_file) == state

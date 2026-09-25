@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
+from voyage.logrotate import iter_metric_files
 
 METRIC_KEYS = [
     "motion_energy",
@@ -35,27 +36,32 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _stages_by_segment(run_dir: Path) -> dict[str, dict[str, float]]:
-    """Per-stage seconds keyed by segment id from logs/metrics.jsonl."""
+    """Per-stage seconds keyed by segment id from logs/metrics*.jsonl.
+
+    Reads the live file plus rotated siblings oldest-first (issue 049):
+    after a daily rotation the live file alone would silently drop every
+    older segment's stages. Later files win on duplicate segment ids.
+    """
     stages: dict[str, dict[str, float]] = {}
-    events_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
-    try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return stages
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    for events_path in iter_metric_files(run_dir):
         try:
-            event = json.loads(line)
-        except ValueError:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
             continue
-        if not isinstance(event, dict) or event.get("event") != "segment_committed":
-            continue
-        segment_id = event.get("segment_id")
-        raw_stages = event.get("stages")
-        if isinstance(segment_id, str) and isinstance(raw_stages, dict):
-            stages[segment_id] = {str(key): float(value) for key, value in raw_stages.items()}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("event") != "segment_committed":
+                continue
+            segment_id = event.get("segment_id")
+            raw_stages = event.get("stages")
+            if isinstance(segment_id, str) and isinstance(raw_stages, dict):
+                stages[segment_id] = {str(key): float(value) for key, value in raw_stages.items()}
     return stages
 
 
