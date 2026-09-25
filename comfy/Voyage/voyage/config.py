@@ -260,12 +260,26 @@ class ProjectConfig(BaseModel):
         return value
 
 
+def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int) -> int:
+    """Narrow a preset value to int (mypy-strict: the dict also holds lists)."""
+    value = preset.get(key, default)
+    if not isinstance(value, int):
+        raise ValueError(f"video preset key {key!r} must be an int (got {value!r})")
+    return value
+
+
 def default_config_toml(run_id: str, style: str, seed: int, video_backend: str = "fake") -> str:
     preset = _video_preset(video_backend)
     backend = str(preset.get("backend", video_backend))
     profile = str(preset.get("profile", "fake-432p"))
-    width = int(preset.get("width", 768))
-    height = int(preset.get("height", 432))
+    width = _preset_int(preset, "width", 768)
+    height = _preset_int(preset, "height", 432)
+    fps = _preset_int(preset, "fps", 24)
+    raw_latent = preset.get("latent_shape", [1, 8, 48, 44, 80])
+    latent_dims = (
+        [int(dim) for dim in raw_latent] if isinstance(raw_latent, list) else [1, 8, 48, 44, 80]
+    )
+    latent_toml = "[" + ", ".join(str(dim) for dim in latent_dims) + "]"
     device = str(preset.get("device", "cpu"))
     audio_preset = _audio_preset(video_backend)
     audio_backend = audio_preset["backend"]
@@ -278,16 +292,16 @@ seed = {seed}
 min_free_space_gib = 5.0
 
 [video]
-# "fake" (built-in testsrc) | "longlive2" (CUDA image) | "ltxv" (CUDA image)
+# "fake" (built-in testsrc) | "longlive2" (CUDA) | "ltxv" (CUDA) | "causvid" (CUDA, 16 fps)
 backend = "{backend}"
 profile = "{profile}"
 width = {width}
 height = {height}
-fps = 24
+fps = {fps}
 segment_frames = 48
 device = "{device}"
 models_dir = "/models"
-latent_shape = [1, 8, 48, 44, 80]
+latent_shape = {latent_toml}
 blocks_per_segment = 1
 quantization = "fp8"
 
@@ -407,7 +421,7 @@ def apply_draft_overrides(
     )
 
 
-_VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
+_VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int | list[int]]] = {
     # `generate --backend` presets (single source of truth, also used by
     # default_config_toml). ltxv renders native 768x512 on CUDA (both /32
     # and /64 clean for the two-stage multiscale pipeline; 1024x576 was
@@ -417,12 +431,20 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
     # 1280x704 (latent_shape x16 spatial — the worker ignores the request
     # geometry), so the preset pins that geometry: anything else fails the
     # commit-time resolution check (qual-longlive2, 2026-09-24); fake is
-    # the config default, spelled out for explicitness.
+    # the config default, spelled out for explicitness; causvid renders
+    # native 832x480 @ 16 fps (the worker rejects anything else — same
+    # native-geometry rule as longlive2).
+    # fps + latent_shape ride the preset too (default_config_toml writes
+    # them into voyage.toml — hardcoding 24/[1,8,48,44,80] there made the
+    # causvid preset a lie: the supervisor sent fps 24 and the worker
+    # refused).
     "fake": {
         "backend": "fake",
         "profile": "fake-432p",
         "width": 768,
         "height": 432,
+        "fps": 24,
+        "latent_shape": [1, 8, 48, 44, 80],
         "device": "cpu",
     },
     "longlive2": {
@@ -430,6 +452,8 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
         "profile": "longlive2-704p",
         "width": 1280,
         "height": 704,
+        "fps": 24,
+        "latent_shape": [1, 8, 48, 44, 80],
         "device": "cuda:0",
     },
     "ltxv": {
@@ -437,12 +461,26 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int]] = {
         "profile": "ltxv-512p",
         "width": 768,
         "height": 512,
+        "fps": 24,
+        "latent_shape": [1, 8, 48, 44, 80],
+        "device": "cuda:0",
+    },
+    "causvid": {
+        "backend": "causvid",
+        "profile": "causvid-480p",
+        "width": 832,
+        "height": 480,
+        # Native 16 fps end-to-end (the worker refuses anything else —
+        # DESIGN §5.4: never relabel 16 fps media as 24; the 24 fps
+        # presentation resample is a separate finalize-stage slice).
+        "fps": 16,
+        "latent_shape": [1, 21, 16, 60, 104],
         "device": "cuda:0",
     },
 }
 
 
-def _video_preset(backend: str) -> dict[str, str | int]:
+def _video_preset(backend: str) -> dict[str, str | int | list[int]]:
     try:
         return _VIDEO_BACKEND_PRESETS[backend]
     except KeyError:
@@ -457,6 +495,7 @@ _AUDIO_BACKEND_PRESETS: dict[str, dict[str, str]] = {
     "fake": {"backend": "fake", "device": "cpu"},
     "longlive2": {"backend": "acestep", "device": "cuda:0"},
     "ltxv": {"backend": "acestep", "device": "cuda:0"},
+    "causvid": {"backend": "acestep", "device": "cuda:0"},
 }
 
 

@@ -64,6 +64,22 @@ RUN pip install transformers==4.57.6
 RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightricks/LTX-Video@4b2d053057623ddd4d0a1d3e9cd28890e9ef487f" \
     && pip install "imageio[ffmpeg]" av sentencepiece einops timm
 
+# CausVid DMD causal generator (Stream D prep, DESIGN §5.4): upstream code
+# at the pinned commit; the worker will strict-load the DMD checkpoint's
+# ['generator'] per the upstream long-video script. Leaf deps only — NEVER
+# `pip install -r requirements.txt`: its numpy==1.24.4 / av==13.1.0 /
+# gradio / moviepy pins would break the torch 2.8 + transformers 4.57.6 +
+# LTXV stack above. The inference closure (causvid.models.wan.
+# causal_inference → causal_model + wan_base modules) needs omegaconf
+# (config), easydict (Wan configs), ftfy (T5 tokenizer) and diffusers
+# (ConfigMixin/ModelMixin/schedulers in causal_model + wan_base model —
+# confirmed by grepping the cloned sources at the pin). export_to_video
+# (diffusers) and TextDataset (causvid.data) from the upstream demo script
+# are NOT needed — Voyage has its own ffmpeg media I/O.
+RUN git clone https://github.com/tianweiy/CausVid /opt/causvid \
+    && git -C /opt/causvid checkout adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
+    && pip install omegaconf easydict ftfy diffusers
+
 # Voyage supervisor package (pure-python here; torch lives only behind the
 # worker module import). --no-deps: pydantic already pinned above, so rich
 # (console progress, a core dependency) and textual (launcher TUI, also
@@ -73,7 +89,7 @@ COPY voyage/ /app/voyage/
 RUN pip install --no-deps -e /app \
     && pip install "rich>=13.7" "textual>=8.0"
 
-ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/app \
+ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/app \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

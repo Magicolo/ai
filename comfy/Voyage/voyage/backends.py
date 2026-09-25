@@ -73,7 +73,7 @@ BACKEND_STATE_MODES: dict[str, StateMode] = {
 }
 """Backend name → continuation mode (DESIGN §5.1 table; `fake` clips are stateless)."""
 
-_STREAMING_BACKENDS = frozenset({"longlive2", "ltxv"})
+_STREAMING_BACKENDS = frozenset({"longlive2", "ltxv", "causvid"})
 """Backends taking the multi-block payload (mirrors `supervisor.STREAMING_VIDEO_BACKENDS`)."""
 
 Transport = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -259,9 +259,11 @@ class VideoBackendAdapter:
         """Build the payload, call the worker, normalize the result.
 
         Frame accounting mirrors the supervisor: worker-reported frames win,
-        otherwise the request's frames stand in. Conditioning is 0 committed
-        duplicates as built (ltxv chains via tail PNG, longlive appends to
-        one stream — the proposal's prefix-overlap replay was not built).
+        otherwise the request's frames stand in. When the worker reports
+        explicit novel/conditioning counts (causvid's 72-novel accounting),
+        those win; otherwise conditioning is 0 committed duplicates as built
+        (ltxv chains via tail PNG, longlive appends to one stream — the
+        proposal's prefix-overlap replay was not built).
         Worker-reported fps wins so a future 16 fps backend is never
         relabeled (TASK §19.5).
         """
@@ -269,20 +271,28 @@ class VideoBackendAdapter:
         result = self._transport("generate_blocks", payload)
         requested = self.requested_frames(request)
         returned = requested
+        conditioning = 0
+        novel: int | None = None
         native_fps = request.fps
         video_block = result.get("video")
         if isinstance(video_block, dict):
             reported_frames = video_block.get("frames")
             if isinstance(reported_frames, int) and reported_frames > 0:
                 returned = reported_frames
+            reported_conditioning = video_block.get("conditioning_frames")
+            if isinstance(reported_conditioning, int) and reported_conditioning >= 0:
+                conditioning = reported_conditioning
+            reported_novel = video_block.get("novel_frames")
+            if isinstance(reported_novel, int) and reported_novel > 0:
+                novel = reported_novel
             reported_fps = video_block.get("fps")
             if isinstance(reported_fps, int) and reported_fps > 0:
                 native_fps = reported_fps
         return VideoSegmentResult(
             requested_frames=requested,
             returned_frames=returned,
-            conditioning_frames=0,
-            novel_frames=returned,
+            conditioning_frames=conditioning,
+            novel_frames=novel if novel is not None else returned,
             native_fps=native_fps,
             output_path=str(output_path),
             backend=self._backend,

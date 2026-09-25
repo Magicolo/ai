@@ -34,11 +34,13 @@ from voyage.media import finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
     download_audio_models,
+    download_causvid_models,
     download_director_models,
     download_inspector_models,
     download_longlive2_bf16,
     download_ltxv_models,
     verify_audio_models,
+    verify_causvid_models,
     verify_director_models,
     verify_inspector_models,
     verify_longlive2_bf16,
@@ -187,6 +189,7 @@ def cmd_models(args: argparse.Namespace) -> int:
     if action == "list":
         print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
+        print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
         print("audio: fake (built-in) | acestep (ACE-Step 1.5 turbo + 0.6B planner)")
         print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
         print("inspector: skipped (built-in) | qwen3.5-9b (Qwen3.5-9B VLM, experimental)")
@@ -196,6 +199,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(message)
         lok, lmessage = verify_ltxv_models(_models_dir(args))
         print(lmessage)
+        cok, cmessage = verify_causvid_models(_models_dir(args))
+        print(cmessage)
         dok, dmessage = verify_director_models(_models_dir(args))
         print(dmessage)
         aok, amessage = verify_audio_models(_models_dir(args))
@@ -203,7 +208,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        return 0 if (ok and lok and dok and aok and iok) else 1
+        return 0 if (ok and lok and cok and dok and aok and iok) else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
         if target == "ltxv-2b":
@@ -219,6 +224,19 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"DiT: {video.get('checkpoint_bytes')} bytes")
             print(f"manifest: {models_dir / 'manifest.json'}")
             return 0
+        if target == "causvid":
+            models_dir = _models_dir(args)
+            print(f"downloading causvid into {models_dir} ...")
+            try:
+                record = download_causvid_models(models_dir)
+            except Exception as exc:
+                print(f"download failed: {exc}", file=sys.stderr)
+                return 1
+            video = record["causvid"]
+            assert isinstance(video, dict)
+            print(f"DMD checkpoint: {video.get('checkpoint_bytes')} bytes")
+            print(f"manifest: {models_dir / 'manifest.json'}")
+            return 0
         if target == "director-qwen8b":
             return _download_director(_models_dir(args))
         if target == "audio-acestep":
@@ -227,9 +245,17 @@ def cmd_models(args: argparse.Namespace) -> int:
             return _download_inspector(_models_dir(args))
         if target != "longlive2-bf16":
             print(f"unknown models target {target!r}")
-            print(
-                "known: longlive2-bf16, ltxv-2b, director-qwen8b, audio-acestep, inspector-qwen35"
+            known_targets = ", ".join(
+                [
+                    "longlive2-bf16",
+                    "ltxv-2b",
+                    "causvid",
+                    "director-qwen8b",
+                    "audio-acestep",
+                    "inspector-qwen35",
+                ]
             )
+            print(f"known: {known_targets}")
             return 2
         models_dir = _models_dir(args)
         print(f"downloading longlive2-bf16 into {models_dir} ...")
@@ -680,6 +706,12 @@ _LTXV_NOVEL_BLOCK_FRAMES = 96
 # segment — qual-longlive2 + Phase-2 E2E, 2026-09-24/22).
 _LONGLIVE_LATENTS_PER_BLOCK = 8
 _LONGLIVE_DECODE_EXPANSION = 4
+# CausVid DMD rollout: 81 decoded frames per rollout, the last
+# 4*(overlap-1)+1 are the conditioning tail (9 at overlap 3) — 72 novel
+# committed per rollout, uniform including rollout 0 (upstream long-video
+# script parity). Duration planning uses the steady-state 72 so `generate
+# --duration` never runs short (worker-reported frames stay the truth).
+_CAUSVID_NOVEL_PER_ROLLOUT = 72
 
 
 def _frames_per_segment(config: ProjectConfig) -> int:
@@ -689,6 +721,8 @@ def _frames_per_segment(config: ProjectConfig) -> int:
     if config.video.backend == "longlive2":
         latents = _LONGLIVE_LATENTS_PER_BLOCK * config.video.blocks_per_segment
         return (latents - 1) * _LONGLIVE_DECODE_EXPANSION + 1
+    if config.video.backend == "causvid":
+        return _CAUSVID_NOVEL_PER_ROLLOUT * config.video.blocks_per_segment
     return config.video.segment_frames
 
 
@@ -697,7 +731,7 @@ def segments_for_duration(duration_seconds: float, fps: int, frames_per_segment:
     return max(1, math.ceil(duration_seconds * fps / frames_per_segment - 1e-9))
 
 
-_CUDA_BACKENDS = frozenset({"ltxv", "longlive2", "acestep"})
+_CUDA_BACKENDS = frozenset({"ltxv", "longlive2", "causvid", "acestep"})
 
 
 def _torch_available() -> bool:
@@ -1077,7 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true")
     init.add_argument(
         "--backend",
-        choices=("fake", "longlive2", "ltxv"),
+        choices=("fake", "longlive2", "ltxv", "causvid"),
         default="fake",
         help="video backend preset written into the run config",
     )
@@ -1149,7 +1183,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gen.add_argument(
         "--backend",
-        choices=("fake", "longlive2", "ltxv"),
+        choices=("fake", "longlive2", "ltxv", "causvid"),
         default="ltxv",
         help="video backend preset written into the run config",
     )

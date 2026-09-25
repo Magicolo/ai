@@ -44,7 +44,7 @@ if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
 fi
 needs_cuda=0
 case "${requested_backend:-}" in
-  ltxv|longlive2|acestep) needs_cuda=1 ;;
+  ltxv|longlive2|causvid|acestep) needs_cuda=1 ;;
 esac
 if [ -n "${VOYAGE_IMAGE:-}" ]; then
   image="$VOYAGE_IMAGE"

@@ -87,10 +87,11 @@ VIDEO_WORKER_MODULES = {
     "fake": "voyage.workers.video",
     "longlive2": "voyage.workers.video_longlive",
     "ltxv": "voyage.workers.video_ltxv",
+    "causvid": "voyage.workers.video_causvid",
 }
-"""Backend name → worker module. longlive2/ltxv only exist in the CUDA image."""
+"""Backend name → worker module. longlive2/ltxv/causvid only exist in the CUDA image."""
 
-STREAMING_VIDEO_BACKENDS = ("longlive2", "ltxv")
+STREAMING_VIDEO_BACKENDS = ("longlive2", "ltxv", "causvid")
 """Backends whose worker holds a resident session across blocks/segments.
 
 These get the multi-block prompts/seeds payload, the resume-hook restart

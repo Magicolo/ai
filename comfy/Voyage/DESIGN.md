@@ -6842,3 +6842,36 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   focus updates, narrow CSS, red-border class; click tests need
   `scroll_visible` since Generate sits below the fold at 120x40).
   Gates: 350 pytest / mypy strict (39 files) / ruff + format clean.
+
+## 2026-09-24 — CausVid worker live (first E2E generation)
+
+- Worker `voyage/workers/video_causvid.py` renders: three 16 GB fitment
+  fixes were needed beyond the scaffold — (1) upstream hardcodes
+  `WanModel.from_pretrained("wan_models/Wan2.1-T2V-1.3B/")` (+ T5/VAE
+  same prefix), fixed with a CWD-contract `_enter_causvid_tree`
+  (symlink + chdir, longlive precedent); (2) upstream `pipeline.to()`
+  parks the 11 GB T5 on GPU (forward OOMs at 14.9 GiB) — T5 now lives
+  on CPU, shuttled to GPU once per segment for a pre-encode of all
+  prompts (one 11 GB roundtrip/segment; per-rollout shuttling
+  fragmented into OOMs), reused via a stub encoder swapped onto the
+  resident pipeline (DiT takes embeds with no device transfer, so CPU
+  embeds would crash); (3) `WanVAEWrapper` has no `.encode` — re-encode
+  goes through `vae.model.encode(x, scale)` (script parity).
+- Wiring: `VIDEO_WORKER_MODULES` + `STREAMING_VIDEO_BACKENDS` +
+  adapter `_STREAMING_BACKENDS` + `causvid-480p` preset (832x480, fps
+  16, latent `[1,21,16,60,104]`) + `models download/verify causvid` +
+  `--backend causvid` (init/generate) + `_frames_per_segment` 72/rollout
+  + adapter honors reported novel/conditioning + run.sh CUDA sniffing.
+  Preset now also carries fps/latent_shape into `voyage.toml`
+  (`default_config_toml` hardcoded 24/[1,8,48,44,80] — the supervisor
+  sent fps 24 and the worker refused; all four presets pin both
+  explicitly, behavior unchanged for fake/longlive2/ltxv).
+- Live proof: `generate --backend causvid --duration 5s` → VALID 144f
+  (2x72 novel, 81-decoded/rollout) @ 832x480/16fps + AAC music,
+  `final.mp4` 9.0s; chained boundary diff 1.02x (seamless);
+  minterpolate 16→24 validated on real frames (214f, no luma shift —
+  finalize-stage wiring still open). Inspection copy (gitignored):
+  `Voyage/output/causvid-e2e_final.mp4`.
+- Gates: ruff + format + mypy strict + 387 pytest green. Open:
+  overlap sweep (1/2/3+), resume-vs-uninterrupted A/B, 24 fps finalize
+  stage (`presentation_fps`), manual eyeball review.

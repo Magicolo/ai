@@ -185,10 +185,11 @@ CAUSVID_SUBDIR = "causvid"
 CAUSVID_CHECKPOINT_SUBDIR = "autoregressive_checkpoint"
 CAUSVID_CHECKPOINT_NAME = "model.pt"
 CAUSVID_CHECKPOINT_FILE = f"{CAUSVID_CHECKPOINT_SUBDIR}/{CAUSVID_CHECKPOINT_NAME}"
-# Presence-sanity floor only: no weights were downloaded during prep (task
-# rule), so the exact byte count is unmeasured. Any real 1.3B bf16 DiT
-# checkpoint (~2.6GB of params) clears 1GB; missing/empty files fail.
-CAUSVID_CKPT_MIN_BYTES = 1_000_000_000
+# Measured 2026-09-24: autoregressive_checkpoint/model.pt is 11,352,649,716
+# bytes (~10.6 GiB) — a full training snapshot keyed on ['generator'], not a
+# params-only file, hence far above a 1.3B bf16 param count. Floor holds ~12%
+# headroom below measured (same convention as the Wan2.1 subset floors).
+CAUSVID_CKPT_MIN_BYTES = 10_000_000_000
 CAUSVID_LICENSE = "CC BY-NC-SA 4.0 (non-commercial; share-alike on adaptations)"
 CAUSVID_LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en"
 
@@ -576,7 +577,7 @@ def download_causvid_models(models_dir: Path) -> dict[str, Any]:
     Wan2.1-T2V-1.3B base subset (DiT shard + VAE + T5 + tokenizer) the
     worker needs underneath it. Merges into the shared manifest; returns
     the merged record. Registry support only — the `models download
-    causvid-*` CLI wiring and the worker land in the Stream C slice.
+    causvid` CLI wiring and the worker land in the CausVid worker track.
     """
     from huggingface_hub import hf_hub_download, snapshot_download
 

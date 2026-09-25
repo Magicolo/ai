@@ -31,17 +31,25 @@ the ODE checkpoints, and the mixkit LMDB datasets.
 From `Wan-AI/Wan2.1-T2V-1.3B` (Apache 2.0) as a subset — sizes measured from
 the HF API file listing at pin time (no weights downloaded during prep):
 
-| File | Bytes at pin time | Registry floor |
-|------|------------------:|----------------|
-| `diffusion_pytorch_model.safetensors` | 5,676,070,424 | 5 GB |
-| `Wan2.1_VAE.pth` | 507,609,880 | 400 MB |
-| `models_t5_umt5-xxl-enc-bf16.pth` | 11,361,920,418 | 10 GB |
-| `google/umt5-xxl/*` (tokenizer) + `config.json` | — | presence only |
+| File | Bytes at pin time | Measured 2026-09-24 | Registry floor |
+|------|------------------:|--------------------:|----------------|
+| `diffusion_pytorch_model.safetensors` | 5,676,070,424 | 5,676,070,424 | 5 GB |
+| `Wan2.1_VAE.pth` | 507,609,880 | 507,609,880 | 400 MB |
+| `models_t5_umt5-xxl-enc-bf16.pth` | 11,361,920,418 | 11,361,920,418 | 10 GB |
+| `google/umt5-xxl/*` (tokenizer) + `config.json` | — | presence confirmed (`spiece.model` 4,548,313 + `tokenizer.json` 16,837,417 + configs; `config.json` 249 B) | presence only |
 
-The DMD `model.pt` byte count is unmeasured (prep rule: no downloads), so
-its registry floor is a 1 GB presence sanity check — any real 1.3B bf16 DiT
-checkpoint (~2.6 GB of params) clears it. Replace with a measured threshold
-after the first real download (open question 1).
+The DMD `model.pt` measured **11,352,649,716 bytes (~10.6 GiB)** on the
+2026-09-24 download — far above a 1.3B bf16 param count because the file is
+a full training snapshot keyed on `['generator']` (optimizer/EMA state
+included), not a params-only checkpoint. Registry floor is now 10 GB
+(`CAUSVID_CKPT_MIN_BYTES`, ~12% headroom below measured — same convention
+as the Wan2.1 subset floors). Checkpoint layout confirmed as expected: only
+`autoregressive_checkpoint/model.pt` fetched (siblings skipped); the Wan2.1
+subset lands as a single-shard `diffusion_pytorch_model.safetensors` +
+`config.json` + VAE + T5 + `google/umt5-xxl/` tokenizer. No LICENSE file
+ships with either download (CausVid is a subfolder-only fetch; the Wan2.1
+allow-list has no LICENSE entry) — the registry license strings, recorded
+in the run manifest, remain the license record.
 
 ## License implications
 
@@ -85,8 +93,8 @@ after the first real download (open question 1).
 
 ## Open questions for the worker slice
 
-1. Exact `model.pt` bytes → replace the 1 GB floor with a measured
-   threshold after the first real download.
+1. RESOLVED 2026-09-24: `model.pt` = 11,352,649,716 bytes; floor is now
+   10 GB (`CAUSVID_CKPT_MIN_BYTES`) with ~12% headroom.
 2. `models download/verify causvid-*` CLI wiring in `voyage/cli.py`
    (registry functions already exist).
 3. Checkpoint choice: `autoregressive_checkpoint` vs

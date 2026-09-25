@@ -236,3 +236,24 @@ def test_config_segment_seconds_bridges_stored_schema() -> None:
     transport, _ = _stub_transport({})
     adapter = VideoBackendAdapter(transport, "fake", _video_config())
     assert adapter.config_segment_seconds() == 2.0
+
+
+def test_causvid_reported_novel_and_conditioning_win() -> None:
+    """CausVid's 72-novel/9-conditioning accounting must survive the adapter."""
+    transport, _ = _stub_transport(
+        {"video": {"frames": 81, "fps": 16, "novel_frames": 72, "conditioning_frames": 9}}
+    )
+    adapter = VideoBackendAdapter(
+        transport, "causvid", _video_config(backend="causvid", blocks_per_segment=1)
+    )
+    result = adapter.generate_segment(
+        _request(fps=16, segment_seconds=4.5, state_mode="reconstructable_prefix"),
+        Path("seg/video.mp4"),
+    )
+    assert result.requested_frames == 72
+    assert result.returned_frames == 81
+    assert result.novel_frames == 72
+    assert result.conditioning_frames == 9
+    assert result.native_fps == 16
+    assert result.backend == "causvid"
+    assert result.state_mode == "reconstructable_prefix"

@@ -1658,16 +1658,21 @@ the new-DESIGN text; §22.5 and §140 kept verbatim; §§137A-D inserted; as-bui
 admonitions in §§5/14/46/118 + §65 profile names added). Items below are the
 code/config work the merged spec now requires.
 
-## 30.1 CausVid — fully remaining (spec-only)
+## 30.1 CausVid — worker live, qualify follow-ups open (2026-09-24)
 
-- No worker (`voyage/workers/video_causvid.py`), registry entry
-  (`model_registry.py`), config preset (`config.py`), or
-  `VIDEO_WORKER_MODULES` entry — `grep causvid voyage/` is empty.
-- Implement per TASK §§19/23.4/25.3: upstream pin (tianweiy/CausVid commit +
-  Wan2.1-T2V-1.3B revision), `generate_blocks`/`generate_segment` op,
-  `reconstructable_prefix` continuation (latent overlap, 21-latent chunks,
-  3-frame overlap), recovery tape, `models download/verify causvid-*`.
-- Deliverable: `docs/UPSTREAM_CAUSVID_NOTES.md` (does not exist).
+- Done: `CAUSVID_*`/`WAN21_*` pins + `download_causvid_models` /
+  `verify_causvid_models` (`model_registry.py`), `docs/UPSTREAM_CAUSVID_NOTES.md`,
+  `tests/test_causvid_prep.py`, worker `voyage/workers/video_causvid.py`
+  (resident bf16 pipeline, 72-novel/rollout, JSON tape, T5-CPU fitment
+  shuttle, CWD-contract symlink), full wiring (module map, streaming
+  tuple, adapter, `causvid-480p` preset with fps 16 + CausVid latent,
+  `models download/verify causvid`, `--backend causvid`, 72/rollout
+  duration math, run.sh CUDA sniffing).
+- Live: `generate --backend causvid` E2E VALID 144f @ 832x480/16fps +
+  AAC, chained boundary 1.02x, minterpolate 16→24 validated on real
+  frames (see §140 entry).
+- Open: overlap sweep (1/2/3+), resume-vs-uninterrupted A/B, 24 fps
+  finalize stage, manual eyeball review.
 
 ## 30.2 LTXV proposal-vs-built drift — reconciled (Stream A, 2026-09-24)
 

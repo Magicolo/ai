@@ -162,6 +162,45 @@ def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:
     assert _frames_per_segment(two_blocks) == 192
 
 
+def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    causvid = with_video_backend(config, "causvid")
+    assert causvid.video.backend == "causvid"
+    assert causvid.video.profile == "causvid-480p"
+    # Native worker geometry (832x480 @ 16 fps — the worker rejects
+    # anything else, same native-geometry rule as longlive2).
+    assert (causvid.video.width, causvid.video.height) == (832, 480)
+    assert causvid.video.device == "cuda:0"
+    # Native 16 fps end-to-end (the worker refuses relabeled timelines).
+    assert causvid.video.fps == 16
+    assert causvid.video.latent_shape == [1, 21, 16, 60, 104]
+    # CUDA video backends pair with ACE-Step music.
+    assert causvid.audio.backend == "acestep"
+    # Source config untouched (pure function).
+    assert config.video.backend == "fake"
+
+
+def test_frames_per_segment_causvid_uses_novel_minimum(tmp_path: Path) -> None:
+    """causvid duration math must use the 72-novel steady state, not 81 rollout."""
+    from voyage.config import default_config_toml, load_config
+
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+    )
+    config, _ = load_config(tmp_path / "voyage.toml")
+    one_block = with_video_backend(config, "causvid")
+    assert _frames_per_segment(one_block) == 72
+    two_blocks = one_block.model_copy(
+        update={"video": VideoConfig(**{**one_block.video.model_dump(), "blocks_per_segment": 2})}
+    )
+    assert _frames_per_segment(two_blocks) == 144
+
+
 def test_unknown_backend_rejected(tmp_path: Path) -> None:
     from voyage.config import default_config_toml, load_config
 
