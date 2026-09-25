@@ -98,6 +98,21 @@ def test_namespace_raises_on_invalid() -> None:
         to_generate_namespace(GenerateFormState())
 
 
+def test_causvid_backend_is_accepted() -> None:
+    state = _valid_state()
+    state.backend = "causvid"
+    assert validate(state) == []
+
+
+def test_plan_summary_causvid_reports_72f_at_16fps() -> None:
+    state = _valid_state()
+    state.backend = "causvid"
+    summary = plan_summary(state)
+    assert "causvid" in summary
+    assert "72f/segment" in summary
+    assert "16fps" in summary
+
+
 def test_plan_summary_default_is_five_seconds() -> None:
     summary = plan_summary(_valid_state())
     assert "5 segment(s)" in summary

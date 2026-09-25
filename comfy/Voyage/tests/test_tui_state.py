@@ -17,6 +17,7 @@ from voyage.tui_state import (
     field_errors,
     gpu_warning,
     load_last_settings,
+    plan_counts,
     save_last_settings,
 )
 
@@ -127,7 +128,7 @@ def test_gpu_warning_empty_for_fake_and_unknown() -> None:
     assert gpu_warning("nope") == ""
 
 
-@pytest.mark.parametrize("backend", ["ltxv", "longlive2"])
+@pytest.mark.parametrize("backend", ["ltxv", "longlive2", "causvid"])
 def test_gpu_warning_names_image_and_gpu_flag(backend: str) -> None:
     warning = gpu_warning(backend)
     assert warning
@@ -135,6 +136,16 @@ def test_gpu_warning_names_image_and_gpu_flag(backend: str) -> None:
     assert "VOYAGE_IMAGE" in warning
     assert "voyage-video" in warning
     assert "--gpus" in warning
+
+
+def test_plan_counts_causvid_uses_72_novel_per_block_at_16fps() -> None:
+    state = GenerateFormState(style="x", backend="causvid", duration="5s")
+    assert plan_counts(state) == (2, 144, pytest.approx(9.0))
+
+
+def test_plan_counts_causvid_scales_with_blocks() -> None:
+    state = GenerateFormState(style="x", backend="causvid", duration="5s", blocks="2")
+    assert plan_counts(state) == (1, 144, pytest.approx(9.0))
 
 
 def test_field_errors_keyed_by_field() -> None:

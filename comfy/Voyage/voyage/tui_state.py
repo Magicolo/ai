@@ -24,7 +24,7 @@ try:
 except ImportError:  # Python 3.10 worker image (upstream env)
     import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
-BACKENDS = ("ltxv", "longlive2", "fake")
+BACKENDS = ("ltxv", "longlive2", "causvid", "fake")
 DIRECTORS = ("qwen", "deterministic")
 QUANTIZATIONS = ("fp8", "bf16")
 
@@ -45,14 +45,20 @@ def _default_settings_path() -> Path:
 
 # Frames each committed segment carries per backend (mirrors
 # voyage.cli._frames_per_segment: LTXV block 0 renders 25 native frames,
-# each extension block adds 24 new ones; other backends use segment_frames).
+# each extension block adds 24 new ones; CausVid commits 72 novel frames
+# per rollout at overlap 3 (16 fps native); other backends use
+# segment_frames).
 _LTXV_FIRST_BLOCK_FRAMES = 25
+_CAUSVID_NOVEL_PER_ROLLOUT = 72
 _DEFAULT_SEGMENT_FRAMES = 48
 _FPS = 24
+# Native frame rate per backend (mirrors the config presets); backends
+# absent here plan at _FPS.
+_BACKEND_FPS = {"causvid": 16}
 
 FIELD_HELP = {
     "backend": "Video backend preset (geometry + device + audio pairing). "
-    "ltxv/longlive2 need the CUDA worker image + a GPU.",
+    "ltxv/longlive2/causvid need the CUDA worker image + a GPU.",
     "duration": "Target length, e.g. '5s', '90', '1m30s', '2m'. Rounds up to whole segments.",
     "style": "Human-owned style string. Required — baked into the run config and every prompt.",
     "name": "Run + folder name. Required — the run lands in output/<name>/ with final.mp4 inside.",
@@ -243,11 +249,14 @@ def plan_counts(state: GenerateFormState) -> tuple[int, int, float] | None:
         frames_per_segment = _LTXV_FIRST_BLOCK_FRAMES + (blocks - 1) * (
             _LTXV_FIRST_BLOCK_FRAMES - 1
         )
+    elif state.backend == "causvid":
+        frames_per_segment = _CAUSVID_NOVEL_PER_ROLLOUT * blocks
     else:
         frames_per_segment = _DEFAULT_SEGMENT_FRAMES
-    segments = segments_for_duration(duration_seconds, _FPS, frames_per_segment)
+    fps = _BACKEND_FPS.get(state.backend, _FPS)
+    segments = segments_for_duration(duration_seconds, fps, frames_per_segment)
     planned_frames = segments * frames_per_segment
-    return segments, planned_frames, planned_frames / _FPS
+    return segments, planned_frames, planned_frames / fps
 
 
 def plan_summary(state: GenerateFormState) -> str:
@@ -274,11 +283,15 @@ def plan_summary(state: GenerateFormState) -> str:
         frames_per_segment = _LTXV_FIRST_BLOCK_FRAMES + (blocks - 1) * (
             _LTXV_FIRST_BLOCK_FRAMES - 1
         )
+    elif state.backend == "causvid":
+        blocks = int(state.blocks.strip()) if state.blocks.strip() else 1
+        frames_per_segment = _CAUSVID_NOVEL_PER_ROLLOUT * blocks
     else:
         frames_per_segment = _DEFAULT_SEGMENT_FRAMES
+    fps = _BACKEND_FPS.get(state.backend, _FPS)
     return (
         f"≈{seconds:.1f}s · {segments} segment(s) · {planned_frames} frames "
-        f"· {state.backend} {frames_per_segment}f/segment @ {_FPS}fps"
+        f"· {state.backend} {frames_per_segment}f/segment @ {fps}fps"
     )
 
 
@@ -390,7 +403,7 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
 
 def gpu_warning(backend: str) -> str:
     """One-line CUDA/GPU notice for CUDA backends, else an empty string."""
-    if backend in ("ltxv", "longlive2"):
+    if backend in ("ltxv", "longlive2", "causvid"):
         return (
             f"{backend} needs the CUDA worker image (VOYAGE_IMAGE=voyage-video) "
             "plus a GPU (--gpus all)."
