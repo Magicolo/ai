@@ -32,6 +32,7 @@ if str(VOYAGE_LONGLIVE_DIR) not in sys.path:
     sys.path.insert(0, str(VOYAGE_LONGLIVE_DIR))
 
 from voyage.model_registry import verify_checkpoint_against_manifest  # noqa: E402
+from voyage.workers import video_common  # noqa: E402
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts  # noqa: E402
 
 # Upstream scene-cut signal: prompt prefix detected by _is_scene_cut when
@@ -1051,50 +1052,50 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_longlive not initialized — send `init` first")
-    import tempfile
-    import time
-
     import torch
 
     profile_stages = bool(payload.get("profile_stages", False))
-    probe: dict[str, Any] = {
+    probe_payload: dict[str, Any] = {
         "segment_id": str(payload.get("segment_id", "benchmark")),
         "prompts": [str(payload.get("prompt", "benchmark probe"))],
         "seeds": [int(payload.get("seed", 0))],
         "scene_cuts": [False],
         "fps": int(payload.get("fps", 24)),
     }
-    walls: list[float] = []
-    peaks: list[float] = []
     stage_splits: list[dict[str, float]] = []
     frames: object = "unknown"
-    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
-        for index in range(warmup + measured):
-            torch.cuda.reset_peak_memory_stats()
-            started = time.monotonic()
-            result = handle_generate_blocks(
-                {
-                    **probe,
-                    "output_path": str(Path(tmp) / f"b{index}.mp4"),
-                    "profile_stages": profile_stages,
-                }
-            )
-            elapsed = time.monotonic() - started
-            peak_gib = torch.cuda.max_memory_allocated() / 1024**3
-            if index >= warmup:
-                walls.append(elapsed)
-                peaks.append(peak_gib)
-                video = result.get("video")
-                if isinstance(video, dict) and isinstance(video.get("frames"), int):
-                    frames = video["frames"]
-                if profile_stages and isinstance(video, dict):
-                    stages = video.get("stage_ms")
-                    if isinstance(stages, dict):
-                        stage_splits.append(
-                            {str(name): float(value) for name, value in stages.items()}
-                        )
+
+    def probe(output_path: Path, measured: bool) -> None:
+        nonlocal frames
+        result = handle_generate_blocks(
+            {
+                **probe_payload,
+                "output_path": str(output_path),
+                "profile_stages": profile_stages,
+            }
+        )
+        if not measured:
+            return
+        video = result.get("video")
+        if isinstance(video, dict) and isinstance(video.get("frames"), int):
+            frames = video["frames"]
+        if profile_stages and isinstance(video, dict):
+            stages = video.get("stage_ms")
+            if isinstance(stages, dict):
+                stage_splits.append({str(name): float(value) for name, value in stages.items()})
+
+    outcome = video_common.run_benchmark_harness(
+        warmup,
+        measured,
+        "voyage-bench-",
+        probe,
+        reset_peak_memory=torch.cuda.reset_peak_memory_stats,
+        read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+    )
+    walls = outcome.wall_seconds
+    peaks = outcome.peak_gib
     mean = sum(walls) / len(walls)
-    blocks = len(probe["prompts"])
+    blocks = len(probe_payload["prompts"])
     response: dict[str, Any] = {
         "backend": "longlive2",
         "warmup_blocks": warmup * blocks,
@@ -1187,19 +1188,16 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     serve(
-        {
-            "init": handle_init,
-            "health": handle_health,
-            "generate_blocks": handle_generate_blocks,
-            "benchmark": handle_benchmark,
-            "evict_gpu": handle_evict_gpu,
-            "rebuild": handle_rebuild,
-            "checkpoint": lambda payload: {
-                "checkpoint_id": f"longlive-{payload.get('segment_id', 'none')}"
-            },
-            "resume": handle_resume,
-            "shutdown": lambda _payload: {"stopped": True},
-        }
+        video_common.standard_serve_map(
+            "longlive",
+            handle_init=handle_init,
+            handle_health=handle_health,
+            handle_generate_blocks=handle_generate_blocks,
+            handle_benchmark=handle_benchmark,
+            handle_evict_gpu=handle_evict_gpu,
+            handle_rebuild=handle_rebuild,
+            handle_resume=handle_resume,
+        )
     )
 
 

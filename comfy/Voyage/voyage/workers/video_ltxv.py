@@ -33,10 +33,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
+from voyage.hashing import sha256_file as shared_sha256_file
 from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION
+from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
+from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
 
 DIT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
 UPSC_FILENAME = "ltxv-spatial-upscaler-0.9.8.safetensors"
@@ -58,8 +59,6 @@ COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 SPATIAL_GRANULARITY = 32
 SPATIAL_GRANULARITY_TWO_STAGE = 64
 STATE_MODE = "reconstructable_prefix"
-TAIL_FILENAME = "video_tail.mp4"
-TAPE_FILENAME = "recovery.pt"
 
 # Probe-verified distilled schedules (Slice 1): cfg 1, STG off, layer 42
 # skipped via attention-values strategy. Baked constants, not tunables.
@@ -164,12 +163,12 @@ def generation_profile_hash(
 
 
 def sha256_file(path: Path) -> str:
-    """Chunked SHA-256 (constant memory — tails are small, videos are not)."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Chunked SHA-256 (constant memory — tails are small, videos are not).
+
+    Delegates to :func:`voyage.hashing.sha256_file` (issue 021); kept under
+    the worker-local name so the tape code below is untouched.
+    """
+    return shared_sha256_file(path)
 
 
 def build_recovery_tape(
@@ -589,10 +588,7 @@ class LTXVSession:
             prompt_plan_digest=prompt_plan_digest,
         )
         tape_path = output_path.parent / TAPE_FILENAME
-        tape_text = json.dumps(tape, indent=2, sort_keys=True) + "\n"
-        tape_tmp = tape_path.with_suffix(".tmp")
-        tape_tmp.write_text(tape_text, encoding="utf-8")
-        tape_tmp.replace(tape_path)
+        video_common.write_tape_atomic(tape_path, tape)
         self._conditioning_tail_path = str(tail_path)
         self._last_prompt = prompts[-1]
         prefix_discarded = generated_total - committed_frames
@@ -644,9 +640,11 @@ class LTXVSession:
 
 
 def _save_mp4(images: Any, path: Path, fps: int) -> None:
-    """Write a (B,C,T,H,W) tensor as h264 (probe-verified layout)."""
-    import imageio.v2 as imageio  # type: ignore[import-not-found]
+    """Write a (B,C,T,H,W) tensor as h264 (probe-verified layout).
 
+    Tensor-to-frames conversion stays here (layout is backend-specific);
+    the clip + mimsave mechanics live in :mod:`video_common` (issue 019).
+    """
     video = images[0]
     if video.dim() == 4 and video.shape[0] <= 4:
         frames = video.permute(1, 2, 3, 0).float().cpu().numpy()
@@ -654,10 +652,10 @@ def _save_mp4(images: Any, path: Path, fps: int) -> None:
         frames = video.permute(0, 2, 3, 1).float().cpu().numpy()
     # Issue 065: clip before uint8 — VAE overshoot outside [0, 1] wraps
     # modulo 256 without it (1.01 becomes near-black; cf. causvid).
-    frames = np.clip(frames * 255.0, 0, 255).astype("uint8")
-    if frames.shape[-1] == 4:
-        frames = frames[..., :3]
-    imageio.mimsave(str(path), list(frames), fps=fps, codec="libx264")
+    clipped = video_common.clip_array_to_uint8(frames)
+    if clipped.shape[-1] == 4:
+        clipped = clipped[..., :3]
+    video_common.save_mp4([clipped[index] for index in range(clipped.shape[0])], path, fps)
 
 
 _SESSION: LTXVSession | None = None
@@ -768,8 +766,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_ltxv not initialized — send `init` first")
-    import tempfile
-
     import torch
 
     session = _SESSION
@@ -777,34 +773,44 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     saved_prompt = session._last_prompt
     session._conditioning_tail_path = None
     session._last_prompt = None
+    benchmark_prompt = str(payload.get("prompt", "benchmark probe"))
+    benchmark_seed = int(payload.get("seed", 0))
+    benchmark_width = int(payload.get("width", 768))
+    benchmark_height = int(payload.get("height", 512))
+    benchmark_fps = int(payload.get("fps", 24))
+    committed = 0
+    generated = 0
+
+    def probe(output_path: Path, measured: bool) -> None:
+        nonlocal committed, generated
+        result = session.generate_blocks(
+            prompts=[benchmark_prompt],
+            seeds=[benchmark_seed],
+            scene_cuts=[True],
+            output_path=output_path,
+            width=benchmark_width,
+            height=benchmark_height,
+            fps=benchmark_fps,
+            segment_id="benchmark",
+        )
+        if measured:
+            committed = int(result["committed_frames"])
+            generated = int(result["generated_frames"])
+
     try:
-        walls: list[float] = []
-        peaks: list[float] = []
-        committed = 0
-        generated = 0
-        with tempfile.TemporaryDirectory(prefix="voyage-ltxv-bench-") as tmp:
-            for index in range(warmup + measured):
-                torch.cuda.reset_peak_memory_stats()
-                started = time.monotonic()
-                result = session.generate_blocks(
-                    prompts=[str(payload.get("prompt", "benchmark probe"))],
-                    seeds=[int(payload.get("seed", 0))],
-                    scene_cuts=[True],
-                    output_path=Path(tmp) / f"b{index}.mp4",
-                    width=int(payload.get("width", 768)),
-                    height=int(payload.get("height", 512)),
-                    fps=int(payload.get("fps", 24)),
-                    segment_id="benchmark",
-                )
-                elapsed = time.monotonic() - started
-                if index >= warmup:
-                    walls.append(elapsed)
-                    peaks.append(torch.cuda.max_memory_allocated() / 1024**3)
-                    committed = int(result["committed_frames"])
-                    generated = int(result["generated_frames"])
+        outcome = video_common.run_benchmark_harness(
+            warmup,
+            measured,
+            "voyage-ltxv-bench-",
+            probe,
+            reset_peak_memory=torch.cuda.reset_peak_memory_stats,
+            read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+        )
     finally:
         session._conditioning_tail_path = saved_tail
         session._last_prompt = saved_prompt
+    walls = outcome.wall_seconds
+    peaks = outcome.peak_gib
     mean = sum(walls) / len(walls)
     return {
         "backend": RECOVERY_PROFILE,
@@ -872,19 +878,16 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     serve(
-        {
-            "init": handle_init,
-            "health": handle_health,
-            "generate_blocks": handle_generate_blocks,
-            "benchmark": handle_benchmark,
-            "evict_gpu": handle_evict_gpu,
-            "rebuild": handle_rebuild,
-            "checkpoint": lambda payload: {
-                "checkpoint_id": f"ltxv-{payload.get('segment_id', 'none')}"
-            },
-            "resume": handle_resume,
-            "shutdown": lambda _payload: {"stopped": True},
-        }
+        video_common.standard_serve_map(
+            "ltxv",
+            handle_init=handle_init,
+            handle_health=handle_health,
+            handle_generate_blocks=handle_generate_blocks,
+            handle_benchmark=handle_benchmark,
+            handle_evict_gpu=handle_evict_gpu,
+            handle_rebuild=handle_rebuild,
+            handle_resume=handle_resume,
+        )
     )
 
 

@@ -18,7 +18,7 @@ import argparse
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 try:
     import tomllib
@@ -259,7 +259,7 @@ def _planning_frames_and_fps(backend: str, blocks: int) -> tuple[int, int]:
     @ 24fps, mirroring ``_frames_per_segment``'s segment_frames default.
     """
     from voyage.cli import _frames_per_segment
-    from voyage.config import ProjectConfig, VideoConfig, _video_preset
+    from voyage.config import ProjectConfig, VideoBackendName, VideoConfig, _video_preset
 
     try:
         preset_fps = _video_preset(backend).get("fps", 24)
@@ -268,7 +268,9 @@ def _planning_frames_and_fps(backend: str, blocks: int) -> tuple[int, int]:
         fps = 24
     planning_config = ProjectConfig(
         style="planning",
-        video=VideoConfig(backend=backend, blocks_per_segment=blocks, fps=fps),
+        video=VideoConfig(
+            backend=cast(VideoBackendName, backend), blocks_per_segment=blocks, fps=fps
+        ),
     )
     return _frames_per_segment(planning_config), fps
 

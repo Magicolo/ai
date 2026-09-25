@@ -34,10 +34,19 @@ so an agent with no project knowledge can pick it up.
   MALFORMED), 010 (best-effort teardown), 016 (run-relative store/resolve +
   layout re-anchor in review), 017 (5s/60s gauge timeouts), 058 (single-step
   DONE + fd lifecycle + orphan patterns), 059 (fail-loud novelty + validate
-  checks), 086 (layout keys), 093-collision (rename to _generation_running;
+  checks), 086 (layout keys),   093-collision (rename to _generation_running;
   racy Pilot idiom stays open). Review fixes: 003 hook wiring + commit test,
   016 legacy re-anchor + test, 093 rename (prior gate failure was the
   collision — now 1.6s pass; remaining flakes are load-dependent).
+- Batch 4 DONE 2026-09-25 (structure, 3 parallel tracks, gates green):
+  RESOLVED 019 (video_common.py shared scaffolding), 021 (hashing.py
+  canonical), 026 (MODEL_SPECS table), 022 (BackendName Literals + single
+  registry), 025 (resolve_config + geometry table; DraftConfig kept as the
+  stored overlay), 023 (adapter contract + supervisor wiring), 020-partial
+  (supervisor/cli/tui splits; workers/media surface stays open).
+  Review fixes: serve-map tests re-pointed at the shared factory, bridge
+  shape typo (2,2,3)→(2,3,3), 4A issue logs written by orchestrator (track
+  returned no report). 020 remains OPEN (workers/media god surface).
 
 ## Critical (liveness / state integrity / RCE)
 

@@ -7,10 +7,13 @@ never from `voyage run`.
 
 from __future__ import annotations
 
-import hashlib
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from voyage.hashing import sha256_file
 
 # Upstream code pin (git commit, not a floating branch).
 LONGLIVE_COMMIT = "6b36d20ec6f7958d29d11a704dfa64611a9f2572"
@@ -217,11 +220,11 @@ WAN21_LICENSE_URL = "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/LIC
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Legacy alias of :func:`voyage.hashing.sha256_file` (issue 021).
+
+    Kept so existing callers keep working; new code imports hashing directly.
+    """
+    return sha256_file(path)
 
 
 def verify_checkpoint_sha256(checkpoint: Path, expected_sha256: str) -> None:
@@ -233,7 +236,7 @@ def verify_checkpoint_sha256(checkpoint: Path, expected_sha256: str) -> None:
     """
     if not expected_sha256:
         raise ValueError(f"no recorded sha256 for checkpoint {checkpoint}")
-    actual = _sha256(checkpoint)
+    actual = sha256_file(checkpoint)
     if actual.lower() != expected_sha256.lower():
         raise ValueError(
             f"checkpoint {checkpoint} sha256 mismatch: expected {expected_sha256}, "
@@ -268,60 +271,12 @@ def verify_checkpoint_against_manifest(models_dir: Path, key: str, checkpoint: P
 
 def download_longlive2_bf16(models_dir: Path) -> dict[str, Any]:
     """Explicit download (DESIGN §85). Returns a manifest-ready record dict."""
-    from huggingface_hub import hf_hub_download, snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    wan_dir = models_dir / "wan_models" / WAN_SUBDIR
-    snapshot_download(
-        repo_id=WAN_HF_REPO,
-        local_dir=str(wan_dir),
-        allow_patterns=WAN_ALLOW,
-    )
-    blob = hf_hub_download(
-        repo_id=LONGLIVE_HF_REPO,
-        filename=LONGLIVE_HF_FILE,
-        revision=LONGLIVE_HF_REVISION,
-        local_dir=str(models_dir / "longlive2"),
-    )
-    generator_path = Path(blob)
-    record = {
-        "video": {
-            "repo": LONGLIVE_HF_REPO,
-            "revision": LONGLIVE_HF_REVISION,
-            "model_id": LONGLIVE_HF_FILE,
-            "checkpoint_sha256": _sha256(generator_path),
-            "checkpoint_bytes": generator_path.stat().st_size,
-            "license": LONGLIVE_LICENSE,
-            "license_url": LONGLIVE_LICENSE_URL,
-            "code_commit": LONGLIVE_COMMIT,
-            "wan_repo": WAN_HF_REPO,
-            "wan_dir": str(wan_dir),
-            "wan_license": WAN_LICENSE,
-        }
-    }
-    # Issue 006a: merge, never overwrite — a raw write here deleted the
-    # sibling backend records every other downloader preserves.
-    return _merge_manifest_record(models_dir, "video", record["video"])
+    return download_model(models_dir, "longlive2-bf16")
 
 
 def verify_longlive2_bf16(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of every required weight file."""
-    missing: list[str] = []
-    generator = models_dir / "longlive2" / LONGLIVE_HF_FILE
-    if not generator.exists() or generator.stat().st_size < 1_000_000_000:
-        missing.append(str(generator))
-    wan_dir = models_dir / "wan_models" / WAN_SUBDIR
-    for pattern in WAN_ALLOW:
-        if pattern.endswith("*"):
-            matches = list(wan_dir.glob(pattern))
-            if not matches:
-                missing.append(f"{wan_dir}/{pattern}")
-        elif not (wan_dir / pattern).exists():
-            missing.append(str(wan_dir / pattern))
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    size_gib = generator.stat().st_size / 1024**3
-    return True, f"longlive2-bf16 OK (generator {size_gib:.1f} GiB + Wan subset)"
+    return verify_model(models_dir, "longlive2-bf16")
 
 
 def _merge_manifest_record(models_dir: Path, key: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -337,6 +292,494 @@ def _merge_manifest_record(models_dir: Path, key: str, value: dict[str, Any]) ->
     return record
 
 
+# Table-driven registry (issue 026): the six download/verify pairs differ
+# only in hub parameters, file layouts and message strings, so the
+# mechanics (hub calls, manifest merge, missing-list format, glob/size
+# checks) live once in download_model/verify_model and each backend is one
+# MODEL_SPECS row plus small record/message builders.
+
+
+@dataclass(frozen=True)
+class SnapshotSpec:
+    """One snapshot_download call: repo pinned at revision into relative_dir."""
+
+    repo_id: str
+    revision: str | None  # None = floating (Wan2.2 has no pinned revision yet — see 011)
+    relative_dir: str  # relative to models_dir
+    allow_patterns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FileSpec:
+    """One hf_hub_download call (single file, optional subfolder)."""
+
+    repo_id: str
+    revision: str
+    filename: str
+    subfolder: str  # "" when the file sits at the repo root
+    relative_dir: str  # relative to models_dir
+
+
+@dataclass(frozen=True)
+class RequiredFile:
+    """One presence (+ optional size-floor) check, in checklist order."""
+
+    relative_path: str  # relative to models_dir
+    min_bytes: int  # 0 = presence only
+
+
+@dataclass(frozen=True)
+class RequiredGlob:
+    """One non-emptiness check: the relative glob must match >= 1 file."""
+
+    relative_pattern: str  # relative to models_dir
+
+
+@dataclass(frozen=True)
+class ShardFloor:
+    """One shard-glob byte-sum floor (director/inspector weight shards)."""
+
+    relative_glob: str  # relative to models_dir
+    min_bytes: int
+    missing_label: str  # e.g. "model-*-of-*.safetensors" or "model shards"
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One registry row: how to fetch it, check it and describe it."""
+
+    name: str  # CLI target, e.g. "longlive2-bf16"
+    manifest_key: str
+    snapshots: tuple[SnapshotSpec, ...]
+    files: tuple[FileSpec, ...]
+    record_builder: Callable[[Path], dict[str, Any]]  # manifest value for the key
+    checks: tuple[RequiredFile | RequiredGlob | ShardFloor, ...]  # in order
+    success_message: Callable[[Path], str]  # exact OK string (byte-stable)
+
+
+_WAN22_RELATIVE = f"wan_models/{WAN_SUBDIR}"
+_ACE_CHECKPOINTS_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}"
+_ACE_LM_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}/{ACE_LM_SUBDIR}"
+
+
+def _record_longlive2(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the LongLive 2.0 stack (fetch part lives in the table)."""
+    wan_dir = models_dir / "wan_models" / WAN_SUBDIR
+    generator_path = models_dir / "longlive2" / LONGLIVE_HF_FILE
+    return {
+        "repo": LONGLIVE_HF_REPO,
+        "revision": LONGLIVE_HF_REVISION,
+        "model_id": LONGLIVE_HF_FILE,
+        "checkpoint_sha256": sha256_file(generator_path),
+        "checkpoint_bytes": generator_path.stat().st_size,
+        "license": LONGLIVE_LICENSE,
+        "license_url": LONGLIVE_LICENSE_URL,
+        "code_commit": LONGLIVE_COMMIT,
+        "wan_repo": WAN_HF_REPO,
+        "wan_dir": str(wan_dir),
+        "wan_license": WAN_LICENSE,
+    }
+
+
+def _record_director(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Phase 3 director stack."""
+    qwen_dir = models_dir / QWEN_SUBDIR
+    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
+    qwen_bytes = sum(part.stat().st_size for part in qwen_shards)
+    minilm_dir = models_dir / MINILM_SUBDIR
+    minilm_weights = minilm_dir / "model.safetensors"
+    return {
+        "repo": QWEN_HF_REPO,
+        "revision": QWEN_HF_REVISION,
+        "model_dir": str(qwen_dir),
+        "checkpoint_bytes": qwen_bytes,
+        "shards": [part.name for part in qwen_shards],
+        "license": QWEN_LICENSE,
+        "license_url": QWEN_LICENSE_URL,
+        "embedding_repo": MINILM_HF_REPO,
+        "embedding_revision": MINILM_HF_REVISION,
+        "embedding_dir": str(minilm_dir),
+        "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
+        "embedding_license": MINILM_LICENSE,
+    }
+
+
+def _record_inspector(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Phase 5 VLM inspector."""
+    target_dir = models_dir / QWEN35_SUBDIR
+    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
+    weights_bytes = sum(part.stat().st_size for part in shards)
+    return {
+        "repo": QWEN35_HF_REPO,
+        "revision": QWEN35_HF_REVISION,
+        "dir": str(target_dir),
+        "bytes": weights_bytes,
+        "license": QWEN35_LICENSE,
+        "license_url": QWEN35_LICENSE_URL,
+    }
+
+
+def _record_audio(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Phase 4 music stack."""
+    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
+    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
+    ace_dir = models_dir / ACE_MAIN_SUBDIR
+    planner_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
+    return {
+        "repo": ACE_MAIN_REPO,
+        "revision": ACE_MAIN_REVISION,
+        "model_dir": str(ace_dir),
+        "turbo_bytes": turbo_weights.stat().st_size if turbo_weights.exists() else 0,
+        "license": ACE_MAIN_LICENSE,
+        "planner_repo": ACE_LM_REPO,
+        "planner_revision": ACE_LM_REVISION,
+        "planner_dir": str(checkpoints_dir / ACE_LM_SUBDIR),
+        "planner_bytes": planner_weights.stat().st_size if planner_weights.exists() else 0,
+    }
+
+
+def _record_ltxv(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Phase 7 LTXV stack."""
+    ltxv_dir = models_dir / LTXV_SUBDIR
+    dit_path = ltxv_dir / LTXV_DIT_FILE
+    return {
+        "repo": LTXV_HF_REPO,
+        "revision": LTXV_HF_REVISION,
+        "model_dir": str(ltxv_dir),
+        "checkpoint_bytes": dit_path.stat().st_size,
+        "files": [LTXV_DIT_FILE, LTXV_UPSC_FILE],
+        "code_commit": LTXV_COMMIT,
+        "text_encoder_repo": LTXV_TE_REPO,
+        "text_encoder_revision": LTXV_TE_REVISION,
+    }
+
+
+def _record_causvid(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Stream D CausVid stack."""
+    causvid_dir = models_dir / CAUSVID_SUBDIR
+    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
+    wan21_dir = models_dir / WAN21_SUBDIR
+    return {
+        "repo": CAUSVID_HF_REPO,
+        "revision": CAUSVID_HF_REVISION,
+        "model_dir": str(causvid_dir),
+        "checkpoint_bytes": checkpoint_path.stat().st_size,
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+        "files": [CAUSVID_CHECKPOINT_FILE],
+        "code_commit": CAUSVID_COMMIT,
+        "license": CAUSVID_LICENSE,
+        "license_url": CAUSVID_LICENSE_URL,
+        "base_repo": WAN21_HF_REPO,
+        "base_revision": WAN21_HF_REVISION,
+        "base_dir": str(wan21_dir),
+        "base_license": WAN21_LICENSE,
+    }
+
+
+def _describe_longlive2(models_dir: Path) -> str:
+    """Exact OK string for the LongLive 2.0 stack (byte-stable)."""
+    size_gib = (models_dir / "longlive2" / LONGLIVE_HF_FILE).stat().st_size / 1024**3
+    return f"longlive2-bf16 OK (generator {size_gib:.1f} GiB + Wan subset)"
+
+
+def _describe_director(models_dir: Path) -> str:
+    """Exact OK string for the director stack (byte-stable)."""
+    qwen_dir = models_dir / QWEN_SUBDIR
+    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
+    qwen_bytes = sum(part.stat().st_size for part in qwen_shards)
+    minilm_weights = models_dir / MINILM_SUBDIR / "model.safetensors"
+    return (
+        f"director-qwen8b OK (Qwen3-8B {qwen_bytes / 1024**3:.1f} GiB + MiniLM "
+        f"{minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
+    )
+
+
+def _describe_inspector(models_dir: Path) -> str:
+    """Exact OK string for the VLM inspector (byte-stable)."""
+    target_dir = models_dir / QWEN35_SUBDIR
+    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
+    weights_bytes = sum(part.stat().st_size for part in shards)
+    return f"inspector-qwen35 OK (Qwen3.5-9B {weights_bytes / 1024**3:.1f} GiB)"
+
+
+def _describe_audio(models_dir: Path) -> str:
+    """Exact OK string for the music stack (byte-stable)."""
+    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
+    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
+    planner_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
+    return (
+        f"audio-acestep OK (turbo {turbo_weights.stat().st_size / 1024**3:.1f} GiB "
+        f"+ planner LM {planner_weights.stat().st_size / 1024**3:.1f} GiB)"
+    )
+
+
+def _describe_ltxv(models_dir: Path) -> str:
+    """Exact OK string for the LTXV stack (byte-stable)."""
+    dit_path = models_dir / LTXV_SUBDIR / LTXV_DIT_FILE
+    return f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
+
+
+def _describe_causvid(models_dir: Path) -> str:
+    """Exact OK string for the CausVid stack (byte-stable)."""
+    gib = (models_dir / CAUSVID_SUBDIR / CAUSVID_CHECKPOINT_FILE).stat().st_size / 1024**3
+    return f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
+
+
+MODEL_SPECS: dict[str, ModelSpec] = {
+    "longlive2-bf16": ModelSpec(
+        name="longlive2-bf16",
+        manifest_key="video",
+        snapshots=(SnapshotSpec(WAN_HF_REPO, None, _WAN22_RELATIVE, tuple(WAN_ALLOW)),),
+        files=(
+            FileSpec(LONGLIVE_HF_REPO, LONGLIVE_HF_REVISION, LONGLIVE_HF_FILE, "", "longlive2"),
+        ),
+        record_builder=_record_longlive2,
+        checks=(
+            RequiredFile(f"longlive2/{LONGLIVE_HF_FILE}", 1_000_000_000),
+            RequiredFile(
+                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00001-of-00003.safetensors", 0
+            ),
+            RequiredFile(
+                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00002-of-00003.safetensors", 0
+            ),
+            RequiredFile(
+                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00003-of-00003.safetensors", 0
+            ),
+            RequiredFile(f"{_WAN22_RELATIVE}/diffusion_pytorch_model.safetensors.index.json", 0),
+            RequiredFile(f"{_WAN22_RELATIVE}/config.json", 0),
+            RequiredFile(f"{_WAN22_RELATIVE}/configuration.json", 0),
+            RequiredFile(f"{_WAN22_RELATIVE}/Wan2.2_VAE.pth", 0),
+            RequiredFile(f"{_WAN22_RELATIVE}/models_t5_umt5-xxl-enc-bf16.pth", 0),
+            RequiredGlob(f"{_WAN22_RELATIVE}/google/umt5-xxl/*"),
+        ),
+        success_message=_describe_longlive2,
+    ),
+    "director-qwen8b": ModelSpec(
+        name="director-qwen8b",
+        manifest_key="director",
+        snapshots=(
+            SnapshotSpec(QWEN_HF_REPO, QWEN_HF_REVISION, QWEN_SUBDIR, tuple(QWEN_ALLOW)),
+            SnapshotSpec(MINILM_HF_REPO, MINILM_HF_REVISION, MINILM_SUBDIR, tuple(MINILM_ALLOW)),
+        ),
+        files=(),
+        record_builder=_record_director,
+        checks=(
+            RequiredFile(f"{QWEN_SUBDIR}/config.json", 0),
+            RequiredFile(f"{QWEN_SUBDIR}/generation_config.json", 0),
+            RequiredFile(f"{QWEN_SUBDIR}/tokenizer.json", 0),
+            RequiredFile(f"{QWEN_SUBDIR}/tokenizer_config.json", 0),
+            RequiredFile(f"{QWEN_SUBDIR}/vocab.json", 0),
+            RequiredFile(f"{QWEN_SUBDIR}/merges.txt", 0),
+            ShardFloor(
+                f"{QWEN_SUBDIR}/model-*-of-*.safetensors",
+                QWEN_MIN_BYTES,
+                "model-*-of-*.safetensors",
+            ),
+            RequiredFile(f"{MINILM_SUBDIR}/model.safetensors", MINILM_MIN_BYTES),
+            RequiredFile(f"{MINILM_SUBDIR}/config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/config_sentence_transformers.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/sentence_bert_config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/modules.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/1_Pooling/config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/tokenizer.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/tokenizer_config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/special_tokens_map.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/vocab.txt", 0),
+        ),
+        success_message=_describe_director,
+    ),
+    "inspector-qwen35": ModelSpec(
+        name="inspector-qwen35",
+        manifest_key="inspector",
+        snapshots=(
+            SnapshotSpec(QWEN35_HF_REPO, QWEN35_HF_REVISION, QWEN35_SUBDIR, tuple(QWEN35_ALLOW)),
+        ),
+        files=(),
+        record_builder=_record_inspector,
+        checks=(
+            RequiredFile(f"{QWEN35_SUBDIR}/model.safetensors.index.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/config.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/tokenizer.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/tokenizer_config.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/vocab.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/merges.txt", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/chat_template.jinja", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/preprocessor_config.json", 0),
+            RequiredFile(f"{QWEN35_SUBDIR}/video_preprocessor_config.json", 0),
+            ShardFloor(
+                f"{QWEN35_SUBDIR}/model.safetensors-*-of-*.safetensors",
+                QWEN35_MIN_BYTES,
+                "model shards",
+            ),
+        ),
+        success_message=_describe_inspector,
+    ),
+    "audio-acestep": ModelSpec(
+        name="audio-acestep",
+        manifest_key="audio",
+        snapshots=(
+            SnapshotSpec(
+                ACE_MAIN_REPO, ACE_MAIN_REVISION, _ACE_CHECKPOINTS_RELATIVE, tuple(ACE_MAIN_ALLOW)
+            ),
+            SnapshotSpec(ACE_LM_REPO, ACE_LM_REVISION, _ACE_LM_RELATIVE, tuple(ACE_LM_ALLOW)),
+        ),
+        files=(),
+        record_builder=_record_audio,
+        checks=(
+            RequiredGlob(f"{_ACE_CHECKPOINTS_RELATIVE}/acestep-v15-turbo/*"),
+            RequiredGlob(f"{_ACE_CHECKPOINTS_RELATIVE}/vae/*"),
+            RequiredGlob(f"{_ACE_CHECKPOINTS_RELATIVE}/Qwen3-Embedding-0.6B/*"),
+            RequiredGlob(f"{_ACE_CHECKPOINTS_RELATIVE}/acestep-5Hz-lm-1.7B/*"),
+            RequiredFile(f"{_ACE_CHECKPOINTS_RELATIVE}/config.json", 0),
+            RequiredFile(
+                f"{_ACE_CHECKPOINTS_RELATIVE}/acestep-v15-turbo/model.safetensors",
+                ACE_TURBO_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{_ACE_CHECKPOINTS_RELATIVE}/acestep-5Hz-lm-1.7B/model.safetensors",
+                ACE_LM17_MIN_BYTES,
+            ),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/model.safetensors", ACE_LM_MIN_BYTES),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/config.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/tokenizer.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/tokenizer_config.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/vocab.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/merges.txt", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/special_tokens_map.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/added_tokens.json", 0),
+            RequiredFile(f"{_ACE_LM_RELATIVE}/chat_template.jinja", 0),
+        ),
+        success_message=_describe_audio,
+    ),
+    "ltxv-2b": ModelSpec(
+        name="ltxv-2b",
+        manifest_key="ltxv",
+        snapshots=(
+            SnapshotSpec(LTXV_TE_REPO, LTXV_TE_REVISION, LTXV_TE_SUBDIR, tuple(LTXV_TE_ALLOW)),
+        ),
+        files=(
+            FileSpec(LTXV_HF_REPO, LTXV_HF_REVISION, LTXV_DIT_FILE, "", LTXV_SUBDIR),
+            FileSpec(LTXV_HF_REPO, LTXV_HF_REVISION, LTXV_UPSC_FILE, "", LTXV_SUBDIR),
+        ),
+        record_builder=_record_ltxv,
+        checks=(
+            RequiredFile(f"{LTXV_SUBDIR}/{LTXV_DIT_FILE}", LTXV_DIT_MIN_BYTES),
+            RequiredFile(f"{LTXV_SUBDIR}/{LTXV_UPSC_FILE}", LTXV_UPSC_MIN_BYTES),
+            RequiredGlob(f"{LTXV_TE_SUBDIR}/tokenizer/*"),
+            RequiredGlob(f"{LTXV_TE_SUBDIR}/text_encoder/*"),
+        ),
+        success_message=_describe_ltxv,
+    ),
+    "causvid": ModelSpec(
+        name="causvid",
+        manifest_key="causvid",
+        snapshots=(
+            SnapshotSpec(WAN21_HF_REPO, WAN21_HF_REVISION, WAN21_SUBDIR, tuple(WAN21_ALLOW)),
+        ),
+        files=(
+            FileSpec(
+                CAUSVID_HF_REPO,
+                CAUSVID_HF_REVISION,
+                CAUSVID_CHECKPOINT_NAME,
+                CAUSVID_CHECKPOINT_SUBDIR,
+                CAUSVID_SUBDIR,
+            ),
+        ),
+        record_builder=_record_causvid,
+        checks=(
+            RequiredFile(f"{CAUSVID_SUBDIR}/{CAUSVID_CHECKPOINT_FILE}", CAUSVID_CKPT_MIN_BYTES),
+            RequiredFile(f"{WAN21_SUBDIR}/diffusion_pytorch_model.safetensors", 0),
+            RequiredFile(f"{WAN21_SUBDIR}/config.json", 0),
+            RequiredFile(f"{WAN21_SUBDIR}/Wan2.1_VAE.pth", 0),
+            RequiredFile(f"{WAN21_SUBDIR}/models_t5_umt5-xxl-enc-bf16.pth", 0),
+            RequiredGlob(f"{WAN21_SUBDIR}/google/umt5-xxl/*"),
+            RequiredFile(
+                f"{WAN21_SUBDIR}/diffusion_pytorch_model.safetensors", WAN21_DIT_MIN_BYTES
+            ),
+            RequiredFile(f"{WAN21_SUBDIR}/Wan2.1_VAE.pth", WAN21_VAE_MIN_BYTES),
+            RequiredFile(f"{WAN21_SUBDIR}/models_t5_umt5-xxl-enc-bf16.pth", WAN21_T5_MIN_BYTES),
+        ),
+        success_message=_describe_causvid,
+    ),
+}
+
+
+def _require_spec(spec_name: str) -> ModelSpec:
+    """Look up a spec by CLI target name (fail loud on unknown)."""
+    try:
+        return MODEL_SPECS[spec_name]
+    except KeyError:
+        known = ", ".join(sorted(MODEL_SPECS))
+        raise ValueError(f"unknown model spec {spec_name!r} (known: {known})") from None
+
+
+def _run_spec_downloads(models_dir: Path, spec: ModelSpec) -> None:
+    """Perform a spec's hub fetches (record building lives in download_model)."""
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    for snapshot in spec.snapshots:
+        snapshot_kwargs: dict[str, Any] = {
+            "repo_id": snapshot.repo_id,
+            "local_dir": str(models_dir / snapshot.relative_dir),
+            "allow_patterns": list(snapshot.allow_patterns),
+        }
+        if snapshot.revision is not None:
+            snapshot_kwargs["revision"] = snapshot.revision
+        snapshot_download(**snapshot_kwargs)
+    for filereq in spec.files:
+        (models_dir / filereq.relative_dir).mkdir(parents=True, exist_ok=True)
+        file_kwargs: dict[str, Any] = {
+            "repo_id": filereq.repo_id,
+            "revision": filereq.revision,
+            "filename": filereq.filename,
+            "local_dir": str(models_dir / filereq.relative_dir),
+        }
+        if filereq.subfolder:
+            file_kwargs["subfolder"] = filereq.subfolder
+        hf_hub_download(**file_kwargs)
+
+
+def download_model(models_dir: Path, spec_name: str) -> dict[str, Any]:
+    """Table-driven download: fetch a spec's files, merge its manifest record."""
+    spec = _require_spec(spec_name)
+    _run_spec_downloads(models_dir, spec)
+    return _merge_manifest_record(models_dir, spec.manifest_key, spec.record_builder(models_dir))
+
+
+def _collect_missing(models_dir: Path, spec: ModelSpec) -> list[str]:
+    """Run a spec's checklist in order; missing entries as display strings."""
+    missing: list[str] = []
+    for check in spec.checks:
+        if isinstance(check, RequiredFile):
+            candidate = models_dir / check.relative_path
+            if check.min_bytes > 0:
+                if not candidate.exists() or candidate.stat().st_size < check.min_bytes:
+                    missing.append(str(candidate))
+            elif not candidate.exists():
+                missing.append(str(candidate))
+        elif isinstance(check, RequiredGlob):
+            if not list(models_dir.glob(check.relative_pattern)):
+                missing.append(f"{models_dir}/{check.relative_pattern}")
+        else:
+            assert isinstance(check, ShardFloor)
+            shards = sorted(models_dir.glob(check.relative_glob))
+            shard_bytes = sum(part.stat().st_size for part in shards)
+            if shard_bytes < check.min_bytes:
+                shard_parent = models_dir / check.relative_glob.split("/")[0]
+                missing.append(f"{shard_parent}/{check.missing_label} ({shard_bytes} bytes)")
+    return missing
+
+
+def verify_model(models_dir: Path, spec_name: str) -> tuple[bool, str]:
+    """Table-driven verify: checklist first, then the spec's exact OK string."""
+    spec = _require_spec(spec_name)
+    missing = _collect_missing(models_dir, spec)
+    if missing:
+        return False, f"missing {len(missing)} files: {missing[:5]}"
+    return True, spec.success_message(models_dir)
+
+
 def download_director_models(models_dir: Path) -> dict[str, Any]:
     """Explicit download of the Phase 3 director stack (DESIGN §§8-9, 85).
 
@@ -344,76 +787,12 @@ def download_director_models(models_dir: Path) -> dict[str, Any]:
     (safetensors + tokenizer/configs, skips the onnx/openvino/tf extras).
     Merges into the shared manifest; returns the merged record.
     """
-    from huggingface_hub import snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    qwen_dir = models_dir / QWEN_SUBDIR
-    snapshot_download(
-        repo_id=QWEN_HF_REPO,
-        revision=QWEN_HF_REVISION,
-        local_dir=str(qwen_dir),
-        allow_patterns=QWEN_ALLOW,
-    )
-    minilm_dir = models_dir / MINILM_SUBDIR
-    snapshot_download(
-        repo_id=MINILM_HF_REPO,
-        revision=MINILM_HF_REVISION,
-        local_dir=str(minilm_dir),
-        allow_patterns=MINILM_ALLOW,
-    )
-    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
-    qwen_bytes = sum(p.stat().st_size for p in qwen_shards)
-    minilm_weights = minilm_dir / "model.safetensors"
-    record = _merge_manifest_record(
-        models_dir,
-        "director",
-        {
-            "repo": QWEN_HF_REPO,
-            "revision": QWEN_HF_REVISION,
-            "model_dir": str(qwen_dir),
-            "checkpoint_bytes": qwen_bytes,
-            "shards": [p.name for p in qwen_shards],
-            "license": QWEN_LICENSE,
-            "license_url": QWEN_LICENSE_URL,
-            "embedding_repo": MINILM_HF_REPO,
-            "embedding_revision": MINILM_HF_REVISION,
-            "embedding_dir": str(minilm_dir),
-            "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
-            "embedding_license": MINILM_LICENSE,
-        },
-    )
-    return record
+    return download_model(models_dir, "director-qwen8b")
 
 
 def verify_director_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the director stack."""
-    missing: list[str] = []
-    qwen_dir = models_dir / QWEN_SUBDIR
-    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
-    qwen_bytes = sum(p.stat().st_size for p in qwen_shards) if qwen_shards else 0
-    for pattern in QWEN_ALLOW:
-        if "[" in pattern:
-            continue  # covered by the shard glob above
-        if not (qwen_dir / pattern).exists():
-            missing.append(str(qwen_dir / pattern))
-    if qwen_bytes < QWEN_MIN_BYTES:
-        missing.append(f"{qwen_dir}/model-*-of-*.safetensors ({qwen_bytes} bytes)")
-    minilm_dir = models_dir / MINILM_SUBDIR
-    minilm_weights = minilm_dir / "model.safetensors"
-    if not minilm_weights.exists() or minilm_weights.stat().st_size < MINILM_MIN_BYTES:
-        missing.append(str(minilm_weights))
-    for pattern in MINILM_ALLOW[1:]:
-        if "/" in pattern:
-            if not (minilm_dir / pattern).exists():
-                missing.append(str(minilm_dir / pattern))
-        elif not (minilm_dir / pattern).exists():
-            missing.append(str(minilm_dir / pattern))
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    return True, (
-        f"director-qwen8b OK (Qwen3-8B {qwen_bytes / 1024**3:.1f} GiB + MiniLM "
-        f"{minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
-    )
+    return verify_model(models_dir, "director-qwen8b")
 
 
 def download_inspector_models(models_dir: Path) -> dict[str, Any]:
@@ -424,49 +803,12 @@ def download_inspector_models(models_dir: Path) -> dict[str, Any]:
     fails to build (Step 0 probe lesson). Merges into the shared manifest;
     returns the merged record.
     """
-    from huggingface_hub import snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    target_dir = models_dir / QWEN35_SUBDIR
-    snapshot_download(
-        repo_id=QWEN35_HF_REPO,
-        revision=QWEN35_HF_REVISION,
-        local_dir=str(target_dir),
-        allow_patterns=QWEN35_ALLOW,
-    )
-    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
-    weights_bytes = sum(p.stat().st_size for p in shards)
-    record = _merge_manifest_record(
-        models_dir,
-        "inspector",
-        {
-            "repo": QWEN35_HF_REPO,
-            "revision": QWEN35_HF_REVISION,
-            "dir": str(target_dir),
-            "bytes": weights_bytes,
-            "license": QWEN35_LICENSE,
-            "license_url": QWEN35_LICENSE_URL,
-        },
-    )
-    return record
+    return download_model(models_dir, "inspector-qwen35")
 
 
 def verify_inspector_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the VLM inspector."""
-    missing: list[str] = []
-    target_dir = models_dir / QWEN35_SUBDIR
-    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
-    weights_bytes = sum(p.stat().st_size for p in shards) if shards else 0
-    for pattern in QWEN35_ALLOW:
-        if "*" in pattern:
-            continue  # covered by the shard glob above
-        if not (target_dir / pattern).exists():
-            missing.append(str(target_dir / pattern))
-    if weights_bytes < QWEN35_MIN_BYTES:
-        missing.append(f"{target_dir}/model shards ({weights_bytes} bytes)")
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    return True, f"inspector-qwen35 OK (Qwen3.5-9B {weights_bytes / 1024**3:.1f} GiB)"
+    return verify_model(models_dir, "inspector-qwen35")
 
 
 def download_audio_models(models_dir: Path) -> dict[str, Any]:
@@ -480,72 +822,12 @@ def download_audio_models(models_dir: Path) -> dict[str, Any]:
     other layout triggers a full 9.4GB auto-download at first run).
     Merges into the shared manifest; returns the merged record.
     """
-    from huggingface_hub import snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    ace_dir = models_dir / ACE_MAIN_SUBDIR
-    checkpoints_dir = ace_dir / ACE_CHECKPOINTS_SUBDIR
-    snapshot_download(
-        repo_id=ACE_MAIN_REPO,
-        revision=ACE_MAIN_REVISION,
-        local_dir=str(checkpoints_dir),
-        allow_patterns=ACE_MAIN_ALLOW,
-    )
-    snapshot_download(
-        repo_id=ACE_LM_REPO,
-        revision=ACE_LM_REVISION,
-        local_dir=str(checkpoints_dir / ACE_LM_SUBDIR),
-        allow_patterns=ACE_LM_ALLOW,
-    )
-    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
-    lm_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
-    record = _merge_manifest_record(
-        models_dir,
-        "audio",
-        {
-            "repo": ACE_MAIN_REPO,
-            "revision": ACE_MAIN_REVISION,
-            "model_dir": str(ace_dir),
-            "turbo_bytes": turbo_weights.stat().st_size if turbo_weights.exists() else 0,
-            "license": ACE_MAIN_LICENSE,
-            "planner_repo": ACE_LM_REPO,
-            "planner_revision": ACE_LM_REVISION,
-            "planner_dir": str(checkpoints_dir / ACE_LM_SUBDIR),
-            "planner_bytes": lm_weights.stat().st_size if lm_weights.exists() else 0,
-        },
-    )
-    return record
+    return download_model(models_dir, "audio-acestep")
 
 
 def verify_audio_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the music stack."""
-    missing: list[str] = []
-    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
-    for pattern in ACE_MAIN_ALLOW:
-        if pattern.endswith("/*"):
-            matches = list((checkpoints_dir / pattern[:-2]).glob("*"))
-            if not matches:
-                missing.append(f"{checkpoints_dir}/{pattern}")
-        elif not (checkpoints_dir / pattern).exists():
-            missing.append(str(checkpoints_dir / pattern))
-    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
-    if not turbo_weights.exists() or turbo_weights.stat().st_size < ACE_TURBO_MIN_BYTES:
-        missing.append(str(turbo_weights))
-    lm17_weights = checkpoints_dir / "acestep-5Hz-lm-1.7B" / "model.safetensors"
-    if not lm17_weights.exists() or lm17_weights.stat().st_size < ACE_LM17_MIN_BYTES:
-        missing.append(str(lm17_weights))
-    lm_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
-    if not lm_weights.exists() or lm_weights.stat().st_size < ACE_LM_MIN_BYTES:
-        missing.append(str(lm_weights))
-    for pattern in ACE_LM_ALLOW[1:]:
-        if not (checkpoints_dir / ACE_LM_SUBDIR / pattern).exists():
-            missing.append(str(checkpoints_dir / ACE_LM_SUBDIR / pattern))
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    return True, (
-        f"audio-acestep OK (turbo {turbo_weights.stat().st_size / 1024**3:.1f} GiB "
-        f"+ planner LM {lm_weights.stat().st_size / 1024**3:.1f} GiB)"
-    )
+    return verify_model(models_dir, "audio-acestep")
 
 
 def download_ltxv_models(models_dir: Path) -> dict[str, Any]:
@@ -556,61 +838,12 @@ def download_ltxv_models(models_dir: Path) -> dict[str, Any]:
     CPU-precomputed bf16 embeds. Merges into the shared manifest; returns
     the merged record.
     """
-    from huggingface_hub import hf_hub_download, snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    ltxv_dir = models_dir / LTXV_SUBDIR
-    ltxv_dir.mkdir(parents=True, exist_ok=True)
-    for filename in (LTXV_DIT_FILE, LTXV_UPSC_FILE):
-        hf_hub_download(
-            repo_id=LTXV_HF_REPO,
-            revision=LTXV_HF_REVISION,
-            filename=filename,
-            local_dir=str(ltxv_dir),
-        )
-    te_dir = models_dir / LTXV_TE_SUBDIR
-    snapshot_download(
-        repo_id=LTXV_TE_REPO,
-        revision=LTXV_TE_REVISION,
-        local_dir=str(te_dir),
-        allow_patterns=LTXV_TE_ALLOW,
-    )
-    dit_path = ltxv_dir / LTXV_DIT_FILE
-    record = _merge_manifest_record(
-        models_dir,
-        "ltxv",
-        {
-            "repo": LTXV_HF_REPO,
-            "revision": LTXV_HF_REVISION,
-            "model_dir": str(ltxv_dir),
-            "checkpoint_bytes": dit_path.stat().st_size,
-            "files": [LTXV_DIT_FILE, LTXV_UPSC_FILE],
-            "code_commit": LTXV_COMMIT,
-            "text_encoder_repo": LTXV_TE_REPO,
-            "text_encoder_revision": LTXV_TE_REVISION,
-        },
-    )
-    return record
+    return download_model(models_dir, "ltxv-2b")
 
 
 def verify_ltxv_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the LTXV stack."""
-    missing: list[str] = []
-    ltxv_dir = models_dir / LTXV_SUBDIR
-    dit_path = ltxv_dir / LTXV_DIT_FILE
-    if not dit_path.exists() or dit_path.stat().st_size < LTXV_DIT_MIN_BYTES:
-        missing.append(str(dit_path))
-    upsc_path = ltxv_dir / LTXV_UPSC_FILE
-    if not upsc_path.exists() or upsc_path.stat().st_size < LTXV_UPSC_MIN_BYTES:
-        missing.append(str(upsc_path))
-    te_dir = models_dir / LTXV_TE_SUBDIR
-    for pattern in LTXV_TE_ALLOW:
-        matches = list((te_dir / pattern[:-2]).glob("*"))
-        if not matches:
-            missing.append(f"{te_dir}/{pattern}")
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    return True, f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
+    return verify_model(models_dir, "ltxv-2b")
 
 
 def download_causvid_models(models_dir: Path) -> dict[str, Any]:
@@ -622,76 +855,12 @@ def download_causvid_models(models_dir: Path) -> dict[str, Any]:
     the merged record. Backs the `models download causvid` CLI target for
     the `causvid` worker (`voyage/workers/video_causvid.py`).
     """
-    from huggingface_hub import hf_hub_download, snapshot_download
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    causvid_dir = models_dir / CAUSVID_SUBDIR
-    causvid_dir.mkdir(parents=True, exist_ok=True)
-    hf_hub_download(
-        repo_id=CAUSVID_HF_REPO,
-        revision=CAUSVID_HF_REVISION,
-        subfolder=CAUSVID_CHECKPOINT_SUBDIR,
-        filename=CAUSVID_CHECKPOINT_NAME,
-        local_dir=str(causvid_dir),
-    )
-    wan21_dir = models_dir / WAN21_SUBDIR
-    snapshot_download(
-        repo_id=WAN21_HF_REPO,
-        revision=WAN21_HF_REVISION,
-        local_dir=str(wan21_dir),
-        allow_patterns=WAN21_ALLOW,
-    )
-    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
-    record = _merge_manifest_record(
-        models_dir,
-        "causvid",
-        {
-            "repo": CAUSVID_HF_REPO,
-            "revision": CAUSVID_HF_REVISION,
-            "model_dir": str(causvid_dir),
-            "checkpoint_bytes": checkpoint_path.stat().st_size,
-            "checkpoint_sha256": _sha256(checkpoint_path),
-            "files": [CAUSVID_CHECKPOINT_FILE],
-            "code_commit": CAUSVID_COMMIT,
-            "license": CAUSVID_LICENSE,
-            "license_url": CAUSVID_LICENSE_URL,
-            "base_repo": WAN21_HF_REPO,
-            "base_revision": WAN21_HF_REVISION,
-            "base_dir": str(wan21_dir),
-            "base_license": WAN21_LICENSE,
-        },
-    )
-    return record
+    return download_model(models_dir, "causvid")
 
 
 def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the CausVid stack."""
-    missing: list[str] = []
-    causvid_dir = models_dir / CAUSVID_SUBDIR
-    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
-    if not checkpoint_path.exists() or checkpoint_path.stat().st_size < CAUSVID_CKPT_MIN_BYTES:
-        missing.append(str(checkpoint_path))
-    wan21_dir = models_dir / WAN21_SUBDIR
-    for pattern in WAN21_ALLOW:
-        if pattern.endswith("*"):
-            matches = list(wan21_dir.glob(pattern))
-            if not matches:
-                missing.append(f"{wan21_dir}/{pattern}")
-        elif not (wan21_dir / pattern).exists():
-            missing.append(str(wan21_dir / pattern))
-    dit_path = wan21_dir / "diffusion_pytorch_model.safetensors"
-    if not dit_path.exists() or dit_path.stat().st_size < WAN21_DIT_MIN_BYTES:
-        missing.append(str(dit_path))
-    vae_path = wan21_dir / "Wan2.1_VAE.pth"
-    if not vae_path.exists() or vae_path.stat().st_size < WAN21_VAE_MIN_BYTES:
-        missing.append(str(vae_path))
-    text_encoder_path = wan21_dir / "models_t5_umt5-xxl-enc-bf16.pth"
-    if not text_encoder_path.exists() or text_encoder_path.stat().st_size < WAN21_T5_MIN_BYTES:
-        missing.append(str(text_encoder_path))
-    if missing:
-        return False, f"missing {len(missing)} files: {missing[:5]}"
-    gib = checkpoint_path.stat().st_size / 1024**3
-    return True, f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
+    return verify_model(models_dir, "causvid")
 
 
 def models_dir_layout(models_dir: Path) -> dict[str, str]:

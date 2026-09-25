@@ -1,6 +1,6 @@
 # 025 — Config geometry has 5 sources of truth (defaults / TOML / presets / draft overlay / CLI)
 
-- Status: open
+- Status: resolved (single resolver + registry landed 2026-09-25; see log)
 - Severity: major (stale-value hazards; the file's own comment admits the
   causvid preset "lie")
 - Area: structure — `voyage/config.py`
@@ -59,4 +59,26 @@ replacing `apply_draft_overrides` + `with_video_backend`.
 - 2026-09-25: found by structure sweep.
 - 2026-09-25: repair pass — added `## Why this is an issue`; all def-line refs
   re-verified live, current; pasted rg output into Evidence.
-- Open: unify geometry; keep `with_video_backend` behavior via tests.
+- 2026-09-25 (resolution, backend-typing track): FIXED in own scope.
+  `voyage/config.py`: `BACKEND_REGISTRY` is the one BACKEND_GEOMETRY table
+  (geometry + latent + device + audio pairing per row; the causvid row
+  carries the native 832x480 @ 16 fps / [1,21,16,60,104] truth, so the old
+  "lie" is gone by construction); `VideoConfig` defaults reference the
+  fake row (`_FAKE_ROW` — `VideoConfig() == BACKEND_REGISTRY["fake"]`
+  geometry, pinned by test); new single `resolve_config(base, backend,
+  draft, director, blocks, take_seconds, quantization, beats_per_segment,
+  drift_every_n_segments)` applies backend preset → stored `[draft]`
+  overlay → targeted overrides, pure, constructor-validated;
+  `apply_draft_overrides` and `with_video_backend` are thin wrappers over
+  it (signatures + ValueError/ValidationError behavior unchanged — the
+  existing draft/generate/generation_stack tests pin them, and they live
+  outside this track's test scope so they were not rewritten).
+  Deliberate deviation from the candidate: `DraftConfig` was NOT deleted —
+  stored TOMLs carry a `[draft]` table and existing tests import the model,
+  so the stored `config.draft` IS the named overlay and resolve_config
+  applies it (documented on the model). Tests:
+  `tests/test_config_resolution.py` (8 tests: noop purity, wrapper
+  parities, order preset→draft→overrides, full backend×draft matrix,
+  targeted overrides, rejections). Gates: same green scope as 022
+  (ruff/format/mypy on touched files; 238 targeted green; full suite 674/4
+  with the 4 failures in other tracks' files).

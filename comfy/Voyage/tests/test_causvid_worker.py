@@ -709,7 +709,12 @@ def test_worker_serve_map_covers_protocol() -> None:
     """The CausVid worker speaks every op the supervisor may send."""
     import inspect
 
-    source = inspect.getsource(video_causvid.main)
+    from voyage.workers import video_common
+
+    # Since issue 019 the map is built by the shared factory: assert the
+    # factory covers the protocol and main() delegates to it (with this
+    # worker's handlers) instead of grepping main() for op literals.
+    factory_source = inspect.getsource(video_common.standard_serve_map)
     for op in (
         "init",
         "health",
@@ -721,7 +726,19 @@ def test_worker_serve_map_covers_protocol() -> None:
         "resume",
         "shutdown",
     ):
-        assert f'"{op}"' in source
+        assert f'"{op}"' in factory_source
+    main_source = inspect.getsource(video_causvid.main)
+    assert "standard_serve_map" in main_source
+    for handler in (
+        "handle_init",
+        "handle_health",
+        "handle_generate_blocks",
+        "handle_benchmark",
+        "handle_evict_gpu",
+        "handle_rebuild",
+        "handle_resume",
+    ):
+        assert handler in main_source
     assert callable(serve)
 
 

@@ -1,6 +1,6 @@
 # 022 — Stringly-typed backends: `backend: str` + scattered `==` + four disagreeing registries
 
-- Status: open
+- Status: resolved (Literals + single registry landed 2026-09-25; cross-file annotation adoption + supervisor worker-module merge are hook-noted below for the owning tracks)
 - Severity: major (type safety — typo fails at runtime; lists already disagree)
 - Area: structure — config/supervisor/CLI/TUI backend naming
 - Rank rationale: only `quantization` got a `Literal`; the wire-critical field
@@ -67,3 +67,56 @@ Sweep `rg` output (~20 sites); live `gpu_warning('causvid') == ''` probe
 - 2026-09-25 (repair pass): added `## Why this is an issue`;
   `gpu_warning('causvid')==''` re-probed live (still omitted); refs verified
   current.
+- 2026-09-25 (resolution, backend-typing track): FIXED in own scope.
+  `voyage/config.py`: `VideoBackendName = Literal["fake","longlive2","ltxv",
+  "causvid"]` + `AudioBackendName = Literal["fake","acestep"]` + `StateMode`
+  (moved from backends.py; backends re-exports it) in one module;
+  `BackendRecord` frozen dataclass + `BACKEND_REGISTRY`
+  (`dict[VideoBackendName, BackendRecord]`: profile/geometry/latent/device
+  + audio pairing + state_mode + streaming per row) replacing
+  `_VIDEO_BACKEND_PRESETS` / `_AUDIO_BACKEND_PRESETS` / `BACKEND_STATE_MODES`
+  as sources (kept as derived views for existing importers); typed
+  `VideoConfig.backend: VideoBackendName`, `AudioConfig.backend:
+  AudioBackendName`, `resolve_config/with_video_backend/default_config_toml`
+  backend params, `BACKEND_STATE_MODES: dict[VideoBackendName, StateMode]`
+  and `_STREAMING_BACKENDS: frozenset[VideoBackendName]` (both derived from
+  the registry) in `voyage/backends.py`, plus `VideoBackendAdapter.backend`
+  / `BackendCapabilities.backend` / `VideoSegmentResult.backend`. Boundary
+  functions taking unchecked external strings (`_video_preset`,
+  `_audio_preset`) stay `str` with runtime ValueError on purpose (their
+  callers live in other tracks' files). Tests:
+  `tests/test_backend_registry.py` (13 tests: vocabularies, registry
+  coverage, defaults==fake row, state/streaming derivation, per-row
+  dispatch, TOML geometry per backend, rejection messages, purity).
+  Gates: ruff check + format clean on all touched files; `mypy
+  voyage/config.py voyage/backends.py` clean; 238 targeted tests green
+  (new 3 files + backends_adapter/draft/generate/generation_stack/
+  tui_state/unit/cli_hardening); full suite 674 passed / 4 failed, all 4
+  in other tracks' files (no config/backends frame in their tracebacks).
+  Full `gates.sh` is red from concurrent in-flight work (supervisor.py
+  ruff F401 + ~80 mypy name-defined from the supervisor rewire; 4 failing
+  tests in new worker/tui files) — none in this track's scope.
+- Hook notes for owning tracks (do NOT belong to this change):
+  supervisor.py — type `VIDEO_WORKER_MODULES: dict[VideoBackendName, str]`
+  (:89), `STREAMING_VIDEO_BACKENDS: tuple[VideoBackendName, ...]` (:97),
+  `AUDIO_WORKER_MODULES: dict[AudioBackendName, str]` (:105),
+  `audio_worker_module/video_worker_module(backend: …)` (:136/:145), and
+  consider deriving all three from `config.BACKEND_REGISTRY` (worker-module
+  strings were deliberately left out of the registry — supervisor-owned
+  data); the `== "longlive2"` (:173, :1491) / `== "acestep"` (:190, :885)
+  / `in STREAMING_VIDEO_BACKENDS` (:168, :886, :1337) sites keep working
+  (Literal == str is runtime-true) and need no change for correctness.
+  cli.py — `--backend choices=(…)` (:1321-1322, :1411-1412) can derive from
+  `typing.get_args(VideoBackendName)`; `_CUDA_BACKENDS` (:888) stays the
+  CUDA set (note: `gpu_warning('causvid')` is covered — tui_state delegates
+  to `_CUDA_BACKENDS`, which already contains causvid); `_frames_per_segment`
+  `== "ltxv"/"longlive2"/"causvid"` (:873-878) need no change; annotate
+  `cmd_init`'s `backend` (`:160`, currently `Any | str`) as
+  `VideoBackendName` to clear the one mypy arg-type error this change
+  surfaces there. tui_state.py — annotate `_planning_frames_and_fps(backend:
+  …)` (:248) as `VideoBackendName` to clear the one mypy arg-type error at
+  `VideoConfig(backend=backend)` (:271); `gpu_warning` (:453) needs nothing
+  (already delegates to cli._CUDA_BACKENDS). workers/director.py — `if
+  backend == "qwen"` (:321) is director vocabulary, out of scope.
+  model_registry.py — comment at :170 references the supervisor dicts;
+  update when the supervisor merges them into the registry.

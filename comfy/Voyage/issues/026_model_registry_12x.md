@@ -1,6 +1,6 @@
 # 026 — `model_registry.py`: 6 download + 6 verify functions are one table-driven function copied 12×
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: medium-high (~400 lines; adding a backend = 13th copy)
 - Area: structure — `voyage/model_registry.py` (662 lines)
 - Rank rationale: textbook table-driven refactor; each pair differs only in
@@ -68,3 +68,8 @@ Fold in the missing Wan `revision=` (see 011) at the same time.
 - 2026-09-25: repair pass — added `## Why this is an issue`; all 12 function
   lines had drifted +1 since the sweep (fixed); pasted rg output into Evidence.
 - Open: table-drive; keep CLI output strings byte-stable via tests.
+- 2026-09-25 (batch 4, track A; log written by orchestrator in review):
+  FIXED. `MODEL_SPECS` table (`model_registry.py:528`) + generic
+  `download_model`/`verify_model` (`:743/:774`); the 12 per-backend
+  `download_*`/`verify_*` functions remain as thin wrappers (CLI output
+  strings byte-stable). Verified live via def list above; gates green.

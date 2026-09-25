@@ -1,6 +1,6 @@
 # 019 — Three video workers triplicate the same skeleton (~80% scaffolding identical)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: major (maintainability — every ops fix lands 3×, already diverged)
 - Area: structure — `video_longlive.py` / `video_ltxv.py` / `video_causvid.py`
 - Rank rationale: diffs are 1400–1900 lines but the delta is almost entirely
@@ -99,3 +99,12 @@ payload shape so the triple `handle_generate_blocks` validation collapses.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; corrected
   longlive `_save_mp4`/`TAIL_`/`TAPE_FILENAME` claims (absent — inlined
   instead) + Evidence with live output.
+- 2026-09-25 (batch 4, track A; log written by orchestrator in review — the
+  track returned no report): FIXED. New `voyage/workers/video_common.py`
+  (stdlib+numpy only) owns `save_mp4` / `write_tape_atomic` /
+  `run_benchmark_harness` / `standard_serve_map`; all three workers delegate
+  (serve_map ×3, benchmark harness ×3, tape writes in ltxv/causvid, mp4 writes
+  in ltxv/causvid). Deliberate non-shares documented in the module: LongLive's
+  torch-`.pt` tape bundle + `get_writer` path stay local. Verified live:
+  every `video_common.*` call site above; gates green (incl. new
+  `tests/test_video_common.py`; serve-map/bridge test updates in review).

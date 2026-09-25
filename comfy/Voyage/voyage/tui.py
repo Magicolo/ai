@@ -514,6 +514,190 @@ class VoyageApp(App[None]):
         line.update(text)
         line.display = bool(text)
 
+    def _form_fields(self) -> ComposeResult:
+        """Form-column widgets, in order (issue 020: form-vs-run seam).
+
+        Yields exactly the widgets `compose` used to inline inside
+        `#form-col` — field rows, flags, plan/errors lines, buttons, key
+        hints. The `with` container keeps compose-stack semantics: building
+        the button row with explicit children instead mounts an identical
+        DOM that silently drops button clicks (verified live 2026-09-25),
+        so the original form stays.
+        """
+        yield self._field_row(
+            "Style *",
+            "style",
+            TextArea(
+                text=self.initial_state.style,
+                soft_wrap=True,
+                id="field-style",
+                tooltip=FIELD_HELP["style"],
+            ),
+            tall=True,
+        )
+        yield self._field_row(
+            "Name *",
+            "name",
+            Input(
+                value=self.initial_state.name,
+                id="field-name",
+                tooltip=FIELD_HELP["name"],
+            ),
+        )
+        yield self._field_row(
+            "Duration",
+            "duration",
+            Input(
+                value=self.initial_state.duration,
+                id="field-duration",
+                tooltip=FIELD_HELP["duration"],
+            ),
+        )
+        yield self._field_row(
+            "Backend ▾",
+            "backend",
+            Select(
+                [(name, name) for name in BACKENDS],
+                value=self.initial_state.backend,
+                allow_blank=False,
+                prompt="▾ pick a backend",
+                id="field-backend",
+                tooltip=FIELD_HELP["backend"],
+            ),
+            tall=True,
+        )
+        yield Static("", id="gpu-warning")
+        yield self._field_row(
+            "Director ▾",
+            "director",
+            Select(
+                [(name, name) for name in DIRECTORS],
+                value=self.initial_state.director,
+                allow_blank=False,
+                prompt="▾ pick a director",
+                id="field-director",
+                tooltip=FIELD_HELP["director"],
+            ),
+            tall=True,
+        )
+        yield self._field_row(
+            "Quantization ▾",
+            "quantization",
+            Select(
+                [(name, name) for name in QUANTIZATIONS],
+                value=self.initial_state.quantization,
+                allow_blank=False,
+                prompt="▾ pick a precision",
+                id="field-quantization",
+                tooltip=FIELD_HELP["quantization"],
+            ),
+            tall=True,
+        )
+        yield self._field_row(
+            "Blocks",
+            "blocks",
+            Input(
+                value=self.initial_state.blocks,
+                placeholder="1",
+                id="field-blocks",
+                tooltip=FIELD_HELP["blocks"],
+            ),
+        )
+        yield self._field_row(
+            "Take seconds",
+            "take_seconds",
+            Input(
+                value=self.initial_state.take_seconds,
+                placeholder="45.0",
+                id="field-take-seconds",
+                tooltip=FIELD_HELP["take_seconds"],
+            ),
+        )
+        yield self._field_row(
+            "Beats/segment",
+            "beats_per_segment",
+            Input(
+                value=self.initial_state.beats_per_segment,
+                placeholder="4",
+                id="field-beats",
+                tooltip=FIELD_HELP["beats_per_segment"],
+            ),
+        )
+        yield self._field_row(
+            "Drift every N",
+            "drift_every_n",
+            Input(
+                value=self.initial_state.drift_every_n,
+                placeholder="1",
+                id="field-drift",
+                tooltip=FIELD_HELP["drift_every_n"],
+            ),
+        )
+        yield self._field_row(
+            "Seed",
+            "seed",
+            Input(
+                value=self.initial_state.seed,
+                id="field-seed",
+                tooltip=FIELD_HELP["seed"],
+            ),
+        )
+        yield Checkbox(
+            "Draft profile (fast low-res iteration)",
+            value=self.initial_state.draft,
+            id="flag-draft",
+        )
+        yield Checkbox(
+            "Force (init into a non-empty directory)",
+            value=self.initial_state.force,
+            id="flag-force",
+        )
+        yield Checkbox(
+            "Skip bad segments at finalize",
+            value=self.initial_state.skip_bad,
+            id="flag-skip-bad",
+        )
+        yield Checkbox(
+            "Verbose console lines behind the TUI",
+            value=self.initial_state.verbose,
+            id="flag-verbose",
+        )
+        yield Checkbox(
+            "No color (plain output)",
+            value=self.initial_state.no_color,
+            id="flag-no-color",
+        )
+        yield Static("", id="plan-line")
+        yield Static("", id="errors-line")
+        with Horizontal(id="button-row"):
+            yield Button("Generate ▶", variant="primary", id="button-generate")
+            yield Button("Quit", id="button-quit")
+        yield Static(
+            "keys: ctrl+g generate · ctrl+x stop · b back · ctrl+q quit",
+            id="key-hints",
+        )
+
+    def _run_view_widgets(self) -> ComposeResult:
+        """Run-view widgets, in order (issue 020: form-vs-run seam).
+
+        Yields exactly the widgets `compose` used to inline inside
+        `#run-view` — head, progress bar, log, result, buttons, key hints.
+        Same `with`-container caveat as `_form_fields`: explicit children
+        mount a click-dead copy, so the original form stays.
+        """
+        yield Static("", id="run-head")
+        yield ProgressBar(id="run-bar")
+        yield RichLog(id="run-log", highlight=False)
+        yield Static("", id="run-result")
+        with Horizontal(id="run-buttons"):
+            yield Button("Stop ■", variant="error", id="button-stop")
+            yield Button("← Back", id="button-back")
+            yield Button("Quit", id="button-quit-run")
+        yield Static(
+            "keys: ctrl+x stop · b back · ctrl+q quit",
+            id="run-keys",
+        )
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(TITLE_ART, id="app-title")
@@ -521,174 +705,12 @@ class VoyageApp(App[None]):
         with ScrollableContainer(id="form-view"):
             with Horizontal(id="form-columns"):
                 with Vertical(id="form-col"):
-                    yield self._field_row(
-                        "Style *",
-                        "style",
-                        TextArea(
-                            text=self.initial_state.style,
-                            soft_wrap=True,
-                            id="field-style",
-                            tooltip=FIELD_HELP["style"],
-                        ),
-                        tall=True,
-                    )
-                    yield self._field_row(
-                        "Name *",
-                        "name",
-                        Input(
-                            value=self.initial_state.name,
-                            id="field-name",
-                            tooltip=FIELD_HELP["name"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Duration",
-                        "duration",
-                        Input(
-                            value=self.initial_state.duration,
-                            id="field-duration",
-                            tooltip=FIELD_HELP["duration"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Backend ▾",
-                        "backend",
-                        Select(
-                            [(name, name) for name in BACKENDS],
-                            value=self.initial_state.backend,
-                            allow_blank=False,
-                            prompt="▾ pick a backend",
-                            id="field-backend",
-                            tooltip=FIELD_HELP["backend"],
-                        ),
-                        tall=True,
-                    )
-                    yield Static("", id="gpu-warning")
-                    yield self._field_row(
-                        "Director ▾",
-                        "director",
-                        Select(
-                            [(name, name) for name in DIRECTORS],
-                            value=self.initial_state.director,
-                            allow_blank=False,
-                            prompt="▾ pick a director",
-                            id="field-director",
-                            tooltip=FIELD_HELP["director"],
-                        ),
-                        tall=True,
-                    )
-                    yield self._field_row(
-                        "Quantization ▾",
-                        "quantization",
-                        Select(
-                            [(name, name) for name in QUANTIZATIONS],
-                            value=self.initial_state.quantization,
-                            allow_blank=False,
-                            prompt="▾ pick a precision",
-                            id="field-quantization",
-                            tooltip=FIELD_HELP["quantization"],
-                        ),
-                        tall=True,
-                    )
-                    yield self._field_row(
-                        "Blocks",
-                        "blocks",
-                        Input(
-                            value=self.initial_state.blocks,
-                            placeholder="1",
-                            id="field-blocks",
-                            tooltip=FIELD_HELP["blocks"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Take seconds",
-                        "take_seconds",
-                        Input(
-                            value=self.initial_state.take_seconds,
-                            placeholder="45.0",
-                            id="field-take-seconds",
-                            tooltip=FIELD_HELP["take_seconds"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Beats/segment",
-                        "beats_per_segment",
-                        Input(
-                            value=self.initial_state.beats_per_segment,
-                            placeholder="4",
-                            id="field-beats",
-                            tooltip=FIELD_HELP["beats_per_segment"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Drift every N",
-                        "drift_every_n",
-                        Input(
-                            value=self.initial_state.drift_every_n,
-                            placeholder="1",
-                            id="field-drift",
-                            tooltip=FIELD_HELP["drift_every_n"],
-                        ),
-                    )
-                    yield self._field_row(
-                        "Seed",
-                        "seed",
-                        Input(
-                            value=self.initial_state.seed,
-                            id="field-seed",
-                            tooltip=FIELD_HELP["seed"],
-                        ),
-                    )
-                    yield Checkbox(
-                        "Draft profile (fast low-res iteration)",
-                        value=self.initial_state.draft,
-                        id="flag-draft",
-                    )
-                    yield Checkbox(
-                        "Force (init into a non-empty directory)",
-                        value=self.initial_state.force,
-                        id="flag-force",
-                    )
-                    yield Checkbox(
-                        "Skip bad segments at finalize",
-                        value=self.initial_state.skip_bad,
-                        id="flag-skip-bad",
-                    )
-                    yield Checkbox(
-                        "Verbose console lines behind the TUI",
-                        value=self.initial_state.verbose,
-                        id="flag-verbose",
-                    )
-                    yield Checkbox(
-                        "No color (plain output)",
-                        value=self.initial_state.no_color,
-                        id="flag-no-color",
-                    )
-                    yield Static("", id="plan-line")
-                    yield Static("", id="errors-line")
-                    with Horizontal(id="button-row"):
-                        yield Button("Generate ▶", variant="primary", id="button-generate")
-                        yield Button("Quit", id="button-quit")
-                    yield Static(
-                        "keys: ctrl+g generate · ctrl+x stop · b back · ctrl+q quit",
-                        id="key-hints",
-                    )
+                    yield from self._form_fields()
                 with Vertical(id="help-panel"):
                     yield Static("❓ Field help", id="help-title")
                     yield Static(_HELP_OVERVIEW, id="help-body")
         with Vertical(id="run-view"):
-            yield Static("", id="run-head")
-            yield ProgressBar(id="run-bar")
-            yield RichLog(id="run-log", highlight=False)
-            yield Static("", id="run-result")
-            with Horizontal(id="run-buttons"):
-                yield Button("Stop ■", variant="error", id="button-stop")
-                yield Button("← Back", id="button-back")
-                yield Button("Quit", id="button-quit-run")
-            yield Static(
-                "keys: ctrl+x stop · b back · ctrl+q quit",
-                id="run-keys",
-            )
+            yield from self._run_view_widgets()
         yield Footer()
 
     def on_mount(self) -> None:

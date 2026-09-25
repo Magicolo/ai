@@ -14,7 +14,6 @@ the supervisor validates and commits. One segment commit:
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
 import signal
@@ -24,11 +23,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 
 from voyage import paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
+from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
 from voyage.console import SegmentProgress
@@ -47,6 +47,7 @@ from voyage.errors import (
     StateError,
     VoyageError,
 )
+from voyage.hashing import sha256_file as sha256_file  # re-export (issue 021, cf. cli.py)
 from voyage.logrotate import append_line
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
@@ -59,7 +60,14 @@ from voyage.media import (
     validate_audio,
     validate_video,
 )
-from voyage.models import AudioPlan, EvolutionDecision, SegmentWorldState, StyleSpec
+from voyage.models import (
+    AudioPlan,
+    EvolutionDecision,
+    PromptPlan,
+    RunState,
+    SegmentWorldState,
+    StyleSpec,
+)
 from voyage.persistence import read_state, write_state
 from voyage.prompts import (
     apply_feedback_amendments,
@@ -75,16 +83,6 @@ from voyage.vision.metrics import (
     sample_frames,
     summarize_segment,
 )
-
-
-def sha256_file(path: Path) -> str:
-    """Chunked SHA-256 (constant memory — takes can be multi-GB)."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
 
 VIDEO_WORKER_MODULES = {
     "fake": "voyage.workers.video",
@@ -131,6 +129,50 @@ RESOURCE_GAUGE_INTERVAL_SEGMENTS = 1
 #: `1..10 * segment_frames`. Beyond that the audio-coverage loop would
 #: slice thousands of pieces and the timeline would corrupt.
 REPORTED_FRAMES_SLACK = 10
+
+
+class ProposedSegment(NamedTuple):
+    """Director proposal + staged prompt plan for one commit (issue 020).
+
+    Pure proposal: no media rendered, no state advanced. Built by
+    `_propose_segment`, consumed by `_render_video` / `_commit_segment`.
+    """
+
+    decision: EvolutionDecision
+    prompt_plan: PromptPlan
+    block_prompts: list[str]
+    num_blocks: int
+    prefetch_hit: bool
+    drift_hold: bool
+
+
+class RenderedVideo(NamedTuple):
+    """Video outcome of one commit (issue 020).
+
+    `frames` is the worker-reported count after the issue-006 ceiling
+    gate (never the raw report); `video_time` is the timeline offset the
+    audio coverage starts from; `recovery_tape` is the validated absolute
+    wire path (None when the worker reported none).
+    """
+
+    frames: int
+    duration: float
+    video_time: float
+    recovery_tape: str | None
+
+
+class CoveredAudio(NamedTuple):
+    """Audio outcome of one commit (issue 020).
+
+    The segment's AudioPlan plus the seconds of music coverage remaining
+    ahead of the new segment end (drives audio_buffer_seconds) and the
+    planner action/reason (surfaced in console summaries).
+    """
+
+    audio_plan: AudioPlan
+    audio_ahead: float
+    take_action: str
+    take_reason: str
 
 
 def audio_worker_module(backend: str) -> str:
@@ -1258,35 +1300,23 @@ class Supervisor:
             "notes": decision.notes,
         }
 
-    def commit_one_segment(self) -> str:
-        """Commit one segment; fails fast when another writer holds the run."""
-        if not self._workers_running:
-            raise FatalWorkerError("commit_one_segment requires start_workers() first")
-        # Single writer per run dir (issue 004): number allocation, media
-        # writes and the state advance are one critical section, so a
-        # second `voyage run` on the same dir exits loudly instead of
-        # interleaving segments and double-counting state.
-        with self._held_run_lock():
-            return self._commit_one_segment_locked()
+    def _propose_segment(
+        self,
+        config: ProjectConfig,
+        state: RunState,
+        number: int,
+        segment_id: str,
+        style_spec: StyleSpec,
+        stage_seconds: dict[str, float],
+    ) -> ProposedSegment:
+        """Director proposal + staged prompt plan for one commit (issue 020).
 
-    def _commit_one_segment_locked(self) -> str:
-        """Segment commit body; the caller holds `_held_run_lock`."""
-        started = time.monotonic()
-        stage_seconds: dict[str, float] = {}
-        config = self._config
-        state = read_state(self._run_dir)
-        check_free_space(self._run_dir, config.min_free_space_gib)
-
-        number = state.next_segment_number
-        segment_id = paths.format_segment_id(number)
-        segment = paths.segment_dir(self._run_dir, segment_id)
-        segment.mkdir(parents=True, exist_ok=True)
-        if self._progress is not None:
-            self._progress.segment_start(number, segment_id)
-
-        # 1. Director proposal (validated schema; never writes state itself).
-        # §74 proposal transaction: validate → novelty → style → accept.
-        style_spec = StyleSpec(prompt=config.style)
+        Accepts the next EvolutionDecision (§74 transaction: validate →
+        novelty → style → accept), folds in the previous segment's visual
+        inspect, and maps the accepted stages onto per-block prompts
+        (§18.2). Records the `inspect` + `director` stage timings. Pure
+        proposal: no media rendered, no state advanced.
+        """
         try:
             store = ConceptStore(
                 self._run_dir / "novelty",
@@ -1333,7 +1363,6 @@ class Supervisor:
         self._prefetch_decide_for_next(config, number, decision, store, style_spec)
 
         # 3. Staged prompt plan (§18.2) + media generation.
-        video_started = time.monotonic()
         streaming = config.video.backend in STREAMING_VIDEO_BACKENDS
         num_blocks = config.video.blocks_per_segment if streaming else 1
         prompt_plan = build_staged_prompt_plan(
@@ -1345,7 +1374,7 @@ class Supervisor:
             blocks_per_stage=config.voyage.blocks_per_prompt_stage,
         )
         # Map each block to its stage prompt.
-        block_prompts = []
+        block_prompts: list[str] = []
         for block in range(num_blocks):
             stage = next(
                 stage
@@ -1353,67 +1382,106 @@ class Supervisor:
                 if stage.block_start <= block <= stage.block_end
             )
             block_prompts.append(stage.prompt)
+        return ProposedSegment(
+            decision=decision,
+            prompt_plan=prompt_plan,
+            block_prompts=block_prompts,
+            num_blocks=num_blocks,
+            prefetch_hit=prefetch_hit,
+            drift_hold=drift_hold,
+        )
+
+    def _render_video(
+        self,
+        config: ProjectConfig,
+        state: RunState,
+        number: int,
+        segment_id: str,
+        segment: Path,
+        proposed: ProposedSegment,
+        stage_seconds: dict[str, float],
+    ) -> RenderedVideo:
+        """Video render through the backend adapter (issues 020, 023).
+
+        The commit path builds a `VideoSegmentRequest` via the adapter's
+        `request_from_config` (geometry + seconds bridge from the stored
+        config; the staged §18.2 per-block prompts/seeds ride along for
+        streaming backends) and calls `VideoBackendAdapter.generate_segment`
+        (issue 023): the adapter owns the single-vs-multi-block payload fork
+        and the worker-result normalization, so the supervisor no longer
+        duplicates either. Transport is the backends-track hook
+        `transport_from_restarting_call` over the restart-guarded
+        `_call_with_restart` (with the video resume hook for
+        resident-session backends), so retries keep their budget and circuit
+        breaker — the adapter itself never retries. Records the `video`
+        timing.
+
+        Two supervisor-side gates stay because the adapter normalizes
+        leniently by design: the raw worker report is re-gated with the
+        original issue-006 predicate (implausible-frame ceiling +
+        recovery-tape confinement) before the normalized count is trusted.
+        """
+        streaming = config.video.backend in STREAMING_VIDEO_BACKENDS
+        video_started = time.monotonic()
+        request = VideoBackendAdapter.request_from_config(
+            config.video,
+            segment_id=segment_id,
+            prompt=proposed.prompt_plan.stages[0].prompt,
+            seed=video_seed(config.seed, number, 0),
+            scene_cut=state.destination_concept != state.current_concept,
+            block_prompts=list(proposed.block_prompts) if streaming else None,
+            block_seeds=(
+                [video_seed(config.seed, number, block) for block in range(proposed.num_blocks)]
+                if streaming
+                else None
+            ),
+        )
         video_out = segment / "video.mp4"
-        audio_out = segment / "audio.wav"
-        video_payload: dict[str, Any] = {
-            "segment_id": segment_id,
-            "output_path": str(video_out),
-            "width": config.video.width,
-            "height": config.video.height,
-            "fps": config.video.fps,
-            "frames": config.video.segment_frames,
-        }
-        if streaming:
-            # Resident-session backends take N blocks per commit. longlive2
-            # appends to one stream (only the first seed starts the noise
-            # RNG, §22.5; scene_cut re-pins the sink); ltxv chains
-            # text-to-video + tail-conditioned extensions (scene_cut forces
-            # a fresh start). Per-block seeds ride the same protocol shape.
-            video_payload["prompts"] = list(block_prompts)
-            video_payload["seeds"] = [
-                video_seed(config.seed, number, block) for block in range(num_blocks)
-            ]
-            video_payload["scene_cuts"] = [state.destination_concept != state.current_concept] + [
-                False
-            ] * (num_blocks - 1)
-        else:
-            video_payload["prompt"] = prompt_plan.stages[0].prompt
-            video_payload["seed"] = video_seed(config.seed, number, 0)
+        raw_result: dict[str, dict[str, object]] = {}
+        base_transport = transport_from_restarting_call(
+            self._call_with_restart,
+            self._video,
+            "video",
+            segment_id,
+            restart_hook=self._resume_video_worker if streaming else None,
+        )
+
+        def _transport(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            result = base_transport(operation, payload)
+            raw_result["result"] = result
+            return result
+
+        adapter = VideoBackendAdapter(_transport, config.video.backend, config.video)
+        display_payload = adapter.build_payload(request, video_out)
         if self._progress is not None:
             self._progress.segment_plan(
                 self._segment_plan_info(
                     config,
                     number,
                     segment_id,
-                    decision,
-                    block_prompts,
-                    video_payload,
-                    num_blocks,
-                    prefetch_hit,
-                    drift_hold,
+                    proposed.decision,
+                    proposed.block_prompts,
+                    display_payload,
+                    proposed.num_blocks,
+                    proposed.prefetch_hit,
+                    proposed.drift_hold,
                 )
             )
         with self._stage(
             "video",
             f"{config.video.backend} {config.video.width}x{config.video.height}",
         ):
-            video_result = self._call_with_restart(
-                self._video,
-                "video",
-                segment_id,
-                "generate_blocks",
-                video_payload,
-                restart_hook=self._resume_video_worker if streaming else None,
-            )
+            segment_result = adapter.generate_segment(request, video_out)
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
         # request), so the timeline always matches reality. Reports are
         # clamped (issue 006): an unbounded count would send the
         # audio-coverage loop slicing thousands of pieces and corrupt the
         # timeline, and a foreign tape would burn restart budget on doomed
-        # resume/rebuild calls.
-        frames = config.video.segment_frames
-        video_block = video_result.get("video")
+        # resume/rebuild calls. The adapter normalizes leniently, so the
+        # raw report is re-gated here with the original predicate before
+        # the normalized count is trusted.
+        video_block = raw_result["result"].get("video")
         recovery_tape: str | None = None
         if isinstance(video_block, dict):
             if "frames" in video_block:
@@ -1428,13 +1496,39 @@ class Supervisor:
                         f"segment {segment_id}: worker reported implausible "
                         f"frames {reported!r} (expected an int within 1..{ceiling})"
                     )
-                frames = reported
             tape = video_block.get("recovery_path")
             if isinstance(tape, str) and tape:
                 recovery_tape = self._checked_tape_path(tape, segment_id)
         stage_seconds["video"] = round(time.monotonic() - video_started, 3)
+        frames = segment_result.returned_frames
         duration = frames / config.video.fps
         video_time = state.timeline_frames / config.video.fps
+        return RenderedVideo(
+            frames=frames,
+            duration=duration,
+            video_time=video_time,
+            recovery_tape=recovery_tape,
+        )
+
+    def _cover_audio(
+        self,
+        config: ProjectConfig,
+        number: int,
+        segment_id: str,
+        segment: Path,
+        video_time: float,
+        duration: float,
+        decision: EvolutionDecision,
+        recovery_tape: str | None,
+        stage_seconds: dict[str, float],
+    ) -> CoveredAudio:
+        """Music takes + slice/assemble for one commit (DESIGN §35, issue 020).
+
+        Renders takes when coverage runs low, then slices/assembles the
+        segment audio. Records the `audio` timing. Delegates to
+        `_ensure_audio_coverage` — this seam exists so the commit
+        orchestration reads as four stages.
+        """
         audio_started = time.monotonic()
         with self._stage("audio", config.audio.backend):
             audio_plan, audio_ahead, take_action, take_reason = self._ensure_audio_coverage(
@@ -1448,7 +1542,37 @@ class Supervisor:
                 recovery_tape,
             )
         stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
+        return CoveredAudio(
+            audio_plan=audio_plan,
+            audio_ahead=audio_ahead,
+            take_action=take_action,
+            take_reason=take_reason,
+        )
 
+    def _commit_segment(
+        self,
+        config: ProjectConfig,
+        state: RunState,
+        number: int,
+        segment_id: str,
+        segment: Path,
+        proposed: ProposedSegment,
+        rendered: RenderedVideo,
+        covered: CoveredAudio,
+        stage_seconds: dict[str, float],
+        started: float,
+    ) -> str:
+        """Validate + metadata + DONE + state advance (issue 020).
+
+        Records the `validate` + `commit` stage timings, emits the
+        `segment_committed` metric and the progress summary. `started` is
+        the commit's monotonic start (drives the elapsed metric).
+        """
+        video_out = segment / "video.mp4"
+        audio_out = segment / "audio.wav"
+        decision = proposed.decision
+        frames = rendered.frames
+        duration = rendered.duration
         # 4. Validate before anything claims the segment is committed.
         validate_started = time.monotonic()
         with self._stage("validate", "media checks"):
@@ -1478,8 +1602,8 @@ class Supervisor:
             )
             atomic_write_json(segment / "world_state.json", world.model_dump())
             atomic_write_json(segment / "transition.json", decision.model_dump())
-            atomic_write_json(segment / "prompt_plan.json", prompt_plan.model_dump())
-            atomic_write_json(segment / "audio_state.json", audio_plan.model_dump())
+            atomic_write_json(segment / "prompt_plan.json", proposed.prompt_plan.model_dump())
+            atomic_write_json(segment / "audio_state.json", covered.audio_plan.model_dump())
             atomic_write_json(
                 segment / "metrics.json",
                 {
@@ -1493,13 +1617,13 @@ class Supervisor:
                     # produced it (tapes never resume across backends — the
                     # worker rejects foreign profiles loudly).
                     "video_backend": config.video.backend,
-                    "blocks": num_blocks,
+                    "blocks": proposed.num_blocks,
                     # Run-relative on disk (issue 016); the wire stays
                     # absolute (`recovery_tape` above) — resolved back via
                     # `_resolve_stored_path` at use.
                     "recovery_tape": (
-                        self._stored_relative(Path(recovery_tape))
-                        if recovery_tape is not None
+                        self._stored_relative(Path(rendered.recovery_tape))
+                        if rendered.recovery_tape is not None
                         else None
                     ),
                 },
@@ -1523,7 +1647,7 @@ class Supervisor:
         fresh.destination_concept = decision.destination_concept
         fresh.phase = decision.phase
         fresh.decision_index = state.decision_index + 1
-        fresh.audio_buffer_seconds = audio_ahead
+        fresh.audio_buffer_seconds = covered.audio_ahead
         fresh.last_error = None
         write_state(self._run_dir, fresh)
         stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
@@ -1549,9 +1673,9 @@ class Supervisor:
                     "segment_id": segment_id,
                     "frames": frames,
                     "duration": duration,
-                    "take_ids": list(audio_plan.take_ids),
-                    "take_action": take_action,
-                    "take_reason": take_reason,
+                    "take_ids": list(covered.audio_plan.take_ids),
+                    "take_action": covered.take_action,
+                    "take_reason": covered.take_reason,
                     "beats": beats,
                     "bpm": grid_bpm,
                     "video_backend": config.video.backend,
@@ -1559,7 +1683,73 @@ class Supervisor:
                     "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
                     "stage_seconds": dict(stage_seconds),
                     "elapsed": elapsed,
-                    "prefetch_hit": prefetch_hit,
+                    "prefetch_hit": proposed.prefetch_hit,
                 }
             )
         return segment_id
+
+    def commit_one_segment(self) -> str:
+        """Commit one segment; fails fast when another writer holds the run."""
+        if not self._workers_running:
+            raise FatalWorkerError("commit_one_segment requires start_workers() first")
+        # Single writer per run dir (issue 004): number allocation, media
+        # writes and the state advance are one critical section, so a
+        # second `voyage run` on the same dir exits loudly instead of
+        # interleaving segments and double-counting state.
+        with self._held_run_lock():
+            return self._commit_one_segment_locked()
+
+    def _commit_one_segment_locked(self) -> str:
+        """Segment commit body; the caller holds `_held_run_lock`.
+
+        Sequencing only — the work lives in `_propose_segment` (director
+        + prompt plan), `_render_video` (adapter video call),
+        `_cover_audio` (music takes + slice/assemble) and
+        `_commit_segment` (validate + metadata + DONE + state advance),
+        each independently testable (issue 020).
+        """
+        started = time.monotonic()
+        stage_seconds: dict[str, float] = {}
+        config = self._config
+        state = read_state(self._run_dir)
+        check_free_space(self._run_dir, config.min_free_space_gib)
+
+        number = state.next_segment_number
+        segment_id = paths.format_segment_id(number)
+        segment = paths.segment_dir(self._run_dir, segment_id)
+        segment.mkdir(parents=True, exist_ok=True)
+        if self._progress is not None:
+            self._progress.segment_start(number, segment_id)
+
+        # 1. Director proposal (validated schema; never writes state itself).
+        # §74 proposal transaction: validate → novelty → style → accept.
+        style_spec = StyleSpec(prompt=config.style)
+        proposed = self._propose_segment(
+            config, state, number, segment_id, style_spec, stage_seconds
+        )
+        rendered = self._render_video(
+            config, state, number, segment_id, segment, proposed, stage_seconds
+        )
+        covered = self._cover_audio(
+            config,
+            number,
+            segment_id,
+            segment,
+            rendered.video_time,
+            rendered.duration,
+            proposed.decision,
+            rendered.recovery_tape,
+            stage_seconds,
+        )
+        return self._commit_segment(
+            config,
+            state,
+            number,
+            segment_id,
+            segment,
+            proposed,
+            rendered,
+            covered,
+            stage_seconds,
+            started,
+        )

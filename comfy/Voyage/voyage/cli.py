@@ -18,6 +18,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -25,6 +26,7 @@ from voyage import paths
 from voyage.concepts import ConceptStore, validate_concepts
 from voyage.config import (
     ProjectConfig,
+    VideoBackendName,
     apply_draft_overrides,
     default_config_toml,
     load_config,
@@ -156,7 +158,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    backend = getattr(args, "backend", None) or "fake"
+    backend: VideoBackendName = getattr(args, "backend", None) or "fake"
     config_text = default_config_toml(args.run_id, args.style, args.seed, video_backend=backend)
     (run_dir / paths.CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
     config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
@@ -1303,14 +1305,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 2
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="voyage", description="Autonomous infinite audiovisual voyage"
-    )
-    # No `required=True`: the bare command (no verb) launches the
-    # interactive launcher TUI (see main), which configures `generate`.
-    sub = parser.add_subparsers(dest="command", required=False)
-
+def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`init` verb: create a new run directory."""
     init = sub.add_parser("init", help="Create a new run directory")
     init.add_argument("--output", required=True, help="run directory to create")
     init.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
@@ -1325,9 +1321,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.set_defaults(func=cmd_init)
 
+
+def _add_doctor_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`doctor` verb: probe hardware and environment."""
     doctor = sub.add_parser("doctor", help="Probe hardware and environment")
     doctor.set_defaults(func=cmd_doctor)
 
+
+def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`models` verb: model management."""
     models = sub.add_parser("models", help="Model management")
     models.add_argument(
         "models_action",
@@ -1351,6 +1353,47 @@ def build_parser() -> argparse.ArgumentParser:
     models.add_argument("--models-dir", default=None, help="model root (default /models)")
     models.set_defaults(func=cmd_models)
 
+
+def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
+    """In-memory run overrides shared by `run` and `generate` (issue 020).
+
+    One helper so the flag set cannot drift between the two verbs; order
+    matches the historical layout (help output unchanged).
+    """
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=None,
+        help="override video blocks per segment (must be positive)",
+    )
+    parser.add_argument(
+        "--take-seconds",
+        type=float,
+        default=None,
+        help="override audio take length in seconds (must be positive)",
+    )
+    parser.add_argument(
+        "--quantization",
+        default=None,
+        choices=("fp8", "bf16"),
+        help="override DiT quantization (fp8 default, bf16 for clean highlights)",
+    )
+    parser.add_argument(
+        "--beats-per-segment",
+        type=int,
+        default=None,
+        help="override beats per segment (must be positive; default 4, doubles to hold >=60 BPM)",
+    )
+    parser.add_argument(
+        "--drift-every-n",
+        type=int,
+        default=None,
+        help="director drifts every Nth segment (must be positive; default 1); other segments hold",
+    )
+
+
+def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`run` verb: generate segments (infinite unless --segments)."""
     run = sub.add_parser("run", help="Generate segments (infinite unless --segments)")
     run.add_argument("--run", required=True, help="run directory (absolute or relative)")
     run.add_argument(
@@ -1370,39 +1413,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("qwen", "deterministic"),
         help="override the director backend",
     )
-    run.add_argument(
-        "--blocks",
-        type=int,
-        default=None,
-        help="override video blocks per segment (must be positive)",
-    )
-    run.add_argument(
-        "--take-seconds",
-        type=float,
-        default=None,
-        help="override audio take length in seconds (must be positive)",
-    )
-    run.add_argument(
-        "--quantization",
-        default=None,
-        choices=("fp8", "bf16"),
-        help="override DiT quantization (fp8 default, bf16 for clean highlights)",
-    )
-    run.add_argument(
-        "--beats-per-segment",
-        type=int,
-        default=None,
-        help="override beats per segment (must be positive; default 4, doubles to hold >=60 BPM)",
-    )
-    run.add_argument(
-        "--drift-every-n",
-        type=int,
-        default=None,
-        help="director drifts every Nth segment (must be positive; default 1); other segments hold",
-    )
+    _add_generation_overrides(run)
     _add_console_args(run)
     run.set_defaults(func=cmd_run)
 
+
+def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`generate` verb: one-shot fixed-duration video."""
     gen = sub.add_parser(
         "generate",
         help="One-shot fixed-duration video (init + run + validate + finalize)",
@@ -1445,51 +1462,34 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("qwen", "deterministic"),
         help="director backend (default qwen)",
     )
-    gen.add_argument(
-        "--blocks",
-        type=int,
-        default=None,
-        help="override video blocks per segment (must be positive)",
-    )
-    gen.add_argument(
-        "--take-seconds",
-        type=float,
-        default=None,
-        help="override audio take length in seconds (must be positive)",
-    )
-    gen.add_argument(
-        "--quantization",
-        default=None,
-        choices=("fp8", "bf16"),
-        help="override DiT quantization (fp8 default, bf16 for clean highlights)",
-    )
-    gen.add_argument(
-        "--beats-per-segment",
-        type=int,
-        default=None,
-        help="override beats per segment (must be positive; default 4, doubles to hold >=60 BPM)",
-    )
-    gen.add_argument(
-        "--drift-every-n",
-        type=int,
-        default=None,
-        help="director drifts every Nth segment (must be positive; default 1); other segments hold",
-    )
+    _add_generation_overrides(gen)
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 
+
+def _add_status_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`status` verb: show run status."""
     status = sub.add_parser("status", help="Show run status")
     status.add_argument("--run", required=True, help="run directory to report on")
     status.set_defaults(func=cmd_status)
 
+
+def _add_pause_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`pause` verb: request a safe pause."""
     pause = sub.add_parser("pause", help="Request a safe pause")
     pause.add_argument("--run", required=True, help="run directory to pause")
     pause.set_defaults(func=cmd_pause)
 
+
+def _add_resume_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`resume` verb: resume from last commit."""
     resume = sub.add_parser("resume", help="Resume from last commit")
     resume.add_argument("--run", required=True, help="run directory to resume")
     resume.set_defaults(func=cmd_resume)
 
+
+def _add_stop_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`stop` verb: safely stop generation."""
     stop = sub.add_parser("stop", help="Safely stop generation")
     stop.add_argument("--run", required=True, help="run directory to stop")
     stop.add_argument(
@@ -1499,10 +1499,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stop.set_defaults(func=cmd_stop)
 
+
+def _add_validate_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`validate` verb: offline consistency check (read-only)."""
     validate = sub.add_parser("validate", help="Offline consistency check (read-only)")
     validate.add_argument("--run", required=True, help="run directory to check")
     validate.set_defaults(func=cmd_validate)
 
+
+def _add_finalize_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`finalize` verb: assemble the final MP4."""
     finalize = sub.add_parser("finalize", help="Assemble the final MP4")
     finalize.add_argument("--run", required=True, help="run directory to finalize")
     finalize.add_argument("--output", required=True, help="final mp4 path to write")
@@ -1514,6 +1520,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_console_args(finalize)
     finalize.set_defaults(func=cmd_finalize)
 
+
+def _add_benchmark_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`benchmark` verb: performance probes."""
     benchmark = sub.add_parser("benchmark", help="Performance probes")
     benchmark.add_argument(
         "benchmark_target",
@@ -1535,6 +1544,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     benchmark.set_defaults(func=cmd_benchmark)
 
+
+def _add_soak_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`soak` verb: stability run with a resource-trend report."""
     soak = sub.add_parser("soak", help="Stability run with a resource-trend report")
     soak.add_argument("--run", required=True, help="run directory to soak-test")
     soak.add_argument(
@@ -1543,6 +1555,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_console_args(soak)
     soak.set_defaults(func=cmd_soak)
 
+
+def _add_inspect_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`inspect` verb: inspect run artifacts."""
     inspect = sub.add_parser("inspect", help="Inspect run artifacts")
     inspect.add_argument(
         "inspect_target",
@@ -1551,6 +1566,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inspect.add_argument("--run", required=True, help="run directory to inspect")
     inspect.set_defaults(func=cmd_inspect)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="voyage", description="Autonomous infinite audiovisual voyage"
+    )
+    # No `required=True`: the bare command (no verb) launches the
+    # interactive launcher TUI (see main), which configures `generate`.
+    sub = parser.add_subparsers(dest="command", required=False)
+
+    _add_init_parser(sub)
+    _add_doctor_parser(sub)
+    _add_models_parser(sub)
+    _add_run_parser(sub)
+    _add_generate_parser(sub)
+
+    _add_status_parser(sub)
+    _add_pause_parser(sub)
+    _add_resume_parser(sub)
+    _add_stop_parser(sub)
+    _add_validate_parser(sub)
+    _add_finalize_parser(sub)
+    _add_benchmark_parser(sub)
+    _add_soak_parser(sub)
+    _add_inspect_parser(sub)
 
     return parser
 

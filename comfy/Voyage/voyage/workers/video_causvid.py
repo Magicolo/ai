@@ -50,6 +50,8 @@ from typing import Any, NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
+from voyage.hashing import sha256_file as shared_sha256_file
+from voyage.hashing import sha256_text as shared_sha256_text
 from voyage.model_registry import (
     CAUSVID_CHECKPOINT_FILE,
     CAUSVID_COMMIT,
@@ -60,7 +62,9 @@ from voyage.model_registry import (
     WAN21_SUBDIR,
     verify_checkpoint_against_manifest,
 )
+from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
+from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
 
 RECOVERY_PROFILE = "causvid"
 STATE_MODE = "reconstructable_prefix"
@@ -76,8 +80,6 @@ DEFAULT_OVERLAP_FRAMES = 3
 # 8x spatial (60 * 8 = 480, 104 * 8 = 832).
 TEMPORAL_COMPRESSION = 4
 VAE_SPATIAL_FACTOR = 8
-TAIL_FILENAME = "video_tail.mp4"
-TAPE_FILENAME = "recovery.pt"
 CONFIG_RELATIVE_PATH = "configs/wan_causal_dmd.yaml"
 DEFAULT_CAUSVID_DIR = "/opt/causvid"
 START_FROM_UPSTREAM = "vae_reencoded_head_plus_raw_latent_tail"
@@ -242,17 +244,20 @@ def generation_profile_hash(
 
 
 def sha256_file(path: Path) -> str:
-    """Chunked SHA-256 (constant memory — tails are small, videos are not)."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Chunked SHA-256 (constant memory — tails are small, videos are not).
+
+    Delegates to :func:`voyage.hashing.sha256_file` (issue 021); kept under
+    the worker-local name so the tape code below is untouched.
+    """
+    return shared_sha256_file(path)
 
 
 def sha256_text(text: str) -> str:
-    """SHA-256 of a short string (config file content for the tape)."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    """SHA-256 of a short string (config file content for the tape).
+
+    Delegates to :func:`voyage.hashing.sha256_text` (issue 021).
+    """
+    return shared_sha256_text(text)
 
 
 def build_recovery_tape(
@@ -389,10 +394,12 @@ def _imageio_v2() -> Any:
 
 
 def _save_mp4(frames: NDArray[np.uint8], path: Path, fps: int) -> None:
-    """Write (T,H,W,C) uint8 frames as h264 @ native fps (upstream writes 16)."""
-    _imageio_v2().mimsave(
-        str(path), [frames[index] for index in range(frames.shape[0])], fps=fps, codec="libx264"
-    )
+    """Write (T,H,W,C) uint8 frames as h264 @ native fps (upstream writes 16).
+
+    Frames arrive uint8 already (clipped in `_frames_from_video`); the
+    mimsave mechanics live in :mod:`video_common` (issue 019).
+    """
+    video_common.save_mp4([frames[index] for index in range(frames.shape[0])], path, fps)
 
 
 def _vae_encode_window(wrapper: Any, scaled: Any, dtype: Any) -> Any:
@@ -780,9 +787,7 @@ class CausvidSession:
             prompt_plan_digest=prompt_plan_digest,
         )
         tape_path = output_path.parent / TAPE_FILENAME
-        tape_tmp = tape_path.with_suffix(".tmp")
-        tape_tmp.write_text(json.dumps(tape, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tape_tmp.replace(tape_path)
+        video_common.write_tape_atomic(tape_path, tape)
         self._last_prompt = prompts[-1]
         dropped_total = generated_total - committed_frames
         del novel_clips, video_frames
@@ -1009,8 +1014,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     validate_benchmark_counts(warmup, measured)
     if _SESSION is None:
         raise RuntimeError("video_causvid not initialized — send `init` first")
-    import tempfile
-
     import torch
 
     session = _SESSION
@@ -1020,34 +1023,40 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     session._start_latents = None
     session._pending_tail_path = None
     session._last_prompt = None
+    benchmark_prompt = str(payload.get("prompt", "benchmark probe"))
+    benchmark_seed = int(payload.get("seed", 0))
+    generated = 0
+    committed = 0
+
+    def probe(output_path: Path, measured: bool) -> None:
+        nonlocal generated, committed
+        rollout = session._run_rollout(
+            benchmark_prompt,
+            benchmark_seed,
+            None,
+            session._encode_conditional(benchmark_prompt),
+        )
+        novel = commit_novel_frames(rollout.frames, session._overlap_frames)
+        _save_mp4(novel, output_path, NATIVE_FPS)
+        if measured:
+            generated = rollout.decoded
+            committed = int(novel.shape[0])
+
     try:
-        walls: list[float] = []
-        peaks: list[float] = []
-        generated = 0
-        committed = 0
-        with tempfile.TemporaryDirectory(prefix="voyage-causvid-bench-") as tmp:
-            for index in range(warmup + measured):
-                torch.cuda.reset_peak_memory_stats()
-                started = time.monotonic()
-                probe_prompt = str(payload.get("prompt", "benchmark probe"))
-                rollout = session._run_rollout(
-                    probe_prompt,
-                    int(payload.get("seed", 0)),
-                    None,
-                    session._encode_conditional(probe_prompt),
-                )
-                novel = commit_novel_frames(rollout.frames, session._overlap_frames)
-                _save_mp4(novel, Path(tmp) / f"b{index}.mp4", NATIVE_FPS)
-                elapsed = time.monotonic() - started
-                if index >= warmup:
-                    walls.append(elapsed)
-                    peaks.append(torch.cuda.max_memory_allocated() / 1024**3)
-                    generated = rollout.decoded
-                    committed = int(novel.shape[0])
+        outcome = video_common.run_benchmark_harness(
+            warmup,
+            measured,
+            "voyage-causvid-bench-",
+            probe,
+            reset_peak_memory=torch.cuda.reset_peak_memory_stats,
+            read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+        )
     finally:
         session._start_latents = saved_start
         session._pending_tail_path = saved_pending
         session._last_prompt = saved_prompt
+    walls = outcome.wall_seconds
+    peaks = outcome.peak_gib
     mean = sum(walls) / len(walls)
     return {
         "backend": RECOVERY_PROFILE,
@@ -1101,19 +1110,16 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     serve(
-        {
-            "init": handle_init,
-            "health": handle_health,
-            "generate_blocks": handle_generate_blocks,
-            "benchmark": handle_benchmark,
-            "evict_gpu": handle_evict_gpu,
-            "rebuild": handle_rebuild,
-            "checkpoint": lambda payload: {
-                "checkpoint_id": f"causvid-{payload.get('segment_id', 'none')}"
-            },
-            "resume": handle_resume,
-            "shutdown": lambda _payload: {"stopped": True},
-        }
+        video_common.standard_serve_map(
+            "causvid",
+            handle_init=handle_init,
+            handle_health=handle_health,
+            handle_generate_blocks=handle_generate_blocks,
+            handle_benchmark=handle_benchmark,
+            handle_evict_gpu=handle_evict_gpu,
+            handle_rebuild=handle_rebuild,
+            handle_resume=handle_resume,
+        )
     )
 
 

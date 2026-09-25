@@ -7,7 +7,6 @@ atomically.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import subprocess
@@ -18,6 +17,7 @@ from typing import Any
 from voyage import paths
 from voyage.atomic import atomic_write_bytes
 from voyage.errors import DiskSpaceError, MediaError
+from voyage.hashing import sha256_file
 
 #: Max |video duration − audio duration| per segment, seconds (DESIGN §56
 #: step 6). Same budget the commit path enforces, so anything committed
@@ -257,12 +257,12 @@ def assemble_segment_audio(
 
 
 def _sha256_file(path: Path) -> str:
-    """Chunked SHA-256 (constant memory — takes can be multi-GB)."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Chunked SHA-256 (constant memory — takes can be multi-GB).
+
+    Delegates to :func:`voyage.hashing.sha256_file` (issue 021); kept under
+    the private name so the segment verifier below is untouched.
+    """
+    return sha256_file(path)
 
 
 def _verify_segment(segment: Path) -> tuple[int, float, float]:
