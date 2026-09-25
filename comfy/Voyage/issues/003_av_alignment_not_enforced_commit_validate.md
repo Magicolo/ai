@@ -1,6 +1,6 @@
 # 003 — A/V alignment never enforced at commit or `validate` — only at `finalize`
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: critical (commit-soundness gate weaker than finalize)
 - Area: correctness — segment validation
 - Rank rationale: `validate` is documented as the commit gate (§70) but passes
@@ -72,3 +72,23 @@ clamped `max(duration,0.1)` artifact) commits cleanly and passes `validate_run`
 - 2026-09-25 (repair pass): refs verified current (`supervisor.py:1179`;
   `cli.py:524,555+`; `media.py:220-261`); `## Why this is an issue` already
   present, no change.
+- 2026-09-25 (consumer-side resolution, media/validate half — FIXED):
+  `voyage/media.py` gained `av_drift_seconds` + `check_av_alignment`
+  (same 0.6 s budget, returns the drift; `_verify_segment` now delegates
+  to it, message unchanged); `cli._check_segment_metrics` enforces the
+  drift over stored `metrics.video/audio.duration` (no probe) with a
+  `run_dir` parameter for the tape resolution; new tests in
+  `tests/test_av_alignment_consumer.py` (helper units + rewritten-audio
+  segment fails `validate_run`, clean run passes). The commit-path half
+  (supervisor.py step 4 + `av_drift_seconds` in the `segment_committed`
+  metric event) is the supervisor track's: call
+  `check_av_alignment(float(video_info["duration"]),
+  float(audio_info["duration"]), segment_id)` next to the existing
+  expected-duration check — signature and hook documented in the
+  helper's docstring.
+- 2026-09-25 (review): hook consumed by the orchestrator — commit step 4 now
+  calls `check_av_alignment` (`supervisor.py`, next to the expected-duration
+  check) and records `"av_drift_seconds"` in the `segment_committed` event.
+  New `test_commit_rejects_av_drifted_audio` pins the commit path
+  (monkeypatched `validate_audio` +10s → `MediaError` "alignment drift").
+  Issue fully resolved on all three gates (commit/validate/finalize).

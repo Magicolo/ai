@@ -1,6 +1,6 @@
 # 007 — Worker error taxonomy erased over RPC; `checked_request` checks nothing; malformed lines stall 600 s
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track; one stale-test excursion disclosed in log)
 - Severity: major (reliability / wasted GPU / 10-min stalls)
 - Area: correctness — RPC protocol (`voyage/workers/loop.py`)
 - Rank rationale: three bugs in one 60-line file; together they burn restart
@@ -92,3 +92,27 @@ Sub-agent additionally verified `checked_request({"a":123}, a=str)` does not rai
 - 2026-09-25 (repair pass): added `## Why this is an issue`;
   `checked_request` type-ignoring re-probed live (bug present); refs verified
   current (`loop.py:24,28,46,56`).
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidates 1–3 in
+  `voyage/workers/loop.py`. (a) Error class survives the wire: `VoyageError`
+  subclasses answer with `code = type(exc).__name__`, `retryable=False`
+  (deterministic config/geometry/compat failures map straight to
+  supervisor `Fatal` via the existing retryable flag — no supervisor change
+  needed); `ValueError`/`KeyError`/`TypeError` past `checked_request`
+  answer `INVALID_PAYLOAD`, `retryable=False`; only unknown `Exception`
+  stays retryable `WORKER_ERROR`. (b) `checked_request` now
+  `isinstance`-enforces (ints satisfy float; bools never satisfy int —
+  `isinstance(True, int)` would otherwise smuggle flags into seeds).
+  (c) Malformed lines: single decode (the double-decode is gone); a
+  schema-bad line with a salvageable id answers `MALFORMED`,
+  `retryable=False` immediately, non-JSON lines log to stderr and wait for
+  the next well-formed request. Tests: `checked_request` type/missing/bool
+  cases, `ConfigurationError` → fatal code over `serve()`, and
+  `MALFORMED`-vs-`UNKNOWN_OP` two-line `serve()` exchange — all in
+  `Voyage/tests/test_commit_hardening.py`. SCOPE EXCURSION (disclosed):
+  this fix invalidates one assertion outside this track's scope —
+  `tests/test_director_request_validation.py:95-96` pinned the old contract
+  (`ValueError` "non-empty texts" for a str `texts`, i.e. exactly the
+  presence-without-type bug); updated to `TypeError` "must be list" with an
+  inline SCOPE NOTE, intent unchanged (reject before embedding). No
+  production file outside scope was touched. Gates: full
+  `Voyage/scripts/gates.sh` green (626 passed).

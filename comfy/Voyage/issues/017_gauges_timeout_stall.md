@@ -1,6 +1,6 @@
 # 017 — Best-effort `_sample_gauges` uses full 600 s RPC timeout ×3 (stalls every commit)
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track; TOML knob deferred, see log)
 - Severity: major (commit latency — up to ~30 min added)
 - Area: correctness/perf — observability on the critical path
 - Rank rationale: optional gauges can dominate commit latency 3× over; one sick
@@ -72,3 +72,20 @@ despite gauges being optional.
 - Open: implement + test.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; Evidence enriched
   (`health` call at 365, no `timeout=`); refs verified current.
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidates 1 + 2
+  (constant form). Health probes now carry `timeout=GAUGE_TIMEOUT_SECONDS`
+  (5 s — worst case ~15 s per commit, not ~30 min) and the inner handler
+  catches `Exception` so a sick worker (or timeout-kwarg-less test double)
+  degrades to missing fields, never a failed commit
+  (`voyage/supervisor.py:449-481`); novelty `_embed_texts` carries
+  `timeout=EMBED_TIMEOUT_SECONDS` (60 s — generous so a healthy director
+  never degrades to token-set fallback, a wedged one never stalls the
+  commit; `voyage/supervisor.py:672`). Cadence: `RESOURCE_GAUGE_INTERVAL_SEGMENTS`
+  (`voyage/supervisor.py:126`, default 1) skips sampling on off-cadence
+  segments — kept at 1 because `test_benchmark.py` pins per-segment gauges;
+  raise the constant to thin out probe traffic. A TOML knob needs
+  `config.py` (out of scope) — deferred to the config-owning track. Tests
+  (`Voyage/tests/test_commit_hardening.py`):
+  `test_gauge_probes_carry_short_timeouts` (three 5.0 timeouts asserted,
+  sick-worker gauges still log) and `test_embed_call_carries_bounded_timeout`
+  (60.0 asserted). Gates: full `Voyage/scripts/gates.sh` green (626 passed).

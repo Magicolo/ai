@@ -224,6 +224,48 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_checkpoint_sha256(checkpoint: Path, expected_sha256: str) -> None:
+    """Fail closed when a checkpoint disagrees with its recorded hash (005).
+
+    Pure helper: hashes ``checkpoint`` and raises ``ValueError`` on any
+    mismatch (possible tampering or truncated download). Exact hex compare
+    (case-insensitive); empty expectations are rejected, never skipped.
+    """
+    if not expected_sha256:
+        raise ValueError(f"no recorded sha256 for checkpoint {checkpoint}")
+    actual = _sha256(checkpoint)
+    if actual.lower() != expected_sha256.lower():
+        raise ValueError(
+            f"checkpoint {checkpoint} sha256 mismatch: expected {expected_sha256}, "
+            f"got {actual} — refusing to torch.load an untrusted file"
+        )
+
+
+def verify_checkpoint_against_manifest(models_dir: Path, key: str, checkpoint: Path) -> None:
+    """sha256-verify a checkpoint against the download manifest (005).
+
+    Reads ``models_dir/manifest.json`` and, when it carries a
+    ``checkpoint_sha256`` for ``key``, verifies ``checkpoint`` against it
+    before any ``torch.load``. No manifest (or no sha for this key — e.g.
+    volumes provisioned outside `voyage models download`) passes through
+    so fresh provisioned stacks still load; a present sha that disagrees
+    raises ``ValueError`` (fail closed).
+    """
+    manifest_path = models_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        return
+    entry = loaded.get(key)
+    if not isinstance(entry, dict):
+        return
+    recorded = entry.get("checkpoint_sha256")
+    if not isinstance(recorded, str) or not recorded:
+        return
+    verify_checkpoint_sha256(checkpoint, recorded)
+
+
 def download_longlive2_bf16(models_dir: Path) -> dict[str, Any]:
     """Explicit download (DESIGN §85). Returns a manifest-ready record dict."""
     from huggingface_hub import hf_hub_download, snapshot_download
@@ -257,9 +299,9 @@ def download_longlive2_bf16(models_dir: Path) -> dict[str, Any]:
             "wan_license": WAN_LICENSE,
         }
     }
-    manifest_path = models_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    return record
+    # Issue 006a: merge, never overwrite — a raw write here deleted the
+    # sibling backend records every other downloader preserves.
+    return _merge_manifest_record(models_dir, "video", record["video"])
 
 
 def verify_longlive2_bf16(models_dir: Path) -> tuple[bool, str]:
@@ -608,6 +650,7 @@ def download_causvid_models(models_dir: Path) -> dict[str, Any]:
             "revision": CAUSVID_HF_REVISION,
             "model_dir": str(causvid_dir),
             "checkpoint_bytes": checkpoint_path.stat().st_size,
+            "checkpoint_sha256": _sha256(checkpoint_path),
             "files": [CAUSVID_CHECKPOINT_FILE],
             "code_commit": CAUSVID_COMMIT,
             "license": CAUSVID_LICENSE,
@@ -652,11 +695,21 @@ def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
 
 
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
+    """Every models-tree root the registry downloads (086).
+
+    Covers all shipped stacks: Wan2.2 + LongLive generator, Wan2.1 +
+    CausVid DMD, LTXV DiT/upscaler + its PixArt text encoder, Qwen3-8B
+    director, Qwen3.5-9B inspector, MiniLM embeddings, ACE-Step music.
+    """
     return {
         "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
         "generator_ckpt": str(models_dir / "longlive2" / LONGLIVE_HF_FILE),
+        "wan21_dir": str(models_dir / WAN21_SUBDIR),
+        "causvid_dir": str(models_dir / CAUSVID_SUBDIR),
         "ltxv_dir": str(models_dir / LTXV_SUBDIR),
+        "ltxv_text_encoder_dir": str(models_dir / LTXV_TE_SUBDIR),
         "qwen_dir": str(models_dir / QWEN_SUBDIR),
+        "inspector_dir": str(models_dir / QWEN35_SUBDIR),
         "minilm_dir": str(models_dir / MINILM_SUBDIR),
         "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),

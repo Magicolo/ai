@@ -479,7 +479,9 @@ class VoyageApp(App[None]):
         super().__init__()
         self.initial_state = _load_initial_state()
         self._run_dir: Path | None = None
-        self._running = False
+        # Generation flag (issue 093): NEVER name this `_running` — Textual's
+        # own `App._running` (True from mount) would collide and mask it.
+        self._generation_running = False
         self._quit_armed = False
         # Elapsed-time heartbeat for the run view (ticks iff the event
         # loop is alive — the visible answer to "is it frozen?").
@@ -815,7 +817,7 @@ class VoyageApp(App[None]):
 
     def _confirm_or_quit(self) -> None:
         """Two-press quit while a run is active; immediate quit otherwise."""
-        if self._running and not self._quit_armed:
+        if self._generation_running and not self._quit_armed:
             self._quit_armed = True
             self.query_one("#run-result", Static).update(
                 "generation is running — press Quit again (ctrl+q) to confirm"
@@ -868,7 +870,7 @@ class VoyageApp(App[None]):
             self.run_history.clear()
             self.query_one("#run-result", Static).update("")
             self.query_one("#button-stop", Button).disabled = False
-            self._running = True
+            self._generation_running = True
             # Synchronous first paint: the run view already says what is
             # starting before the worker thread boots (no silent gap).
             self._run_head_base = head
@@ -881,7 +883,7 @@ class VoyageApp(App[None]):
         except Exception as exc:
             self.query_one("#form-view", ScrollableContainer).display = True
             self.query_one("#run-view", Vertical).display = False
-            self._running = False
+            self._generation_running = False
             self._stop_heartbeat()
             self._set_line("#errors-line", f"cannot open run view: {exc}")
             return
@@ -910,7 +912,7 @@ class VoyageApp(App[None]):
 
     def _tick_run_head(self) -> None:
         """Elapsed-time suffix — advances only while the loop is alive."""
-        if not self._running or not self._run_head_base:
+        if not self._generation_running or not self._run_head_base:
             return
         try:
             elapsed = time.monotonic() - self._run_t0
@@ -982,7 +984,7 @@ class VoyageApp(App[None]):
         self.query_one("#run-bar", ProgressBar).update(total=total, progress=done)
 
     def _finish_generation(self, result: str) -> None:
-        self._running = False
+        self._generation_running = False
         self._quit_armed = False
         self._stop_heartbeat()
         self.query_one("#button-stop", Button).disabled = True
@@ -994,7 +996,7 @@ class VoyageApp(App[None]):
         self.query_one("#run-result", Static).update(result)
 
     def _request_stop(self) -> None:
-        if not self._running or self._run_dir is None:
+        if not self._generation_running or self._run_dir is None:
             self.append_run_line("■ nothing running")
             return
         state_path = self._run_dir / "state.json"
@@ -1021,7 +1023,7 @@ class VoyageApp(App[None]):
         self.append_run_line("■ stop requested — finishing the current segment …")
 
     def _show_form(self) -> None:
-        if self._running:
+        if self._generation_running:
             return
         self._stop_heartbeat()
         self.query_one("#run-view", Vertical).display = False

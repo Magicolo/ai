@@ -92,7 +92,12 @@ def test_inspector_loader_reloads_when_model_id_changes(
 def test_handle_embed_rejects_empty_and_non_string_texts() -> None:
     with pytest.raises(ValueError, match="non-empty texts"):
         director_worker.handle_embed({"texts": []})
-    with pytest.raises(ValueError, match="non-empty texts"):
+    # SCOPE NOTE 2026-09-25 (issue 007 supervisor track): `checked_request`
+    # now isinstance-enforces before any handler code runs, so a non-list
+    # `texts` fails fast with TypeError instead of reaching the handler's
+    # ValueError. Intent unchanged (reject before embedding); only the
+    # contract moved one layer earlier. Worker-track: adjust if desired.
+    with pytest.raises(TypeError, match="must be list"):
         director_worker.handle_embed({"texts": "not-a-list"})
     with pytest.raises(ValueError, match="must all be strings"):
         director_worker.handle_embed({"texts": ["amber dunes", 123]})

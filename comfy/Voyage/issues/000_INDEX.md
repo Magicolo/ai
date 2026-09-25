@@ -25,6 +25,19 @@ so an agent with no project knowledge can pick it up.
   logrotate.iter_metric_files + status novelty/slowest-stage/Age; soak/status
   reader adoption is a hook note). NEW 093 filed in review (VoyageApp._running
   collision + racy Pilot scroll/click, from batch-2 bisection notes).
+- Batch 3 DONE 2026-09-25 (supervisor/RPC correctness, 3 parallel tracks, gates
+  626 green): RESOLVED 001 (non-blocking os.read + 8MiB cap), 002 (ingress
+  wraps + run_segments backstop), 003 (commit-side check_av_alignment + drift
+  metric; hook wired + commit test in review), 004 (fcntl run lock), 005
+  (weights_only + sha pre-verify), 006 (frames clamp + tape containment), 006a
+  (merge fix), 007 (error-class codes + isinstance checked_request +
+  MALFORMED), 010 (best-effort teardown), 016 (run-relative store/resolve +
+  layout re-anchor in review), 017 (5s/60s gauge timeouts), 058 (single-step
+  DONE + fd lifecycle + orphan patterns), 059 (fail-loud novelty + validate
+  checks), 086 (layout keys), 093-collision (rename to _generation_running;
+  racy Pilot idiom stays open). Review fixes: 003 hook wiring + commit test,
+  016 legacy re-anchor + test, 093 rename (prior gate failure was the
+  collision — now 1.6s pass; remaining flakes are load-dependent).
 
 ## Critical (liveness / state integrity / RCE)
 

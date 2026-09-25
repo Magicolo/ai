@@ -192,9 +192,9 @@ def test_generate_end_to_end_fake_backend(tmp_path: Path, monkeypatch: pytest.Mo
             await pilot.click("#button-generate")
             for _ in range(240):
                 await pilot.pause(1.0)
-                if not app._running:
+                if not app._generation_running:
                     break
-            assert not app._running, "generation worker did not finish in time"
+            assert not app._generation_running, "generation worker did not finish in time"
             assert len(app.run_history) >= 3
             assert any("SEGMENT" in line for line in app.run_history)
             result = app.query_one("#run-result", Static)
@@ -251,10 +251,10 @@ def test_stop_with_corrupt_state_reports_feedback(tmp_path: Path) -> None:
             run_dir.mkdir(parents=True)
             (run_dir / "state.json").write_text("{bad json", encoding="utf-8")
             app._run_dir = run_dir
-            app._running = True
+            app._generation_running = True
             app._request_stop()
             await pilot.pause()
             assert any("cannot stop" in line for line in app.run_history)
-            assert app._running
+            assert app._generation_running
 
     asyncio.run(_run())

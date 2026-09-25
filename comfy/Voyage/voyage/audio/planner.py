@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from voyage.paths import resolve_stored_path
+
 TAKES_FILENAME = "takes.jsonl"
 
 
@@ -38,6 +40,20 @@ class AudioTake:
     def covers_until(self) -> float:
         """Exclusive video-time end of this take's coverage."""
         return self.covers_from + self.duration
+
+    def resolved_path(self, run_dir: Path) -> Path:
+        """Usable take file path (issue 016 consumer side).
+
+        Stored form is run-relative POSIX; legacy entries are absolute.
+        An existing path is used as-is, otherwise a relative entry
+        resolves against `run_dir` — so a relocated run keeps serving
+        takes instead of failing on a stale absolute path. HOOK FOR THE
+        SUPERVISOR TRACK: `supervisor._ensure_audio_coverage` should call
+        `serving.resolved_path(self._run_dir)` (and resolve
+        `current.path` for the repaint `reference_audio` payload) instead
+        of `Path(serving.path)` / `current.path` verbatim.
+        """
+        return resolve_stored_path(run_dir, self.path)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable ledger form."""

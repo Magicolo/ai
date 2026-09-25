@@ -58,7 +58,13 @@ def read_manifest(run_dir: Path) -> dict[str, object]:
     path = run_dir / paths.MANIFEST_FILENAME
     if not path.exists():
         raise StateError(f"missing {paths.MANIFEST_FILENAME} in {run_dir}")
-    data = read_json(path)
+    try:
+        data = read_json(path)
+    except (OSError, ValueError) as exc:
+        # Torn manifest (SIGKILL mid-write) or hand-edit corruption must
+        # read as StateError (issue 002) — never a bare JSONDecodeError
+        # that escapes the commit boundary and strands the run at RUNNING.
+        raise StateError(f"invalid {paths.MANIFEST_FILENAME} in {run_dir}: {exc}") from exc
     if not isinstance(data, dict):
         raise StateError(f"{paths.MANIFEST_FILENAME} is not a JSON object")
     return data

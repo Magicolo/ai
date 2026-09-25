@@ -303,7 +303,7 @@ def test_keys_alone_full_flow() -> None:
             await pilot.press("ctrl+g")
             await pilot.pause()
             assert started == [True]
-            assert app._running is True
+            assert app._generation_running is True
             assert not app.query_one("#form-view", ScrollableContainer).display
             await pilot.press("ctrl+g")
             await pilot.pause()
@@ -348,15 +348,15 @@ def test_worker_failure_restores_form_with_error(
             await pilot.click("#button-generate")
             errors = app.query_one("#errors-line", Static)
             for _ in range(200):
-                if app._running or "boom" in str(errors.content):
+                if app._generation_running or "boom" in str(errors.content):
                     break
                 await pilot.pause(0.05)
-            assert app._running or "boom" in str(errors.content)
+            assert app._generation_running or "boom" in str(errors.content)
             for _ in range(60):
                 await pilot.pause(0.5)
-                if not app._running:
+                if not app._generation_running:
                     break
-            assert not app._running
+            assert not app._generation_running
             assert app.query_one("#form-view", ScrollableContainer).display
             assert "boom" in str(app.query_one("#errors-line", Static).content)
 
@@ -380,7 +380,7 @@ def test_confirm_before_quit_arms_then_exits() -> None:
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.exit = _record_exit
-            app._running = True
+            app._generation_running = True
             app.action_quit_app()
             await pilot.pause()
             assert exits == []
@@ -389,7 +389,7 @@ def test_confirm_before_quit_arms_then_exits() -> None:
             app.action_quit_app()
             await pilot.pause()
             assert exits == [True]
-            app._running = False
+            app._generation_running = False
             app._quit_armed = False
             app.action_quit_app()
             assert exits == [True, True]
@@ -641,9 +641,9 @@ def test_generate_button_runs_real_fake_backend_to_completion(
             await pilot.click("#button-generate")
             for _ in range(120):
                 await pilot.pause(0.5)
-                if not app._running:
+                if not app._generation_running:
                     break
-            assert not app._running
+            assert not app._generation_running
             assert app.query_one("#run-view").display
             result = str(app.query_one("#run-result", Static).content)
             assert result.startswith("✓ generated"), result
@@ -680,9 +680,9 @@ def test_base_exception_in_worker_restores_form(
             await pilot.click("#button-generate")
             for _ in range(60):
                 await pilot.pause(0.5)
-                if not app._running:
+                if not app._generation_running:
                     break
-            assert not app._running
+            assert not app._generation_running
             assert app.query_one("#form-view", ScrollableContainer).display
             assert "2" in str(app.query_one("#errors-line", Static).content)
 
@@ -782,10 +782,10 @@ def test_slow_run_stays_responsive_and_reaches_monitoring_view(
             assert app.focused is not before
             release.set()
             for _ in range(200):
-                if not app._running:
+                if not app._generation_running:
                     break
                 await pilot.pause(0.05)
-            assert not app._running
+            assert not app._generation_running
             assert "generated" in str(app.query_one("#run-result", Static).content)
 
     asyncio.run(_run())
@@ -836,10 +836,10 @@ def test_mid_run_progress_reaches_log_before_completion(
             assert any("000001" in line for line in app.run_history)
             release.set()
             for _ in range(200):
-                if not app._running:
+                if not app._generation_running:
                     break
                 await pilot.pause(0.05)
-            assert not app._running
+            assert not app._generation_running
 
     asyncio.run(_run())
 
@@ -868,15 +868,15 @@ def test_cuda_fast_fail_returns_to_form_with_error(
             await pilot.click("#button-generate")
             errors = app.query_one("#errors-line", Static)
             for _ in range(200):
-                if app._running or errors.display:
+                if app._generation_running or errors.display:
                     break
                 await pilot.pause(0.05)
-            assert app._running or errors.display
+            assert app._generation_running or errors.display
             for _ in range(200):
-                if not app._running:
+                if not app._generation_running:
                     break
                 await pilot.pause(0.05)
-            assert not app._running
+            assert not app._generation_running
             assert app.query_one("#form-view", ScrollableContainer).display
             assert "CUDA" in str(app.query_one("#errors-line", Static).content)
 
@@ -912,20 +912,20 @@ def test_run_head_ticks_elapsed_while_running(
             await pilot.pause()
             await pilot.click("#button-generate")
             for _ in range(200):
-                if app._running:
+                if app._generation_running:
                     break
                 await pilot.pause(0.05)
-            assert app._running
+            assert app._generation_running
             assert any("starting" in line for line in app.run_history)
             await pilot.pause(2.5)
             head = str(app.query_one("#run-head", Static).content)
             assert "elapsed" in head
             release.set()
             for _ in range(200):
-                if not app._running:
+                if not app._generation_running:
                     break
                 await pilot.pause(0.05)
-            assert not app._running
+            assert not app._generation_running
             assert app._heartbeat is None
 
     asyncio.run(_run())

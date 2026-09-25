@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 import traceback
 from collections.abc import Callable
 from typing import Any
 
+from voyage.errors import VoyageError
 from voyage.rpc import decode_request, encode_response, failure, success
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -21,11 +23,28 @@ def serve(handlers: dict[str, Handler]) -> None:
         if not line:
             continue
         try:
-            decode_request(line)
-        except Exception:
-            continue  # Malformed line: stdout framing is length-delimited JSONL,
-            # so skip and wait for the next well-formed request.
-        request = decode_request(line)
+            request = decode_request(line)
+        except Exception as decode_exc:
+            # Malformed line (issue 007): never stall the supervisor for a
+            # full timeout. When an id survives inside otherwise-bad JSON,
+            # answer MALFORMED (fatal — retrying the same bytes cannot
+            # succeed); a non-JSON line carries no id to answer, so log it
+            # and wait for the next well-formed request.
+            print(f"malformed request line: {decode_exc}", file=sys.stderr)
+            salvaged_id = _salvaged_request_id(line)
+            if salvaged_id is not None:
+                stdout.write(
+                    encode_response(
+                        failure(
+                            salvaged_id,
+                            "MALFORMED",
+                            f"malformed request: {decode_exc}",
+                            retryable=False,
+                        )
+                    )
+                )
+                stdout.flush()
+            continue
         handler = handlers.get(request.op)
         if handler is None:
             stdout.write(
@@ -45,6 +64,28 @@ def serve(handlers: dict[str, Handler]) -> None:
             stdout.write(
                 encode_response(failure(request.id, "NOT_IMPLEMENTED", str(exc), retryable=False))
             )
+        except VoyageError as exc:
+            # Preserve the error class over the wire (issue 007): the code
+            # is the class name and retryable=False, so the supervisor maps
+            # deterministic failures (bad geometry, bad config, version
+            # skew) straight to Fatal instead of burning restart budget.
+            stdout.write(
+                encode_response(failure(request.id, type(exc).__name__, str(exc), retryable=False))
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            # Deterministic payload/plumbing failure past checked_request
+            # (bad numbers, missing keys): fail fast, never retry.
+            traceback.print_exc(file=sys.stderr)
+            stdout.write(
+                encode_response(
+                    failure(
+                        request.id,
+                        "INVALID_PAYLOAD",
+                        f"{type(exc).__name__}: {exc}",
+                        retryable=False,
+                    )
+                )
+            )
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             stdout.write(encode_response(failure(request.id, "WORKER_ERROR", str(exc))))
@@ -53,10 +94,39 @@ def serve(handlers: dict[str, Handler]) -> None:
         stdout.flush()
 
 
+def _salvaged_request_id(line: str) -> str | None:
+    """Best-effort request id from a line that failed schema validation."""
+    try:
+        raw: Any = json.loads(line)
+    except ValueError:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("id"), str):
+        return str(raw["id"])
+    return None
+
+
 def checked_request(payload: dict[str, Any], **required: type) -> None:
-    for key, _type in required.items():
+    """Fail fast on missing or mistyped payload fields (issue 007).
+
+    Presence alone let `{"frames": "abc"}` through to burn a GPU load
+    before failing deep inside the worker — the type is now enforced here,
+    before any model work. Plain ints satisfy a float requirement (JSON has
+    no int/float distinction worth dying over); bools never satisfy int.
+    """
+    for key, expected in required.items():
         if key not in payload:
             raise KeyError(f"missing payload field: {key}")
+        value = payload[key]
+        if isinstance(value, bool) and expected is not bool:
+            raise TypeError(
+                f"payload field {key!r} must be {expected.__name__}, got {type(value).__name__}"
+            )
+        if expected is float and isinstance(value, int):
+            continue
+        if not isinstance(value, expected):
+            raise TypeError(
+                f"payload field {key!r} must be {expected.__name__}, got {type(value).__name__}"
+            )
 
 
 def validate_benchmark_counts(warmup: int, measured: int) -> None:

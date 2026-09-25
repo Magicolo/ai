@@ -1,6 +1,6 @@
 # 002 — Non-`VoyageError` escapes `commit_one_segment` → run rests at stale RUNNING, never FAILED
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track; ingress-site moves deferred, see log)
 - Severity: critical (state integrity / crash recovery)
 - Area: correctness — error taxonomy at persistence/media ingress
 - Rank rationale: any torn ledger line, corrupt concept line, or weird video
@@ -92,3 +92,22 @@ Orchestrator verified the fps site reads `num, _, den = rate.partition("/")` at
   except-block; `planner.py:191`; `concepts.py:98`; `media.py:82`);
   ZeroDivisionError probes re-run live; `## Why this is an issue` already
   present, no change.
+- 2026-09-25 (RESOLVED, supervisor track): candidates 1 (in-scope parts) +
+  2 (backstop). `planner.py`/`concepts.py`/`media.py` are outside this
+  track's scope (untouched), so the wraps land at the supervisor-owned
+  boundary instead: takes-ledger load → `StateError`
+  (`voyage/supervisor.py:1017-1029`), `ConceptStore` construction →
+  `StateError` (`voyage/supervisor.py:1295-1308`), manifest read →
+  `StateError` (`voyage/persistence.py:63-70`; `read_state` already wrapped
+  everything). Plus the belt-and-braces backstop in `run_segments`
+  (`voyage/supervisor.py:542-575`): any non-`VoyageError` (torn JSON,
+  `ValidationError`, media `ZeroDivisionError`) rests the run at FAILED and
+  re-raises as `FatalWorkerError` — RUNNING can no longer survive an
+  exception. All three repros verified FAILED via
+  `Voyage/tests/test_commit_hardening.py` (`test_torn_takes_ledger_rests_failed`,
+  `test_corrupt_concept_history_rests_failed`,
+  `test_unexpected_exception_backstops_to_failed` with an injected
+  `ZeroDivisionError`). FOLLOW-UP for the ingress-owning track: move the
+  wraps to `load_takes`/`ConceptStore.__init__`/fps-parse proper (precise
+  classes at the source); behavior is already correct through the boundary.
+  Gates: full `Voyage/scripts/gates.sh` green (626 passed).

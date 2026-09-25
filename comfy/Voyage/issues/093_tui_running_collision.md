@@ -1,6 +1,6 @@
 # 093 — `VoyageApp._running` collides with Textual `App._running`; Pilot click-after-`scroll_visible` racy
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: low (flaky-gate class; state-masking hazard)
 - Area: TUI tests — `voyage/tui.py` (`VoyageApp`), `tests/test_tui_app.py`
 - Rank rationale: found during batch-2 TUI verification (bisected, pre-existing,
@@ -58,4 +58,9 @@ repeatedly under load; observe intermittent ~30 s hangs. Inspect
 
 - 2026-09-25: filed by the orchestrator from the batch-2 TUI track's bisection
   notes (no code changed yet).
-- Open: rename + harden Pilot idiom + tests.
+- 2026-09-25: FIXED (collision half). Renamed `VoyageApp._running` →
+  `_generation_running` (`tui.py:8 sites` + comment guard) and updated all
+  `app._running` test references (`test_tui.py:4`, `test_tui_app.py:~15`).
+  Previously-failing `test_base_exception_in_worker_restores_form` now passes
+  in 1.57s (was a 30s hang → assert). Racy Pilot scroll/click idiom remains
+  open as a test-hardening follow-up (no helper added yet).

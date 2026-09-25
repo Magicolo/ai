@@ -65,6 +65,27 @@ worker load path.
 
 - 2026-09-25: found by supply-chain sweep; `rg` re-verified by orchestrator.
 - Open: implement 1-4; never load an untrusted checkpoint in the PoC.
-- 2026-09-25 (repair pass): `rg torch.load` re-run live — all four unflagged
-  sites still present (`video_longlive.py:111,658,1036,1079`,
-  `video_causvid.py:502`); `## Why this is an issue` already present, no change.
+- 2026-09-25 (resolution): FIXED (LongLive + CausVid; LTXV verified no-op).
+  `weights_only=True` at all four unflagged sites: T5 state dict
+  (`video_longlive.py` `CpuUmt5Encoder`), generator container via new
+  `load_generator_container` helper (split out for CPU testability —
+  no generate/denoise change), both recovery-tape loads via new
+  `_load_recovery_tape` helper (fail-closed suffix/existence/dict
+  checks), and the CausVid DMD snapshot (`video_causvid.py`). sha256
+  pre-verify before load: new `verify_checkpoint_sha256` +
+  `verify_checkpoint_against_manifest` in `model_registry.py` (pass
+  through with no manifest so fresh volumes still load; fail closed on
+  mismatch), wired into both generator loads; `download_causvid_models`
+  now records `checkpoint_sha256` so the CausVid check is effective.
+  Recovery tapes: JSON migration REJECTED as unsafe (tapes carry raw
+  tensors — tail latents, embeds, RNG state — with no JSON encoding);
+  `weights_only=True` + strict shape validation instead; full run_dir
+  containment lives supervisor-side (out of scope). LTXV verified
+  no-op (safetensors + JSON tapes only, zero `torch.load`). Mock-torch
+  tests pin every flag in `tests/test_checkpoint_safety.py` (11 tests;
+  no checkpoint bytes executed, no network). Gates rg note: `rg
+  "torch\.load" voyage` must show `weights_only=True` on every code
+  site — proposed as a `gates.sh` check but `scripts/` is out of scope,
+  left as follow-up. Scoped gates green (ruff + format + mypy strict +
+  73 tests); full `gates.sh` stays red only on another agent's in-flight
+  `voyage/rpc.py` F401. Status: fixed.

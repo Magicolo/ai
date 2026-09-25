@@ -1,6 +1,6 @@
 # 001 — RPC `readline()` blocks past the select deadline on partial lines (supervisor can hang indefinitely)
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track)
 - Severity: critical (hang / liveness)
 - Area: correctness — worker RPC transport
 - Rank rationale: defeats the only timeout guard on every worker call; one sick worker wedges commits forever.
@@ -93,3 +93,19 @@ Add a regression test: stub worker that writes a partial line and sleeps; assert
 - Open: implement (1), add test, re-run `test_failure_policy.py` + crash matrix.
 - 2026-09-25 (repair pass): refs verified current (`rpc.py:148-150,164-179,94`;
   `supervisor.py:183-191`); `## Why this is an issue` already present, no change.
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidate 1 (+3).
+  `SubprocessWorker.call` (`voyage/rpc.py:236-265`) no longer calls blocking
+  `readline()` after `select`: new `_read_response_line`
+  (`voyage/rpc.py:169-233`) sets the fd non-blocking and accumulates with
+  `os.read` until `\n`, EOF, the 8 MiB `MAX_RESPONSE_LINE_BYTES` cap
+  (`voyage/rpc.py:38`), or the deadline — every exit except a full line
+  raises `RecoverableWorkerError`, so the restart path engages and the
+  `_call_lock` is always released. Malformed response bytes now also raise
+  `RecoverableWorkerError` instead of escaping as pydantic `ValidationError`
+  (`voyage/rpc.py:254-261`). Raw-fd test doubles (int stdout, as in
+  `test_failure_policy.py`) are accepted alongside `TextIO`. Regression
+  tests in `Voyage/tests/test_commit_hardening.py`: partial-line stub fails
+  at ~0.5 s (`test_partial_line_never_passes_deadline`), full line still
+  reads (`test_full_response_line_still_reads`), oversize line fails fast at
+  the cap (`test_oversize_response_line_fails_fast`). Gates: full
+  `Voyage/scripts/gates.sh` green (626 passed).

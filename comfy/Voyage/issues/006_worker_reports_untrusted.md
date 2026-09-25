@@ -1,6 +1,6 @@
 # 006 — Worker-reported `frames`/`recovery_path` trusted blindly (no bounds, no containment)
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track)
 - Severity: major (DoS / deserialization oracle / state corruption)
 - Area: correctness — supervisor/worker trust boundary
 - Rank rationale: a buggy (or compromised) worker can exhaust disk, corrupt the
@@ -87,3 +87,18 @@ $ sed -n '1145,1156p' voyage/supervisor.py
 - 2026-09-25 (repair pass): refs verified current (`supervisor.py:1149-1154`;
   `cli.py:551`); Evidence enriched with live `sed` output;
   `## Why this is an issue` already present, no change.
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidates 1 + 2.
+  Reported `frames` is only accepted when the key is present AND an int
+  (bools rejected) within `1..10 * segment_frames`
+  (`REPORTED_FRAMES_SLACK`, `voyage/supervisor.py:132`), else immediate
+  `MediaError` (`voyage/supervisor.py:1414-1433`) — absent key keeps the
+  configured fallback. Reported `recovery_path` goes through
+  `_checked_tape_path` (`voyage/supervisor.py:279-300`): must resolve under
+  the run dir (escapes → `MediaError`) and must exist (missing →
+  `MediaError`), returning the absolute wire path; the metrics copy is
+  stored run-relative (016). Regression tests in
+  `Voyage/tests/test_commit_hardening.py`:
+  `test_implausible_reported_frames_rejected` (`frames=10**9`) and
+  `test_foreign_recovery_path_rejected` (`/etc/passwd`), both fail fast at
+  commit against real fake workers. Gates: full `Voyage/scripts/gates.sh`
+  green (626 passed).

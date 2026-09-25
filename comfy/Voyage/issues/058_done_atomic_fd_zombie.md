@@ -1,6 +1,6 @@
 # 058 — DONE commit is two-step non-atomic; stderr log fd leaks; `stop()` can leave zombies (+ `*.tmp.npy` orphan blind spot)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25)
 - Severity: low-medium (durability nits + fd/zombie leaks + invisible torn-vector
   orphans)
 - Area: `voyage/supervisor.py:1219-1222`, `voyage/rpc.py:96-122`,
@@ -86,3 +86,36 @@ after `kill()` do `proc.wait()`.
   the per-`start()` log fd (`rpc.py:99-101`) is still never closed. Claims
   stand. Added `## Why this is an issue`.
 - Open: implement + tests.
+- 2026-09-25 (consumer-side orphan-scan half — FIXED): `cli.validate_run`
+  scans `_ORPHAN_PATTERNS = ("*.partial", "*.tmp.npy", "*.tmp*")` under
+  `segments/` plus the `novelty/` dir (torn `concept_vectors.npy.*.tmp.npy`
+  now visible), deduplicated, reported as `orphan transient files`
+  (keeps the `orphan` substring existing tests match). Tests in
+  `tests/test_run_relative_consumer.py` (segment + novelty tmp orphans
+  flagged, clean run green). DONE-atomicity + rpc fd/zombie halves remain
+  with the supervisor track (supervisor.py/rpc.py out of scope).
+- 2026-09-25 (supervisor halves — DONE, status untouched for the media
+  track): single-step DONE — `atomic_write_bytes(segment / DONE, b"")`
+  directly (`voyage/supervisor.py:1456-1461`), no more visible
+  `DONE.partial` window for concurrent validate to trip on (the mkstemp
+  `DONE.*.partial` temp still exists mid-write, same as every other
+  atomic file — the scan flags real remnants, and
+  `test_validate_detects_done_partial_remnant` still passes on a crafted
+  remnant). Log-fd lifecycle (`voyage/rpc.py:107-153`): `start()` keeps
+  `self._log_file` (closing any previous handle first) and `stop()`
+  always closes it, including the never-started path. Zombie reap
+  (`voyage/rpc.py:130-153`): `stop()` now `wait()`s after `kill()` (10 s
+  grace, then gives up — SIGKILL landing is near-instant, so this cannot
+  block). Tests in `Voyage/tests/test_commit_hardening.py`:
+  `test_done_written_without_partial_remnant` (DONE present, zero
+  `*.partial` under `segments/`) and
+  `test_worker_stop_closes_log_and_reaps` (SIGKILL → `stop_workers`
+  completes, log handle closed, `_proc`/`_log_file` cleared). The
+  `concepts.py` tmp-scan half stays with the media track. Gates: full
+  `Voyage/scripts/gates.sh` green (626 passed).
+- 2026-09-25 (review): both halves verified landed — single-step
+  `atomic_write_bytes(segment/DONE)`, `SubprocessWorker` log-fd lifecycle
+  (`_log_file` closed on every `stop()`, `wait()` after `kill()`), orphan scan
+  extended to `*.tmp.npy`/`*.tmp*` under `segments/` and `novelty/`
+  (`cli._ORPHAN_PATTERNS`). Tests: no-`DONE.partial`, kill→stop reaps with fds
+  closed, tmp-orphan flags. Issue fully resolved.

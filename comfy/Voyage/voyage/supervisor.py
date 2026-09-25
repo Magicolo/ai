@@ -13,20 +13,21 @@ the supervisor validates and commits. One segment commit:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from voyage import paths
-from voyage.atomic import atomic_write_bytes, atomic_write_json, fsync_dir
+from voyage.atomic import atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
@@ -43,12 +44,14 @@ from voyage.errors import (
     MediaError,
     ProposalRejected,
     RecoverableWorkerError,
+    StateError,
     VoyageError,
 )
 from voyage.logrotate import append_line
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     assemble_segment_audio,
+    check_av_alignment,
     check_free_space,
     probe,
     run_capture,
@@ -104,6 +107,30 @@ AUDIO_WORKER_MODULES = {
     "acestep": "voyage.workers.audio_acestep",
 }
 """Backend name → worker module. acestep only exists in the GPU image."""
+
+#: Seconds a best-effort gauge probe may take per worker (issue 017).
+#: Gauges are observability, not correctness — at 5 s the three health
+#: probes add at most ~15 s per commit instead of ~30 min at the 600 s
+#: RPC default.
+GAUGE_TIMEOUT_SECONDS = 5.0
+
+#: Seconds a novelty embedding call may take before the token-set fallback
+#: engages (issue 017). Generous on purpose: a slow director must degrade
+#: to fallback instead of stalling the commit, while a healthy director
+#: must never be cut off so early that embeddings silently disable.
+EMBED_TIMEOUT_SECONDS = 60.0
+
+#: Sample resource gauges every K segments (issue 017). 1 keeps the
+#: per-segment cadence the benchmark/soak readers expect; raise it to
+#: thin out probe traffic on long runs (a TOML knob needs config.py,
+#: owned by another track — this constant is the option meanwhile).
+RESOURCE_GAUGE_INTERVAL_SEGMENTS = 1
+
+#: How far a worker-reported frame count may exceed the configured
+#: segment size before it reads as corruption, not reality (issue 006):
+#: `1..10 * segment_frames`. Beyond that the audio-coverage loop would
+#: slice thousands of pieces and the timeline would corrupt.
+REPORTED_FRAMES_SLACK = 10
 
 
 def audio_worker_module(backend: str) -> str:
@@ -197,6 +224,78 @@ class Supervisor:
     def request_stop(self) -> None:
         """Ask the run loop to exit after the current segment (SIGINT path)."""
         self._stop_flag = True
+
+    @contextmanager
+    def _held_run_lock(self) -> Iterator[None]:
+        """Single-writer run lock, held for one commit (issue 004).
+
+        `fcntl.flock(LOCK_EX | LOCK_NB)` on `<run>/state.json.lock`: the
+        second supervisor fails fast with FatalWorkerError (naming the
+        holder pid) instead of interleaving media + state writes. The lock
+        dies with the process, so no stale-lock recovery exists by design.
+        """
+        lock_path = self._run_dir / "state.json.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                holder = self._read_lock_holder(lock_path)
+                raise FatalWorkerError(
+                    f"run {self._run_dir} is locked by pid {holder}; "
+                    "refusing a second concurrent writer"
+                ) from exc
+            os.lseek(lock_fd, 0, os.SEEK_SET)
+            os.ftruncate(lock_fd, 0)
+            os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+    def _read_lock_holder(self, lock_path: Path) -> str:
+        """Pid recorded by the lock holder, or 'unknown' (best-effort)."""
+        try:
+            return lock_path.read_text(encoding="utf-8").strip() or "unknown"
+        except OSError:
+            return "unknown"
+
+    def _stored_relative(self, absolute_path: Path) -> str:
+        """Persist `absolute_path` run-relative when possible (issue 016).
+
+        Wire payloads stay absolute (workers need real paths); what lands
+        in takes.jsonl / metrics.json is relative POSIX, so `mv` of a run
+        keeps every reference valid. Resolution is the shared
+        `paths.resolve_stored_path` convention (consumer side owns it).
+        """
+        try:
+            return str(absolute_path.relative_to(self._run_dir))
+        except ValueError:
+            return str(absolute_path)
+
+    def _checked_tape_path(self, tape: str, segment_id: str) -> str:
+        """Validate a worker-reported recovery path (issue 006).
+
+        Returns the absolute wire path. Anything escaping the run dir or
+        pointing at a missing file fails fast with MediaError instead of
+        burning restart budget on doomed resume/rebuild calls.
+        """
+        candidate = Path(tape)
+        if not candidate.is_absolute():
+            candidate = self._run_dir / candidate
+        try:
+            candidate.relative_to(self._run_dir)
+        except ValueError:
+            raise MediaError(
+                f"segment {segment_id}: worker recovery path escapes the run dir: {tape!r}"
+            ) from None
+        if not candidate.exists():
+            raise MediaError(f"segment {segment_id}: worker recovery path is missing: {candidate}")
+        return str(candidate)
 
     def inject_worker_crash(self, worker_name: str) -> int:
         """SIGKILL one worker without cleanup (crash-injection hook, §69).
@@ -342,10 +441,17 @@ class Supervisor:
     def _sample_gauges(self, segment_id: str) -> None:
         """Best-effort resource snapshot after a commit (Phase 6 slice E).
 
-        Never fails the commit: any probe error degrades to a skipped
-        event. Worker health is polled directly (no restart) so a sick
-        worker shows up as missing fields, not a recovery.
+        Never fails the commit — and never stalls it either (issue 017):
+        every probe carries a short timeout, so a sick worker shows up as
+        missing fields while adding at most GAUGE_TIMEOUT_SECONDS per
+        worker. Sampled every RESOURCE_GAUGE_INTERVAL_SEGMENTS segments.
         """
+        try:
+            interval = max(1, RESOURCE_GAUGE_INTERVAL_SEGMENTS)
+            if int(segment_id) % interval != 0:
+                return
+        except ValueError:
+            pass
         try:
             import resource
             import shutil
@@ -362,8 +468,11 @@ class Supervisor:
                 ("director", self._director),
             ):
                 try:
-                    health = worker.call("health", {})
-                except VoyageError:
+                    health = worker.call("health", {}, timeout=GAUGE_TIMEOUT_SECONDS)
+                except Exception:
+                    # Best-effort means best-effort: a sick worker — or a
+                    # test double without a timeout kwarg — shows up as
+                    # missing fields, never as a failed commit.
                     continue
                 for key in ("vram_free_gib", "vram_total_gib"):
                     value = health.get(key)
@@ -431,6 +540,38 @@ class Supervisor:
                     write_state(self._run_dir, failed)
                     self._log_metric({"event": "segment_commit_failed", "error": str(exc)})
                     raise
+                except Exception as exc:
+                    # Belt-and-braces (issue 002): anything that is not a
+                    # VoyageError — torn JSON, pydantic ValidationError, a
+                    # ZeroDivisionError from media probing — still rests the
+                    # run at FAILED instead of stranding RUNNING, and
+                    # re-raises as FatalWorkerError so callers branch on
+                    # class, never on message.
+                    try:
+                        failed = read_state(self._run_dir)
+                    except VoyageError:
+                        self._log_metric(
+                            {
+                                "event": "segment_commit_failed",
+                                "error": f"unreadable state after {type(exc).__name__}: {exc}",
+                            }
+                        )
+                        raise FatalWorkerError(
+                            f"segment commit failed with {type(exc).__name__}: {exc} "
+                            "(state.json unreadable)"
+                        ) from exc
+                    failed.last_error = f"{type(exc).__name__}: {exc}"
+                    failed.status = "FAILED"
+                    write_state(self._run_dir, failed)
+                    self._log_metric(
+                        {
+                            "event": "segment_commit_failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    raise FatalWorkerError(
+                        f"segment commit failed with {type(exc).__name__}: {exc}"
+                    ) from exc
                 committed.append(segment_id)
             if stopped and self._stop_flag and not self._stop_requested_via_file():
                 # SIGINT path: rest as PAUSED so `voyage run` resumes cleanly.
@@ -523,9 +664,13 @@ class Supervisor:
         return raw
 
     def _embed_texts(self, texts: list[str]) -> list[list[float]] | None:
-        """Embed via the director worker; None when unavailable (fallback)."""
+        """Embed via the director worker; None when unavailable (fallback).
+
+        Bounded by EMBED_TIMEOUT_SECONDS (issue 017): a wedged director
+        degrades to the token-set fallback instead of stalling the commit.
+        """
         try:
-            result = self._director.call("embed", {"texts": texts})
+            result = self._director.call("embed", {"texts": texts}, timeout=EMBED_TIMEOUT_SECONDS)
         except VoyageError:
             return None
         vectors = result.get("vectors")
@@ -728,6 +873,13 @@ class Supervisor:
         tape. Fake backends answer the same ops as no-ops, so the swap
         only happens for the acestep + resident-session video pair — every
         other pairing renders without touching video residency.
+
+        Teardown never masks the primary failure (issue 010): when the
+        take render raises, evict/rebuild run best-effort (failures land
+        as `audio_swap_teardown_error` metrics) and the original exception
+        propagates — including the no-tape case, where the video is left
+        evicted and marked explicitly instead of stranding the next
+        segment on a fresh stream with no error.
         """
         swap = (
             self._config.audio.backend == "acestep"
@@ -735,15 +887,40 @@ class Supervisor:
         )
         if swap:
             self._call_with_restart(self._video, "video", segment_id, "evict_gpu", {})
+        primary_error: BaseException | None = None
+        audio_result: dict[str, object] | None = None
         try:
-            return self._call_with_restart(
+            audio_result = self._call_with_restart(
                 self._audio, "audio", segment_id, "generate_audio", audio_payload
             )
-        finally:
+        except BaseException as exc:
+            primary_error = exc
+        if primary_error is not None:
             if swap:
+                self._best_effort_audio_teardown(segment_id, recovery_path)
+            raise primary_error
+        assert audio_result is not None  # no exception means a result arrived
+        if swap:
+            evict_error: Exception | None = None
+            try:
                 self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
-                if recovery_path is None:
-                    raise MediaError(f"segment {segment_id}: no recovery tape for video rebuild")
+            except Exception as exc:
+                evict_error = exc
+                self._log_metric(
+                    {
+                        "event": "audio_swap_teardown_error",
+                        "segment_id": segment_id,
+                        "phase": "audio_evict",
+                        "error": str(exc),
+                    }
+                )
+            if recovery_path is None:
+                if evict_error is not None:
+                    raise evict_error
+                raise MediaError(f"segment {segment_id}: no recovery tape for video rebuild")
+            # Rebuild runs even when the audio evict failed, so the stream
+            # is never stranded evicted after a rendered take.
+            try:
                 self._call_with_restart(
                     self._video,
                     "video",
@@ -751,6 +928,67 @@ class Supervisor:
                     "rebuild",
                     {"recovery_path": recovery_path},
                 )
+            except Exception as exc:
+                self._log_metric(
+                    {
+                        "event": "audio_swap_teardown_error",
+                        "segment_id": segment_id,
+                        "phase": "video_rebuild",
+                        "error": str(exc),
+                    }
+                )
+                raise
+            if evict_error is not None:
+                raise evict_error
+        return audio_result
+
+    def _best_effort_audio_teardown(self, segment_id: str, recovery_path: str | None) -> None:
+        """Post-failure GPU-swap teardown: log, never raise (issue 010).
+
+        A primary failure is already in flight (it propagates from
+        `_with_audio_gpu`), so every teardown step reports through
+        `audio_swap_teardown_error` metrics instead of replacing the
+        cause. Without a tape the video stays evicted — recorded as
+        `video_left_evicted` so the seam is explicit, and the run still
+        rests at FAILED via the propagating primary.
+        """
+        try:
+            self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
+        except Exception as exc:
+            self._log_metric(
+                {
+                    "event": "audio_swap_teardown_error",
+                    "segment_id": segment_id,
+                    "phase": "audio_evict",
+                    "error": str(exc),
+                }
+            )
+        if recovery_path is not None:
+            try:
+                self._call_with_restart(
+                    self._video,
+                    "video",
+                    segment_id,
+                    "rebuild",
+                    {"recovery_path": recovery_path},
+                )
+            except Exception as exc:
+                self._log_metric(
+                    {
+                        "event": "audio_swap_teardown_error",
+                        "segment_id": segment_id,
+                        "phase": "video_rebuild",
+                        "error": str(exc),
+                    }
+                )
+        else:
+            self._log_metric(
+                {
+                    "event": "video_left_evicted",
+                    "segment_id": segment_id,
+                    "reason": "no recovery tape for video rebuild after audio failure",
+                }
+            )
 
     def _ensure_audio_coverage(
         self,
@@ -775,10 +1013,17 @@ class Supervisor:
         audio_cfg = config.audio
         audio_dir = self._run_dir / "audio"
         ledger = audio_dir / TAKES_FILENAME
+        try:
+            takes = load_takes(ledger)
+        except Exception as exc:
+            # Torn ledger (SIGKILL mid-append) or hand-edit corruption must
+            # read as StateError (issue 002) — never a bare JSONDecodeError
+            # that escapes the commit boundary and strands RUNNING.
+            raise StateError(f"segment {segment_id}: corrupt takes ledger {ledger}: {exc}") from exc
         planner = AudioPlanner(
             take_seconds=audio_cfg.take_seconds,
             ahead_seconds=audio_cfg.ahead_seconds,
-            takes=load_takes(ledger),
+            takes=takes,
             segment_seconds=duration,
         )
         caption = decision.audio.music_caption or audio_cfg.music_style
@@ -810,11 +1055,13 @@ class Supervisor:
             if plan.action == "repaint" and plan.current is not None:
                 current = plan.current
                 payload["task_type"] = "repaint"
-                payload["reference_audio"] = current.path
+                # Absolute wire path via the shared 016 convention (the
+                # ledger stores run-relative; the worker needs a real path).
+                payload["reference_audio"] = str(current.resolved_path(self._run_dir))
                 payload["repaint_start"] = video_time - current.covers_from
                 payload["repaint_end"] = current.duration
             self._with_audio_gpu(segment_id, payload, recovery_tape)
-            take.path = str(take_file)
+            take.path = self._stored_relative(take_file)
             planner.record(take)
             append_take(ledger, take)
             self._log_metric(
@@ -843,7 +1090,10 @@ class Supervisor:
             piece = min(serving.covers_until(), end) - cursor
             slice_path = segment / f"slice_{index:02d}.wav"
             slice_take(
-                Path(serving.path),
+                # Shared 016 convention: run-relative ledger entries
+                # resolve under the current run dir; legacy absolute
+                # entries are used as-is while they exist.
+                serving.resolved_path(self._run_dir),
                 cursor - serving.covers_from,
                 piece,
                 slice_path,
@@ -1009,8 +1259,18 @@ class Supervisor:
         }
 
     def commit_one_segment(self) -> str:
+        """Commit one segment; fails fast when another writer holds the run."""
         if not self._workers_running:
             raise FatalWorkerError("commit_one_segment requires start_workers() first")
+        # Single writer per run dir (issue 004): number allocation, media
+        # writes and the state advance are one critical section, so a
+        # second `voyage run` on the same dir exits loudly instead of
+        # interleaving segments and double-counting state.
+        with self._held_run_lock():
+            return self._commit_one_segment_locked()
+
+    def _commit_one_segment_locked(self) -> str:
+        """Segment commit body; the caller holds `_held_run_lock`."""
         started = time.monotonic()
         stage_seconds: dict[str, float] = {}
         config = self._config
@@ -1027,11 +1287,17 @@ class Supervisor:
         # 1. Director proposal (validated schema; never writes state itself).
         # §74 proposal transaction: validate → novelty → style → accept.
         style_spec = StyleSpec(prompt=config.style)
-        store = ConceptStore(
-            self._run_dir / "novelty",
-            similarity_threshold=config.voyage.novelty_threshold,
-            legacy_path=self._run_dir / paths.CONCEPTS_FILENAME,
-        )
+        try:
+            store = ConceptStore(
+                self._run_dir / "novelty",
+                similarity_threshold=config.voyage.novelty_threshold,
+                legacy_path=self._run_dir / paths.CONCEPTS_FILENAME,
+            )
+        except Exception as exc:
+            # Corrupt concept history must read as StateError (issue 002)
+            # — never a bare pydantic ValidationError that escapes the
+            # commit boundary and strands the run at RUNNING.
+            raise StateError(f"segment {segment_id}: corrupt concept history: {exc}") from exc
         # 1b. Piggyback inspect of the previous segment (§44, experimental):
         # ordered, synchronous, never blocking the commit on failure.
         inspect_started = time.monotonic()
@@ -1141,17 +1407,31 @@ class Supervisor:
             )
         # Truthful frame accounting: the worker reports what it rendered
         # (longlive's decoded count depends on the VAE chunking, not the
-        # request), so the timeline always matches reality.
+        # request), so the timeline always matches reality. Reports are
+        # clamped (issue 006): an unbounded count would send the
+        # audio-coverage loop slicing thousands of pieces and corrupt the
+        # timeline, and a foreign tape would burn restart budget on doomed
+        # resume/rebuild calls.
         frames = config.video.segment_frames
         video_block = video_result.get("video")
         recovery_tape: str | None = None
         if isinstance(video_block, dict):
-            reported = video_block.get("frames")
-            if isinstance(reported, int) and reported > 0:
+            if "frames" in video_block:
+                reported = video_block["frames"]
+                ceiling = REPORTED_FRAMES_SLACK * config.video.segment_frames
+                if (
+                    isinstance(reported, bool)
+                    or not isinstance(reported, int)
+                    or not 1 <= reported <= ceiling
+                ):
+                    raise MediaError(
+                        f"segment {segment_id}: worker reported implausible "
+                        f"frames {reported!r} (expected an int within 1..{ceiling})"
+                    )
                 frames = reported
             tape = video_block.get("recovery_path")
-            if isinstance(tape, str):
-                recovery_tape = tape
+            if isinstance(tape, str) and tape:
+                recovery_tape = self._checked_tape_path(tape, segment_id)
         stage_seconds["video"] = round(time.monotonic() - video_started, 3)
         duration = frames / config.video.fps
         video_time = state.timeline_frames / config.video.fps
@@ -1178,6 +1458,11 @@ class Supervisor:
             audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
         if abs(float(video_info["duration"]) - duration) > AV_ALIGNMENT_TOLERANCE_SECONDS:
             raise MediaError(f"segment {segment_id} A/V duration drift")
+        # Issue 003: video-vs-audio alignment at commit (validate/finalize
+        # already enforce it — the commit gate was strictly weaker).
+        av_drift = check_av_alignment(
+            float(video_info["duration"]), float(audio_info["duration"]), segment_id
+        )
         stage_seconds["validate"] = round(time.monotonic() - validate_started, 3)
 
         # 5. Metadata → checksums → DONE → state. No state file may claim
@@ -1209,17 +1494,25 @@ class Supervisor:
                     # worker rejects foreign profiles loudly).
                     "video_backend": config.video.backend,
                     "blocks": num_blocks,
-                    "recovery_tape": recovery_tape,
+                    # Run-relative on disk (issue 016); the wire stays
+                    # absolute (`recovery_tape` above) — resolved back via
+                    # `_resolve_stored_path` at use.
+                    "recovery_tape": (
+                        self._stored_relative(Path(recovery_tape))
+                        if recovery_tape is not None
+                        else None
+                    ),
                 },
             )
             atomic_write_json(
                 segment / "sha256.json",
                 {"video.mp4": sha256_file(video_out), "audio.wav": sha256_file(audio_out)},
             )
-            done_partial = segment / "DONE.partial"
-            atomic_write_bytes(done_partial, b"")
-            done_partial.replace(segment / paths.DONE_MARKER)
-            fsync_dir(segment)
+            # Single-step DONE (issue 058): one atomic write straight to
+            # DONE. The old two-step (write DONE.partial, then rename left
+            # a visible DONE.partial window where a concurrent validate
+            # reported a spurious orphan on a healthy in-flight commit.
+            atomic_write_bytes(segment / paths.DONE_MARKER, b"")
 
         # 6. Supervisor-owned state advance (single writer).
         fresh = read_state(self._run_dir)
@@ -1240,6 +1533,7 @@ class Supervisor:
                 "event": "segment_committed",
                 "segment_id": segment_id,
                 "frames": frames,
+                "av_drift_seconds": av_drift,
                 "elapsed_seconds": elapsed,
                 "stages": stage_seconds,
             }

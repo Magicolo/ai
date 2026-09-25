@@ -58,6 +58,7 @@ from voyage.model_registry import (
     CAUSVID_LICENSE,
     CAUSVID_SUBDIR,
     WAN21_SUBDIR,
+    verify_checkpoint_against_manifest,
 )
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
@@ -499,7 +500,10 @@ class CausvidSession:
         pipeline.to(device="cuda", dtype=torch.bfloat16)
         checkpoint = weights["causvid DMD checkpoint"]
         print(f"loading CausVid generator {checkpoint} ...", file=sys.stderr)
-        loaded = torch.load(str(checkpoint), map_location="cpu")
+        # 005: sha256 against the download manifest first, then
+        # weights_only (the snapshot holds tensors + metadata only).
+        verify_checkpoint_against_manifest(models_dir, "causvid", checkpoint)
+        loaded = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
         try:
             generator_state = loaded["generator"]
         except (KeyError, TypeError) as exc:

@@ -1,6 +1,6 @@
 # 010 — `_with_audio_gpu` `finally` masks the real error and can strand video evicted
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track)
 - Severity: major (operability / continuity)
 - Area: correctness — GPU swap teardown (`voyage/supervisor.py:736-753`)
 - Rank rationale: production-only path (acestep + streaming video) that hides the
@@ -80,3 +80,22 @@ $ rg -n "evict_gpu|rebuild" voyage/supervisor.py
 - 2026-09-25 (repair pass): refs verified current (`supervisor.py:732-751`);
   Evidence enriched with live `rg` output; `## Why this is an issue` already
   present, no change.
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidates 1–3. The
+  `finally` is gone: `_with_audio_gpu` (`voyage/supervisor.py:862-942`)
+  captures the primary exception, runs teardown through
+  `_best_effort_audio_teardown` (`voyage/supervisor.py:944-983`, log-only,
+  never raises while a primary is in flight), and re-raises the primary
+  unchanged — the `no recovery tape` `MediaError` now fires only when the
+  take render SUCCEEDED, and the no-tape failure case is recorded as an
+  explicit `video_left_evicted` metric (the run still rests FAILED via the
+  propagating primary, so the seam is marked, not silent). After success,
+  an audio-evict failure still attempts the video rebuild before raising,
+  and every teardown failure emits `audio_swap_teardown_error` (candidate
+  3, visible in metrics/scoreboard readers). Matrix tests in
+  `Voyage/tests/test_commit_hardening.py` (stubbed swap, no GPU):
+  `test_audio_failure_propagates_not_masked` (ACE OOM, no tape — cause
+  preserved, evict-only calls, `video_left_evicted` logged),
+  `test_audio_failure_with_tape_still_rebuilds` (rebuild attempted, cause
+  still wins), `test_success_path_teardown_failure_still_rebuilds`
+  (rebuild attempted, teardown error raised + metric). Gates: full
+  `Voyage/scripts/gates.sh` green (626 passed).

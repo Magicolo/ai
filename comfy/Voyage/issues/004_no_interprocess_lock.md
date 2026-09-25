@@ -1,6 +1,6 @@
 # 004 — No inter-process mutual exclusion: two supervisors corrupt the same segment + state
 
-- Status: open
+- Status: resolved 2026-09-25 (supervisor track; pause-race + CLI-doc follow-ups logged)
 - Severity: critical (data corruption under concurrent invocation)
 - Area: correctness — concurrency / single-writer assumption
 - Rank rationale: silent media + state corruption from a plausible operator action
@@ -75,3 +75,24 @@ $ rg -n "_call_lock" voyage/rpc.py
 - 2026-09-25 (repair pass): refs verified current (`supervisor.py:1023,1225`);
   Evidence enriched with live `rg` output (no flock/lockfile);
   `## Why this is an issue` already present, no change.
+- 2026-09-25 (RESOLVED, supervisor track): implemented candidate 1.
+  `Supervisor._held_run_lock` (`voyage/supervisor.py:228-257`) holds
+  `fcntl.flock(LOCK_EX | LOCK_NB)` on `<run>/state.json.lock` (holder pid
+  recorded in the file) for the whole commit: `commit_one_segment` is now a
+  thin wrapper acquiring the lock around `_commit_one_segment_locked`
+  (`voyage/supervisor.py:1264-1272`). The second writer fails fast with
+  `FatalWorkerError` naming the holder pid — never queues, never
+  interleaves. The lock dies with the process, so no stale-lock recovery
+  exists by design. Regression test
+  (`test_second_writer_fails_fast_when_locked` in
+  `Voyage/tests/test_commit_hardening.py`) holds the lock on one
+  supervisor and asserts the second fails in <5 s. OBSERVED FLAKE (same
+  class, out of scope): `test_pause_mid_run_stops_at_boundary` failed once
+  under full-suite load (10 commits landed, pause missed) and passes in
+  isolation — the commit-tail `write_state(fresh)` can clobber an
+  externally-written PAUSE_REQUESTED between its read and write (the race
+  this issue's description already names). Candidate: hold the same run
+  lock around pause/stop-flag transitions, or make the tail advance
+  preserve an externally-set terminal status. CLI singleton doc (candidate
+  2) needs `cli.py` (out of scope) — deferred. Gates: full
+  `Voyage/scripts/gates.sh` green (626 passed).

@@ -78,3 +78,13 @@ asserts it survives.
   exact `## Evidence` (was `## Evidence (…)`). Added
   `## Why this is an issue`. No staleness.
 - Open: one-line fix + regression test.
+- 2026-09-25 (resolution): FIXED. `download_longlive2_bf16` now returns
+  `_merge_manifest_record(models_dir, "video", record["video"])`
+  (`voyage/model_registry.py`, replacing the raw `write_text`), matching
+  the other five downloaders. Regression test
+  `test_longlive_download_preserves_foreign_manifest_keys` in
+  `tests/test_checkpoint_safety.py` pre-seeds `{"director": ...}` with a
+  stubbed `huggingface_hub` and asserts the key survives. Scoped gates
+  green (ruff + format + mypy strict + 73 tests incl. longlive/causvid/
+  ltxv modules); full `gates.sh` stays red only on another agent's
+  in-flight `voyage/rpc.py` F401. Status: fixed.

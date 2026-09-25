@@ -57,3 +57,17 @@ the exact-set assertion.
   cited lines live (`model_registry.py:654-663`, `test_longlive.py:22-33` —
   both match); re-ran layout probe (7 keys, pasted above).
 - Open: update helper + test.
+- 2026-09-25 (resolution): FIXED via the add-keys candidate (not the
+  legacy-documentation one — the helper is used and should tell the
+  truth). `models_dir_layout` (`voyage/model_registry.py`) gains
+  `wan21_dir`, `causvid_dir`, `ltxv_text_encoder_dir`, and
+  `inspector_dir` (full-word names, existing `*_dir` style) with a
+  docstring listing every covered stack. Exact-set test
+  `test_models_dir_layout_keys` (`tests/test_longlive.py`) updated to
+  the 11-key set plus per-key suffix assertions; new
+  `test_models_dir_layout_covers_shipped_stacks` in
+  `tests/test_checkpoint_safety.py` pins each downloader subdir
+  constant. `test_ltxv.py::test_layout_includes_ltxv_dir` unaffected.
+  Scoped gates green (ruff + format + mypy strict + 73 tests); full
+  `gates.sh` stays red only on another agent's in-flight `voyage/rpc.py`
+  F401. Status: fixed.

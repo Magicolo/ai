@@ -226,7 +226,7 @@ def test_generate_parser_director_choices() -> None:
     """Generate accepts qwen, rejects QWEN at parse time (073)."""
     parser = build_parser()
     args = parser.parse_args(["generate", "--duration", "2s", "--style", _STYLE])
-    assert args.director is None
+    assert args.director == "qwen"
     args = parser.parse_args(
         ["generate", "--duration", "2s", "--style", _STYLE, "--director", "qwen"]
     )

@@ -87,3 +87,19 @@ present unexpectedly.
   orphans with zero concept-state coverage (Evidence pasted). No staleness.
   Added `## Why this is an issue`.
 - Open: fail-loud/degrade + validate checks + tests.
+- 2026-09-25 (full resolution — FIXED, fail-loud variant):
+  `voyage/concepts.py` `check_novel` and `_append_vector` now raise
+  `StateError` listing the dangling record ids when accepted records
+  reference missing vector rows (shared `_dangling_vector_records`
+  helper; token-only/legacy records with `embedding_index == -1` are
+  unaffected); new `validate_concepts(directory)` covers vectors
+  row-count vs max accepted index, index keys ⊆ accepted ids, and
+  index-vs-record row agreement (mixed -1 deliberately not an error —
+  legacy migrations coexist); `cli.validate_run` runs it whenever
+  `novelty/` or legacy `concepts.jsonl` exists. Tests in
+  `tests/test_concept_integrity.py` (fail-loud on deleted vectors for
+  both entry points, token-only unaffected, all three validator rules,
+  run-level `validate_run` flag). Note for the supervisor track:
+  `check_novel` raising `StateError` inside `_accept_director_decision`
+  aborts the commit loudly — that is the intended fail-loud behavior,
+  no supervisor change required.

@@ -22,7 +22,7 @@ from types import FrameType
 from pydantic import ValidationError
 
 from voyage import paths
-from voyage.concepts import ConceptStore
+from voyage.concepts import ConceptStore, validate_concepts
 from voyage.config import (
     ProjectConfig,
     apply_draft_overrides,
@@ -32,7 +32,7 @@ from voyage.config import (
 from voyage.console import RichSegmentProgress, VoyageConsole
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
-from voyage.media import finalize_run
+from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS, finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
     download_audio_models,
@@ -629,8 +629,14 @@ def _check_segment_checksums(segment: Path) -> list[str]:
     return errors
 
 
-def _check_segment_metrics(segment: Path) -> tuple[list[str], int]:
-    """Frame ranges, durations, recovery tapes (DESIGN §70).
+def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[list[str], int]:
+    """Frame ranges, durations, A/V drift, recovery tapes (DESIGN §70).
+
+    The drift check reads the stored `metrics.video/audio.duration` —
+    no probe needed — so `validate` enforces the same 0.6 s budget the
+    finalizer does (issue 003). Recovery tapes resolve run-relative
+    (issue 016 consumer side); `run_dir=None` keeps the legacy
+    as-is check for callers without a run context.
 
     Returns (errors, frames).
     """
@@ -645,6 +651,7 @@ def _check_segment_metrics(segment: Path) -> tuple[list[str], int]:
         return [f"{segment.name} has unreadable metrics.json"], 0
     if frames <= 0:
         errors.append(f"{segment.name} has non-positive frame count {frames}")
+    durations: dict[str, float] = {}
     for key in ("video", "audio"):
         block = metrics.get(key)
         if isinstance(block, dict):
@@ -652,12 +659,45 @@ def _check_segment_metrics(segment: Path) -> tuple[list[str], int]:
                 duration = float(block.get("duration", 0.0))
             except (TypeError, ValueError):
                 duration = 0.0
+            durations[key] = duration
             if duration <= 0:
                 errors.append(f"{segment.name} has non-positive {key} duration")
+    video_duration = durations.get("video", 0.0)
+    audio_duration = durations.get("audio", 0.0)
+    if video_duration > 0 and audio_duration > 0:
+        drift = abs(video_duration - audio_duration)
+        if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
+            errors.append(
+                f"{segment.name} A/V alignment drift {drift:.3f}s "
+                f"exceeds {AV_ALIGNMENT_TOLERANCE_SECONDS:.1f}s"
+            )
     tape = metrics.get("recovery_tape")
-    if isinstance(tape, str) and tape and not Path(tape).exists():
-        errors.append(f"{segment.name} references missing recovery checkpoint {tape}")
+    if isinstance(tape, str) and tape:
+        tape_path = paths.resolve_stored_path(run_dir, tape) if run_dir is not None else Path(tape)
+        if not tape_path.exists():
+            errors.append(f"{segment.name} references missing recovery checkpoint {tape}")
     return errors, frames
+
+
+_ORPHAN_PATTERNS = ("*.partial", "*.tmp.npy", "*.tmp*")
+"""Transient-file globs for the validate orphan scan (issue 058).
+
+`*.partial` covers atomic-write staging; `*.tmp*` (which subsumes the
+explicit `*.tmp.npy`) covers concept-vector temps
+(`concept_vectors.npy.<pid>.tmp.npy`) and any future pid-suffixed
+staging. Legit artifacts never use these suffixes.
+"""
+
+
+def _collect_transient_orphans(root: Path, base: Path) -> list[str]:
+    """Sorted base-relative transient files under `root` (issue 058)."""
+    found: set[str] = set()
+    if root.exists():
+        for pattern in _ORPHAN_PATTERNS:
+            for candidate in root.rglob(pattern):
+                if candidate.is_file():
+                    found.add(str(candidate.relative_to(base)))
+    return sorted(found)
 
 
 def validate_run(run_dir: Path) -> list[str]:
@@ -691,24 +731,21 @@ def validate_run(run_dir: Path) -> list[str]:
             if not (segment / name).exists():
                 errors.append(f"{segment.name} DONE but missing {name}")
         errors.extend(_check_segment_checksums(segment))
-        metric_errors, frames = _check_segment_metrics(segment)
+        metric_errors, frames = _check_segment_metrics(segment, run_dir)
         errors.extend(metric_errors)
         expected_frames += frames
     if expected_frames != state.timeline_frames:
         errors.append(
             f"timeline frames {state.timeline_frames} != sum of segment frames {expected_frames}"
         )
-    orphans = (
-        sorted(
-            str(p.relative_to(segments_root))
-            for p in segments_root.rglob("*.partial")
-            if p.is_file()
-        )
-        if segments_root.exists()
-        else []
-    )
+    orphans = _collect_transient_orphans(segments_root, segments_root)
+    orphans.extend(_collect_transient_orphans(run_dir / "novelty", run_dir))
+    orphans = sorted(set(orphans))
     if orphans:
-        errors.append(f"orphan partial files: {orphans}")
+        errors.append(f"orphan transient files: {orphans}")
+    novelty_dir = run_dir / "novelty"
+    if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
+        errors.extend(validate_concepts(novelty_dir))
     return errors
 
 
@@ -945,8 +982,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
     _warn_if_no_cuda(config)
     # `generate` enables the full stack by default: qwen director drift,
     # beat-grid audio and overlap-blend finalize all ride the run config
-    # written at init; explicit flags still win.
-    director = args.director if args.director is not None else "qwen"
+    # written at init; explicit flags still win. The parser default for
+    # --director is qwen, so args.director carries it directly.
+    director = args.director
     try:
         effective = apply_draft_overrides(
             config,
@@ -1403,9 +1441,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gen.add_argument(
         "--director",
-        default=None,
+        default="qwen",
         choices=("qwen", "deterministic"),
-        help="override the director backend",
+        help="director backend (default qwen)",
     )
     gen.add_argument(
         "--blocks",

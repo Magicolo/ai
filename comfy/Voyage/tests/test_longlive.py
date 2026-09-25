@@ -24,13 +24,21 @@ def test_models_dir_layout_keys(tmp_path: Path) -> None:
     assert set(layout) == {
         "wan_dir",
         "generator_ckpt",
+        "wan21_dir",
+        "causvid_dir",
         "ltxv_dir",
+        "ltxv_text_encoder_dir",
         "qwen_dir",
+        "inspector_dir",
         "minilm_dir",
         "acestep_dir",
         "manifest",
     }
     assert layout["generator_ckpt"].endswith("model_bf16.pt")
+    assert layout["causvid_dir"].endswith(model_registry.CAUSVID_SUBDIR)
+    assert layout["wan21_dir"].endswith(model_registry.WAN21_SUBDIR)
+    assert layout["inspector_dir"].endswith(model_registry.QWEN35_SUBDIR)
+    assert layout["ltxv_text_encoder_dir"].endswith(model_registry.LTXV_TE_SUBDIR)
 
 
 def test_director_pins(tmp_path: Path) -> None:

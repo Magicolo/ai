@@ -31,6 +31,7 @@ VOYAGE_MODELS_DIR = Path(os.environ.get("VOYAGE_MODELS_DIR", "/models"))
 if str(VOYAGE_LONGLIVE_DIR) not in sys.path:
     sys.path.insert(0, str(VOYAGE_LONGLIVE_DIR))
 
+from voyage.model_registry import verify_checkpoint_against_manifest  # noqa: E402
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts  # noqa: E402
 
 # Upstream scene-cut signal: prompt prefix detected by _is_scene_cut when
@@ -165,7 +166,7 @@ class CpuUmt5Encoder:
         state = torch.load(
             wan_dir / "models_t5_umt5-xxl-enc-bf16.pth",
             map_location="cpu",
-            weights_only=False,
+            weights_only=True,  # 005: plain state dict — never unpickle code
         )
         self._model.load_state_dict(state)
         self._tokenizer = HuggingfaceTokenizer(
@@ -656,6 +657,21 @@ def profile_for_quantization(quantization: str) -> str:
         ) from None
 
 
+def load_generator_container(generator_ckpt: Path, models_dir: Path) -> Any:
+    """sha256-verify then weights_only-load the generator container (005).
+
+    Split out so CPU tests pin the secure flags without building the GPU
+    pipeline: the manifest hash is checked before any ``torch.load``, and
+    the load itself is ``weights_only=True`` (the container holds tensors
+    plus export metadata only — never executable code).
+    """
+    import torch
+
+    verify_checkpoint_against_manifest(models_dir, "video", generator_ckpt)
+    print("loading generator checkpoint ...", file=sys.stderr)
+    return torch.load(str(generator_ckpt), map_location="cpu", weights_only=True)
+
+
 class LongLiveSession:
     """Resident pipeline: built once at `init`, reused per segment."""
 
@@ -708,8 +724,7 @@ class LongLiveSession:
         # generator + export metadata), strict-load, bf16, in-place FP8.
         import utils.nvfp4_checkpoint as nvfp4_ckpt  # type: ignore[import-not-found]
 
-        print("loading generator checkpoint ...", file=sys.stderr)
-        generator_container = torch.load(str(generator_ckpt), map_location="cpu")
+        generator_container = load_generator_container(generator_ckpt, models_dir)
         generator_state = nvfp4_ckpt.unwrap_generator_state_dict(generator_container, use_ema=False)
         pipeline.generator.load_state_dict(generator_state, strict=True)
         del generator_container, generator_state
@@ -1095,15 +1110,34 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
+def _load_recovery_tape(recovery_path: str) -> dict[str, Any]:
+    """Load a LongLive recovery.pt tape without pickle code execution (005).
+
+    The tape carries raw tensors (tail latents, embeds, RNG state), so the
+    LTXV/CausVid JSON migration is not trivially safe here — instead the
+    load is ``weights_only=True`` (tensors + primitives only) with a strict
+    dict-shape check. Fail closed on missing files, wrong suffixes, and
+    non-dict payloads. Full run_dir containment lives supervisor-side
+    (the worker only sees the supervisor-passed path).
+    """
+    tape_path = Path(recovery_path)
+    if tape_path.suffix != ".pt" or not tape_path.is_file():
+        raise ValueError(f"refusing to load recovery tape {recovery_path!r}")
+    import torch
+
+    with open(str(tape_path), "rb") as handle:
+        tape = torch.load(handle, map_location="cpu", weights_only=True)
+    if not isinstance(tape, dict):
+        raise ValueError("LongLive recovery tape must be a dict")
+    return tape
+
+
 def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
     """Rebuild causal context from a recovery.pt tape (DESIGN §27.1)."""
     if _SESSION is None:
         raise RuntimeError("video_longlive not initialized — send `init` first")
-    import torch
-
     checked_request(payload, recovery_path=str)
-    with open(str(payload["recovery_path"]), "rb") as handle:
-        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    tape = _load_recovery_tape(str(payload["recovery_path"]))
     expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
     if not isinstance(tape, dict) or tape.get("profile") != expected:
         raise ValueError("recovery tape profile mismatch")
@@ -1136,8 +1170,6 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
     OOMs the 16GB card (measured 14.97GB in resume replay).
     """
     global _SESSION
-    import torch
-
     checked_request(payload, recovery_path=str)
     if not _INIT_PARAMS:
         raise RuntimeError("video_longlive rebuilt before init")
@@ -1145,8 +1177,7 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
         _SESSION.evict()
         _SESSION = None
     _SESSION = _build_session()
-    with open(str(payload["recovery_path"]), "rb") as handle:
-        tape = torch.load(handle, map_location="cpu", weights_only=False)
+    tape = _load_recovery_tape(str(payload["recovery_path"]))
     expected = profile_for_quantization(str(_INIT_PARAMS["quantization"]))
     if not isinstance(tape, dict) or tape.get("profile") != expected:
         raise ValueError("recovery tape profile mismatch")

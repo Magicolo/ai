@@ -25,6 +25,38 @@ from voyage.errors import DiskSpaceError, MediaError
 AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6
 
 
+def av_drift_seconds(video_duration: float, audio_duration: float) -> float:
+    """Absolute A/V duration drift in seconds (issue 003 helper).
+
+    Pure math over already-measured durations — no ffprobe here, so the
+    commit path and `validate` can share the exact budget the finalizer
+    enforces without re-probing media.
+    """
+    return abs(float(video_duration) - float(audio_duration))
+
+
+def check_av_alignment(
+    video_duration: float, audio_duration: float, segment_name: str = "segment"
+) -> float:
+    """Enforce the A/V budget; return the drift for the metrics event.
+
+    Raises MediaError past the tolerance. HOOK FOR THE SUPERVISOR TRACK
+    (supervisor.py is out of this change's scope): in `commit_one_segment`
+    step 4, replace the video-vs-expected check with
+    `drift = check_av_alignment(float(video_info["duration"]),
+    float(audio_info["duration"]), segment_id)` (keeping the expected-
+    duration check alongside), and record `"av_drift_seconds": drift` in
+    the `segment_committed` metric event so scoreboard/soak can trend it.
+    """
+    drift = av_drift_seconds(video_duration, audio_duration)
+    if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(
+            f"segment {segment_name} A/V alignment drift {drift:.3f}s "
+            f"exceeds {AV_ALIGNMENT_TOLERANCE_SECONDS:.1f}s"
+        )
+    return drift
+
+
 def check_free_space(run_dir: Path, min_free_gib: float) -> float:
     """Free GiB under `run_dir`; raise DiskSpaceError below the reserve.
 
@@ -268,12 +300,7 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
     audio_duration = float(probe(segment / "audio.wav").get("format", {}).get("duration", 0.0))
     if video_duration <= 0 or audio_duration <= 0:
         raise MediaError(f"segment {name} has non-positive media duration")
-    drift = abs(video_duration - audio_duration)
-    if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
-        raise MediaError(
-            f"segment {name} A/V alignment drift {drift:.3f}s "
-            f"exceeds {AV_ALIGNMENT_TOLERANCE_SECONDS:.1f}s"
-        )
+    check_av_alignment(video_duration, audio_duration, name)
     return frames, video_duration, audio_duration
 
 
@@ -379,14 +406,20 @@ def build_final_audio(
         piece = 0
         while cursor < window_end - 1e-6:
             serving = planner.take_for_time(cursor)
-            if serving is None or not serving.path or not Path(serving.path).exists():
+            if serving is None or not serving.path:
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+            # Issue 016 consumer side: ledger entries may be run-relative
+            # or legacy absolute — resolve the same way at every use site.
+            serving_path = paths.resolve_stored_path(run_dir, serving.path)
+            if not serving_path.exists():
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
                 return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
             piece_end = min(serving.covers_until(), window_end)
             if piece_end <= cursor:
                 return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
             slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
             slice_take(
-                Path(serving.path),
+                serving_path,
                 cursor - serving.covers_from,
                 piece_end - cursor,
                 slice_path,
