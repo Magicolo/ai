@@ -46,6 +46,45 @@ def apply_scene_cut_prefix(prompt: str, scene_cut: bool) -> str:
     return prompt
 
 
+_STAGE_NAMES: tuple[str, ...] = (
+    "offload_vae_to_cpu_ms",
+    "denoise_blocks_ms",
+    "tape_encode_ms",
+    "offload_for_decode_ms",
+    "vae_decode_ms",
+    "restore_after_decode_ms",
+    "media_write_ms",
+)
+
+
+class _CudaStageTimer:
+    """CUDA-event wall timer for one `generate_blocks` call (Track 1.1 audit).
+
+    Created only when `profile_stages` is on — the off path never
+    instantiates this class, so no CUDA events are created and no
+    synchronizes run (strictly zero GPU-timing overhead). Each stage is
+    bracketed by `start`/`stop`; `stop` records the end event,
+    synchronizes on it, and stores `start.elapsed_time(end)` milliseconds.
+    """
+
+    def __init__(self, torch_module: Any) -> None:
+        self._torch = torch_module
+        self._starts: dict[str, Any] = {}
+        self.stage_ms: dict[str, float] = {}
+
+    def start(self, stage: str) -> None:
+        event = self._torch.cuda.Event(enable_timing=True)
+        event.record()
+        self._starts[stage] = event
+
+    def stop(self, stage: str) -> None:
+        end = self._torch.cuda.Event(enable_timing=True)
+        end.record()
+        start = self._starts.pop(stage)
+        end.synchronize()
+        self.stage_ms[stage] = float(start.elapsed_time(end))
+
+
 class CpuUmt5Encoder:
     """Call-compatible twin of upstream WanTextEncoder, CPU/bf16 resident.
 
@@ -683,7 +722,15 @@ class LongLiveSession:
         scene_cuts: list[bool],
         output_path: Path,
         fps: int,
+        profile_stages: bool = False,
     ) -> dict[str, Any]:
+        """Denoise blocks, decode, and write the segment video.
+
+        When `profile_stages` is true, each pipeline stage is bracketed
+        with CUDA timing events and the result carries `stage_ms`
+        (milliseconds per stage for this call); when false (default) no
+        timing events are created and the return keys are unchanged.
+        """
         import imageio.v2 as imageio  # type: ignore[import-not-found]
         from einops import rearrange  # type: ignore[import-not-found]
 
@@ -691,6 +738,7 @@ class LongLiveSession:
             raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
         torch = self._torch
         pipe = self._pipeline
+        timer: _CudaStageTimer | None = _CudaStageTimer(torch) if profile_stages else None
         # VAE-offload-for-generate (mirrors the generator-offload-for-decode
         # below): the VAE (measured 1.31 GiB, full-res) sits idle until the
         # decode step, while the generate-time peak (DiT forward + KV cache
@@ -698,23 +746,35 @@ class LongLiveSession:
         # the VAE aside buys the headroom local_attn 16 needs at full res
         # (breakdown: 13.16 + 2.59 - 1.31 = 14.44 GiB peak). Restored right
         # after the block loop, before the tape write and decode.
+        if timer is not None:
+            timer.start("offload_vae_to_cpu_ms")
         pipe.vae.to("cpu")
         torch.cuda.empty_cache()
+        if timer is not None:
+            timer.stop("offload_vae_to_cpu_ms")
         block_latents = []
         # One sequence per payload: full noise + output buffers, sliced per
         # block at absolute stream positions (mirrors one upstream
         # inference() call). Only seeds[0] seeds the stream RNG.
+        if timer is not None:
+            timer.start("denoise_blocks_ms")
         self._stream.begin_sequence(len(prompts), seeds[0])
         with torch.inference_mode():
             for prompt, cut in zip(prompts, scene_cuts, strict=True):
                 block_latents.append(self._stream.append_block(prompt, cut))
         latents = torch.cat(block_latents, dim=1)
         pipe.vae.to(self._device)
+        if timer is not None:
+            timer.stop("denoise_blocks_ms")
         # Recovery tail (DESIGN §27): last block's clean latents + embeds so
         # a restarted worker rebuilds causal context without re-encoding
         # (CPU T5 costs minutes). Written beside the segment video.
         tail_prompt = prompts[-1]
+        if timer is not None:
+            timer.start("tape_encode_ms")
         _cond, _cond_list = self._stream._encode(tail_prompt)
+        if timer is not None:
+            timer.stop("tape_encode_ms")
         tape = {
             "tail_latents": block_latents[-1].detach().cpu(),
             "prompt_embeds": _cond["prompt_embeds"].detach().cpu(),
@@ -735,17 +795,31 @@ class LongLiveSession:
         # segment causally in one call, then restore. PCIe roundtrip costs
         # tens of seconds; the stream (caches) survives intact.
         pipe = self._pipeline
+        if timer is not None:
+            timer.start("offload_for_decode_ms")
         pipe.generator.to("cpu")
         self._stream.offload_caches()
         torch.cuda.empty_cache()
+        if timer is not None:
+            timer.stop("offload_for_decode_ms")
         try:
+            if timer is not None:
+                timer.start("vae_decode_ms")
             with torch.inference_mode():
                 generated = pipe.vae.decode_to_pixel_chunk(
                     latents, use_cache=False, chunk_size=int(latents.shape[1])
                 )
+            if timer is not None:
+                timer.stop("vae_decode_ms")
         finally:
+            if timer is not None:
+                timer.start("restore_after_decode_ms")
             pipe.generator.to(self._device)
             self._stream.restore_caches()
+            if timer is not None:
+                timer.stop("restore_after_decode_ms")
+        if timer is not None:
+            timer.start("media_write_ms")
         video = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
         pipe.vae.model.clear_cache()
         del latents, generated, block_latents
@@ -756,8 +830,10 @@ class LongLiveSession:
         ) as writer:
             for frame in frames:
                 writer.append_data(frame)
+        if timer is not None:
+            timer.stop("media_write_ms")
         height, width = int(video.shape[2]), int(video.shape[3])
-        return {
+        result: dict[str, Any] = {
             "frames": len(frames),
             "fps": fps,
             "width": width,
@@ -766,6 +842,9 @@ class LongLiveSession:
             "stream_start_frame": self._stream.next_start_frame - 8 * len(prompts),
             "recovery_path": str(recovery_path),
         }
+        if timer is not None:
+            result["stage_ms"] = dict(timer.stage_ms)
+        return result
 
 
 _SESSION: LongLiveSession | None = None
@@ -858,12 +937,14 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
         seeds = [int(payload["seed"])]
         scene_cuts = [bool(payload.get("scene_cut", False))]
     output = Path(str(payload["output_path"]))
+    profile_stages = bool(payload.get("profile_stages", False))
     result = _SESSION.generate_blocks(
         prompts=prompts,
         seeds=seeds,
         scene_cuts=scene_cuts,
         output_path=output,
         fps=int(payload["fps"]),
+        profile_stages=profile_stages,
     )
     artifacts = [str(output), str(result["recovery_path"])]
     return {
@@ -890,6 +971,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
 
     warmup = int(payload.get("warmup", 1))
     measured = int(payload.get("measured", 3))
+    profile_stages = bool(payload.get("profile_stages", False))
     probe: dict[str, Any] = {
         "segment_id": str(payload.get("segment_id", "benchmark")),
         "prompts": [str(payload.get("prompt", "benchmark probe"))],
@@ -899,13 +981,18 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     }
     walls: list[float] = []
     peaks: list[float] = []
+    stage_splits: list[dict[str, float]] = []
     frames: object = "unknown"
     with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
         for index in range(warmup + measured):
             torch.cuda.reset_peak_memory_stats()
             started = time.monotonic()
             result = handle_generate_blocks(
-                {**probe, "output_path": str(Path(tmp) / f"b{index}.mp4")}
+                {
+                    **probe,
+                    "output_path": str(Path(tmp) / f"b{index}.mp4"),
+                    "profile_stages": profile_stages,
+                }
             )
             elapsed = time.monotonic() - started
             peak_gib = torch.cuda.max_memory_allocated() / 1024**3
@@ -915,9 +1002,15 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
                 video = result.get("video")
                 if isinstance(video, dict) and isinstance(video.get("frames"), int):
                     frames = video["frames"]
+                if profile_stages and isinstance(video, dict):
+                    stages = video.get("stage_ms")
+                    if isinstance(stages, dict):
+                        stage_splits.append(
+                            {str(name): float(value) for name, value in stages.items()}
+                        )
     mean = sum(walls) / len(walls)
     blocks = len(probe["prompts"])
-    return {
+    response: dict[str, Any] = {
         "backend": "longlive2",
         "warmup_blocks": warmup * blocks,
         "measured_blocks": measured * blocks,
@@ -927,6 +1020,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         "vram_peak_gib": round(max(peaks), 2),
         "vram_avg_gib": round(sum(peaks) / len(peaks), 2),
     }
+    if profile_stages:
+        response["stage_ms_per_block"] = stage_splits
+    return response
 
 
 def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:

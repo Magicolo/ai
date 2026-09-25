@@ -6787,6 +6787,29 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   editor as a `TextArea` (sets `.text`, not Input `.value` —
   `tests/test_tui.py:138,147`).
 
+## 2026-09-24 — LongLive audit (stage timers + verdict, §16/§137D phase 1)
+
+- Instrumented `LongLiveSession.generate_blocks` with off-by-default
+  CUDA-event stage timers (`profile_stages` flag through
+  `handle_generate_blocks`/`handle_benchmark`; zero overhead when off —
+  proven by test, not inspection) + `tests/test_longlive_stages.py`
+  (6 CPU-only tests).
+- Steady-state splits (fp8, 1-block/29f @ 1280x704, blocks 1-2):
+  DiT denoise ~16.9s (44%), VAE decode ~16.3s (43%), PCIe offload
+  roundtrips ~4.4s (11.5%), media write ~0.7s (2%) — budget closes at
+  ~100% against ~38.3s block wall (~32:1 wall:video; the old ~100:1 was
+  cold-start-dominated). Verdict: §16 category I (mixed) — DiT genuine
+  throughput + VAE (D) + transfers (C); A/B/E/F/H excluded with evidence
+  (torchao W8A8 provably engaged: 300 linears quantized, 6 kept BF16).
+- bf16 is NOT runnable full-res on 16 GiB: init OK (11.1 GiB resident)
+  but the first forward OOMs deterministically (14.93 GiB in use, +42 MiB
+  requested) — per the user's bf16-first/fp8-fallback call, fp8 stands.
+  First-call excess ~55 s (block 0 denoise 72 s vs 16.9 s steady) is a
+  once-per-session CPU-T5/autotune cost, excluded per TASK §4.2.
+- Full writeup: `Voyage/reports/longlive-audit.md`. Raw probe logs were
+  ephemeral (`/tmp/auditprobe/`, host-only). Gates green on scope
+  (ruff + format + mypy strict + targeted pytest; full-suite single
+  failure is the concurrent TUI agent's `test_tui.py` e2e, out of scope).
 
 ## 2026-09-24 — Launcher-TUI frontpage rework (single list + help panel)
 

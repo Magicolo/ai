@@ -1706,17 +1706,13 @@ code/config work the merged spec now requires.
 - Deliverable: `docs/UPSTREAM_LTXV_NOTES.md` (does not exist; only
   `UPSTREAM_LONG_LIVE_PATCHES.md` does).
 
-## 30.3 Config/interface duality — adapter or spec update
+## 30.3 Config/interface duality — resolved via adapter (Stream C, 2026-09-24)
 
-- Target (merged §§5.1/14): async `VideoBackend.generate_segment` +
-  `segment_seconds` + `[video.longlive/ltxv/causvid]` blocks with
-  `state_mode`.
-- Live (`config.py`, `workers/loop.py`, `rpc.py`): sync JSONL RPC with op
-  `generate_blocks` + `VideoConfig(segment_frames, blocks_per_segment,
-  quantization)` + `_VIDEO_BACKEND_PRESETS`.
-- Either implement the async interface as a wrapper over the current RPC or
-  amend §§5.1/14/45-46 to standardize on `generate_blocks`. Do not leave
-  both as if they were the same contract.
+- Single contract is `voyage/backends.py:VideoBackendAdapter` — spec
+  `generate_segment`/`segment_seconds`/`state_mode` vocabulary caller-side
+  over the unchanged sync `generate_blocks` wire op and unchanged
+  `VideoConfig` schema (sync by design; no migration needed).
+  21 CPU-only tests in `tests/test_backends_adapter.py`.
 
 ## 30.4 Benchmark + audit artifacts — never produced
 
