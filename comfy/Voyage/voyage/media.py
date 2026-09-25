@@ -92,6 +92,22 @@ def validate_video(
     return {"frames": frames, "duration": duration, "fps": actual_fps}
 
 
+def _probe_video_fps(info: dict[str, Any]) -> float:
+    """Parse the video stream's avg_frame_rate; 0.0 when absent/unparseable."""
+    streams = info.get("streams", [])
+    video = next(
+        (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"),
+        None,
+    )
+    if video is None:
+        return 0.0
+    num, _, den = str(video.get("avg_frame_rate", "0/1")).partition("/")
+    try:
+        return float(num) / float(den or 1) if num else 0.0
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def validate_audio(path: Path, sample_rate: int, channels: int) -> dict[str, Any]:
     info = probe(path)
     streams = [s for s in info.get("streams", []) if isinstance(s, dict)]
@@ -403,6 +419,13 @@ def build_final_audio(
     return dest
 
 
+# Floor for the final presentation frame rate (user decision 2026-09-25:
+# the shipped video is always >= 24fps). Sub-24fps sources (CausVid native
+# 16fps) are motion-interpolated up; sources already at/above the floor
+# keep the plain fps filter (no behavior change).
+PRESENTATION_MIN_FPS = 24
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -463,6 +486,18 @@ def finalize_run(
     if not usable:
         raise MediaError(f"no usable segments in {run_dir}")
 
+    # Presentation frame rate: sources below the floor (CausVid 16fps) are
+    # lifted with motion interpolation; the audio timeline stays on source
+    # fps (frame counts / source fps = seconds either way).
+    source_info = probe(usable[0] / "video.mp4")
+    source_fps = _probe_video_fps(source_info)
+    presentation_fps = max(fps, PRESENTATION_MIN_FPS)
+    lift = ""
+    if source_fps > 0 and presentation_fps > source_fps + 0.5:
+        lift = (
+            f"minterpolate=fps={presentation_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
+        )
+
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
         # Per-segment video-only parts, then concat the parts.
@@ -505,8 +540,8 @@ def finalize_run(
         )
         staged = tmpdir / "final.mp4"
         vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}"
+            f"{lift}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={presentation_fps}"
         )
         proc = run_capture(
             [
@@ -544,7 +579,7 @@ def finalize_run(
         )
         if proc.returncode != 0:
             raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
-        validate_video(staged, width, height, fps)
+        validate_video(staged, width, height, presentation_fps)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(output_path, staged.read_bytes())
     return output_path

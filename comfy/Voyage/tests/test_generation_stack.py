@@ -22,7 +22,12 @@ from voyage.config import (
     default_config_toml,
     load_config,
 )
-from voyage.media import build_final_audio, finalize_run
+from voyage.media import (
+    _probe_video_fps,
+    build_final_audio,
+    finalize_run,
+    validate_video,
+)
 from voyage.media import probe as media_probe
 from voyage.persistence import (
     build_manifest,
@@ -177,6 +182,44 @@ def test_finalize_overlap_zero_keeps_legacy_splice(tmp_path: Path) -> None:
     assert finalize_run(run_dir, out, overlap_fraction=0.0).exists()
     duration = float(media_probe(out).get("format", {}).get("duration", 0.0))
     assert duration == pytest.approx(4.0, abs=0.15)
+
+
+def test_probe_video_fps_returns_zero_on_unparseable() -> None:
+    """The presentation-fps probe never raises on odd ffprobe output."""
+    video = {"codec_type": "video", "avg_frame_rate": "16/1"}
+    assert _probe_video_fps({"streams": [video]}) == pytest.approx(16.0)
+    assert _probe_video_fps({"streams": []}) == 0.0
+    assert _probe_video_fps({}) == 0.0
+    assert _probe_video_fps({"streams": [{"codec_type": "video"}]}) == 0.0
+    assert _probe_video_fps({"streams": [{"codec_type": "video", "avg_frame_rate": "0/0"}]}) == 0.0
+    assert (
+        _probe_video_fps({"streams": [{"codec_type": "video", "avg_frame_rate": "bogus"}]}) == 0.0
+    )
+
+
+def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
+    """Sub-24fps sources (CausVid native 16fps) finalize at 24fps via
+    motion-interpolated resampling, not frame duplication."""
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config.video.fps = 16
+    supervisor = Supervisor(run_dir, config)
+    supervisor.start_workers()
+    try:
+        supervisor.commit_one_segment()
+        supervisor.commit_one_segment()
+    finally:
+        supervisor.stop_workers()
+    out = tmp_path / "final-24.mp4"
+    assert finalize_run(run_dir, out, fps=16).exists()
+    probed = validate_video(out, 768, 432, 24)
+    assert probed["fps"] == pytest.approx(24.0, abs=0.5)
+    # 2 fake segments x 48f @16fps = 6.0s of content; the 24fps presentation
+    # carries ~144 frames over the same duration.
+    assert probed["frames"] == pytest.approx(144, abs=4)
+    duration = float(media_probe(out).get("format", {}).get("duration", 0.0))
+    assert duration == pytest.approx(6.0, abs=0.3)
 
 
 def test_build_final_audio_falls_back_without_takes(tmp_path: Path) -> None:
