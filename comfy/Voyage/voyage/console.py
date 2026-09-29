@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Protocol, TextIO
 
@@ -286,6 +286,21 @@ class VoyageConsole:
         elif prefetch:
             self.line(f"     ⏱{prefetch}")
 
+    @contextmanager
+    def parallel_downloads(self, labels: Sequence[str]) -> Iterator[ParallelDownloadTracker]:
+        """Per-model spinners for parallel downloads (rich TTY) or plain lines.
+
+        Same degradation contract as every other method here: non-TTY,
+        missing rich, or `--no-color`/`NO_COLOR` prints one plain line per
+        model instead of animated spinners, with the same words.
+        """
+        tracker = ParallelDownloadTracker(self, list(labels))
+        tracker._begin()
+        try:
+            yield tracker
+        finally:
+            tracker._finish()
+
 
 class RichSegmentProgress:
     """Console implementation of the supervisor's SegmentProgress sink."""
@@ -304,3 +319,60 @@ class RichSegmentProgress:
 
     def segment_done(self, info: dict[str, Any]) -> None:
         self._console.segment_done(info)
+
+
+class ParallelDownloadTracker:
+    """Per-model finish reporter for `VoyageConsole.parallel_downloads`.
+
+    Why a separate object: hub fetches run on worker threads but `rich`
+    is not thread-safe for concurrent task updates — the `ensure_models`
+    driver reports each completion from its main-thread `as_completed`
+    loop, so all progress writes stay on one thread. Main thread only.
+    """
+
+    def __init__(self, console: VoyageConsole, labels: list[str]) -> None:
+        self._console = console
+        self._labels = labels
+        self._started: dict[str, float] = {}
+        self._progress: Any = None
+        self._tasks: dict[str, Any] = {}
+
+    def _begin(self) -> None:
+        now = time.monotonic()
+        for label in self._labels:
+            self._started[label] = now
+        if self._console._rich is not None and self._console._is_tty:
+            from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                TimeElapsedColumn(),
+                console=self._console._rich,
+                transient=False,
+            )
+            self._progress.start()
+            for label in self._labels:
+                self._tasks[label] = self._progress.add_task(label, total=1, completed=0)
+        else:
+            for label in self._labels:
+                self._console.line(f"▸ downloading {label} ...")
+
+    def succeed(self, label: str) -> None:
+        """Mark one model fetched + verified (prints its elapsed time)."""
+        elapsed = time.monotonic() - self._started.get(label, time.monotonic())
+        if self._progress is not None:
+            self._progress.update(self._tasks[label], completed=1)
+        self._console.styled("✓", f"{label} ready ({elapsed:.1f}s)", "green")
+
+    def fail(self, label: str, detail: str = "") -> None:
+        """Mark one model failed (stays on stdout so TUI capture keeps it)."""
+        suffix = f": {detail}" if detail else ""
+        if self._progress is not None:
+            self._progress.update(self._tasks[label], completed=1)
+        self._console.styled("✗", f"{label} failed{suffix}", "red")
+
+    def _finish(self) -> None:
+        if self._progress is not None:
+            self._progress.stop()
+            self._progress = None

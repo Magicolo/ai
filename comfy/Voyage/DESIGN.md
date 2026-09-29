@@ -7189,3 +7189,49 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   (run.sh `--user` + no HOME breaks HF downloads), `-v
   /tmp/causvid-anchor:/opt/causvid/wan_models`,
   `-e VOYAGE_LONGLIVE_DIR=/tmp/ll-tree` (host symlinks into /models).
+
+- User intent: `voyage generate` must download/verify all models (and
+  other external deps) it needs as part of the command, with polished
+  console progress — but only the stacks the specific invocation needs
+  (ltxv downloads its own models, never the other backends'), and
+  parallelized where possible.
+- New `voyage/models_ensure.py`: `required_specs(config, sfx_enabled)`
+  maps the effective config to registry specs (video backend's own:
+  longlive2→`longlive2-bf16`, ltxv→`ltxv-2b`, causvid→`causvid`, never
+  the other two; `audio-acestep` when paired; `director-qwen8b` unless
+  deterministic; `sfx-mmaudio` only when the finalize pass will run;
+  `inspector-qwen35` only when enabled; fake video → empty set, so fake
+  runs stay weight-free/offline and the qwen→deterministic fallback is
+  preserved). `ensure_models` verify-first, then downloads the missing
+  specs on a `ThreadPoolExecutor(min(missing, 4))` with per-model
+  `parallel_downloads` progress, re-verifies, fail-fast 1 with the
+  verify/download message per model. `--no-download` skips fetching and
+  fails on anything missing. Manifest race note: parallel
+  `download_model` calls can drop each other's `manifest.json` entries
+  (read-modify-write), so a locked `_repair_manifest` re-merges missing
+  keys afterwards (best-effort; verify stays authoritative).
+- `VoyageConsole.parallel_downloads(labels)` (console.py): rich TTY gets
+  one spinner + elapsed timer per model; plain `▸ downloading …` /
+  `✓ <label> ready (Xs)` / `✗ <label> failed` lines otherwise (same
+  words, TUI-capturable). Tracker is main-thread-only (reported from
+  the `as_completed` loop — rich is not thread-safe).
+- `cmd_generate` wiring (after effective config, before the banner):
+  `check_ffmpeg` gate, `check_free_space` on the run dir + each model
+  stack mount (nearest existing ancestor — the mount may not exist
+  until downloads create it), then ensure with
+  `sfx_enabled = not no_sfx and sfx.backend != "fake"` (mirrors the
+  finalize gate). TUI path unchanged: ensure runs under stdout
+  redirection into the run log, no `SegmentProgress` change.
+- Known pre-existing gap (out of scope, documented): director/inspector
+  workers resolve via hub `model_id` + HF cache, not `models_dir` — the
+  inline download still warms the cache in the same container, but a
+  pre-provisioned `/models` with a cold HF cache still falls back to
+  deterministic/skip.
+- Proof: `tests/test_generate_ensure.py` (15 TDD tests: mapping incl.
+  fake-empty, verify-hit skips download, missing-only download,
+  `--no-download`, download-failure nonzero, plain-fallback words,
+  ffmpeg/disk/ensure-fail gates, selective-scope spy on a real fake
+  e2e); ruff + format + mypy green; full suite 906 passed + 13 failed,
+  all 13 in other agents' in-flight areas (fake 48f→96f segment-math
+  change, backend-adapter/config/finalize/scoreboard — none touch the
+  ensure path; verified by failure signatures + `git diff` scope).

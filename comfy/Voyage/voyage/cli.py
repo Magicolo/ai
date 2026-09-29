@@ -35,7 +35,7 @@ from voyage.console import RichSegmentProgress, VoyageConsole
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.logrotate import iter_metric_files
-from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS, finalize_run
+from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS, check_free_space, finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
     download_audio_models,
@@ -1045,6 +1045,43 @@ def cmd_generate(args: argparse.Namespace) -> int:
     planned_frames = segments * frames_per_segment
     console = get_console(args)
     sink = getattr(args, "progress_sink", None)
+    ffmpeg_ok, ffmpeg_message = check_ffmpeg()
+    if not ffmpeg_ok:
+        print(f"error: {ffmpeg_message}", file=sys.stderr)
+        return 1
+    try:
+        check_free_space(run_dir, effective.min_free_space_gib)
+        stack_dirs = {
+            effective.video.models_dir,
+            effective.audio.models_dir,
+            effective.sfx.models_dir,
+        }
+        for stack_dir in sorted(stack_dirs):
+            # The mount may not exist yet (downloads create it): check the
+            # nearest existing ancestor so a missing dir never crashes.
+            anchor = Path(stack_dir)
+            while not anchor.exists():
+                anchor = anchor.parent
+            check_free_space(anchor, effective.min_free_space_gib)
+    except DiskSpaceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    from voyage.models_ensure import ensure_models
+
+    sfx_enabled = (
+        not bool(getattr(args, "no_sfx", False))
+        and (getattr(args, "sfx_backend", None) or effective.sfx.backend) != "fake"
+    )
+    if (
+        ensure_models(
+            effective,
+            sfx_enabled,
+            console,
+            allow_download=not bool(getattr(args, "no_download", False)),
+        )
+        != 0
+    ):
+        return 1
     if sink is None:
         console.rule(
             f"voyage generate · {effective.video.backend} "
@@ -1486,6 +1523,11 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         "--skip-bad",
         action="store_true",
         help="finalize past corrupt segments instead of aborting",
+    )
+    gen.add_argument(
+        "--no-download",
+        action="store_true",
+        help="fail instead of downloading missing models (verify only)",
     )
     gen.add_argument(
         "--draft",

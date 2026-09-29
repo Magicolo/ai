@@ -185,7 +185,16 @@ backend picked interactively) counts as CUDA-needing when the host has a
 GPU (`nvidia-smi -L` probe), so ltxv works with no explicit variables;
 without a GPU it stays slim. A CUDA backend in an image
 without torch fails fast with a pointer to `voyage-video` instead of a
-cryptic worker error.
+cryptic worker error. Before the banner, `generate` gates on
+`ffmpeg`/`ffprobe` presence and free disk (run dir + each model stack's
+mount, nearest existing ancestor when the mount is not created yet),
+then verifies — and downloads when missing — only the models the
+effective config needs (the video backend's own stack, paired ACE-Step
+audio, qwen director unless deterministic, MMAudio SFX only when the
+finalize pass will run, the VLM inspector only when enabled; `fake`
+needs nothing and stays offline). Missing stacks download in parallel
+with one spinner each (plain `▸`/`✓` lines without a TTY); `--no-download`
+fails instead of fetching.
 
 ## Start / pause / resume / stop
 
