@@ -39,6 +39,32 @@ def _require_app() -> Any:
     return VoyageApp
 
 
+async def _click_generate_when_ready(pilot: Any, app: Any) -> None:
+    """Click Generate once it is really under the mouse (issue 093).
+
+    `scroll_visible` only schedules scrolling and a single `pause()` is
+    not enough under load; `pilot.click` returns False (instead of
+    raising) when the click lands on another widget, and every caller
+    used to ignore that — a lost click looks exactly like a hung run.
+    Poll until the click lands.
+    """
+    from textual.widgets import Button
+
+    for _ in range(100):
+        app.query_one("#button-generate", Button).scroll_visible()
+        await pilot.pause(0.05)
+        if await pilot.click("#button-generate"):
+            return
+    raise AssertionError("generate button never became clickable")
+
+
+_STARTUP_WAIT_ITERATIONS = 600
+"""Polls for worker-startup gates (200 × 0.05 s = 10 s was too tight when
+the box is shared: thread/event-loop scheduling under load starves the
+10 s budget with no code fault — issue 093. 30 s still fails loudly on a
+truly dead worker. Finish-waits keep their own budgets below.)"""
+
+
 def test_auto_focus_targets_style_field() -> None:
     VoyageApp = _require_app()
     assert VoyageApp.AUTO_FOCUS == "#field-style"
@@ -336,18 +362,16 @@ def test_worker_failure_restores_form_with_error(
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer
-        from textual.widgets import Button, Static, TextArea
+        from textual.widgets import Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "quiet harbor"
             await pilot.pause()
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
+            await _click_generate_when_ready(pilot, app)
             errors = app.query_one("#errors-line", Static)
-            for _ in range(200):
+            for _ in range(_STARTUP_WAIT_ITERATIONS):
                 if app._generation_running or "boom" in str(errors.content):
                     break
                 await pilot.pause(0.05)
@@ -628,7 +652,7 @@ def test_generate_button_runs_real_fake_backend_to_completion(
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer
-        from textual.widgets import Button, Select, Static, TextArea
+        from textual.widgets import Select, Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -636,9 +660,7 @@ def test_generate_button_runs_real_fake_backend_to_completion(
             app.query_one("#field-style", TextArea).text = "calm neon harbor"
             app.query_one("#field-backend", Select).value = "fake"
             await pilot.pause()
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
+            await _click_generate_when_ready(pilot, app)
             for _ in range(120):
                 await pilot.pause(0.5)
                 if not app._generation_running:
@@ -668,16 +690,14 @@ def test_base_exception_in_worker_restores_form(
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer
-        from textual.widgets import Button, Static, TextArea
+        from textual.widgets import Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "calm neon harbor"
             await pilot.pause()
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
+            await _click_generate_when_ready(pilot, app)
             for _ in range(60):
                 await pilot.pause(0.5)
                 if not app._generation_running:
@@ -760,17 +780,15 @@ def test_slow_run_stays_responsive_and_reaches_monitoring_view(
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer, Vertical
-        from textual.widgets import Button, Static, TextArea
+        from textual.widgets import Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "slow harbor"
             before = app.focused
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
-            for _ in range(200):
+            await _click_generate_when_ready(pilot, app)
+            for _ in range(_STARTUP_WAIT_ITERATIONS):
                 if started.is_set():
                     break
                 await pilot.pause(0.05)
@@ -815,16 +833,14 @@ def test_mid_run_progress_reaches_log_before_completion(
     monkeypatch.setattr("voyage.cli.cmd_generate", _posting_generate)
 
     async def _run() -> None:
-        from textual.widgets import Button, TextArea
+        from textual.widgets import TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "posting harbor"
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
-            for _ in range(200):
+            await _click_generate_when_ready(pilot, app)
+            for _ in range(_STARTUP_WAIT_ITERATIONS):
                 if entered.is_set():
                     break
                 await pilot.pause(0.05)
@@ -857,17 +873,15 @@ def test_cuda_fast_fail_returns_to_form_with_error(
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer
-        from textual.widgets import Button, Static, TextArea
+        from textual.widgets import Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "nucuda harbor"
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
+            await _click_generate_when_ready(pilot, app)
             errors = app.query_one("#errors-line", Static)
-            for _ in range(200):
+            for _ in range(_STARTUP_WAIT_ITERATIONS):
                 if app._generation_running or errors.display:
                     break
                 await pilot.pause(0.05)
@@ -902,16 +916,14 @@ def test_run_head_ticks_elapsed_while_running(
     monkeypatch.setattr("voyage.cli.cmd_generate", _slow_generate)
 
     async def _run() -> None:
-        from textual.widgets import Button, Static, TextArea
+        from textual.widgets import Static, TextArea
 
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             app.query_one("#field-style", TextArea).text = "ticking harbor"
-            app.query_one("#button-generate", Button).scroll_visible()
-            await pilot.pause()
-            await pilot.click("#button-generate")
-            for _ in range(200):
+            await _click_generate_when_ready(pilot, app)
+            for _ in range(_STARTUP_WAIT_ITERATIONS):
                 if app._generation_running:
                     break
                 await pilot.pause(0.05)

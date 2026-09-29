@@ -133,3 +133,14 @@ stderr; flesh out `models info` or drop the stub.
   parse + programmatic-stderr, duration forms + `-5s` positivity, stop
   finalize no-doubling via monkeypatched `cmd_finalize`, audio-blame).
   Gates green.
+- 2026-09-29 (this track, scope leftovers only): FIXED the deferred trio.
+  `voyage/tui_state.py:69-70` `FIELD_HELP["duration"]` unified to
+  `'5s','90','1m30s','2m','1h','1h2m3.5s'` + rounds-up note (matches
+  `cli._DURATION_EXAMPLES`); `docs/OPERATIONS.md` duration unified in both
+  spots (TUI field + generate paragraph: fractional/combined/bare/
+  whitespace + overshoot); `voyage/cli.py` `models info` fleshed out
+  (bundles + pins pointer + CausVid CC BY-NC-SA 4.0 + verify hint).
+  Out of scope kept: `Literal` on `DirectorConfig.backend`, inspect usage
+  order, console split (by design). Tests: 1 new in
+  `tests/test_cli_hardening.py` (`models info` bundles/license/verify).
+  Scoped gates green.

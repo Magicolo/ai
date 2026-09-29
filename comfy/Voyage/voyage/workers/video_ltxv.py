@@ -33,6 +33,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from numpy.typing import NDArray
+
 from voyage.hashing import sha256_file as shared_sha256_file
 from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION
 from voyage.workers import video_common
@@ -139,6 +142,70 @@ def split_prefix_novel(generated_frames: int, conditioning_frames: int) -> tuple
     if conditioning_frames < 0 or conditioning_frames > generated_frames:
         raise ValueError(f"conditioning {conditioning_frames} out of range [0, {generated_frames}]")
     return (conditioning_frames, generated_frames - conditioning_frames)
+
+
+def validate_tail_length(actual_frames: int, expected_frames: int) -> int:
+    """Fail loud when a chained tail is short (issue 064, slim-testable).
+
+    Extracted from the inline tail assert in `generate_blocks` so the
+    negative-slice guard is unit-covered without a GPU session: a short
+    `novel` used to slice short silently and degrade the next block's
+    anchor. Returns `actual_frames` for call-site fluency.
+    """
+    if actual_frames != expected_frames:
+        raise ValueError(
+            f"LTXV tail has {actual_frames} frames, expects "
+            f"{expected_frames} — refusing a short anchor"
+        )
+    return actual_frames
+
+
+def tail_frames_for_conditioning(frame_array: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Shape-gate the in-memory tensor handoff (issue 028, slim-testable).
+
+    Upstream `prepare_conditioning` takes the tail as a (T, H, W, C) uint8
+    array as well as a media path; conditioning chained blocks on these
+    frames directly skips the lossy mp4 encode/decode roundtrip on the
+    continuity-critical tail. Duck-typed on the array (worker image passes
+    torch-derived numpy, slim tests pass numpy directly) — only shape and
+    dtype are asserted, never the tensor type.
+    """
+    if frame_array.ndim != 4 or frame_array.shape[-1] != 3:
+        raise ValueError(
+            f"LTXV conditioning frames must be (T, H, W, 3) (got shape {frame_array.shape})"
+        )
+    if frame_array.shape[0] < 1:
+        raise ValueError("LTXV conditioning frames must hold at least one frame")
+    if frame_array.dtype != np.uint8:
+        raise ValueError(f"LTXV conditioning frames must be uint8 (got {frame_array.dtype})")
+    return frame_array
+
+
+def _tail_clip_to_handoff_frames(tail_clip: Any) -> NDArray[np.uint8] | None:
+    """Bottle a block tail for the next block's in-memory handoff (issue 028).
+
+    Layout mirrors `_save_mp4` (channel-first tail → (T, H, W, C) + the
+    issue-065 clip + alpha drop), then the (T, H, W, C) uint8 shape gate.
+    The result is a CPU numpy copy, so the caller can free the GPU tail
+    while the handoff survives. Returns None when the tail cannot be
+    bottled (unexpected tensor API — e.g. stubbed sessions in CPU tests):
+    the next block then falls back to the chain mp4 path, which is today's
+    behavior, and the miss is noted on stderr so a layout drift degrades
+    to the status quo instead of silently corrupting the anchor.
+    """
+    try:
+        tail_video = tail_clip[0]
+        if tail_video.dim() == 4 and tail_video.shape[0] <= 4:
+            tail_numpy = tail_video.permute(1, 2, 3, 0).float().cpu().numpy()
+        else:
+            tail_numpy = tail_video.permute(0, 2, 3, 1).float().cpu().numpy()
+        tail_clipped = video_common.clip_array_to_uint8(tail_numpy)
+        if tail_clipped.shape[-1] == 4:
+            tail_clipped = tail_clipped[..., :3]
+        return tail_frames_for_conditioning(tail_clipped)
+    except Exception as exc:  # noqa: BLE001 — fallback is today's mp4 path
+        print(f"ltxv tensor handoff unavailable ({exc}); using chain mp4", file=sys.stderr)
+        return None
 
 
 def prompt_plan_hash(prompts: list[str]) -> str:
@@ -299,17 +366,27 @@ class LTXVSession:
         self._multiscale = LTXMultiScalePipeline(pipeline, latent_upsampler=upsampler)
         self._tokenizer = tokenizer
         self._text_encoder = text_encoder
-        self._embed_cache: dict[str, tuple[Any, Any]] = {}
+        # Issue 030: bounded LRU (was an unbounded dict pinning
+        # device-side masks forever); entries are stored CPU-side and
+        # moved to `self._device` on use (never a hardcoded "cuda").
+        self._embed_cache = video_common.EmbedCache()
         self._negative: tuple[Any, Any] | None = None
         self._conditioning_tail_path: str | None = None
         self._last_prompt: str | None = None
         self._fp8_fallback = False
 
     def _encode(self, text: str) -> tuple[Any, Any]:
-        """CPU T5 encode (~25 s, cached per prompt); mask moved to CUDA."""
+        """CPU T5 encode (~25 s, cached per prompt); mask moved to the device on use.
+
+        Issue 030: the entry is stored CPU-side (host RAM, not resident
+        VRAM) under a bounded LRU, and both tensors move to
+        `self._device` on every use — including hits, so a cached mask
+        never stays pinned to a stale device.
+        """
         cached = self._embed_cache.get(text)
         if cached is not None:
-            return cached
+            embeds, mask = cached
+            return (embeds.to(self._device), mask.to(self._device))
         torch = self._torch
         inputs = self._tokenizer(
             text,
@@ -321,12 +398,11 @@ class LTXVSession:
         )
         with torch.inference_mode():
             embeds = self._text_encoder(inputs.input_ids)[0].to(torch.bfloat16)
-        # Masks ride into CUDA cross-attention; the pipeline only moves
-        # embeds, so the mask must be moved here (probe lesson). Issue
-        # 074: the session device, not a hardcoded "cuda" (breaks cuda:1).
-        result = (embeds, inputs.attention_mask.to(self._device))
-        self._embed_cache[text] = result
-        return result
+        # Masks ride into device cross-attention; the pipeline only moves
+        # embeds, so the mask must be moved by the caller (probe lesson).
+        # Issue 074: the session device, not a hardcoded "cuda" (breaks cuda:1).
+        self._embed_cache.put(text, (embeds, inputs.attention_mask))
+        return (embeds.to(self._device), inputs.attention_mask.to(self._device))
 
     def _quantize_fp8_fallback(self) -> None:
         """In-place torchao dynamic-fp8 DiT quant (OOM fallback, once)."""
@@ -347,16 +423,23 @@ class LTXVSession:
         height: int,
         frames: int,
         fps: int,
-        conditioning_media_path: str | None,
+        conditioning_media: str | NDArray[np.uint8] | None,
     ) -> Any:
         """One 121-frame extension clip; returns the (B,C,T,H,W) tensor.
 
-        ``conditioning_media_path`` is the 25-frame tail video (or None for a
-        fresh text-to-video start); it is conditioned at start frame 0 per
-        the upstream extension contract. The caller discards the prefix.
+        ``conditioning_media`` is the 25-frame tail — either the tail video
+        path or the same tail as an in-memory (T, H, W, C) uint8 array
+        (issue 028 tensor handoff: skips the lossy mp4 roundtrip on the
+        continuity-critical tail), or None for a fresh text-to-video start.
+        It is conditioned at start frame 0 per the upstream extension
+        contract. The caller discards the prefix. The union keeps one
+        positional slot, so stubbed sessions keep working unchanged.
         """
         from ltx_video.inference import calculate_padding, prepare_conditioning
 
+        conditioning_source: str | NDArray[np.uint8] | None = conditioning_media
+        if conditioning_source is not None and not isinstance(conditioning_source, str):
+            conditioning_source = tail_frames_for_conditioning(conditioning_source)
         torch = self._torch
         if self._negative is None:
             self._negative = self._encode(NEGATIVE_PROMPT)
@@ -368,7 +451,7 @@ class LTXVSession:
         padding = calculate_padding(height, width, height_p, width_p)
         conditioning = (
             prepare_conditioning(
-                [conditioning_media_path],
+                [conditioning_source],
                 [1.0],
                 [0],
                 height,
@@ -377,7 +460,7 @@ class LTXVSession:
                 padding,
                 self._pipeline,
             )
-            if conditioning_media_path is not None
+            if conditioning_source is not None
             else None
         )
         generator = torch.Generator(device=self._device).manual_seed(seed)
@@ -506,31 +589,41 @@ class LTXVSession:
         novel_clips: list[Any] = []
         chain_tails: list[Path] = []
         pending_tail: Path | None = None
+        pending_tail_frames: NDArray[np.uint8] | None = None
         generated_total = 0
         conditioning_total = 0
         resident_tail = self._conditioning_tail_path
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
         try:
             for index, (prompt, seed) in enumerate(zip(prompts, seeds, strict=True)):
+                conditioning_source: str | NDArray[np.uint8] | None
                 if index == 0:
                     tail_candidate = resident_tail
                     if tail_candidate is None or scene_cuts[0] or not Path(tail_candidate).exists():
-                        conditioning: str | None = None
+                        conditioning_source = None
                     else:
-                        conditioning = tail_candidate
+                        conditioning_source = tail_candidate
+                elif pending_tail_frames is not None:
+                    # Issue 028 tensor handoff: chain onto the previous
+                    # block's in-memory tail frames — NOT the stale resident
+                    # tail (which still points at the previous segment until
+                    # this call commits below), and without the lossy mp4
+                    # roundtrip. The chain mp4 below stays as the
+                    # crash-recovery/fallback artifact.
+                    conditioning_source = pending_tail_frames
                 else:
                     if not chain_tails:
                         raise RuntimeError("LTXV block chain lost its tail video")
                     # Chain onto the previous block's freshly rendered tail video
                     # — NOT the stale resident tail (which still points at the
                     # previous segment until this call commits below).
-                    conditioning = str(chain_tails[-1])
+                    conditioning_source = str(chain_tails[-1])
                 block = self._generate_block(
-                    prompt, seed, width, height, segment_target_frames, fps, conditioning
+                    prompt, seed, width, height, segment_target_frames, fps, conditioning_source
                 )
                 generated_frames = int(block.shape[2])
                 generated_total += generated_frames
-                if conditioning is None:
+                if conditioning_source is None:
                     novel = block
                 else:
                     conditioning_total += conditioning_tail_frames
@@ -543,16 +636,15 @@ class LTXVSession:
                 # Issue 064: a short `novel` slices short (negative-slice
                 # semantics) — committing that as a full 25-frame anchor
                 # would silently degrade the next block, so fail loudly.
-                tail_frames = int(tail_clip.shape[2])
-                if tail_frames != conditioning_tail_frames:
-                    raise ValueError(
-                        f"LTXV tail has {tail_frames} frames, expects "
-                        f"{conditioning_tail_frames} — refusing a short anchor"
-                    )
+                validate_tail_length(int(tail_clip.shape[2]), conditioning_tail_frames)
                 pending_tail = output_path.parent / f"{output_path.stem}_chain{index:02d}.mp4"
                 _save_mp4(tail_clip, pending_tail, fps)
                 chain_tails.append(pending_tail)
                 pending_tail = None
+                # Issue 028: bottle the tail for the next block's in-memory
+                # handoff (None when the tail cannot be bottled — the next
+                # block then falls back to the chain mp4, today's behavior).
+                pending_tail_frames = _tail_clip_to_handoff_frames(tail_clip)
                 del tail_clip
         except Exception:
             # Issue 064: the OOM-retry path must not leave `_chain*.mp4`

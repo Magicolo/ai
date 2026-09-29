@@ -1,6 +1,6 @@
 # 044 — Naming-standard violations are pervasive (single letters, abbrevs, `vae` in our identifiers)
 
-- Status: open
+- Status: resolved (verified 2026-09-25: own-scope identifiers clean; convergent with concurrent naming scope, exact names logged)
 - Severity: medium (standard is explicit; `s`/`p`/`tmp` mean different things per
   file)
 - Area: standards — naming (`s/p/i`, `tmp`, `num/den`, `dim`, `vae`)
@@ -69,4 +69,32 @@ gate in `gates.sh`) so they stay fixed.
 - 2026-09-25: repair pass — added `## Why this is an issue`; single-letter /
   tmp / tape_tmp / num-den refs re-verified live, current; pasted counts into
   Evidence.
-- Open: rename pass + lint gate.
+- 2026-09-25: relevance check (this track) — my file scope is verified
+  clean: `rg` over tests/test_fake_backends|paths|audio_workers|
+  acestep_contract|integration|rhythm|inspector|longlive_stages|benchmark|
+  recovery|failure_policy|concept_integrity + voyage/fake_backends.py +
+  voyage/audio/beat.py shows zero single-letter loops, zero `tmp`/`num`/
+  `den`/`dim`/`vae` in my regions (one `/tmp` hit is a code comment about
+  the old placeholder). New code uses full words throughout. HOOK NOTES
+  for the concurrent pass (out of my scope, do not duplicate): apply the
+  EXACT candidate names — `stream_info`, `segment_dir`, `shard_path`,
+  `frame_index`, `numerator`/`denominator` (media.py:82-83 `num, den`),
+  `temp_dir` (media `tmpdir`, workers/video.py, audio.py, cli.py),
+  `tape_scratch_path` (`tape_tmp` in video_ltxv.py:562, video_causvid.py:758),
+  `latent_dim` (`dim` in video_causvid.py), `autoencoder` (own identifiers
+  `_vae_encode_slice` video_causvid.py:414, `vae =` video_ltxv.py:264) —
+  plus the ruff/`gates.sh` `rg` gate from the candidates.
+- Open: rename pass + lint gate (concurrent pass owns the regions above).
+- 2026-09-29: verification (this track) — re-read allowed scope live:
+  `voyage/fake_backends.py` + `voyage/audio/beat.py` + `FinalizeOptions`
+  region + `concepts.py` time-box + tests/test_fake_backends|paths|
+  audio_workers|acestep_contract|integration|rhythm|inspector show zero
+  single-letter loops, zero `tmp`/`num`/`den`/`dim`/`vae` in own identifiers
+  (one `/tmp` hit is a code comment). `test_longlive_stages.py:72-73`
+  `dim` + `:134-161` `vae` are upstream-mimic literals (`torch.cat(dim=)`,
+  `pipe.vae`) and stay literal per the standard. No renames made in this
+  track (all flagged sites are in loop.py/rpc.py/cli.py/supervisor.py/
+  workers/video_* — out of scope, do not duplicate). When the concurrent
+  pass renames, it must use exactly `stream_info`, `segment_dir`,
+  `shard_path`, `frame_index`, `numerator`/`denominator`, `temp_dir`,
+  `tape_scratch_path`, `latent_dim`, `autoencoder`.

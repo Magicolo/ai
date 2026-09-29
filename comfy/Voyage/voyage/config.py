@@ -18,7 +18,7 @@ try:
 except ImportError:  # Python 3.10 worker image (upstream env)
     import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from voyage.errors import ConfigurationError
 
@@ -258,9 +258,28 @@ class AudioConfig(BaseModel):
             raise ValueError("energy must be within [0, 1]")
         return value
 
+    @model_validator(mode="after")
+    def take_covers_ahead(self) -> AudioConfig:
+        """Refuse take lengths that force a GPU swap on every segment (issue 013).
+
+        A take no longer than the audio-ahead window expires before the
+        coverage check ever keeps it, so every segment pays a full
+        video-evict + take-render + audio-evict + video-rebuild cycle
+        (the dominant wall-clock cost on a 16 GiB card). Steady state
+        needs take_seconds >> ahead_seconds (defaults 45.0/20.0).
+        """
+        if not self.take_seconds > self.ahead_seconds:
+            raise ValueError(
+                f"take_seconds ({self.take_seconds}) must exceed ahead_seconds "
+                f"({self.ahead_seconds}): a take no longer than the audio-ahead "
+                "window forces a full video↔audio GPU swap on EVERY segment — "
+                "keep take_seconds >> ahead_seconds (defaults 45.0/20.0)"
+            )
+        return self
+
 
 class DirectorConfig(BaseModel):
-    backend: str = "deterministic"
+    backend: str = "qwen"
     model_id: str = "Qwen/Qwen3-8B"
     temperature: float = 0.7
     # Qwen worker: non-thinking mode (no <think> parsing), JSON-only output.
@@ -363,12 +382,19 @@ class DraftConfig(BaseModel):
         return value
 
 
+SPEC_MIN_FREE_SPACE_GIB = 20.0
+"""Spec default reserve (DESIGN §70/§140): hand-written TOML omitting the key gets this."""
+
+DEV_MIN_FREE_SPACE_GIB = 5.0
+"""Init-generated TOML default (issue 052): small dev boxes validate at 5 GiB."""
+
+
 class ProjectConfig(BaseModel):
     schema_version: int = 1
     run_id: str = "voyage"
     style: str = ""
     seed: int = 0
-    min_free_space_gib: float = 20.0
+    min_free_space_gib: float = SPEC_MIN_FREE_SPACE_GIB
     video: VideoConfig = Field(default_factory=VideoConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     director: DirectorConfig = Field(default_factory=DirectorConfig)
@@ -412,7 +438,11 @@ def _toml_basic_string(raw_value: str) -> str:
 
 
 def default_config_toml(
-    run_id: str, style: str, seed: int, video_backend: VideoBackendName = "fake"
+    run_id: str,
+    style: str,
+    seed: int,
+    video_backend: VideoBackendName = "fake",
+    director_backend: str = "qwen",
 ) -> str:
     preset = _video_preset(video_backend)
     backend = str(preset.get("backend", video_backend))
@@ -436,7 +466,7 @@ schema_version = 1
 run_id = {escaped_run_id}
 style = {escaped_style}
 seed = {seed}
-min_free_space_gib = 5.0
+min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}
 
 [video]
 # "fake" (built-in testsrc) | "longlive2" (CUDA) | "ltxv" (CUDA) | "causvid" (CUDA, 16 fps)
@@ -468,7 +498,7 @@ models_dir = "/models"
 device = "{audio_device}"
 
 [director]
-backend = "deterministic"
+backend = "{director_backend}"
 model_id = "Qwen/Qwen3-8B"
 temperature = 0.7
 enable_thinking = false

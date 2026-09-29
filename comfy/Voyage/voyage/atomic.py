@@ -3,11 +3,21 @@ over the previous valid file: write temp + fsync + os.replace."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
+
+JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+"""JSON-shaped data: the typed JSON/RPC boundary (issue 036).
+
+Recursive alias (3.10-compatible via string forward references). Use this
+instead of bare `Any` for payloads crossing the process boundary so shape
+errors surface at the checker, not inside workers at runtime. Callers
+holding `Any` (e.g. pydantic wire models) accept it without complaint.
+"""
 
 
 def fsync_dir(directory: Path) -> None:
@@ -40,19 +50,33 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         # BaseException (not Exception) on purpose: the temp file must not
         # litter the run dir even on KeyboardInterrupt/SystemExit. The error
         # is always re-raised below — this is cleanup, never swallowing.
-        try:
+        # Best-effort unlink: the replace may already have consumed the temp
+        # path, or the directory may be gone — either way there is nothing
+        # left worth failing the original error for.
+        with contextlib.suppress(OSError):
             os.unlink(tmp_name)
-        except OSError:
-            # Best-effort: the replace may already have consumed the temp
-            # path, or the directory may be gone — either way there is
-            # nothing left worth failing the original error for.
-            pass
         raise
 
 
 def atomic_write_json(destination: Path, payload: Any) -> None:
+    """Write JSON atomically. `payload` stays `Any` on purpose (issue 036).
+
+    `json.dumps` serializes anything, so narrowing the write side buys no
+    checking — the contract lives on the read side (`read_json` callers
+    narrow `JsonValue` with `isinstance`) and on RPC payloads
+    (`RpcPayload` in `voyage.rpc`). Widening this to `JsonValue` was tried
+    and reverted: manifest/state writers hold `dict[str, object]`, which
+    is not a `JsonValue`, and those call sites belong to other passes.
+    """
     atomic_write_bytes(destination, (json.dumps(payload, indent=2) + "\n").encode("utf-8"))
 
 
 def read_json(path: Path) -> Any:
+    """Read JSON. Returns `Any` (not `JsonValue`) for the same reason.
+
+    Narrowing here to `JsonValue` was tried and reverted with the write
+    side: `isinstance`-narrowed `dict[str, JsonValue]` is not assignable
+    to the `dict[str, object]` manifests the readers return. Callers must
+    keep validating shape with `isinstance` (see `read_manifest`).
+    """
     return json.loads(path.read_text(encoding="utf-8"))

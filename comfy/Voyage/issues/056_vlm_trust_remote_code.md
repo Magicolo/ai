@@ -63,3 +63,13 @@ exception in DESIGN §5 alongside the `False` default.
   corrected Area refs (`director.py:89-111`, registry `:70-95`) and the
   full revision hash. Added `## Why this is an issue`.
 - Open: vendor/audit/scope; document.
+- 2026-09-29 (this track, docs-only — `workers/` out of scope): DOCUMENTED
+  the exception. `DESIGN.md` §44 as-built note (`§44-vlm-trust-2026-09-29`):
+  inspector `True` (required) vs text-path `False`, pin + allow-list cover
+  availability not execution, vendoring + hash-pinning + minimal mounts are
+  the follow-up. `docs/MODELS.md` inspector section carries the same trust
+  note. Code (`director.py:146,152` `True`) untouched. Tests: docs-only.
+  Vendor/audit/scope remains open.
+- 2026-09-29 (orchestrator): documented + scoped (DESIGN §44 + MODELS
+  notes); vendor/audit/minimal-mounts remain a dedicated security task.
+  Kept OPEN for it.

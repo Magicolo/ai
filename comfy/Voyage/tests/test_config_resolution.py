@@ -13,9 +13,12 @@ from pydantic import ValidationError
 
 from voyage.config import (
     BACKEND_REGISTRY,
+    DEV_MIN_FREE_SPACE_GIB,
+    SPEC_MIN_FREE_SPACE_GIB,
     AudioConfig,
     ProjectConfig,
     apply_draft_overrides,
+    default_config_toml,
     resolve_config,
     with_video_backend,
 )
@@ -124,3 +127,12 @@ def test_invalid_overrides_rejected() -> None:
 def test_unknown_backend_rejected() -> None:
     with pytest.raises(ValueError, match="unknown video backend"):
         resolve_config(_base_config(), backend="framepack")  # type: ignore[arg-type]
+
+
+def test_free_space_reserve_defaults_are_named_constants() -> None:
+    """Triple default is explicit: spec 20.0 vs dev 5.0 (052)."""
+    assert SPEC_MIN_FREE_SPACE_GIB == 20.0
+    assert DEV_MIN_FREE_SPACE_GIB == 5.0
+    assert ProjectConfig(style="reserve-probe").min_free_space_gib == SPEC_MIN_FREE_SPACE_GIB
+    generated = default_config_toml("reserve-probe", "line art", 7)
+    assert f"min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}" in generated

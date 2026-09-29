@@ -320,7 +320,11 @@ class _StubSession:
 
     def generate_blocks(self, **kwargs: Any) -> dict[str, Any]:
         self.seen.append(kwargs)
-        video: dict[str, Any] = {"frames": 29, "recovery_path": "/tmp/x/recovery.pt"}
+        # Grounded placeholder (issue 090): the stub never writes a tape,
+        # so the path names a file under the call's own output dir instead
+        # of a hardcoded /tmp string no test could stat.
+        output_parent = Path(str(kwargs.get("output_path", "segment.mp4"))).parent
+        video: dict[str, Any] = {"frames": 29, "recovery_path": str(output_parent / "recovery.pt")}
         if kwargs.get("profile_stages"):
             video["stage_ms"] = dict.fromkeys(_STAGE_NAMES, 3.25)
         return video

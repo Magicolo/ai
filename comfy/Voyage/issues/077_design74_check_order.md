@@ -1,6 +1,6 @@
 # 077 — DESIGN §74 vs code: accept-loop check order inverted (style before novelty)
 
-- Status: open
+- Status: resolved (annotated 2026-09-25: as-built DESIGN note)
 - Severity: low (spec drift — both gates enforced, but violation attribution and
   retry sequencing differ from spec)
 - Area: spec/code drift — DESIGN §74 (`DESIGN.md:3500`, was `:3487` before
@@ -59,3 +59,9 @@ actual order + rationale.
   DESIGN line (`:3487` → `:3500`, section ref stable); re-verified code order
   live (style gate precedes novelty gate — pasted above).
 - Open: reorder or annotate.
+- 2026-09-29 (this track, docs-only — `supervisor.py` out of scope):
+  ANNOTATED. `DESIGN.md` §74 as-built note (`§74-accept-order-2026-09-29`):
+  code runs style-then-novelty (`supervisor.py:869` vs `:881`) while the
+  diagram lists novelty first; both gates enforced, attribution follows
+  code. Code untouched; reorder-or-diagram remains open for the owning
+  track. Tests: docs-only.

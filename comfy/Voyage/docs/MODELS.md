@@ -56,7 +56,11 @@ geometry 832×480 @ 16 fps; full notes:
 | VLM | [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | `c202236235762e1c871ad0ccb60c8ee5ba337b9a` |
 
 The allow-list must include `chat_template.jinja`. Only needed when
-`[experimental] visual_inspector = true`.
+`[experimental] visual_inspector = true`. Note: the inspector loads with
+`trust_remote_code=True` (the model ships custom modeling/processor code;
+the Qwen3 text path stays `False`) — a compromised revision is RCE in the
+director container. The pin + allow-list mitigate availability, not
+execution; vendoring + hash-pinning the modeling files is the follow-up.
 
 ## Audio — ACE-Step 1.5 (`models download audio-acestep`)
 

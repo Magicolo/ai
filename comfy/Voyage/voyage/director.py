@@ -39,8 +39,45 @@ transitions, plan music that may evolve more strongly than visuals.
 Rules: the voyage evolves continuously; transitions are gradual and
 describe change mechanisms, never abrupt substitution; old canonical
 concepts are forbidden unless revisits are allowed; output must be
-machine-readable JSON only, no prose, no markdown fences.\
+machine-readable JSON only, no prose, no markdown fences.
+Caption doctrine: every decision carries three caption families, all
+derived from the style charter + the evolving general prompt
+(current world → destination) — (1) video stages with concrete visual
+detail (motion, scenes, objects, characters, shots, angles), (2) a
+music caption in musical terms (instruments, harmony, melody, texture),
+(3) an sfx_caption with concrete sound descriptions (objects,
+environments, creatures, materials in action). All three families must
+evolve gradually as the general prompt drifts: continue from the
+previous captions with a slow drift, never jump or restart.\
 """
+
+
+def format_previous_captions(
+    previous_video_stages: list[str],
+    previous_music: str,
+    previous_sfx: str,
+) -> str:
+    """Stable previous-captions block for the director prompt (pure).
+
+    Empty when nothing precedes (voyage start): the director prompt is
+    then unchanged. Otherwise a bounded text block the model must
+    continue with a slow drift — the mechanism that keeps every caption
+    family tracking the general-prompt evolution instead of restarting.
+    """
+    lines: list[str] = []
+    for index, stage in enumerate(previous_video_stages):
+        cleaned = " ".join(stage.split())
+        if cleaned:
+            lines.append(f"video[{index}]: {cleaned}")
+    music = " ".join(previous_music.split())
+    if music:
+        lines.append(f"music: {music}")
+    sfx = " ".join(previous_sfx.split())
+    if sfx:
+        lines.append(f"sfx: {sfx}")
+    if not lines:
+        return ""
+    return "PREVIOUS CAPTIONS (continue with a slow drift, never restart)\n" + "\n".join(lines)
 
 
 def build_director_user_message(
@@ -53,6 +90,7 @@ def build_director_user_message(
     controller_metrics: str,
     retry_feedback: str = "",
     measured_context: str = "",
+    previous_captions: str = "",
 ) -> str:
     """Bounded director input (§20). Never a raw transcript."""
     sections = [
@@ -66,6 +104,8 @@ def build_director_user_message(
     ]
     if measured_context:
         sections.append(measured_context)
+    if previous_captions:
+        sections.append(previous_captions)
     if retry_feedback:
         sections.append(
             f"PREVIOUS PROPOSAL REJECTED\n{retry_feedback}\nPropose a different concept."
@@ -75,9 +115,17 @@ def build_director_user_message(
         "{canonical_name, summary}, transition {mechanism, "
         "transition_strength, estimated_duration_seconds, "
         "intermediate_stages, major_transition}, video {stages: "
-        "[3-5 short scene descriptions, ordered from current world to "
-        "destination]}, audio {music_caption, energy 0-1, tempo_bpm, "
-        "texture, environment}, novelty {why_new, distinguishes_from}. "
+        "[3-5 short scene descriptions with concrete visual detail "
+        "(motion, scenes, objects, characters, shots, angles), ordered "
+        "from current world to destination]}, audio {music_caption "
+        "(musical terms: instruments, harmony, melody, texture), energy "
+        "0-1, tempo_bpm, texture, environment, sfx_caption (concrete "
+        "sound descriptions: objects, environments, creatures, materials "
+        "in action)}, novelty {why_new, distinguishes_from}. "
+        "All three caption families (video stages, music_caption, "
+        "sfx_caption) must evolve gradually as the general prompt drifts: "
+        "continue from the PREVIOUS CAPTIONS with a slow drift, never "
+        "jump or restart. "
         "Strict types: transition.mechanism MUST be exactly one of "
         "'material_metamorphosis', 'environmental_transformation', "
         "'scale_shift', 'geometric_transformation', 'physical_rule_change', "
@@ -105,11 +153,18 @@ def deterministic_decision(
     phase: TransitionPhase,
     style: str,
 ) -> EvolutionDecision:
-    """Fallback content: continue the current stage, preserve style (§51)."""
+    """Fallback content: continue the current stage, preserve style (§51).
+
+    All three caption families derive from the same concept + charter so
+    they track the general-prompt drift by construction: a drifted
+    concept yields drifted captions, a held concept yields stable
+    captions. Deterministic (no randomness) so holds are bit-stable.
+    """
     position = PHASE_ORDER.index(phase)
     if decision_index > 0 and decision_index % 2 == 0 and position < len(PHASE_ORDER) - 1:
         phase = PHASE_ORDER[position + 1]
     concept = destination_concept or current_concept or style
+    charter = style.strip()
     return EvolutionDecision(
         decision_index=decision_index,
         destination=DirectorDestination(
@@ -121,8 +176,23 @@ def deterministic_decision(
             mechanism="hybrid",
             intermediate_stages=[f"the {concept} holds and deepens"],
         ),
-        video=DirectorVideoPlan(stages=[concept]),
-        audio=DirectorAudioPlan(),
+        video=DirectorVideoPlan(
+            stages=[
+                f"{charter}: {concept} in continuous gentle motion, "
+                "held wide shot, gradual organic transformation unfolding"
+            ]
+        ),
+        audio=DirectorAudioPlan(
+            music_caption=(
+                f"slow ambient electronic composition for {concept}: "
+                f"soft pads and low drones in {charter}, "
+                "sparse bell melody, gentle harmonic drift"
+            ),
+            sfx_caption=(
+                f"quiet concrete sounds of {concept}: soft air movement, "
+                "faint material creaks and distant low rumble"
+            ),
+        ),
         novelty=DirectorNovelty(why_new="fallback holds the current concept"),
         phase=phase,
         novelty_accepted=True,
@@ -182,6 +252,7 @@ def director_input_from_state(
     forbidden_summary: str,
     audio_state: str,
     measured_context: str = "",
+    previous_captions: str = "",
 ) -> dict[str, Any]:
     """Assemble the bounded §20 input from supervisor state (no transcript)."""
     return {
@@ -194,6 +265,7 @@ def director_input_from_state(
         "forbidden_summary": forbidden_summary,
         "audio_state": audio_state,
         "measured_context": measured_context,
+        "previous_captions": previous_captions,
         "controller_metrics": (
             f"decision_index={state.decision_index} "
             f"committed_segments={state.committed_segments} "

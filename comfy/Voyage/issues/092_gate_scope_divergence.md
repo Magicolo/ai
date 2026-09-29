@@ -66,4 +66,26 @@ the script headers.
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (all script bodies + both Dockerfiles — match); pasted
   script contents above.
-- Open: align scopes + video smoke gate.
+- 2026-09-25: documented (this track — scripts/ out of scope, no edits
+  made). Decisions for the scripts owner: (a) scope divergence is REAL and
+  accepted as documented behavior — `build.sh` gates the baked snapshot,
+  `gates.sh`/`test.sh` gate the live tree; a file missing from Dockerfile
+  `COPY` will pass live-tree gates and fail snapshot gates, so a
+  `build.sh` failure after green `gates.sh` means "check COPY coverage"
+  first; (b) `test.sh` stays pytest-only by design (fast iteration) —
+  full gates live in `gates.sh`; (c) HOOK: `build-video.sh` still runs
+  zero gates and the video image installs no pytest/mypy/ruff — add at
+  least a smoke gate (`python -m compileall` or worker `--help` import
+  check) when the image is next touched. Endurance-marker decision (089)
+  is recorded in-test, not in scripts.
+- Open: video smoke gate only (scripts owner).
+- 2026-09-29: verification (this track) — re-read `scripts/build.sh`,
+  `gates.sh`, `test.sh`, `build-video.sh` + both Dockerfiles live: scope
+  divergence documented 2026-09-25 still accurate (snapshot vs live tree,
+  pytest-only `test.sh`, zero-gate video image). No scripts edits made
+  (out of scope). Scope ruff (`ruff check` + `format --check`) green;
+  full `gates.sh` mypy red on pre-existing hypothesis stubs is a separate
+  config gap for the scripts owner, not this divergence.
+- 2026-09-29 (orchestrator): still OPEN — needs the invocation
+  alignment (bind-mount everywhere or snapshot everywhere) plus a smoke
+  gate in build-video.sh. Documentation of the divergence is done.

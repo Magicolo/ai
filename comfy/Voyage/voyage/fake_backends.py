@@ -1,16 +1,44 @@
-"""Fake media backends: tiny deterministic ffmpeg renders.
+"""Fake media backends: tiny deterministic ffmpeg renders (DESIGN §§38, 56, I).
 
-Video: `testsrc` pattern (deterministic, no model). Audio: `sine`
-tone. Both are real codecs in real containers so ffprobe validation
-and the finalizer concat path run exactly as in production.
+Video: `testsrc` pattern (deterministic, no model). Audio: sine tone at
+the energy-derived frequency. Both are real codecs in real containers so
+ffprobe validation and the finalizer concat path run exactly as in
+production.
+
+Why these exist instead of mocks: the commit/validate/finalize contract
+is exercised with genuine ffmpeg media (real durations, frames, codecs),
+so a regression in probing or assembly fails here on CPU instead of in a
+long GPU run. Seeds reach the bytes (issue 040): the video hue angle and
+the audio start phase both derive from `seed`, so different seeds render
+different media while the same seed stays bit-stable.
 """
 
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 
 from voyage.errors import MediaError
+
+
+def video_hue_angle(seed: int) -> float:
+    """Hue rotation in degrees derived from `seed` (issue 040).
+
+    Pure helper so tests pin the mapping without rendering: the angle
+    wraps at 360 (seeds 360 apart share a hue — documented, acceptable
+    for a fake), and the same seed always yields the same angle.
+    """
+    return float(seed % 360)
+
+
+def audio_start_phase(seed: int) -> float:
+    """Sine start phase in radians derived from `seed` (issue 040).
+
+    Pure helper so tests pin the mapping without rendering: 1000 distinct
+    phases across 0..2π, same seed → same phase.
+    """
+    return (seed % 1000) * 2.0 * math.pi / 1000.0
 
 
 def _run(argv: list[str]) -> None:
@@ -32,7 +60,6 @@ class FakeVideoBackend:
         fps: int,
         frames: int,
     ) -> dict[str, object]:
-        del prompt, seed
         duration = frames / fps
         _run(
             [
@@ -44,6 +71,8 @@ class FakeVideoBackend:
                 "lavfi",
                 "-i",
                 f"testsrc=size={width}x{height}:rate={fps}:duration={duration}",
+                "-vf",
+                f"hue=h={video_hue_angle(seed)}",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -69,8 +98,12 @@ class FakeAudioBackend:
         channels: int,
         duration_seconds: float,
     ) -> dict[str, object]:
-        del style, seed
+        del style
         frequency = 220.0 + 220.0 * energy
+        # Seed reaches the bytes via the start phase (issue 040): same
+        # tone, different phase per seed — `sine` has no phase knob, so the
+        # equivalent `aevalsrc` expression carries it explicitly.
+        phase = audio_start_phase(seed)
         # Take files are FLAC (ACE-Step's native container); segment slices
         # are WAV. Match the encoder to the output extension so the fake
         # backend stays a drop-in for either (§38: WAV intermediates, FLAC
@@ -85,7 +118,7 @@ class FakeAudioBackend:
                 "-f",
                 "lavfi",
                 "-i",
-                f"sine=frequency={frequency}:sample_rate={sample_rate}:duration={duration_seconds}",
+                f"aevalsrc=sin(2*PI*{frequency}*t+{phase}):s={sample_rate}:d={duration_seconds}",
                 "-c:a",
                 codec,
                 "-ac",

@@ -386,6 +386,42 @@ class _Rollout(NamedTuple):
     decoded: int
 
 
+_stub_encoder_classes: dict[Any, Any] = {}
+"""One stub-encoder subclass per torch module object (issue 030).
+
+Was `_StubEncoder`, a fresh `nn.Module` subclass defined per `_infer`
+call (one class object per rollout): the concrete subclass is now built
+once per torch module by `_stub_encoder_class` and only holds the
+precomputed embeds for its call.
+"""
+
+
+def _stub_encoder_class(module_base: Any) -> Any:
+    """Return the cached precomputed-encoder subclass for `module_base`.
+
+    Caches by the base object itself (strong ref — one entry per torch
+    module in practice), so rollouts share one class instead of
+    allocating a new subclass per `_infer` call.
+    """
+    cached = _stub_encoder_classes.get(module_base)
+    if cached is not None:
+        return cached
+
+    class _PrecomputedEncoder(module_base):  # type: ignore[misc]
+        """Quacks like WanTextEncoder for one inference call."""
+
+        def __init__(self, precomputed: dict[str, Any]) -> None:
+            super().__init__()
+            self._precomputed = precomputed
+
+        def forward(self, text_prompts: Any = None) -> dict[str, Any]:
+            del text_prompts
+            return self._precomputed
+
+    _stub_encoder_classes[module_base] = _PrecomputedEncoder
+    return _PrecomputedEncoder
+
+
 def _imageio_v2() -> Any:
     """Single lazy imageio accessor (slim-safe; one import site for mypy)."""
     import imageio.v2 as imageio  # type: ignore[import-not-found]
@@ -542,29 +578,39 @@ class CausvidSession:
             generator=generator,
         )
 
-    def _encode_conditional(self, prompt: str) -> dict[str, Any]:
-        """Encode one prompt on a brief T5 GPU visit; T5 parks on CPU after.
+    def _encode_conditionals(self, prompts: list[str]) -> list[dict[str, Any]]:
+        """Encode every prompt on ONE T5 roundtrip (issue 029).
 
-        One shuttle per call — callers pre-encode the whole segment up
-        front so N rollouts cost one 11 GB roundtrip, not N (repeated
-        alloc/free cycles fragment the allocator into OOMs).
+        The 11 GB text encoder moves to CUDA once, encodes each prompt
+        with the same per-prompt call as before, and parks back on CPU
+        once. Repeated alloc/free cycles fragment the allocator into
+        OOMs — the old per-prompt shuttle paid that per prompt.
 
         The collect + empty_cache before the move matters on resident
-        sessions: the previous segment leaves cached-but-unused blocks that
-        fragment the 11 GB T5 placement (measured: 2nd-segment shuttle OOM
-        at 14.72 GiB in use without it).
+        sessions: the previous segment leaves cached-but-unused blocks
+        that fragment the 11 GB T5 placement (measured: 2nd-segment
+        shuttle OOM at 14.72 GiB in use without it).
         """
+        if not prompts:
+            raise ValueError("causvid needs at least one prompt to encode")
         torch = self._torch
         pipeline = self._pipeline
         gc.collect()
         torch.cuda.empty_cache()
         pipeline.text_encoder.to("cuda")
         try:
-            conditional: dict[str, Any] = pipeline.text_encoder([prompt])
+            return [pipeline.text_encoder([prompt]) for prompt in prompts]
         finally:
             pipeline.text_encoder.to("cpu")
             torch.cuda.empty_cache()
-        return conditional
+
+    def _encode_conditional(self, prompt: str) -> dict[str, Any]:
+        """Encode one prompt on a brief T5 GPU visit; T5 parks on CPU after.
+
+        Single-prompt form (benchmark probes); segment renders use
+        `_encode_conditionals` so N rollouts cost one 11 GB roundtrip.
+        """
+        return self._encode_conditionals([prompt])[0]
 
     def _infer(
         self, noise: Any, prompt: str, start: Any | None, conditional: dict[str, Any]
@@ -581,21 +627,8 @@ class CausvidSession:
         """
         pipeline = self._pipeline
         real_encoder = pipeline.text_encoder
-
-        _module_base: Any = self._torch.nn.Module
-
-        class _StubEncoder(_module_base):  # type: ignore[misc]
-            """Quacks like WanTextEncoder for one inference call."""
-
-            def __init__(self, precomputed: dict[str, Any]) -> None:
-                super().__init__()
-                self._precomputed = precomputed
-
-            def forward(self, text_prompts: Any = None) -> dict[str, Any]:
-                del text_prompts
-                return self._precomputed
-
-        pipeline.text_encoder = _StubEncoder(conditional)
+        stub_class = _stub_encoder_class(self._torch.nn.Module)
+        pipeline.text_encoder = stub_class(conditional)
         try:
             video, latents = pipeline.inference(
                 noise=noise,
@@ -743,10 +776,11 @@ class CausvidSession:
         fresh_rollouts = 0
         generated_total = 0
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
-        # One T5 shuttle for the whole segment: pre-encode every prompt up
-        # front (each embed is ~4 MB on GPU) instead of shuttling the 11 GB
-        # model per rollout — repeated alloc/free cycles fragment into OOMs.
-        conditionals = [self._encode_conditional(prompt) for prompt in prompts]
+        # One T5 shuttle for the whole segment (issue 029): pre-encode
+        # every prompt up front on a single CUDA roundtrip (each embed
+        # is ~4 MB on GPU) instead of shuttling the 11 GB model per
+        # rollout — repeated alloc/free cycles fragment into OOMs.
+        conditionals = self._encode_conditionals(prompts)
         for index, (prompt, seed, cut) in enumerate(zip(prompts, seeds, scene_cuts, strict=True)):
             conditional = conditionals[index]
             start, was_fresh = self._rollout_start(cut)

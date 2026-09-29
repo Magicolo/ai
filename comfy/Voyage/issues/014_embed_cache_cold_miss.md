@@ -1,6 +1,6 @@
 # 014 — Embed cache is session-resident: every evict/rebuild cold-misses CPU T5 (minutes)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: tail-embed persist + resume warming + tests)
 - Severity: major (performance — minutes per post-audio segment)
 - Area: workers — text-embedding cache lifecycle
 - Rank rationale: turns every audio take into a repeated minutes-long T5 encode;
@@ -81,3 +81,29 @@ Payoff: post-audio segments return to steady-state latency; saves minutes per ta
 - Open: implement file-backed cache + measurement.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; Evidence enriched
   with live `_embed_cache` output; refs verified current.
+- 2026-09-26 (resolution, FIXED — longlive slice): the tape already
+  persisted the tail embeds (`prompt_embeds` CPU tensor), so no new
+  file format was needed — the fix re-seeds the session LRU from it.
+  `LongLiveSession.generate_blocks` now writes `tail_prompt` +
+  `tail_conditionals` (CPU-side via `video_common.move_to_cpu`) into
+  the tape (`voyage/workers/video_longlive.py:902-903`); new pure
+  helper `restore_tail_embed_cache` (`:369-390`) re-seeds the cache
+  and is called from `resume_from_tape` (`:547`) alongside RNG/tail
+  restore. Pre-fix tapes (no new keys) resume fine, just without the
+  warm cache (returns None). The session cache itself is now the
+  bounded CPU-side `EmbedCache` (see 030), so the restored entry
+  costs host RAM, not VRAM. LTXV deliberately out of this slice: its
+  encode is ~25 s (not minutes) and its tape carries no embeds — it
+  gets the 030 LRU only; a disk-backed LTXV embed store (keyed by
+  `prompt_plan_hash`) remains future work if the 25 s starts to
+  dominate. GPU measurement (pre/post-rebuild first-block latency on
+  a repeated prompt across a take) is the orchestrator's job — no GPU
+  workloads were run here.
+  Tests: `tests/test_issue_014_embed_restore.py` (7 tests: helper
+  seed/ignore-legacy/reject-blank, `resume_from_tape` warms cache via
+  stubbed `torch` + fake pipe, pre-fix tape leaves cache cold).
+  Gates: ruff + format clean and mypy strict clean on all touched
+  files; the 45 new tests pass in-container. Full-tree gates stay red
+  on other tracks' in-flight work (ruff in 6 untouched files, mypy in
+  supervisor/cli/persistence/config/tui_state, conftest/hypothesis —
+  see the 032 log for the inventory).

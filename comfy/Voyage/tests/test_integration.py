@@ -8,31 +8,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import default_config_toml, load_config
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    read_state,
-    write_manifest,
-    write_state,
-)
+from voyage.config import load_config
+from voyage.media import FinalizeOptions, finalize_run, validate_video
+from voyage.persistence import read_state
 from voyage.rpc import SubprocessWorker
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml("itest", "pastel neon line-art, peaceful", 7),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id="itest", seed=7)
 
 
 def test_workers_answer_health(tmp_path: Path) -> None:
@@ -56,6 +44,9 @@ def test_director_worker_decides(tmp_path: Path) -> None:
                 "destination_concept": "b",
                 "phase": "ESTABLISH",
                 "style": "s",
+                # Explicit opt-out: the worker default is qwen since
+                # 2026-09-29, so the deterministic path must say so.
+                "backend": "deterministic",
             },
         )
         assert result["destination"]["canonical_name"] == "b"
@@ -82,3 +73,44 @@ def test_commit_one_segment_end_to_end(tmp_path: Path) -> None:
     assert state.committed_segments == 1
     assert state.next_segment_number == 1
     assert state.timeline_frames == config.video.segment_frames
+
+
+def _committed_run(tmp_path: Path, segment_count: int) -> Path:
+    """Commit `segment_count` fake segments; caller owns no workers after return."""
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    supervisor = Supervisor(run_dir, config)
+    supervisor.start_workers()
+    try:
+        for _ in range(segment_count):
+            supervisor.commit_one_segment()
+    finally:
+        supervisor.stop_workers()
+    return run_dir
+
+
+def test_finalize_end_to_end_after_commit(tmp_path: Path) -> None:
+    """Commit → finalize → valid presentation MP4 (issue 038 contract path)."""
+    run_dir = _committed_run(tmp_path, 2)
+    output_path = tmp_path / "final.mp4"
+    assert finalize_run(run_dir, output_path) == output_path
+    assert output_path.exists()
+    info = validate_video(output_path, 768, 432, 24)
+    assert info["duration"] > 0
+
+
+def test_finalize_options_explicit_joint_style(tmp_path: Path) -> None:
+    """The `FinalizeOptions` path (issue 045) finalizes identically."""
+    run_dir = _committed_run(tmp_path, 2)
+    for joint_style in ("blend", "hard-splice"):
+        output_path = tmp_path / f"final-{joint_style}.mp4"
+        options = FinalizeOptions(joint_style=joint_style)  # type: ignore[arg-type]
+        assert finalize_run(run_dir, output_path, options=options) == output_path
+        info = validate_video(output_path, 768, 432, 24)
+        assert info["duration"] > 0
+
+
+def test_finalize_options_rejects_unknown_joint_style() -> None:
+    with pytest.raises(ValueError, match="joint_style"):
+        FinalizeOptions(joint_style="crossfade-everything")  # type: ignore[arg-type]

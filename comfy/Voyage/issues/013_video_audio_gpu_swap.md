@@ -1,6 +1,6 @@
 # 013 — Sequential video↔audio GPU swap on every take (full evict + full rebuild)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: take_seconds>>ahead_seconds validator + tests; split-device/overlap need idle-GPU measurement, see log)
 - Severity: major (dominant wall-clock + VRAM cliff on 16 GiB)
 - Area: performance — `_with_audio_gpu` swap path
 - Rank rationale: the single biggest production cost; any caption change/repaint/
@@ -85,3 +85,15 @@ per segment); observe per-segment full swap wall vs the invariant-holding baseli
 - 2026-09-25 (repair pass): added `## Why this is an issue`; Evidence enriched
   (swap + evict sites re-verified); `_ensure_audio_coverage` range updated to
   755-868.
+- 2026-09-26 (resolution, candidate 1 — FIXED): `AudioConfig.take_covers_ahead`
+  model validator (`voyage/config.py:261-278`, import at `:21`) rejects
+  `take_seconds <= ahead_seconds` at config load with the swap-cost message
+  (defaults 45.0/20.0 unaffected; `resolve_config` take overrides validate
+  through the same constructor). Candidates (2) split-devices and (3) overlap
+  still need idle-GPU measurement (unchanged). Tests:
+  `tests/test_audio_take_ahead_guard.py` (7 tests: defaults/equal/short/message
+  text/just-above/resolve-override/toml roundtrip). Gates on scope files: ruff
+  check + format clean; mypy clean for the validator (the one `config.py:19`
+  unused-ignore is pre-existing); new tests green. Full `gates.sh` stays red
+  on out-of-scope concurrent-pass files (8 ruff hits, 44 mypy hits, missing
+  hypothesis dep — none in this change).

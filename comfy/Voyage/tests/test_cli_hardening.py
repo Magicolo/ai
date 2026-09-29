@@ -424,3 +424,20 @@ def test_slowest_stage_picks_max() -> None:
     assert _slowest_stage({"video": 1.2, "audio": 0.4}) == "video (1.2s)"
     assert _slowest_stage({}) is None
     assert _slowest_stage({"video": "fast"}) is None
+
+
+def test_models_info_reports_bundles_and_license(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`models info` names bundles, pins, license, and verify (051)."""
+    assert main(["models", "info"]) == 0
+    out = capsys.readouterr().out
+    for expected in (
+        "longlive2-bf16",
+        "ltxv-2b",
+        "causvid",
+        "model_registry.py",
+        "CC BY-NC-SA 4.0",
+        "models verify",
+    ):
+        assert expected in out, expected

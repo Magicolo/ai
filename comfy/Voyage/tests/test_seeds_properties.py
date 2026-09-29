@@ -20,9 +20,9 @@ import pytest
 
 pytest.importorskip("hypothesis", reason="property tests need Hypothesis (absent from gate image)")
 
-from hypothesis import given  # noqa: E402 — importorskip above exits first when absent
-from hypothesis import strategies as strategies  # noqa: E402 — importorskip above exits first
-from hypothesis.strategies import DataObject  # noqa: E402 — importorskip above exits first
+from hypothesis import given
+from hypothesis import strategies as strategies
+from hypothesis.strategies import DataObject
 
 from voyage.seeds import audio_seed, derive_seed, director_seed, video_seed
 

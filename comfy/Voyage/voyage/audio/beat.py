@@ -74,3 +74,19 @@ def quantize_take_seconds(take_seconds: float, segment_seconds: float) -> float:
         raise ValueError(f"segment duration must be positive (got {segment_seconds})")
     multiples = max(1, round(take_seconds / segment_seconds))
     return multiples * segment_seconds
+
+
+def segment_progress_info(
+    segment_seconds: float,
+    beats_per_segment: int = 4,
+) -> dict[str, float]:
+    """Progress-only beat/BPM numbers for one segment (issue 046).
+
+    The supervisor needs these for display while `build_final_audio`
+    re-derives the same timeline for the real mix — this helper keeps the
+    display math in `audio.beat` (one owner) instead of a lazy mid-commit
+    re-import at the call site. Raises ValueError on bad inputs, same
+    contract as `beats_for_segment`.
+    """
+    beats, grid_bpm = beats_for_segment(segment_seconds, beats_per_segment)
+    return {"beats": float(beats), "grid_bpm": grid_bpm}

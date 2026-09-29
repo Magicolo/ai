@@ -34,6 +34,7 @@ from voyage.config import (
 from voyage.console import RichSegmentProgress, VoyageConsole
 from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
+from voyage.logrotate import iter_metric_files
 from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS, finalize_run
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
@@ -159,7 +160,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
     backend: VideoBackendName = getattr(args, "backend", None) or "fake"
-    config_text = default_config_toml(args.run_id, args.style, args.seed, video_backend=backend)
+    director_backend: str = getattr(args, "director", None) or "qwen"
+    config_text = default_config_toml(
+        args.run_id, args.style, args.seed, video_backend=backend, director_backend=director_backend
+    )
     (run_dir / paths.CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
     config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
     hardware = {"note": "recorded at init; see `voyage doctor` for live facts"}
@@ -323,7 +327,12 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(f"manifest: {models_dir / 'manifest.json'}")
         return 0
     if action == "info":
-        print("Use `voyage models list` for backends, `verify` for file checks.")
+        print("backends: `voyage models list` (video/audio/director/inspector)")
+        print("weights: longlive2-bf16 (~48 GB) | ltxv-2b (~7 GB) | causvid (~28 GB)")
+        print("weights: director-qwen8b (~16 GB) | audio-acestep | inspector-qwen35 (~19 GB)")
+        print("pins: voyage/model_registry.py (single source); human mirror docs/MODELS.md")
+        print("note: CausVid DMD checkpoint is CC BY-NC-SA 4.0 (non-commercial)")
+        print("check: `voyage models verify` for presence + size sanity")
         return 0
     return 2
 
@@ -471,27 +480,56 @@ def _slowest_stage(stages: dict[str, object]) -> str | None:
     return f"{name} ({numeric[name]}s)"
 
 
-def _last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
-    """Newest segment_committed event (id + stages) in the live metrics log.
+def _read_all_metric_events(run_dir: Path) -> list[dict[str, object]]:
+    """All metric events across live + rotated siblings, oldest-first (049).
 
-    Returns None when the log is missing, empty, or rolled past the last
-    commit (daily rotation) — status must degrade, never fail.
+    Rotation splits history across dated siblings; readers needing full
+    history (status last-commit, soak/benchmark averages) must use this
+    instead of opening the live file directly. Torn lines are skipped;
+    a missing/unreadable logs dir yields whatever subset exists.
     """
-    metrics_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
-    try:
-        lines = metrics_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for line in reversed(lines):
+    events: list[dict[str, object]] = []
+    for events_path in iter_metric_files(run_dir):
         try:
-            event = json.loads(line)
-        except ValueError:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
             continue
-        if isinstance(event, dict) and event.get("event") == "segment_committed":
-            stages = event.get("stages")
-            segment_id = event.get("segment_id")
-            if isinstance(stages, dict) and isinstance(segment_id, str):
-                return segment_id, stages
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
+    """Newest segment_committed event (id + stages) across rotated logs.
+
+    Scans live + dated siblings newest-first via `iter_metric_files`
+    (issue 049): after a daily rotation the live file alone would
+    silently drop the Stages section the day after a run ends.
+    Returns None when no commit is found — status must degrade, never fail.
+    """
+    for events_path in reversed(iter_metric_files(run_dir)):
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "segment_committed":
+                stages = event.get("stages")
+                segment_id = event.get("segment_id")
+                if isinstance(stages, dict) and isinstance(segment_id, str):
+                    return segment_id, stages
     return None
 
 
@@ -974,6 +1012,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         seed=args.seed,
         force=args.force,
         backend=args.backend,
+        director=args.director,
     )
     code = cmd_init(init_args)
     if code != 0:
@@ -1158,12 +1197,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         run_dir = Path(init_args.output)
         config, _digest = _load_run(run_dir)
         committed = Supervisor(run_dir, config).run_segments(segments)
-        events = [
-            json.loads(line)
-            for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
+        events = _read_all_metric_events(run_dir)
         setup = {
             "backend": "fake",
             "warmup": warmup,
@@ -1200,9 +1234,8 @@ def _stage_means(events: list[dict[str, object]]) -> dict[str, float]:
 
 def cmd_soak(args: argparse.Namespace) -> int:
     """Run N segments on a real run, then report the stability trend (§68)."""
-    import json
-
     from voyage.bench import format_report, summarize_gauges
+    from voyage.supervisor import summarize_prefetch_outcome
 
     run_dir = _run_dir_arg(args.run)
     segments = int(args.segments)
@@ -1218,17 +1251,13 @@ def cmd_soak(args: argparse.Namespace) -> int:
     committed = Supervisor(run_dir, config, progress=RichSegmentProgress(console)).run_segments(
         segments
     )
-    events = [
-        json.loads(line)
-        for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
+    events = _read_all_metric_events(run_dir)
     setup: dict[str, object] = {"run": str(run_dir), "segments_requested": segments}
     metrics: dict[str, object] = {
         "segments_committed": committed,
         "stages": _stage_means(events),
         **summarize_gauges([event for event in events if event.get("event") == "resource_gauges"]),
+        "prefetch": summarize_prefetch_outcome(events),
         "validate_errors": validate_run(run_dir),
     }
     print(format_report("soak", setup, metrics))
@@ -1318,6 +1347,13 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
         choices=("fake", "longlive2", "ltxv", "causvid"),
         default="fake",
         help="video backend preset written into the run config",
+    )
+    init.add_argument(
+        "--director",
+        choices=("qwen", "deterministic"),
+        default="qwen",
+        help="director backend written into the run config "
+        "(default qwen; deterministic disables the LLM)",
     )
     init.set_defaults(func=cmd_init)
 

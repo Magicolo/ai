@@ -1,6 +1,6 @@
 # 031 — Finalize does 2 full video encodes + re-slices all audio from takes
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: concat-copy fast path + slice cache + tests)
 - Severity: medium (finalize wall; O(segments × pieces) ffmpeg spawns)
 - Area: performance — `voyage/media.py:303-549`
 - Rank rationale: the first pass is pure waste on native-geometry runs (now the
@@ -65,3 +65,24 @@ against a single-encode baseline.
   signature re-verified live (`media.py:406-418`, current); pasted output into
   Evidence.
 - Open: implement concat-copy fast path + slice cache + measurement.
+- 2026-09-26 (resolution — FIXED): both landed in `voyage/media.py`.
+  Concat-copy fast path: `_segment_video_matches_target` (`:550-569`,
+  probe-only, never raises — h264 + yuv420p + WxH + fps gate) and the
+  `native` branch in `finalize_run` (`:679-725`) concats the committed
+  videos with `-c:v copy` + muxes the blended audio — zero video
+  re-encodes on native runs (the default); the two-pass path is untouched
+  for lifts/mismatches (the 16fps→24 minterpolate test still takes it).
+  The hoisted `build_final_audio` call uses `settings.*` so the concurrent
+  pass's `FinalizeOptions` is respected on both paths; also removed a
+  duplicated fallback `return` in `build_final_audio` (dead code).
+  Slice cache: `_slice_cache_key` (`.6f` precision) + `_cached_slice_take`
+  (`:332-368`, per-finalize memo, copy-on-hit, `exists` guard survives
+  `replace` moves), wired into the window loop (`:442`, `:465`).
+  Honest caveat: steady-state windows tile distinct byte ranges (pieces
+  break at take joints), so identical (take,start,dur) recurs only when two
+  joints fall inside one overlap span — expect ~0 hits in steady state;
+  the mechanism is correct and covered, not a steady-state win.
+  Tests: `tests/test_finalize_fastpath.py` (6 tests: key rounding, one-spawn
+  memo, native/negative matcher probes, native end-to-end validate, audio
+  blend smoke, copy-path call recording with zero libx264 video encodes +
+  AAC audio present).

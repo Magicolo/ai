@@ -1,6 +1,6 @@
 # 047 — Docs drift: README thin; BACKENDS/MODELS miss CausVid+LTXV; `UPSTREAM_LTXV_NOTES.md` missing
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: README/TUI/flags/index + BACKENDS/MODELS rows + LTXV notes)
 - Severity: medium (users can't discover verbs/backends; registry not "single
   source of truth" in docs)
 - Area: documentation — README, `docs/`, `TASK.md`
@@ -92,3 +92,16 @@ Commands above.
   flags, BACKENDS LTXV tail-PNG paragraph (:50-64 vs video_ltxv.py:15,59,561),
   missing UPSTREAM_LTXV_NOTES.md. Evidence replaced with real command output.
 - Open: rewrite remaining docs batch.
+- 2026-09-29 (this track): FIXED the remaining batch (docs-only, no runtime
+  change). `README.md`: TUI paragraph + full `generate` flags
+  (`--backend/--duration/--draft/--director/--blocks/--take-seconds/
+  --quantization/--beats-per-segment/--drift-every-n/--final-video/
+  --skip-bad/--verbose/--no-color`) + status/scoreboard/benchmark/soak
+  one-liners + full docs index (added `UPSTREAM_CAUSVID_NOTES.md` +
+  `UPSTREAM_LTXV_NOTES.md`). `docs/BACKENDS.md:50-65`: LTXV chaining
+  rewritten to Stream-A (121-frame clips / 25-frame `video_tail.mp4` /
+  96-novel + §5.3 JSON tape; PNG tail removed). Created
+  `docs/UPSTREAM_LTXV_NOTES.md` (pins `4b2d053`/`8984fa25`/`b89adade`,
+  Stream-A accounting, license pointer); `TASK.md` deliverable line marked
+  landed. Tests: docs-only, no new tests. Scoped gates green (ruff/format
+  N/A md; pytest 78 passed on related suites).

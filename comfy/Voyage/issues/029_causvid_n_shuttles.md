@@ -1,6 +1,6 @@
 # 029 — CausVid pre-encodes with N separate 11 GiB T5 shuttles per segment
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: single T5 shuttle + tests)
 - Severity: medium-high (allocator churn → fragmentation OOMs)
 - Area: performance — `CausvidSession._encode_conditional` + `generate_blocks`
 - Rank rationale: the code's own comment warns against exactly what the code does.
@@ -64,3 +64,24 @@ multi-block OOM flakes.
   the fix ("one 11 GB roundtrip, not N") while `:717` still loops per-prompt
   shuttles — docstring-vs-code contradiction, issue stands.
 - Open: implement + multi-block soak.
+- 2026-09-26 (resolution, FIXED): new
+  `CausvidSession._encode_conditionals` (`voyage/workers/video_causvid.py:581-605`)
+  moves T5 to CUDA once, encodes every prompt with the same per-prompt
+  call as before, and parks it back once (`finally`, so a failed
+  encode still restores the CPU park); empty lists rejected.
+  `_encode_conditional` (`:607-613`) delegates to it (single-prompt
+  form kept for benchmark probes — identical shuttle semantics).
+  `generate_blocks` (`:783`) calls the batch form, resolving the
+  docstring-vs-code contradiction. Multi-block soak under memory
+  pressure is the orchestrator's job (no GPU workloads here).
+  Tests: `tests/test_issue_029_causvid_shuttle.py` (6 tests: one
+  `cuda/cpu` pair + 2 `empty_cache` calls for 3 prompts, single
+  delegation, `finally` restore on failure, empty rejection, class
+  cache identity, precomputed passthrough).
+  Gates: ruff + format + mypy strict clean on `video_causvid.py`;
+  new tests pass in-container (see 014 log for full-tree gate state).
+  Regression slice (causvid/ltxv/longlive/concepts-adjacent/metrics/
+  recovery/inspector suites): 118 passed; the only 4 failures are
+  `tests/test_ltxv_failure_hygiene.py`, caused by the 030 LRU type
+  change (see 030 log) — `test_causvid_worker.py` itself is fully
+  green with the new single-shuttle path.

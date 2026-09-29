@@ -14,32 +14,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import cmd_status
-from voyage.config import default_config_toml, load_config
+from voyage.cli import _last_commit_stages, _read_all_metric_events, cmd_status
+from voyage.config import load_config
 from voyage.logrotate import append_line, iter_metric_files
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    write_manifest,
-    write_state,
-)
 from voyage.rpc import SubprocessWorker
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "observability") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _backdate(path: Path, days_ago: int) -> None:
@@ -183,3 +168,40 @@ def test_status_shows_section_layout(tmp_path: Path, capsys: pytest.CaptureFixtu
         "Free:",
     ):
         assert expected in out, expected
+
+
+def test_last_commit_stages_spans_rotation(tmp_path: Path) -> None:
+    """Day-after rotation: the commit in the dated sibling is still found (049)."""
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    rotated = logs_dir / "metrics-2026-01-01.jsonl"
+    rotated.write_text(
+        '{"event": "segment_committed", "segment_id": "000000", "stages": {"video": 1.0}}\n',
+        encoding="utf-8",
+    )
+    live = logs_dir / "metrics.jsonl"
+    live.write_text('{"event": "resource_gauges"}\n', encoding="utf-8")
+    assert _last_commit_stages(run_dir) == ("000000", {"video": 1.0})
+    live.write_text(
+        '{"event": "segment_committed", "segment_id": "000001", "stages": {"video": 2.0}}\n',
+        encoding="utf-8",
+    )
+    assert _last_commit_stages(run_dir) == ("000001", {"video": 2.0})
+
+
+def test_read_all_metric_events_concatenates_oldest_first(tmp_path: Path) -> None:
+    """Soak/benchmark averages see rotated + live events in order, torn lines skipped."""
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    rotated = logs_dir / "metrics-2026-01-01.jsonl"
+    rotated.write_text(
+        '{"event": "segment_committed", "segment_id": "000000"}\nnot-json\n',
+        encoding="utf-8",
+    )
+    live = logs_dir / "metrics.jsonl"
+    live.write_text('{"event": "resource_gauges"}\n', encoding="utf-8")
+    events = _read_all_metric_events(run_dir)
+    assert [event["event"] for event in events] == ["segment_committed", "resource_gauges"]
+    assert _read_all_metric_events(tmp_path / "absent-run") == []

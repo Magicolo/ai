@@ -1708,8 +1708,7 @@ code/config work the merged spec now requires.
   1.72 GiB failed), so the revert stands as measured fact. Remaining open:
   81/97/121 matrix, TeaCache/Q8/FP8 study, extension-throughput, manual
   eyeball review of the qual continuity numbers.
-- Deliverable: `docs/UPSTREAM_LTXV_NOTES.md` (does not exist; only
-  `UPSTREAM_LONG_LIVE_PATCHES.md` does).
+- Deliverable: `docs/UPSTREAM_LTXV_NOTES.md` (landed 2026-09-29, issue 047).
 
 ## 30.3 Config/interface duality — resolved via adapter (Stream C, 2026-09-24)
 

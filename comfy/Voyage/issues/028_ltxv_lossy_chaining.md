@@ -1,6 +1,6 @@
 # 028 — LTXV inter-block chaining via lossy mp4 temp files (encode + decode per block)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: tensor handoff + tail-length asserts + tests; encode-wall A/B needs idle GPU, see log)
 - Severity: medium-high (wall + quality — generation loss on the continuity tail)
 - Area: performance — `voyage/workers/video_ltxv.py:477-591`
 - Rank rationale: N encodes + N decodes for what is logically a tensor handoff;
@@ -58,3 +58,29 @@ on the continuity-critical tail.
   _save_mp4 / prepare_conditioning refs re-verified live, current; pasted rg
   output into Evidence.
 - Open: implement tensor handoff + A/B continuity check.
+- 2026-09-26 (resolution, PARTIAL): tensor handoff landed with the mp4
+  fallback kept (`voyage/workers/video_ltxv.py`). Pure helpers (slim-tested):
+  `validate_tail_length` (`:147-160`, the issue-064 short-anchor guard
+  extracted from the inline assert), `tail_frames_for_conditioning`
+  (`:163-181`, (T,H,W,C) uint8 shape gate), `_tail_clip_to_handoff_frames`
+  (`:184-215`, `_save_mp4`-mirroring conversion returning None with a
+  stderr note when the tail cannot be bottled). `_generate_block` takes the
+  union `str | NDArray[np.uint8] | None` in its existing 7th slot
+  (`:418-466`) — arity unchanged so stubbed sessions keep working;
+  `generate_blocks` chains onto `pending_tail_frames` when bottling
+  succeeded, else the chain mp4 path (`:592-647`). Chain mp4s are still
+  written (crash-recovery/fallback artifact + final-tail source): the
+  quality win (no lossy roundtrip on the continuity tail) and the decode
+  wall land now; the encode wall remains. Tests:
+  `tests/test_ltxv_tensor_handoff.py` (11 tests: tail-length exact/short/
+  long, constants, shape/dtype gates, bottling of a channel-first fake,
+  stub-tensor fallback). Compatibility note: an 8th-parameter variant was
+  tried first and broke `test_ltxv_failure_hygiene` stubs (7-arg) — the
+  union slot fixes it; those 3 tests pass unmodified. FOLLOW-UP (needs idle
+  GPU): (a) A/B continuity — tensor-chained vs mp4-chained multi-block
+  segment, consecutive-frame diff + eyeball, confirming `prepare_conditioning`
+  array semantics in the pinned ltx-video rev; (b) only then stop writing
+  intermediate `*_chain*.mp4` (keep the final `video_tail.mp4` recovery
+  anchor). Pre-existing, out of scope: `test_encode_moves_mask_to_session_device`
+  fails on the concurrent pass's `_encode` LRU change (`{}` has no `.put`) —
+  untouched here.

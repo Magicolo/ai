@@ -1,6 +1,6 @@
 # 041 — Markers registered but dead; no coverage gate; benchmark evidence gaps
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: gpu deselect + coverage /tmp datafile + fail_under 65; GPU artifacts need idle GPU, see log)
 - Severity: medium (GPU-gated tests don't exist as a category; coverage unknown;
   perf claims lack artifacts)
 - Area: tests/benchmarks — `pyproject.toml:64-70`, `bench.py`, reports
@@ -66,4 +66,28 @@ every image" comment.
 - 2026-09-25: repair pass — added `## Why this is an issue`; marker state
   re-verified live (still 0 `pytest.mark.gpu` hits; `parametrize` ×6 +
   `endurance` ×1 at `test_benchmark.py:161` — current).
-- Open: markers + coverage first (cheap), GPU benchmark artifacts need idle GPU.
+- 2026-09-26 (resolution, FIXED for markers+coverage, notes for artifacts):
+  - Markers: `test.sh` bare default now runs `-m "not gpu"` (explicit args
+    pass through — `./scripts/test.sh -m gpu` is the documented GPU path);
+    `gates.sh` pytest leg carries `-m 'not gpu'`. Verified live against a
+    concurrent agent's new `@pytest.mark.gpu` test
+    (`test_acestep_contract.py:80`): the default deselects exactly 1 test.
+    Marking further GPU probes stays with their authors; `endurance` keeps
+    running in gates (unchanged behavior).
+  - Coverage: `coverage==7.16.1` pinned in dev; `[tool.coverage.run]`
+    (`source=voyage`, `data_file=/tmp/voyage-coverage-data` — never in the
+    bind mount) + `[tool.coverage.report]` (`show_missing`,
+    `fail_under=65`). Measured 78% total on the fake backends (827 passed),
+    so 65 leaves headroom for GPU-worker bodies uncovered by design; raise
+    toward measured as worker coverage grows. `gates.sh` runs the suite
+    once under `coverage run` + `coverage report` (fail_under enforced
+    every gate, no second run).
+  - Hook (lock owner): same as 039 — `coverage==7.16.1` needs its lock
+    line before the gates coverage leg works in a fresh image.
+  - Benchmark notes (no code — needs idle GPU, still open): cheapest
+    measurements are `benchmark video --profile_stages` per backend on an
+    idle card with the JSON committed, 45 s-take `audio benchmark` numbers
+    into `video-backends.md`, and the empty LTXV leg at
+    `reports/video-backends.md:119-122`; aggregate
+    `director_prefetch_hit/miss` in `soak` when touched.
+- Open: GPU benchmark artifacts only (above).

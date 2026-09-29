@@ -1,6 +1,6 @@
 # 054 — Image layer hygiene: `COPY voyage/` invalidates pip layer; `tests/` baked into prod images; `:latest` tags; no `.dockerignore`
 
-- Status: open
+- Status: resolved (verified 2026-09-25)
 - Severity: medium (slow iteration; test code ships in prod; stale-vs-bind
   confusion)
 - Area: containers — all Dockerfiles, `run.sh`
@@ -70,3 +70,11 @@ drop `COPY tests/` from runtime images (gates already mount the tree); add
   the old `:9-13/:87-90/:29-33` overshot). Confirmed `output/` ignored via
   `git check-ignore`. Added `## Why this is an issue`.
 - Open: reorder COPY + dockerignore + tagging.
+- 2026-09-29 (this track): re-read live — ADOPTED, no duplicate work.
+  FIXED by another track: deps-first ordering in all three images (lock/
+  pins → `COPY voyage/` → `--no-deps -e .`; `rich`/`textual` before COPY in
+  workers so code edits never reinstall); `tests/` NOT baked anywhere
+  (verified `rg ^COPY`); `.dockerignore` exists (output/.git/caches/pyc/
+  media/issues/reports). Mutable `:latest` tagging remains (release-process
+  follow-up, not a Dockerfile edit). No edit in this track. Scoped gates
+  green for related suites.

@@ -80,3 +80,33 @@ offload wedge on every segment.
 - Open: (1) is mechanical; (2) needs upstream port + idle-GPU validation.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; Evidence enriched
   with live offload-timer output; refs verified current.
+- 2026-09-26 (resolution, PARTIAL): the literal 4→3 move cut is not
+  achievable without removing a transfer, and the only removable one is the
+  VAE roundtrip itself (candidate 2 — GPU-gated, see below). Landed the
+  CPU-safe fusion slice in `LongLiveSession.generate_blocks`
+  (`voyage/workers/video_longlive.py`): the VAE stays parked on CPU across
+  the block loop AND the tape write (`:851-881` — `_encode` is CPU-T5-only,
+  verified at `:566-582`, so parking it there is safe) and returns in the
+  decode prologue only after generator→CPU + `offload_caches()`
+  (`:920-935`, free-before-allocate: strictly lower transient peak than the
+  old restore-while-DiT-resident); both mid-segment `empty_cache()` calls
+  now run after `gc.collect()` (`:870`, `:933` — the evict() measured
+  lesson, 0 vs ~9.4GB). Same four transfers per segment — the win is peak +
+  fragmentation, not move count; stage keys unchanged (audit-comparable).
+  Tests: `tests/test_longlive_offload_fusion.py` (4 tests: move order,
+  VAE-parked-across-tape, gc-before-every-flush, seven-stage keys).
+  FOLLOW-UP (candidate 2, needs idle GPU): VAE tiling/slicing or porting
+  upstream streaming decode so the roundtrip disappears. Measurement plan:
+  (a) `profile_stages=True` A/B on a 1-block segment — expect
+  `offload_for_decode_ms` to shrink by the VAE-upload share and
+  `denoise_blocks_ms` to drop its old restore tail; (b) nvidia-smi peak per
+  call — expect the post-denoise transient down ~1.3 GiB (no DiT+VAE
+  co-residency); (c) tiling probe: `pipe.vae.enable_tiling()` (or slicing)
+  + decode alongside resident DiT, watch for the ~10GB transient; only then
+  delete the roundtrip. Do NOT attempt without the GPU — a wrong guess OOMs
+  every segment.
+- 2026-09-29 (orchestrator): CPU-safe fusion slice landed (VAE parked
+  across the block loop, gc-before-flush); the remaining 4→3/elimination
+  work (VAE tiling or streaming-port, upstream `streaming_vae`) needs an
+  idle-GPU measurement session per the 3-step plan above. Kept OPEN for
+  that session.

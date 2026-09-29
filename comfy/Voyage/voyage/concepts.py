@@ -20,13 +20,25 @@ import json
 import math
 import os
 import re
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+from numpy.typing import NDArray
 from pydantic import BaseModel
 
-from voyage.atomic import atomic_write_bytes, atomic_write_json, fsync_dir
+from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json, fsync_dir
 from voyage.errors import StateError
+
+LEGACY_MIGRATION_REMOVE_AFTER = "2026-12-31"
+"""Time-box for the Phase 0/2 `legacy_path` migration (issue 046).
+
+The migration has served: live callers (`supervisor`, `cli`) still thread
+`legacy_path` through, but no new code may depend on it. After the date
+above, delete the `legacy_path` parameter, `_migrate_legacy`, and this
+constant — every use site warns until then.
+"""
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -62,6 +74,33 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _max_cosine_to_accepted(
+    vector: list[float], matrix: NDArray[np.float32], accepted_indices: list[int]
+) -> float:
+    """Max cosine of `vector` against accepted matrix rows (issue 027).
+
+    Vectorized twin of the `cosine_similarity` loop it replaces: empty
+    queries, dimension mismatches, and zero-norm rows all score 0.0,
+    and the floor stays 0.0 (the loop never returned a negative best).
+    """
+    rows = [index for index in accepted_indices if 0 <= index < matrix.shape[0]]
+    if not rows or not vector:
+        return 0.0
+    query = np.asarray([float(value) for value in vector], dtype=np.float64)
+    if query.shape[0] != matrix.shape[1]:
+        return 0.0
+    query_norm = float(np.linalg.norm(query))
+    if query_norm == 0.0:
+        return 0.0
+    candidates = matrix[rows].astype(np.float64)
+    row_norms = np.linalg.norm(candidates, axis=1)
+    dots = candidates @ query
+    with np.errstate(divide="ignore", invalid="ignore"):
+        similarities = np.divide(dots, row_norms * query_norm)
+    similarities[row_norms == 0.0] = 0.0
+    return float(max(0.0, np.max(similarities)))
+
+
 class ConceptRecord(BaseModel):
     id: str
     canonical_name: str
@@ -91,6 +130,12 @@ class ConceptStore:
         self._vectors_path = directory / "concept_vectors.npy"
         self._index_path = directory / "concept_index.json"
         self._records: list[ConceptRecord] = []
+        # Issue 027: in-memory vector matrix (None until first read).
+        # The store is the single writer per run (DESIGN §72), so the
+        # cache only goes stale on our own appends, which refresh it —
+        # repeated check/append cycles in one commit stop re-reading
+        # the full file from disk.
+        self._matrix_cache: NDArray[np.float32] | None = None
         if legacy_path is not None and legacy_path.exists() and not self._concepts_path.exists():
             self._migrate_legacy(legacy_path)
         if self._concepts_path.exists():
@@ -109,7 +154,17 @@ class ConceptStore:
         return [record.canonical_name for record in self._records if record.accepted]
 
     def _migrate_legacy(self, legacy_path: Path) -> None:
-        """Adopt Phase 0/2 token-set history into §21 records (no vectors)."""
+        """Adopt Phase 0/2 token-set history into §21 records (no vectors).
+
+        Time-boxed (see `LEGACY_MIGRATION_REMOVE_AFTER`): warns on every
+        use so remaining callers show up in logs before removal.
+        """
+        warnings.warn(
+            "ConceptStore legacy_path migration is deprecated and will be removed after "
+            f"{LEGACY_MIGRATION_REMOVE_AFTER}; stop threading legacy_path through new code",
+            DeprecationWarning,
+            stacklevel=3,
+        )
         directory = self._directory
         directory.mkdir(parents=True, exist_ok=True)
         records: list[ConceptRecord] = []
@@ -131,12 +186,21 @@ class ConceptStore:
             "".join(record.model_dump_json() + "\n" for record in records).encode("utf-8"),
         )
 
-    def _load_vectors(self) -> list[list[float]]:
-        if not self._vectors_path.exists():
-            return []
-        import numpy as np
+    def _load_matrix(self) -> NDArray[np.float32]:
+        """Full vector matrix as float32, cached in memory (issue 027).
 
-        matrix = np.load(str(self._vectors_path))
+        A missing matrix reads as a (0, 0) empty — callers treat "no
+        rows" uniformly instead of branching on file existence.
+        """
+        if self._matrix_cache is None:
+            if not self._vectors_path.exists():
+                self._matrix_cache = np.zeros((0, 0), dtype=np.float32)
+            else:
+                self._matrix_cache = np.asarray(np.load(str(self._vectors_path)), dtype=np.float32)
+        return self._matrix_cache
+
+    def _load_vectors(self) -> list[list[float]]:
+        matrix = self._load_matrix()
         return [[float(value) for value in row] for row in matrix.tolist()]
 
     def _dangling_vector_records(self, stored_count: int) -> list[str]:
@@ -159,15 +223,17 @@ class ConceptStore:
 
         A crash mid-save must never leave a torn .npy behind — the
         previous valid matrix survives. (Single writer, DESIGN §72.)
-        """
-        import numpy as np
 
+        Issue 027: single disk load (was two `np.load` calls: one for
+        the dangling guard, one for the rows) plus a C-speed
+        `concatenate` (was `tolist → append → asarray`: a Python-float
+        roundtrip of every stored value per segment).
+        """
+        if not vector:
+            raise ValueError("concept vector must be non-empty")
         # Issue 059 fail-loud: never stack a fresh matrix under records
         # that reference lost rows — the indices would silently dangle.
-        if self._vectors_path.exists():
-            existing_rows = int(np.load(str(self._vectors_path)).shape[0])
-        else:
-            existing_rows = 0
+        existing_rows = int(self._load_matrix().shape[0]) if self._vectors_path.exists() else 0
         dangling = self._dangling_vector_records(existing_rows)
         if dangling:
             raise StateError(
@@ -175,13 +241,13 @@ class ConceptStore:
                 f"({existing_rows} rows stored); restore concept_vectors.npy "
                 "before appending"
             )
+        row = np.asarray([[float(value) for value in vector]], dtype=np.float32)
         if self._vectors_path.exists():
-            matrix = np.load(str(self._vectors_path))
-            rows = matrix.tolist()
-            rows.append([float(value) for value in vector])
-            stacked = np.asarray(rows, dtype=np.float32)
+            stacked = np.asarray(
+                np.concatenate([self._load_matrix(), row], axis=0), dtype=np.float32
+            )
         else:
-            stacked = np.asarray([[float(value) for value in vector]], dtype=np.float32)
+            stacked = row
         self._vectors_path.parent.mkdir(parents=True, exist_ok=True)
         # np.save appends .npy when missing, so the temp name keeps the suffix.
         tmp_npy = self._vectors_path.parent / f"{self._vectors_path.name}.{os.getpid()}.tmp.npy"
@@ -198,6 +264,7 @@ class ConceptStore:
             except OSError:
                 pass
             raise
+        self._matrix_cache = stacked
         return int(stacked.shape[0]) - 1
 
     def check_novel(self, text: str, vector: list[float] | None = None) -> tuple[bool, float]:
@@ -208,22 +275,21 @@ class ConceptStore:
         """
         canonical = canonicalize(text)
         if vector is not None:
-            stored = self._load_vectors()
+            matrix = self._load_matrix()
             # Issue 059 fail-loud: missing rows must abort the novelty
             # decision, never score the duplicate 0.0 (accepted as novel).
-            dangling = self._dangling_vector_records(len(stored))
+            dangling = self._dangling_vector_records(int(matrix.shape[0]))
             if dangling:
                 raise StateError(
                     f"concept vectors missing rows for records {dangling} "
-                    f"({len(stored)} rows stored); restore concept_vectors.npy "
+                    f"({int(matrix.shape[0])} rows stored); restore concept_vectors.npy "
                     "before proposing"
                 )
-            best = 0.0
-            for record in self._records:
-                if not record.accepted or record.embedding_index < 0:
-                    continue
-                if record.embedding_index < len(stored):
-                    best = max(best, cosine_similarity(vector, stored[record.embedding_index]))
+            best = _max_cosine_to_accepted(
+                vector,
+                matrix,
+                [record.embedding_index for record in self._records if record.accepted],
+            )
             return (best < self._threshold, best)
         best = 0.0
         for known in self.history_texts():
@@ -258,7 +324,9 @@ class ConceptStore:
         return record
 
     def _write_index(self) -> None:
-        index = {record.id: record.embedding_index for record in self._records if record.accepted}
+        index: dict[str, JsonValue] = {
+            record.id: record.embedding_index for record in self._records if record.accepted
+        }
         atomic_write_json(self._index_path, index)
 
     def propose(

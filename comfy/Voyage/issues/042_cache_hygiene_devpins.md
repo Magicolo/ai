@@ -1,6 +1,6 @@
 # 042 — Residue/cache hygiene below Zoomy bar; `__pycache__` on disk; dev pins drift
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: cache env + exact pins)
 - Severity: medium (dirty tree; uncomparable gates across images)
 - Area: standards — scripts env, Dockerfile, dev pins
 - Rank rationale: two distinct but adjacent hygiene gaps; the tree already shows
@@ -67,4 +67,21 @@ benchmark/manifest logs; pin director-image test deps to the same pins.
 - 2026-09-25: repair pass — added `## Why this is an issue`; `__pycache__`
   presence + cache-env absence re-verified live on host; pasted output into
   Evidence.
-- Open: implement env + pins.
+- 2026-09-26 (resolution, FIXED in owned scope, hooks for the rest):
+  - Cache env: `gates.sh` + `test.sh` now pass `RUFF_CACHE_DIR`,
+    `MYPY_CACHE_DIR`, `HYPOTHESIS_STORAGE_DIRECTORY` (all `/tmp/voyage-*`)
+    alongside the existing `PYTHONDONTWRITEBYTECODE=1`; `conftest.py`
+    disables the Hypothesis example DB (`database=None` profile), so no
+    replay residue ever lands in the bind mount. `addopts`
+    `no:cacheprovider` kept. Pre-existing `__pycache__` residue under
+    `Voyage/` removed (root-owned stragglers via the container).
+  - Dev pins: adopted the concurrent exact pins (`pytest==9.1.1`,
+    `mypy==2.3.1`, `ruff==0.16.9` — verified live in the gate image) and
+    added `hypothesis==6.168.0` + `coverage==7.16.1` in the same style.
+  - Hooks (not this scope, do not duplicate): `ENV
+    PYTHONDONTWRITEBYTECODE=1` + cache-dir `ENV` in `Dockerfile` (owned by
+    5E — the Dockerfile has since gone lock-based, see its header);
+    `requirements.lock` regen for the two new dev pins (lock owner, header
+    procedure — gate image lacks them until then); `build.sh` /
+    `build-director.sh` / `run.sh` / `qualify.sh` env parity (their owners).
+- Open: none in this slice.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,8 +20,66 @@ MOTION_THRESHOLD = 0.05
 EDGE_THRESHOLD = 0.15
 """A pixel counts as edge when its Sobel magnitude exceeds this."""
 
-Frame = NDArray[np.uint8]
-Histogram = NDArray[np.float64]
+Frame: TypeAlias = NDArray[np.uint8]
+Histogram: TypeAlias = NDArray[np.float64]
+
+
+def select_frame_indices(total_frames: int, count: int) -> list[int]:
+    """Evenly spaced frame indices over `total_frames` (pure helper).
+
+    `count == 1` picks the middle frame (the VLM inspect view) —
+    the same choice `sample_frames` documents.
+    """
+    if total_frames < 1:
+        raise MediaError(f"frame selection needs total_frames >= 1 (got {total_frames})")
+    if count < 1:
+        raise MediaError(f"frame selection needs count >= 1 (got {count})")
+    if count == 1:
+        return [total_frames // 2]
+    return [round(index * (total_frames - 1) / (count - 1)) for index in range(count)]
+
+
+def select_filter_expression(indices: list[int]) -> str:
+    """ffmpeg `select` filter decoding only `indices` (issue 032).
+
+    `n` counts input frames from 0, so `eq(n\\,X)` keeps exactly input
+    frame X; callers pair this with `-vsync 0` so no frames are
+    duplicated to fill a constant rate.
+    """
+    if not indices:
+        raise MediaError("select filter needs at least one frame index")
+    if any(index < 0 for index in indices):
+        raise MediaError(f"select filter needs non-negative indices (got {indices})")
+    terms = "+".join(f"eq(n\\,{index})" for index in indices)
+    return f"select='{terms}'"
+
+
+def estimate_frame_total(
+    video_stream: dict[str, Any], container_format: dict[str, Any]
+) -> int | None:
+    """Best-effort decoded-frame count from probe data (issue 032).
+
+    Prefers the stream's `nb_frames`; falls back to
+    duration × `avg_frame_rate`. Returns None when neither yields a
+    positive count — the caller then takes the full-decode path.
+    """
+    raw_count = video_stream.get("nb_frames")
+    try:
+        direct = int(str(raw_count))
+    except (TypeError, ValueError):
+        direct = 0
+    if direct > 0:
+        return direct
+    raw_duration = video_stream.get("duration", container_format.get("duration"))
+    raw_rate = video_stream.get("avg_frame_rate", "")
+    try:
+        duration = float(str(raw_duration))
+        numerator, _, denominator = str(raw_rate).partition("/")
+        rate = float(numerator) / float(denominator)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    estimated = round(duration * rate)
+    return estimated if estimated > 0 else None
 
 
 def _to_gray(frame: Frame) -> NDArray[np.float64]:
@@ -28,28 +87,10 @@ def _to_gray(frame: Frame) -> NDArray[np.float64]:
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
 
-def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Frame]:
-    """Decode a segment clip and return `count` evenly spaced RGB frames.
-
-    `count == 1` returns the middle frame (the VLM inspect view). Frames
-    are downscaled to `width` (aspect kept, even height) — regulation and
-    drift signals, never pixels for show. Raises MediaError when ffmpeg
-    yields no decodable frames.
-    """
+def _decode_frames(video_path: Path, width: int, height: int, video_filter: str) -> list[Frame]:
+    """Run ffmpeg with `video_filter`, return decoded RGB frames (no copy)."""
     import subprocess
 
-    if count < 1:
-        raise MediaError(f"sample_frames needs count >= 1 (got {count})")
-    info = probe(video_path)
-    streams = [s for s in info.get("streams", []) if isinstance(s, dict)]
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
-    if video is None:
-        raise MediaError(f"no video stream in {video_path}")
-    source_width = int(video.get("width", 0) or 0)
-    source_height = int(video.get("height", 0) or 0)
-    if source_width <= 0 or source_height <= 0:
-        raise MediaError(f"unreadable dimensions in {video_path}")
-    height = max(2, (source_height * width // source_width) // 2 * 2)
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -60,7 +101,9 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
             "-i",
             str(video_path),
             "-vf",
-            f"scale={width}:{height}",
+            video_filter,
+            "-vsync",
+            "0",
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -77,14 +120,101 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
     total, leftover = divmod(len(raw), stride)
     if total == 0 or leftover:
         raise MediaError(f"frame sampling yielded no whole frames for {video_path}")
-    frames = [
-        np.frombuffer(raw[i * stride : (i + 1) * stride], dtype=np.uint8).reshape(height, width, 3)
-        for i in range(total)
+    return [
+        np.frombuffer(raw[index * stride : (index + 1) * stride], dtype=np.uint8).reshape(
+            height, width, 3
+        )
+        for index in range(total)
     ]
+
+
+def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Frame]:
+    """Decode a segment clip and return `count` evenly spaced RGB frames.
+
+    `count == 1` returns the middle frame (the VLM inspect view). Frames
+    are downscaled to `width` (aspect kept, even height) — regulation and
+    drift signals, never pixels for show. Raises MediaError when ffmpeg
+    yields no decodable frames.
+
+    Issue 032: decodes only the needed frames via a `select` filter
+    when the probe yields a frame total (the common mp4 case) — the
+    full-stream decode stays as the fallback when the estimate is
+    missing or drifts, so the contract never changes.
+    """
+    if count < 1:
+        raise MediaError(f"sample_frames needs count >= 1 (got {count})")
+    info = probe(video_path)
+    streams = [s for s in info.get("streams", []) if isinstance(s, dict)]
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if video is None:
+        raise MediaError(f"no video stream in {video_path}")
+    source_width = int(video.get("width", 0) or 0)
+    source_height = int(video.get("height", 0) or 0)
+    if source_width <= 0 or source_height <= 0:
+        raise MediaError(f"unreadable dimensions in {video_path}")
+    height = max(2, (source_height * width // source_width) // 2 * 2)
+    container = info.get("format", {})
+    container_format: dict[str, Any] = container if isinstance(container, dict) else {}
+    estimated_total = estimate_frame_total(video, container_format)
+    if estimated_total is not None:
+        picks = select_frame_indices(estimated_total, count)
+        selected = _decode_frames(
+            video_path,
+            width,
+            height,
+            f"{select_filter_expression(picks)},scale={width}:{height}",
+        )
+        if len(selected) == len(picks):
+            return [frame.copy() for frame in selected]
+        # Estimate drifted (VFR / wrong nb_frames): fall through to full decode.
+    frames = _decode_frames(video_path, width, height, f"scale={width}:{height}")
+    total = len(frames)
     if count == 1:
         return [frames[total // 2].copy()]
-    picks = [round(i * (total - 1) / (count - 1)) for i in range(count)]
+    picks = select_frame_indices(total, count)
     return [frames[pick].copy() for pick in picks]
+
+
+class SegmentZeroAnchor:
+    """Caches the segment-0 palette histogram across commits (issue 032).
+
+    The supervisor re-decoded all of seg0 on every segment when the
+    inspector is on; seg0 never changes after its commit, so one
+    decode serves the whole run. Construct once per run and call
+    `reference(seg0_video)` per commit: the cached histogram serves
+    while the path + mtime match, otherwise it re-reads (a
+    re-rendered seg0 heals instead of serving a stale anchor).
+
+    Supervisor hook (not wired here — `supervisor.py` is out of scope
+    for this change): keep one `SegmentZeroAnchor` on the supervisor
+    across `run_segments` and replace the per-commit
+    `frame_histogram(sample_frames(seg0_video, 1)[0])` in
+    `_run_previous_inspect` with `anchor.reference(seg0_video)`.
+    """
+
+    def __init__(self) -> None:
+        self._source: Path | None = None
+        self._source_mtime: float = 0.0
+        self._reference: Histogram | None = None
+
+    def reference(self, segment_zero_video: Path) -> Histogram:
+        """Segment-0 palette histogram, decoded at most once per render."""
+        try:
+            modified = segment_zero_video.stat().st_mtime
+        except OSError as exc:
+            raise MediaError(f"segment-0 anchor unreadable: {segment_zero_video}") from exc
+        if (
+            self._reference is not None
+            and self._source == segment_zero_video
+            and self._source_mtime == modified
+        ):
+            return self._reference.copy()
+        frames = sample_frames(segment_zero_video, 1)
+        reference = frame_histogram(frames[0])
+        self._source = segment_zero_video
+        self._source_mtime = modified
+        self._reference = reference
+        return reference.copy()
 
 
 def frame_histogram(frame: Frame, bins: int = HISTOGRAM_BINS) -> Histogram:

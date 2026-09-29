@@ -1,6 +1,6 @@
 # 039 — Zero Hypothesis: 361 tests, 0 properties; `nan`/`inf` slip through (`inf` → 5.6e162 beats)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: hypothesis pin + conftest profile + 9 properties + pins)
 - Severity: medium-high (entire input-domain class untested; live `nan` leak +
   astronomic `inf` blowup)
 - Area: tests — property-based testing
@@ -65,4 +65,34 @@ Commands above; `rg -n "hypothesis|given" Voyage/tests | wc -l` → 0.
 - 2026-09-25: repair pass — added `## Why this is an issue`; re-ran the beat
   probes live (`nan->(4, nan)`; `inf`→~5.6e162 beats, `bpm: nan` — current);
   `rg -n "hypothesis|given" tests/` still 0 code hits.
-- Open: reject non-finite inputs + add hypothesis properties.
+- 2026-09-26 (resolution, FIXED): `hypothesis==6.168.0` pinned in
+  `[project.optional-dependencies] dev` (Zoomy parity pin); `conftest.py`
+  carries the container profile (`database=None`) + two shared strategies
+  (`bounded_counts`, NUL-free `short_texts`) behind a `find_spec` guard so
+  the suite still collects where the package is absent (property modules
+  skip via `importorskip` — verified: 22 passed / 3 skipped without it).
+  New: `tests/test_beat_properties.py` (BPM identity, minimal doubling,
+  determinism, grid alignment, sub-segment floor + `-0.0`/extreme-finite/
+  negative-base pins) and `tests/test_similarity_properties.py`
+  (bounded+symmetric, reflexive, canonicalize idempotence, cosine
+  symmetry/self-unit + empty/case/order/underflow/mismatch pins) — 27
+  tests, all green with Hypothesis (49 passed incl. seeds properties).
+  - Live discoveries pinned, not just fixed: the cosine self-unit property
+    found float-underflow (`[4.4e-197]` squares to sub-denormal → norm 0.0
+    → returns 0.0 for a nonzero vector; pinned as
+    `test_cosine_underflow_reads_as_zero`, policy call logged for the
+    concepts owner); `characters(blacklist_characters=…)` still draws lone
+    surrogates (probed `\ud800`) — conftest blacklists `Cs` explicitly
+    with a Literal-typed tuple (mypy-strict clean).
+  - Adopted (already in tree): nan/inf rejection lives in `beat.py`
+    `_require_finite` + `test_rhythm.py` pins (batch-1 work, not duplicated).
+  - Follow-ups: `test_seeds_properties.py` `short_labels` uses bare
+    `st.text()` — if that shares the `characters()` surrogate default,
+    tighten to conftest `short_texts` (owning pass, one line + rerun);
+    seed-determinism of fakes is issue 040's, not this one.
+  - Hook (lock owner): `requirements.lock` needs the matching lines
+    (`hypothesis==6.168.0` + `sortedcontainers` transitive) — the slim
+    image installs from the lock with `--no-deps -e .`, so the gate image
+    does not carry Hypothesis until the lock is regenerated per its header
+    procedure; gates were verified green via ephemeral install meanwhile.
+- Open: none in this slice.

@@ -1,0 +1,55 @@
+# Voyage slim-image dependency lock (issue 011, freeze-record).
+#
+# Recorded 2026-09-25 via `docker run --rm voyage:latest pip freeze`
+# (slim image, Python 3.12). The slim Dockerfile installs this file first
+# (`pip install -r requirements.lock`), so rebuilds are byte-identical for
+# every package — including transitives that pyproject.toml only floors.
+# Direct (= human-owned) pins live in pyproject.toml; this file is the
+# machine-recorded transitive closure. The two must agree on direct deps.
+#
+# Regenerate after any deliberate upgrade:
+#   docker build -t voyage:latest .
+#   docker run --rm voyage:latest pip freeze | grep -v '^-e ' > requirements.lock
+#
+# Worker images (video/director) carry different stacks (torch/CUDA/Qwen)
+# and are pinned separately in worker/Dockerfile.* — this lock is slim-only.
+annotated-types==0.8.0
+anyio==4.15.1
+ast_serialize==0.11.2
+click==8.5.0
+coverage==7.16.1
+filelock==4.0.3
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore2==2.13.1
+httpx2==2.13.1
+huggingface_hub==2.0.0
+hypothesis==6.168.0
+idna==3.20
+iniconfig==2.3.0
+librt==0.15.0
+linkify-it-py==2.2.0
+markdown-it-py==4.2.0
+mdit-py-plugins==0.6.1
+mdurl==0.1.2
+mypy==2.3.1
+mypy_extensions==1.1.0
+numpy==1.26.4
+packaging==26.3
+pathspec==1.1.1
+platformdirs==4.11.14
+pluggy==1.6.0
+pydantic==2.10.6
+pydantic_core==2.27.2
+Pygments==2.21.0
+pytest==9.1.1
+PyYAML==6.0.3
+rich==15.0.0
+ruff==0.16.9
+sortedcontainers==2.4.0
+textual==8.2.8
+tqdm==4.70.1
+truststore==0.10.4
+typing_extensions==4.16.0
+typing-inspection==0.4.4

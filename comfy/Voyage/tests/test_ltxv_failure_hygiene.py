@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from voyage.workers import video_ltxv
+from voyage.workers.video_common import EmbedCache
 
 
 class _FakeBlockTensor:
@@ -296,7 +297,7 @@ def test_encode_moves_mask_to_session_device() -> None:
         ),
         _text_encoder=_FakeTextEncoder(_FakeEmbeds()),
         _torch=types.SimpleNamespace(inference_mode=contextlib.nullcontext, bfloat16="bfloat16"),
-        _embed_cache={},
+        _embed_cache=EmbedCache(),
     )
     video_ltxv.LTXVSession._encode(session_self, "probe prompt")  # type: ignore[arg-type]
     assert mask.destinations == ["cuda:1"]

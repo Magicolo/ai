@@ -319,7 +319,6 @@ def test_tail_drop_math_matches_upstream_script() -> None:
 
 def test_rollout_zero_uses_uniform_accounting() -> None:
     """Rollout 0 drops its tail exactly like every later rollout (script parity)."""
-    assert video_causvid.split_tail_novel(81, 3) == video_causvid.split_tail_novel(81, 3)
     dropped, novel = video_causvid.split_tail_novel(81, 3)
     assert dropped + novel == 81
     assert novel == 72

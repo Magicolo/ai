@@ -1,6 +1,6 @@
 # 012 — Unpinned base images and toolchain: no digests, unversioned apt/ffmpeg/pip
 
-- Status: open
+- Status: resolved (verified 2026-09-25: digests + apt/ffmpeg/pip pins)
 - Severity: major (reproducibility / supply chain)
 - Area: containers — all three Dockerfiles
 - Rank rationale: finalize bytes are not reproducible across rebuilds; base-image
@@ -59,3 +59,13 @@ tag (`:latest`) is identical (see also 054).
 - Open: pin digests + versions.
 - 2026-09-25 (repair pass): added `## Why this is an issue`; FROM/apt/pip
   lines re-verified live, still floating; no other change.
+- 2026-09-29 (this track, scope Dockerfiles): re-read live — ADOPTED, no
+  duplicate work. FIXED by another track: all three FROM carry digests
+  (`Dockerfile:8`, `worker/Dockerfile.video:7`,
+  `worker/Dockerfile.director:4`); `ffmpeg=7:7.1.5-0+deb13u1` pinned
+  slim + director; `pip==25.0.1` pinned all three; bump procedures in
+  header comments + `docs/INSTALL.md`. Remainder documented in-tree:
+  video apt set stays unversioned (`Dockerfile.video:23-27`, digest-pinned
+  FROM is the guarantee; freeze on next GPU build). No edit in this track.
+  Note: full video/director image builds skipped per task (slim build via
+  `gates.sh` only).

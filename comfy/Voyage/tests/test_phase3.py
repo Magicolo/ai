@@ -101,6 +101,7 @@ def test_director_input_has_no_transcript(tmp_path: Path) -> None:
         "forbidden_summary",
         "audio_state",
         "measured_context",
+        "previous_captions",
         "controller_metrics",
     }
 

@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Base pinned by digest (issue 012): same linux/amd64 python:3.12-slim snapshot
+# as the slim image (resolved 2026-09-25). Bump procedure: see Voyage/Dockerfile
+# header + docs/INSTALL.md; keep all three Dockerfiles on the same snapshot.
+FROM python:3.12-slim@sha256:44ff437bba879d4941b710a369a8f19266aea34b29002807f0c487fabc9eec9b
 
 # Phase 3 director worker env (DESIGN §§8-9): CPU-only torch + transformers
 # (Qwen3-8B, bf16 weights served from system RAM) + sentence-transformers
@@ -11,26 +14,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git gcc g++ ffmpeg \
+        git gcc g++ ffmpeg=7:7.1.5-0+deb13u1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip \
+# Torch floats the CPU wheel (issue 011 remainder): no CPU-side freeze has
+# been recorded yet — the next GPU-box run should freeze
+# (`pip freeze` in this image) and pin torch/torchvision/sentence-
+# transformers/accelerate/safetensors/huggingface_hub/numpy/pillow exact.
+# transformers is pinned exact (4.57.6 breaks nothing: the video image
+# needs 4.x for LongLive's x_clip_loss, verified Phase 3 E2E); the pure
+# tools match the slim lockfile so gate behavior is identical everywhere.
+RUN pip install --no-cache-dir "pip==25.0.1" \
     && pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip install "transformers>=4.51" "sentence-transformers" "accelerate" "safetensors" \
-    "huggingface_hub[cli]" "numpy>=1.26" "pydantic>=2.7,<2.11" "ruff" "mypy" "pytest" \
+RUN pip install "transformers==4.57.6" "sentence-transformers" "accelerate" "safetensors" \
+    "huggingface_hub[cli]" "numpy>=1.26" "pydantic>=2.7,<2.11" \
+    "ruff==0.16.9" "mypy==2.3.1" "pytest==9.1.1" \
     "pillow" \
     && pip install torchvision --index-url https://download.pytorch.org/whl/cpu
 
+# Console progress (rich) + launcher TUI (textual) land first (issue 054):
+# pure-leaf installs before any COPY, so voyage-code edits never reinstall
+# them. Versions match the slim lockfile.
+RUN pip install "rich==15.0.0" "textual==8.2.8"
+
 # Voyage supervisor package (CPU-only here; GPU code lives only behind the
 # video_longlive worker module import, which this image never loads).
-# --no-deps skips rich (console progress, a core dependency) and textual
-# (launcher TUI, also core), so both land explicitly on this line.
+# --no-deps: everything above is already pinned, so the editable install
+# adds only the voyage package itself.
+# tests/ are NOT baked in (issue 054): gates bind-mount the host tree.
 COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
-COPY tests/ /app/tests/
-RUN pip install --no-deps -e /app \
-    && pip install "rich>=13.7" "textual>=8.0"
+RUN pip install --no-deps -e /app
 
 # Run as the invoking host user (issue 053 follow-up): same bind-mount
 # ownership contract as the slim/video images — a real user carrying the
@@ -45,6 +60,12 @@ RUN set -eux; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager
 ENV HOME=/home/voyager
 USER voyager
+
+# Build-time doctor gate (issue 048): same probe the slim image runs —
+# verifies ffmpeg/torch-CUDA/disk/models facts inside THIS image's stack,
+# not just the slim one. Exit code is ffmpeg-only, so missing models at
+# build time warn via facts without failing the build.
+RUN voyage doctor
 
 ENV PYTHONPATH=/app \
     VOYAGE_MODELS_DIR=/models

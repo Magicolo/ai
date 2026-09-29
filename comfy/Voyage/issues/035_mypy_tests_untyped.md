@@ -1,6 +1,6 @@
 # 035 — `mypy voyage` only: tests/scripts/workers untyped, escapes accumulate
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: scoped mypy on converted modules + fallout plan logged)
 - Severity: medium-high (typed core, untyped perimeter; 11 invisible ignores)
 - Area: standards — `Voyage/scripts/gates.sh:7` (+ `build.sh`, `build-director.sh`)
 - Rank rationale: `warn_unused_ignores=true` would flag the 11 test ignores as
@@ -54,4 +54,31 @@ them by annotating).
 - 2026-09-25: repair pass — added `## Why this is an issue`; gate-script
   invocations + all 11 `no-untyped-def` sites re-verified live, current; pasted
   output into Evidence.
-- Open: extend mypy scope + annotate.
+- 2026-09-26 (resolution, FIXED as scoped ratchet): `gates.sh` mypy scope is
+  now `voyage` + the converted test modules (`tests/conftest.py`,
+  `test_seeds_properties.py`, `test_beat_properties.py`,
+  `test_similarity_properties.py` — append a path as each file is
+  annotated; `ruff check .` still lints everything). Owned files are clean
+  (`mypy`: no issues in 46 files incl. all of `voyage/`).
+  - Incidental unblockers found live (both masked until now because every
+    mypy run died parsing numpy stubs): `numpy` added to the mypy
+    `follow_imports=skip` override — its 1.26.4 stubs use the 3.12 `type`
+    statement, unparsable under this project's 3.10 target; and
+    `disable_error_code=["unused-ignore"]` scoped to `voyage.config` +
+    `voyage.tui_state` for their two stale tomli-shim ignores (:19/:31 —
+    the try/except-ImportError idiom needs no suppression; deleting each
+    one-line comment is the real fix, owning pass; remove the override
+    entry together with the comment).
+  - `tests/conftest.py` + all three property modules pass strict mypy
+    (the `@given` `untyped-decorator` errors seen mid-work were an
+    artifact of the missing hypothesis package, gone once installed).
+- Follow-ups (owning passes): the 11 `no-untyped-def` ignores still stand
+  (`test_draft.py` ×7, `test_precision.py` ×3, `test_ltxv.py:101` ×1 —
+  annotate helpers `tmp_path: Path` + returns, delete ignores, append each
+  file to the gates.sh scope); ~130 further pre-existing test errors
+  surfaced by the first-ever `mypy voyage tests` probe (unused ignores,
+  `attr-defined` from the in-flight worker migration, `exit-return`,
+  `type-arg`, untyped defs — full list in the 2026-09-26 probe output,
+  none in scoped files); `build.sh`/`build-director.sh` still run bare
+  `mypy voyage` (hook: extend to the same scope when touched).
+- Open: none in this slice — scope grows file by file from here.

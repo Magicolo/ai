@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -36,6 +37,97 @@ TAIL_FILENAME = "video_tail.mp4"
 
 TAPE_FILENAME = "recovery.pt"
 """Recovery-tape filename (kept for supervisor discovery; JSON content)."""
+
+EMBED_CACHE_CAPACITY = 8
+"""Resident text-embed entries per worker session (issues 014, 030).
+
+Every distinct prompt costs a CPU T5 encode (minutes on longlive, ~25 s
+on ltxv); the cache avoids re-encoding repeats within a session, and the
+bound keeps drift-every-N runs from pinning VRAM monotonically. Entries
+are stored CPU-side — callers move to the worker device on use — so an
+entry costs host RAM (~4 MB), never resident VRAM.
+"""
+
+
+class EmbedCache:
+    """Small LRU over opaque text-embed values (issues 014, 030).
+
+    Torch-agnostic on purpose: values are opaque (nested tensor
+    structures differ per backend), eviction is pure key order, and
+    device placement stays with the caller (`move_to_cpu` /
+    `move_to_device` below). `get` refreshes recency; `put` evicts the
+    least-recently-used entry past capacity.
+    """
+
+    def __init__(self, capacity: int = EMBED_CACHE_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"embed cache capacity must be >= 1 (got {capacity})")
+        self._capacity = capacity
+        self._entries: OrderedDict[str, Any] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._entries
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    def get(self, key: str) -> Any | None:
+        """Return the entry and refresh its recency, or None on a miss."""
+        if key not in self._entries:
+            return None
+        self._entries.move_to_end(key)
+        return self._entries[key]
+
+    def put(self, key: str, value: Any) -> None:
+        """Store `value` under `key`, evicting the LRU entry past capacity."""
+        if key in self._entries:
+            self._entries.move_to_end(key)
+        self._entries[key] = value
+        while len(self._entries) > self._capacity:
+            self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        """Drop all entries (session teardown)."""
+        self._entries.clear()
+
+
+def move_to_cpu(value: Any) -> Any:
+    """Recursively move nested tensor structures to CPU (issue 030).
+
+    Duck-typed (`.cpu()`) so this module stays torch-free and CPU tests
+    can use doubles: mappings and lists/tuples recurse element-wise,
+    objects with `.cpu()` move, everything else passes through.
+    """
+    if isinstance(value, dict):
+        return {key: move_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        moved = [move_to_cpu(item) for item in value]
+        return type(value)(moved) if isinstance(value, tuple) else moved
+    if hasattr(value, "cpu"):
+        return value.cpu()
+    return value
+
+
+def move_to_device(value: Any, device: Any) -> Any:
+    """Recursively move nested tensor structures to `device` (issue 030).
+
+    Mirror of :func:`move_to_cpu` for cache hits: mappings and
+    lists/tuples recurse, objects with `.to(device)` move, everything
+    else passes through. Same-device `.to()` is a no-op upstream, so
+    hits cost no copy when the entry already sits on the device.
+    """
+    if isinstance(value, dict):
+        return {key: move_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        moved = [move_to_device(item, device) for item in value]
+        return type(value)(moved) if isinstance(value, tuple) else moved
+    if hasattr(value, "to"):
+        return value.to(device)
+    return value
 
 
 def write_tape_atomic(tape_path: Path, tape: dict[str, Any]) -> Path:

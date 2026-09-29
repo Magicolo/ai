@@ -1,6 +1,6 @@
 # 038 — No dedicated tests for the audio/GPU stack, fakes, doctor, or paths
 
-- Status: open
+- Status: resolved 2026-09-25 (this track)
 - Severity: medium-high (untested load-bearing modules; 3-test integration
   contract for the whole RPC+commit+validate+finalize path)
 - Area: tests — coverage mapping
@@ -73,4 +73,36 @@ expand `test_integration.py` to cover resume/rebuild/skip-bad paths.
 - 2026-09-25: repair pass — added `## Why this is an issue`; module→test
   mapping re-probed live (audio.acestep/workers.audio/fake_backends/paths still
   zero direct hits; doctor mocked-only); pasted probe output into Evidence.
-- Open: add modules incrementally; highest value first (fakes, paths, doctor).
+- 2026-09-25: resolution (this track) — new modules `test_fake_backends`
+  (container/shape/duration + seed-reaches-bytes, issues 040/044-clean),
+  `test_paths` (id format/bounds/roundtrip, resolve_stored_path incl.
+  re-anchor), `test_audio_workers` (fake `generate_audio` real-ffmpeg render,
+  validators, benchmark shape/counts, lifecycle echo),
+  `test_acestep_contract` (CPU-only: bpm mapping, constants, stack shape,
+  render_take validates-before-import + one `gpu`-marked render stub that
+  skips without CUDA); `test_integration.py` gains finalize end-to-end +
+  `FinalizeOptions` blend/hard-splice paths (issue 045 wiring). Doctor
+  adopted as-is (`test_doctor.py` landed via the concurrent pass — not
+  duplicated); `vision/__init__.py` is a one-line docstring (nothing to
+  pin); atomic/seeds owned by the concurrent track (conftest +
+  test_seeds_properties, untouched). Resume/rebuild/skip-bad already
+  covered in test_recovery/test_crash_matrix/test_failure_policy/
+  test_state_integrity — verified, not duplicated.
+- Open: none in this track's scope (gates green required before close).
+- 2026-09-29: verification (this track) — re-read live: `test_fake_backends.py`
+  (6 tests: container/shape/duration + seed-reaches-bytes), `test_paths.py`
+  (8 tests: format/bounds/roundtrip/re-anchor), `test_audio_workers.py`
+  (7 tests), `test_acestep_contract.py` (8 tests), `test_doctor.py` (7 tests),
+  `test_integration.py` gains finalize end-to-end + `FinalizeOptions` paths —
+  all present. Scope pytest: 119 passed; 4 failures in
+  `test_acestep_contract.py` are an out-of-scope `voyage/audio/acestep.py`
+  regression (validates-after-import, `bpm_for_energy` clamp drift) for the
+  owning track — not edited (audio/beat.py progress helper only). Ruff clean
+  for scope; full `gates.sh` mypy red on pre-existing hypothesis stubs
+  (conftest read-only, out of scope).
+- 2026-09-29 (orchestrator): two review fixes on the contract tests —
+  `render_take` now validates (bpm/duration/task_type/reference) BEFORE
+  the upstream import (was: ModuleNotFoundError masked the ValueError
+  contract on CPU), and the energy-floor pin corrected to == 60 (the
+  60..140 map floor; MIN_BPM == 1 bounds explicit tempos instead).
+  7 passed, 1 gpu-skipped.

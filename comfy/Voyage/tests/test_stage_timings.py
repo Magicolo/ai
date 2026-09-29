@@ -10,30 +10,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import default_config_toml, load_config
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    read_state,
-    write_manifest,
-    write_state,
-)
+from voyage.config import load_config
+from voyage.persistence import read_state
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "timings") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _committed_events(run_dir: Path) -> list[dict[str, object]]:

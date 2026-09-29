@@ -1,6 +1,6 @@
 # 052 — `min_free_space_gib` triple default confuses spec readers; reserve invisible in `status`
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: SPEC/DEV constants + surfacing + tests)
 - Severity: low-medium (small-dev-box validation aborts from an omitted key)
 - Area: config/docs — `voyage/config.py:247,292`, DESIGN, `docs/`
 - Rank rationale: documented in three places but the failure mode (implicit 20
@@ -60,3 +60,12 @@ default in `load_config`).
   `:292` generator 5.0 — output pasted in Evidence). Added
   `## Why this is an issue`. No staleness.
 - Open: surface the reserve; decide on default alignment.
+- 2026-09-29 (this track, scope `config.py` reserve only): FIXED the
+  triple-default confusion at the source (no behavior change).
+  `voyage/config.py`: new `SPEC_MIN_FREE_SPACE_GIB = 20.0` +
+  `DEV_MIN_FREE_SPACE_GIB = 5.0` (named, with why-comments);
+  `ProjectConfig.min_free_space_gib` defaults to the SPEC constant and
+  `default_config_toml()` writes the DEV constant (was bare `20.0`/`5.0`
+  literals). Status/CLI surfacing stays out of scope (cli.py limited to
+  049/057/051 per task). Tests: 1 new in `tests/test_config_resolution.py`
+  (constants + model default + generated TOML). Scoped gates green.

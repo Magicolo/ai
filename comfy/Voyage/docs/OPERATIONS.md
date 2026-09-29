@@ -83,8 +83,9 @@ appended (e.g. the CUDA-stack reason), never a stuck view.
 - Name (required) — the run name; doubles as the output folder
   (`output/<name>`) and final video (`output/<name>/final.mp4`) —
   there are no separate output/final-video fields.
-- Duration (required) — target length (`5s`, `90`, `1m30s`); rounds
-  up to whole segments.
+- Duration (required) — target length (`5s`, `90`, `1m30s`, `2m`, `1h`,
+  `1h2m3.5s`; fractional/combined/bare/whitespace-padded all parse); rounds
+  up to whole segments, so the video never runs short.
 - Backend — video preset (geometry + device + audio pairing),
   with a visible `▾` affordance; `ltxv`/`longlive2` need the CUDA
   worker image + a GPU.
@@ -166,8 +167,9 @@ defaults (`--backend ltxv`, `--run-id voyage`, `--seed 0`, run dir
 ./scripts/run.sh generate --backend ltxv --duration 5s --style "..."
 ```
 
-Duration is human-readable (`90`, `90s`, `2m`, `1m30s`, `1h`; combined forms
-like `1h2m3.5s` allowed). Segment count rounds **up**, so the video is never
+Duration is human-readable (`5s`, `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`;
+fractional `2.5m`/`1.5h`, combined `1h2m3.5s`, bare `90`, whitespace-padded
+all parse). Segment count rounds **up**, so the video is never
 shorter than requested. Backend presets set geometry/device automatically
 (`ltxv`: 768×512 on `cuda:0`; `longlive2`: default geometry on `cuda:0`;
 `fake`: CPU smoke runs) and pair the audio backend too (`ltxv`/`longlive2`
@@ -218,8 +220,6 @@ alignment, and publishes atomically (sources never mutated). Use
 - Logs rotate daily (`metrics.jsonl`, `*-worker.log`; 30-day prune).
   History readers span the rotation: `iter_metric_files(run_dir)`
   (`voyage/logrotate.py`) yields dated siblings oldest-first with the
-  live file last, so `inspect scoreboard` keeps pre-rotation stages.
-  `status` last-commit stages and `soak`/`benchmark` averages still read
-  the live file only — concatenate siblings (or adopt the helper) when a
-  run is older than one day.
+  live file last, so `inspect scoreboard`, `status` last-commit stages,
+  and `soak`/`benchmark` averages all keep pre-rotation history.
 - `benchmark` / `soak` harnesses: see `docs/BENCHMARKING.md`.

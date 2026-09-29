@@ -13,32 +13,17 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.bench import format_report, summarize_gauges, timing_stats
 from voyage.cli import main
-from voyage.config import default_config_toml, load_config
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    read_state,
-    write_manifest,
-    write_state,
-)
+from voyage.config import load_config
+from voyage.persistence import read_state
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "benchmark") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _gauge_events(run_dir: Path) -> list[dict[str, Any]]:
@@ -146,7 +131,9 @@ def test_per_segment_gauges_logged(tmp_path: Path) -> None:
         assert "run_id" in event
     summary = summarize_gauges(events)
     assert summary["segments"] == 2
-    assert summary["rss_delta_mb"] >= 0
+    # Symmetric flatness budget (issue 089): peak RSS can legitimately
+    # *fall* between segments after GC, so a one-sided `>= 0` flakes.
+    assert abs(summary["rss_delta_mb"]) < 500
 
 
 def test_soak_cli_reports_trend(tmp_path: Path, capsys: object) -> None:
@@ -158,6 +145,10 @@ def test_soak_cli_reports_trend(tmp_path: Path, capsys: object) -> None:
     assert read_state(run_dir).committed_segments == 2
 
 
+# Always-on stability gate (issue 089 decision): `gates.sh`/`test.sh` pass
+# no `-m` filter, so this `endurance` test runs on every gate by design —
+# small (3 fake segments, seconds) and bounded the same 500 MB budget as
+# the gauge test above. Exclude deliberately with `-m "not endurance"`.
 @pytest.mark.endurance
 def test_endurance_segments_stay_flat(tmp_path: Path) -> None:
     """Small always-on soak: gauges every segment, bounded RSS, valid run."""

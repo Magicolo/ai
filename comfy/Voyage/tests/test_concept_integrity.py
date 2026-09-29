@@ -13,28 +13,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import validate_run
 from voyage.concepts import ConceptStore, validate_concepts
-from voyage.config import default_config_toml, load_config
+from voyage.config import load_config
 from voyage.errors import StateError
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "concepts") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    from voyage.persistence import build_manifest, initial_state, write_manifest, write_state
-
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def test_check_novel_fails_loud_on_deleted_vectors(tmp_path: Path) -> None:
@@ -115,3 +104,15 @@ def test_validate_run_flags_lost_vectors(tmp_path: Path) -> None:
     (novelty_dir / "concept_vectors.npy").unlink()
     errors = validate_run(run_dir)
     assert any("concept_vectors" in error for error in errors)
+
+
+def test_load_jsonl_roundtrips_records_and_tolerates_missing(tmp_path: Path) -> None:
+    """Test-pin for the `load_jsonl` helper (issue 046 disposition)."""
+    missing = tmp_path / "absent.jsonl"
+    assert ConceptStore.load_jsonl(missing) == []
+    concepts_file = tmp_path / "concepts.jsonl"
+    concepts_file.write_text(
+        '{"id": "concept-000000"}\n\n{"id": "concept-000001"}\n', encoding="utf-8"
+    )
+    loaded = ConceptStore.load_jsonl(concepts_file)
+    assert [entry["id"] for entry in loaded] == ["concept-000000", "concept-000001"]

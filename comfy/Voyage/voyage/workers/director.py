@@ -31,7 +31,7 @@ from voyage.director import (
 from voyage.models import EvolutionDecision, TransitionPhase
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 
-_CONFIG: dict[str, Any] = {"backend": "deterministic"}
+_CONFIG: dict[str, Any] = {"backend": "qwen"}
 _QWEN: dict[str, Any] = {}
 _EMBEDDER: dict[str, Any] = {}
 _INSPECTOR: dict[str, Any] = {}
@@ -309,6 +309,8 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
         audio_state=str(payload.get("audio_state", "")),
         controller_metrics=str(payload.get("controller_metrics", "")),
         retry_feedback=str(payload.get("retry_feedback", "")),
+        measured_context=str(payload.get("measured_context", "")),
+        previous_captions=str(payload.get("previous_captions", "")),
     )
     attempts = [
         (user_message, temperature),
@@ -351,7 +353,7 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
 
 def handle_decide(payload: dict[str, Any]) -> dict[str, Any]:
     checked_request(payload, decision_index=int, phase=str)
-    backend = str(payload.get("backend") or _CONFIG.get("backend", "deterministic"))
+    backend = str(payload.get("backend") or _CONFIG.get("backend", "qwen"))
     if backend == "qwen":
         return _qwen_decide(payload)
     checked_request(

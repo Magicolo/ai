@@ -1,6 +1,6 @@
 # 046 — Legacy shims, unused helpers, cross-module feature envy (`loop.py` double-decode)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: migration time-box + joint_style + beat helper + pins; loop half via 007)
 - Severity: low-medium (cleanup; one real per-RPC waste + one swallowed-error path)
 - Area: structure — dead code / layering
 - Rank rationale: small individually, but 7 unused helpers + a double Pydantic
@@ -82,4 +82,34 @@ once and log malformed lines; delete or test-pin the 7 unused helpers.
 - 2026-09-25: repair pass — added `## Why this is an issue`; legacy_path /
   loop double-decode refs re-verified live, current; pasted rg/sed output into
   Evidence.
-- Open: cleanup batch.
+- 2026-09-25: partial resolution (this track) — (a) migration time-box:
+  `concepts.py` gains `LEGACY_MIGRATION_REMOVE_AFTER = "2026-12-31"` +
+  `DeprecationWarning` on every `_migrate_legacy` use (no gates filter
+  escalates warnings; test_phase3 legacy test still passes); (b) finalize
+  joint rendering is explicit via `FinalizeOptions.joint_style` (045, wired
+  in `finalize_run`; `build_final_audio` itself untouched — out of scope);
+  (c) `audio/beat.py` gains `segment_progress_info()` (display beats/BPM,
+  pinned in test_rhythm) so the supervisor can drop its lazy mid-commit
+  re-import — supervisor.py untouched (concurrent-owned); (d) `loop.py`
+  VERIFIED single-decode (read-only check: `serve()` decodes once at
+  :57-59, malformed → MALFORMED/log + continue — issue 007's shape, no
+  double-decode remains; NOT edited, concurrent pass owns it); (e) unused-
+  helper disposition: `ConceptStore.load_jsonl` test-pinned
+  (test_concept_integrity). HOOK NOTES (out of scope): delete or test-pin
+  `non_empty`/`config_segment_seconds` (backends.py), `timing_stats`
+  (bench.py), `build_prompt_plan` (prompts.py), `director_seed` (seeds.py),
+  `histogram_distance` (vision/metrics.py), `decoded_frames_for_latents`
+  (causvid.py); WHY/DESIGN pointers still missing on workers/video.py,
+  workers/audio.py, bench.py (fake_backends.py got its pointer this pass).
+- Open: remaining helper dispositions + supervisor beat import (concurrent).
+- 2026-09-29: verification (this track) — re-read live (read-only where
+  out of scope): (a) `voyage/concepts.py:34-41` time-box constant +
+  `:156-167` `DeprecationWarning` present; (b) `FinalizeOptions.joint_style`
+  explicit via 045, present; (c) `voyage/audio/beat.py:79-92`
+  `segment_progress_info()` present + pinned in `test_rhythm.py:146-159`;
+  (d) `voyage/workers/loop.py:50-79` VERIFIED single-decode (decodes once
+  at `:57-59`, malformed → MALFORMED/log + continue — issue 007's shape, no
+  double-decode remains; NOT edited, concurrent owns it); (e)
+  `ConceptStore.load_jsonl` test-pinned
+  (`test_concept_integrity.py:109-117`); (f) `fake_backends.py:1-13`
+  WHY/DESIGN pointer present. No edit needed (already fixed in scope).

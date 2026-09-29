@@ -1,6 +1,6 @@
 # 049 — `status` drifted from §59; scoreboard/`status`/soak blind after rotation
 
-- Status: open (STATUS half resolved 2026-09-25 CLI track; ROTATION half untouched — other track)
+- Status: resolved (fixed 2026-09-25: rotation readers + soak/status adoption (review) + status fields) (STATUS half resolved 2026-09-25 CLI track; ROTATION half untouched — other track)
 - Severity: medium (stale contract + silent history loss the day after a run ends)
 - Area: observability — `cli.py:396-466`, `scoreboard.py:37-60`,
   `logrotate.py:35-88`
@@ -148,3 +148,14 @@ FIXED (readers half): rotation-blind history loss fixed for
 scoreboard via the shared helper; `status`/`soak` adoption left for
 the CLI track per the hook above. Status-vs-§59 drift (Novelty/Current
 block/slowest-stages/Uptime) untouched — other track.
+- 2026-09-29 (this track, scope soak/status reader adoption): ADOPTED the
+  `iter_metric_files` hook (no duplication). `voyage/cli.py`: new
+  `_read_all_metric_events()` (live + siblings oldest-first, torn lines
+  skipped, never raises) + `_last_commit_stages()` scans
+  `reversed(iter_metric_files())` + `cmd_soak` + `cmd_benchmark`
+  end-to-end read via the helper (live-only reads gone); `docs/OPERATIONS.md`
+  long-run paragraph updated to the spanning contract. Tests: 2 new in
+  `tests/test_observability.py` (rotation-then-read last-commit, concat
+  order + torn-line skip + missing-dir). Scoped gates green: ruff + format
+  + mypy strict on `cli.py`, 78 pytest passed across
+  observability/config/cli-hardening/scoreboard/draft.

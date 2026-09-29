@@ -1,6 +1,6 @@
 # 088 — 13 copy-pasted `_init_run` scaffolds across test modules (drift already visible)
 
-- Status: open
+- Status: resolved 2026-09-25 (this track: all converted to the shared helper)
 - Severity: low (persistence-format change must be edited 13 times; no
   `conftest.py`)
 - Area: tests — 13 sites (see list)
@@ -52,4 +52,24 @@ keyword options; keep per-module wrappers only where behavior differs.
 - 2026-09-25: found by pass-2 tests sweep; count re-verified live.
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   all 13 sites live (every `file:line` matches `rg` output; no `conftest.py`).
-- Open: extract helper.
+- 2026-09-25: resolved — adopted the concurrent pass's `tests/conftest.py`
+  (`initialize_run_directory`, not duplicated): all 16 remaining `_init_run`
+  copies converted to one-line wrappers preserving exact semantics
+  (run_id/seed/style per file: seed-7 files pass `seed=7` explicitly —
+  generation_stack "stack"/style, integration "itest", inspector_wiring
+  "iwire"+visual_inspector, scoreboard run_id+visual_inspector; the rest
+  seed 11 + own run_id). Now-unused imports trimmed per file (kept
+  `read_state`/`write_state`/`load_config`/`default_config_toml` where
+  tests still use them — verified per file, incl. two LSP-caught keeps:
+  generation_stack + crash_matrix `read_state`). `test_phase2`'s
+  `from tests.test_recovery import _init_run` keeps working (wrapper kept).
+  Per-module wrappers stay (conftest docstring's contract) — behavior
+  differs only in defaults, which the helper parameters carry.
+- 2026-09-29: fix (this track) — converted the one remaining full copy
+  `tests/test_finalize_fastpath.py:33-43` to
+  `initialize_run_directory(run_dir, run_id="fastpath", style=style, seed=7)`
+  + trimmed `default_config_toml`/`build_manifest`/`initial_state`/
+  `write_manifest`/`write_state` imports (used the shared fixture per
+  guidance; exact semantics preserved). All other `_init_run` sites
+  re-verified live as one-line wrappers. Ruff clean for scope; scope pytest
+  passes (fastpath tests green).

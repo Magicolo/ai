@@ -366,6 +366,30 @@ def _install_pos_only_caches(pipe: Any) -> bool:
     return True
 
 
+def restore_tail_embed_cache(
+    embed_cache: video_common.EmbedCache, tape: dict[str, Any]
+) -> str | None:
+    """Re-seed the embed LRU from a recovery tape (issue 014).
+
+    The tape already persists the tail block's CPU embeds
+    (`prompt_embeds` + `tail_conditionals`, written by
+    `LongLiveSession.generate_blocks`); without this restore the
+    post-audio rebuild cold-misses the CPU T5 (minutes) on the next
+    block even for the identical prompt. Returns the restored prompt,
+    or None when the tape predates the keys (pre-fix tapes resume
+    fine, just without the warm cache).
+    """
+    tail_prompt = tape.get("tail_prompt")
+    if not isinstance(tail_prompt, str) or not tail_prompt:
+        return None
+    embeds = tape.get("prompt_embeds")
+    conditionals = tape.get("tail_conditionals")
+    if embeds is None or conditionals is None:
+        return None
+    embed_cache.put(tail_prompt, ({"prompt_embeds": embeds}, conditionals))
+    return tail_prompt
+
+
 class LongLiveStreamSession:
     """Persistent causal stream (DESIGN §22): caches survive across blocks.
 
@@ -406,7 +430,10 @@ class LongLiveStreamSession:
         self._device = device
         self._next_start_frame = 0  # latent frames committed to the stream
         self._blocks_appended = 0
-        self._embed_cache: dict[str, tuple[Any, Any]] = {}
+        # Issue 030: bounded LRU (was an unbounded dict pinning CUDA
+        # tensors forever); entries are stored CPU-side, moved to the
+        # worker device on use, so drift-every-N runs stay VRAM-flat.
+        self._embed_cache = video_common.EmbedCache()
         self._noise_rng: Any = None  # stream noise generator (seeded on first block)
         self._seq_noise: Any = None  # full-sequence noise for the in-flight call
         self._seq_output: Any = None  # full-sequence output buffer, same frames
@@ -514,6 +541,10 @@ class LongLiveStreamSession:
             pipe.vae.to(self._device)
         self._next_start_frame = tail_frames
         self._blocks_appended = 1
+        # Issue 014: warm the embed LRU from the tape alongside RNG/tail
+        # so the first post-rebuild block with the repeated prompt hits
+        # instead of cold-missing the CPU T5 (minutes).
+        restore_tail_embed_cache(self._embed_cache, tape)
         # Continue the stream noise trajectory: the tape carries the RNG
         # state from the end of the taped segment, so the next appended
         # block draws exactly where the stream left off — including across
@@ -533,13 +564,21 @@ class LongLiveStreamSession:
         return self._noise_rng.get_state().cpu()
 
     def _encode(self, prompt: str) -> tuple[Any, Any]:
+        """Encode one prompt (cached); hits move the CPU entry to the device.
+
+        Issue 030: entries are stored CPU-side (`move_to_cpu`), so the
+        cache costs host RAM, not resident VRAM; the LRU bound (see
+        `video_common.EMBED_CACHE_CAPACITY`) evicts stale prompts.
+        """
         cached = self._embed_cache.get(prompt)
         if cached is not None:
-            return cached
+            moved = video_common.move_to_device(cached, self._device)
+            assert isinstance(moved, tuple)
+            return moved
         from utils.prompt_conditioning import encode_prompt_blocks  # type: ignore[import-not-found]
 
         cond, cond_list = encode_prompt_blocks(self._pipeline.text_encoder, [[prompt]], 1)
-        self._embed_cache[prompt] = (cond, cond_list)
+        self._embed_cache.put(prompt, video_common.move_to_cpu((cond, cond_list)))
         return cond, cond_list
 
     def begin_sequence(self, total_blocks: int, seed: int) -> None:
@@ -801,6 +840,8 @@ class LongLiveSession:
         (milliseconds per stage for this call); when false (default) no
         timing events are created and the return keys are unchanged.
         """
+        import gc
+
         import imageio.v2 as imageio  # type: ignore[import-not-found]
         from einops import rearrange  # type: ignore[import-not-found]
 
@@ -814,11 +855,19 @@ class LongLiveSession:
         # decode step, while the generate-time peak (DiT forward + KV cache
         # + fp8 activation transients) is what bounds KV capacity — moving
         # the VAE aside buys the headroom local_attn 16 needs at full res
-        # (breakdown: 13.16 + 2.59 - 1.31 = 14.44 GiB peak). Restored right
-        # after the block loop, before the tape write and decode.
+        # (breakdown: 13.16 + 2.59 - 1.31 = 14.44 GiB peak). The VAE stays
+        # parked on CPU across the block loop AND the tape write below
+        # (both are DiT/CPU-only — issue 015 fusion); it returns in the
+        # decode prologue after the generator + caches move aside
+        # (free-before-allocate: strictly lower transient peak than
+        # restoring it here while the DiT is still resident).
         if timer is not None:
             timer.start("offload_vae_to_cpu_ms")
         pipe.vae.to("cpu")
+        # Collect first: reference cycles (caches, hooks, closures) keep GPU
+        # tensors alive past moves/dels; without a collection empty_cache
+        # frees nothing (the evict() lesson, measured 0 vs ~9.4GB).
+        gc.collect()
         torch.cuda.empty_cache()
         if timer is not None:
             timer.stop("offload_vae_to_cpu_ms")
@@ -833,12 +882,14 @@ class LongLiveSession:
             for prompt, cut in zip(prompts, scene_cuts, strict=True):
                 block_latents.append(self._stream.append_block(prompt, cut))
         latents = torch.cat(block_latents, dim=1)
-        pipe.vae.to(self._device)
         if timer is not None:
             timer.stop("denoise_blocks_ms")
         # Recovery tail (DESIGN §27): last block's clean latents + embeds so
         # a restarted worker rebuilds causal context without re-encoding
-        # (CPU T5 costs minutes). Written beside the segment video.
+        # (CPU T5 costs minutes). Written beside the segment video. The
+        # tail prompt + CPU conditionals ride along so `resume_from_tape`
+        # can re-seed the embed LRU (issue 014) — pre-fix readers ignore
+        # the extra keys.
         tail_prompt = prompts[-1]
         if timer is not None:
             timer.start("tape_encode_ms")
@@ -848,6 +899,8 @@ class LongLiveSession:
         tape = {
             "tail_latents": block_latents[-1].detach().cpu(),
             "prompt_embeds": _cond["prompt_embeds"].detach().cpu(),
+            "tail_prompt": tail_prompt,
+            "tail_conditionals": video_common.move_to_cpu(_cond_list),
             "next_start_frame": self._stream.next_start_frame,
             "blocks_appended": self._stream.blocks_appended,
             "noise_rng_state": self._stream.noise_rng_state(),
@@ -869,6 +922,15 @@ class LongLiveSession:
             timer.start("offload_for_decode_ms")
         pipe.generator.to("cpu")
         self._stream.offload_caches()
+        # Issue 015 fusion: the VAE returns here — after the generator +
+        # caches moved aside (free-before-allocate) instead of right after
+        # the block loop while the DiT is still resident. The tape write
+        # above is CPU T5-only (LongLiveStreamSession._encode never touches
+        # the VAE), so parking it on CPU across that stretch is safe. Same
+        # four transfers per segment, lower transient peak; removing a
+        # transfer needs VAE tiling/streaming decode (GPU-gated follow-up).
+        pipe.vae.to(self._device)
+        gc.collect()
         torch.cuda.empty_cache()
         if timer is not None:
             timer.stop("offload_for_decode_ms")

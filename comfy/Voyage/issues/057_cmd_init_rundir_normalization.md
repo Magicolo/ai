@@ -83,3 +83,10 @@ note against present code; close or file separately.
   `tests/test_generate.py` 96/192/29/93/72 asserts). TASK §30.2 "Resolved"
   immunity claim now holds for init too (TASK itself not edited — outside
   scope, flagged in the original log). Gates green.
+- 2026-09-29 (this track, scope verify only): re-read live — ADOPTED, no
+  duplicate work. `cmd_init` still `run_dir = resolve_run_dir(args.output)`
+  (`voyage/cli.py:154`); regression
+  `tests/test_cli_hardening.py::test_init_then_run_with_relative_paths`
+  still present and passing (78 scoped pytest green). 25/24 note stays
+  stale-closed (no `_LTXV_NATIVE_BLOCK_FRAMES`; steady-state 96/29-93/72
+  pinned in `tests/test_generate.py`). No edit in this track.

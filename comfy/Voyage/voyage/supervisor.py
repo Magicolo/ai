@@ -55,6 +55,7 @@ from voyage.media import (
     check_av_alignment,
     check_free_space,
     probe,
+    probed_take_seconds,
     run_capture,
     slice_take,
     validate_audio,
@@ -175,6 +176,27 @@ class CoveredAudio(NamedTuple):
     take_reason: str
 
 
+def summarize_prefetch_outcome(events: list[dict[str, Any]]) -> dict[str, float | int | None]:
+    """Aggregate director-prefetch hit/miss events (issue 033).
+
+    Pure reader over metrics/log events — the commit path already emits
+    `director_prefetch_hit/miss` per segment; this turns them into the hit
+    rate the soak report needs before any prefetch restructuring is
+    considered (candidate 3: measure first). `prefetch_hit_rate` is None
+    with no prefetch events (never 0/0). Lives beside the emitter (not in
+    the CLI) so the aggregation and the event names cannot drift apart;
+    the soak report renders the returned mapping as-is.
+    """
+    hits = sum(1 for event in events if event.get("event") == "director_prefetch_hit")
+    misses = sum(1 for event in events if event.get("event") == "director_prefetch_miss")
+    total = hits + misses
+    return {
+        "prefetch_hits": hits,
+        "prefetch_misses": misses,
+        "prefetch_hit_rate": (hits / total) if total else None,
+    }
+
+
 def audio_worker_module(backend: str) -> str:
     try:
         return AUDIO_WORKER_MODULES[backend]
@@ -191,6 +213,39 @@ def video_worker_module(backend: str) -> str:
         raise ConfigurationError(
             f"unknown video backend {backend!r} (known: {sorted(VIDEO_WORKER_MODULES)})"
         ) from None
+
+
+def previous_transition_captions(run_dir: Path, number: int) -> str:
+    """Previous segment's three caption families as director-prompt text.
+
+    Best-effort history for the drift chain: reads segment number-1's
+    committed transition.json and formats its video stages + music/SFX
+    captions via format_previous_captions. Missing segment (voyage
+    start), torn JSON, or legacy decisions without captions all yield ""
+    so the director prompt is unchanged — a history read must never
+    break a commit.
+    """
+    if number <= 0:
+        return ""
+    from voyage.director import format_previous_captions
+
+    prev_id = paths.format_segment_id(number - 1)
+    transition_path = paths.segment_dir(run_dir, prev_id) / "transition.json"
+    try:
+        raw = json.loads(transition_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    try:
+        decision = EvolutionDecision.model_validate(raw)
+    except Exception:
+        return ""
+    return format_previous_captions(
+        previous_video_stages=list(decision.video.stages),
+        previous_music=decision.audio.music_caption,
+        previous_sfx=decision.audio.sfx_caption,
+    )
 
 
 class Supervisor:
@@ -665,7 +720,19 @@ class Supervisor:
             timeline_frames=0,
         )
         try:
-            payload = self._decide_payload(config, spec_state, store, style_spec)
+            from voyage.director import format_previous_captions
+
+            payload = self._decide_payload(
+                config,
+                spec_state,
+                store,
+                style_spec,
+                previous_captions=format_previous_captions(
+                    previous_video_stages=list(decision.video.stages),
+                    previous_music=decision.audio.music_caption,
+                    previous_sfx=decision.audio.sfx_caption,
+                ),
+            )
         except VoyageError:
             self._prefetch_target = None
             return
@@ -733,8 +800,19 @@ class Supervisor:
         style_spec: StyleSpec,
         retry_feedback: str = "",
         measured_context: str = "",
+        previous_captions: str | None = None,
     ) -> dict[str, Any]:
         history = store.history_texts()
+        if previous_captions is None:
+            number = getattr(state, "next_segment_number", None)
+            try:
+                previous_captions = (
+                    previous_transition_captions(self._run_dir, int(number))
+                    if isinstance(number, int)
+                    else ""
+                )
+            except (OSError, ValueError):
+                previous_captions = ""
         payload = director_input_from_state(
             state,
             style_charter=style_spec.prompt,
@@ -746,6 +824,7 @@ class Supervisor:
             ),
             audio_state=(f"style={config.audio.music_style} energy={config.audio.energy}"),
             measured_context=measured_context,
+            previous_captions=previous_captions,
         )
         payload.update(
             {
@@ -1078,8 +1157,19 @@ class Supervisor:
 
         beats, grid_bpm = beats_for_segment(duration, audio_cfg.beats_per_segment)
         take_bpm = int(round(grid_bpm))
+        # A clamped-short take (issue 094 below) can leave this segment
+        # uncovered — re-plan boundedly so coverage extends with another
+        # chained take instead of erroring at slice time. Three attempts
+        # bound GPU spend; the slice walk still fails loud on a true gap.
+        # `plan` is primed before the loop (a second identical call opens
+        # the first iteration) so the tail return below stays bound even
+        # when every iteration takes the keep path.
         plan = planner.plan(video_time, caption, seed, number)
-        if plan.action in ("render", "repaint") and plan.take is not None:
+        for _coverage_attempt in range(3):
+            seed = audio_seed(config.seed, number, len(planner.takes))
+            plan = planner.plan(video_time, caption, seed, number)
+            if plan.action not in ("render", "repaint") or plan.take is None:
+                break
             take = plan.take
             take.bpm = float(take_bpm)
             take_file = audio_dir / f"{take.take_id}.wav"
@@ -1103,6 +1193,14 @@ class Supervisor:
                 payload["repaint_start"] = video_time - current.covers_from
                 payload["repaint_end"] = current.duration
             self._with_audio_gpu(segment_id, payload, recovery_tape)
+            # Issue 094: ACE renders are not sample-exact vs the request —
+            # clamp the ledger to the file so coverage math follows reality
+            # instead of overstating it (a fully-past-EOF slice later
+            # degrades the whole finalize to the hard-splice fallback).
+            take_file_seconds = probed_take_seconds(take_file)
+            take_shortfall = max(take.duration - take_file_seconds, 0.0)
+            if take_shortfall > 1e-3:
+                take.duration = take_file_seconds
             take.path = self._stored_relative(take_file)
             planner.record(take)
             append_take(ledger, take)
@@ -1115,8 +1213,12 @@ class Supervisor:
                     "reason": plan.reason,
                     "beats": beats,
                     "bpm": take_bpm,
+                    "take_file_seconds": take_file_seconds,
+                    "take_short_seconds": take_shortfall,
                 }
             )
+            if planner.coverage_until() >= video_time + duration - 1e-6:
+                break
         # Slice the takes covering [video_time, video_time + duration).
         # A take boundary inside the segment yields two slices joined with
         # a crossfade; the common case is exactly one slice.
@@ -1297,6 +1399,7 @@ class Supervisor:
             "audio_beats": beats,
             "audio_texture": decision.audio.texture,
             "audio_environment": list(decision.audio.environment),
+            "audio_sfx_caption": decision.audio.sfx_caption,
             "notes": decision.notes,
         }
 

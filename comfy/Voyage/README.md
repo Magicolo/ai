@@ -80,6 +80,26 @@ Omit `--segments` to run until `voyage pause` / `voyage stop` / SIGINT.
 GPU run: `VOYAGE_IMAGE=voyage-video:latest VOYAGE_GPUS=1 ./scripts/run.sh …`
 Fast iteration: add `--draft` (640×352, 1 block/segment, 45 s takes).
 
+`generate` flags: `--backend ltxv|longlive2|causvid|fake` (default ltxv),
+`--duration 5s` (e.g. `5s`, `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`; rounds
+up to whole segments), `--draft`, `--director qwen|deterministic`,
+`--blocks`, `--take-seconds`, `--quantization fp8|bf16`,
+`--beats-per-segment`, `--drift-every-n`, `--final-video`, `--skip-bad`,
+`--verbose`/`--no-color`.
+
+Bare `voyage` (no verb) launches the interactive launcher TUI: every
+`generate` setting with its default in one required-first list, live
+validation with a derived segments/frames plan, then Generate runs the
+same pipeline with per-segment prompts and Stop/Back/Quit. Needs a TTY;
+pick `fake` on GPU-less boxes for CPU smoke runs.
+
+```bash
+./scripts/run.sh status --run <dir>            # §59 sections + slowest stage
+./scripts/run.sh inspect scoreboard --run <dir> # per-segment frames/stages/metrics
+./scripts/run.sh benchmark video --run <dir> --warmup 1 --measured 3
+./scripts/run.sh soak --run <dir> --segments 3 # stability trend + validate
+```
+
 ## Layout
 
 - `voyage/` — supervisor package (config, state, RPC, workers, media,
@@ -103,3 +123,5 @@ Fast iteration: add `--draft` (640×352, 1 block/segment, 45 s takes).
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — benchmark/soak protocol and reports.
 - `docs/UPSTREAM_LONG_LIVE_PATCHES.md` — LongLive runtime patches.
+- `docs/UPSTREAM_CAUSVID_NOTES.md` — CausVid integration notes.
+- `docs/UPSTREAM_LTXV_NOTES.md` — LTXV integration notes.

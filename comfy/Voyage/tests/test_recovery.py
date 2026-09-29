@@ -9,31 +9,19 @@ import threading
 import time
 from pathlib import Path
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import main
-from voyage.config import default_config_toml, load_config
+from voyage.config import load_config
 from voyage.persistence import (
-    build_manifest,
-    initial_state,
     read_state,
-    write_manifest,
     write_state,
 )
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "recovery") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def test_supervisor_restart_continues(tmp_path: Path) -> None:
@@ -84,9 +72,12 @@ def test_pause_mid_run_stops_at_boundary(tmp_path: Path) -> None:
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
 
     def _ask_pause() -> None:
-        for _ in range(400):
-            if (run_dir / "segments" / "000000" / "DONE").exists():
-                break
+        # Event poll with a hard deadline (issue 089): the DONE marker is
+        # the event, the deadline keeps a wedged commit from silently
+        # falling through to a confusing zero-segment assertion below.
+        deadline = time.monotonic() + 120.0
+        while not (run_dir / "segments" / "000000" / "DONE").exists():
+            assert time.monotonic() < deadline, "first segment never committed"
             time.sleep(0.05)
         state = read_state(run_dir)
         state.status = "PAUSE_REQUESTED"

@@ -1,6 +1,6 @@
 # 040 — Fake backends ignore `seed`/`prompt`: seed-determinism claims untestable
 
-- Status: open
+- Status: resolved 2026-09-25 (this track, candidate 1 + gpu-marker proxy)
 - Severity: medium-high (test fidelity — "deterministic seed" tests through fakes
   are vacuous)
 - Area: tests — `voyage/fake_backends.py:35,72-73`
@@ -52,4 +52,19 @@ Two fake renders differing only in seed; `cmp` the outputs.
 - 2026-09-25: repair pass — added `## Why this is an issue`; `del` lines
   re-verified live (`fake_backends.py:35,72`, current); pasted rg output into
   Evidence.
-- Open: pick (1) or (2); GPU determinism test needs idle-GPU time.
+- 2026-09-25: resolution (candidate 1) — seed now reaches the bytes:
+  video via `hue=h=<seed % 360>` filter (`video_hue_angle` helper, pinned),
+  audio via `aevalsrc` start phase (`audio_start_phase` helper, 1000 phases
+  over 0..2π, pinned); same seed → bit-identical, seed 11 vs 12 → differ
+  (both backends, `test_fake_backends.py`). Frequency still derives from
+  `energy` only (contract unchanged); `prompt`/`style` still accepted but
+  unused. Candidate 2 partially: `test_acestep_contract.py` carries one
+  `gpu`-marked render test (first `gpu` marker use) that skips without
+  CUDA + provisioned checkpoints — the GPU determinism proxy has a home.
+- Open: none in this track's scope (gates green required before close).
+- 2026-09-29: verification (this track) — re-read `voyage/fake_backends.py`
+  live: `video_hue_angle` (`:25-32`), `audio_start_phase` (`:35-41`),
+  video `hue=h=` (`:75`), audio `aevalsrc` phase (`:106,121`) all present;
+  no `del prompt, seed` / `del style, seed` remains. Tests
+  `test_fake_backends.py:74-105` pin same-seed-identical / seed-11-vs-12-differ
+  for both backends; scope pytest passes. No edit needed (already fixed).

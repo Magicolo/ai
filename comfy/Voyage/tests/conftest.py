@@ -11,17 +11,22 @@ the legacy `_init_run` copies are being converted incrementally —
 two converted as proof (test_console, test_av_alignment_consumer) —
 and stay valid because the helper keeps their exact semantics.
 
-The property-test module needs Hypothesis, which is not in the gate
-image's dev extras yet (see the ALL-gap report): it guards itself with
-`pytest.importorskip`, so it reports a skip there and runs once
-Hypothesis is installed — no conftest hook needed (per-file ignore
-hooks do not fire in this package-layout suite).
+Hypothesis runs with a container-tuned profile below (issue 039): no
+example database, so failing examples are reported verbosely but never
+replayed from — or written to — the bind-mounted tree, which is the
+correct trade-off for ephemeral container runs. The whole block is
+guarded by `find_spec` (not a bare import): images that have not picked
+up the pinned dev extra yet still collect and run the suite, with the
+property modules skipping themselves via `pytest.importorskip` before
+they reach the shared strategies.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -33,6 +38,36 @@ from voyage.persistence import (
     write_manifest,
     write_state,
 )
+
+if importlib.util.find_spec("hypothesis") is not None:
+    from hypothesis import settings
+    from hypothesis import strategies as hypothesis_strategies
+
+    settings.register_profile("container", database=None)
+    settings.load_profile("container")
+
+    # Shared domain-constrained generators (issue 039): property modules draw
+    # from these instead of inventing overlapping alphabets. `st.data()`
+    # draws keep `@given` signatures narrow; deterministic pins for the
+    # singular cases generators hit only probabilistically (nan/inf/empty)
+    # live in the property modules themselves, next to the properties they
+    # anchor.
+    bounded_counts = hypothesis_strategies.integers(min_value=0, max_value=999999)
+    """Small non-negative counts — seeds derive from run/segment/block numbers."""
+
+    # Verified live: `characters()` with only `blacklist_characters` still
+    # draws lone surrogates (probed `\ud800`), so the surrogate category
+    # stays blacklisted explicitly alongside NUL. The tuple needs the Literal
+    # type — hypothesis types the parameter as a collection of category
+    # literals.
+    surrogate_category: tuple[Literal["Cs"], ...] = ("Cs",)
+    short_texts = hypothesis_strategies.text(
+        alphabet=hypothesis_strategies.characters(
+            blacklist_categories=surrogate_category, blacklist_characters="\x00"
+        ),
+        max_size=24,
+    )
+    """Short NUL-free texts — safe for JSON round-trips and tokenizers."""
 
 # Every legacy `_init_run` copy uses this exact style prompt; the seed
 # default 11 is the modal value across the copies (integration-style

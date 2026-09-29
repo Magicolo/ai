@@ -1,6 +1,6 @@
 # 090 — Hardcoded `/tmp` placeholder paths that never touch the filesystem (missing-file path untested)
 
-- Status: open
+- Status: resolved 2026-09-25 (this track: tmp_path files + missing-file pin; boundary check hooked)
 - Severity: low (string-only paths; real loader's missing-file error has zero
   coverage)
 - Area: tests + director loader — `test_rhythm.py:87,101`
@@ -62,4 +62,21 @@ Use `tmp_path`-backed files in the three tests and add one missing-file test for
 - 2026-09-25: found by pass-2 tests sweep.
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (all `/tmp` hits match); re-ran `rg` (pasted above).
-- Open: fix tests + boundary check.
+- 2026-09-25: resolved (tests) — rhythm take paths are now real tmp_path
+  files (created, not string-only); inspector success/skip paths use real
+  tmp_path frame files; the longlive stub's `recovery_path` derives from
+  the call's own output dir (stat-able shape, never `/tmp/x/...`); new
+  `test_handle_inspect_forwards_missing_path_unchecked` pins the current
+  forwarding of a nonexistent path. HOOK NOTE (director.py out of scope):
+  add the existence check at the `handle_inspect` worker boundary so the
+  real loader's missing-file error path is covered, not mocked around.
+- Open: boundary existence check only (director track).
+- 2026-09-29: verification (this track) — re-read live: `rg -n "/tmp"`
+  over `test_rhythm.py`/`test_inspector.py`/`test_longlive_stages.py` shows
+  zero placeholder paths (only `test_longlive_stages.py:325` comment
+  mentioning the old string); rhythm takes use real `tmp_path` files,
+  inspector success/skip use real `tmp_path` frame files, longlive stub
+  derives `recovery_path` from the call's output dir; new
+  `test_handle_inspect_forwards_missing_path_unchecked` pins forwarding.
+  No edit needed (already fixed in scope); existence check stays
+  director-owned (director.py untouched).

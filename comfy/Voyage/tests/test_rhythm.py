@@ -6,9 +6,16 @@ no GPU, no ffmpeg.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from voyage.audio.beat import MIN_BPM, beats_for_segment, quantize_take_seconds
+from voyage.audio.beat import (
+    MIN_BPM,
+    beats_for_segment,
+    quantize_take_seconds,
+    segment_progress_info,
+)
 from voyage.audio.planner import AudioPlanner, AudioTake
 
 
@@ -103,10 +110,12 @@ def test_planner_without_segment_seconds_keeps_legacy_length() -> None:
     assert plan.take.duration == pytest.approx(45.0)
 
 
-def test_take_bpm_ledger_roundtrip() -> None:
+def test_take_bpm_ledger_roundtrip(tmp_path: Path) -> None:
+    take_file = tmp_path / "take_0000.wav"
+    take_file.write_bytes(b"fake-take")
     take = AudioTake(
         take_id="take_0000",
-        path="/tmp/x.wav",
+        path=str(take_file),
         caption="ambient",
         seed=1,
         covers_from=0.0,
@@ -117,10 +126,12 @@ def test_take_bpm_ledger_roundtrip() -> None:
     assert AudioTake.from_dict(take.to_dict()).bpm == pytest.approx(120.0)
 
 
-def test_take_bpm_absent_on_legacy_lines() -> None:
+def test_take_bpm_absent_on_legacy_lines(tmp_path: Path) -> None:
+    take_file = tmp_path / "take_0000.wav"
+    take_file.write_bytes(b"fake-take")
     take = AudioTake(
         take_id="take_0000",
-        path="/tmp/x.wav",
+        path=str(take_file),
         caption="ambient",
         seed=1,
         covers_from=0.0,
@@ -130,3 +141,19 @@ def test_take_bpm_absent_on_legacy_lines() -> None:
     raw = take.to_dict()
     assert "bpm" not in raw
     assert AudioTake.from_dict(raw).bpm is None
+
+
+def test_segment_progress_info_reports_beats_and_bpm() -> None:
+    """Progress-only display numbers (issue 046): same grid as the mixer."""
+    info = segment_progress_info(4.0, 4)
+    assert info == {"beats": 4.0, "grid_bpm": pytest.approx(60.0)}
+    doubled = segment_progress_info(5.04, 4)
+    assert doubled["beats"] == 8.0
+    assert doubled["grid_bpm"] == pytest.approx(8 * 60.0 / 5.04)
+
+
+def test_segment_progress_info_rejects_bad_durations() -> None:
+    with pytest.raises(ValueError):
+        segment_progress_info(0.0, 4)
+    with pytest.raises(ValueError):
+        segment_progress_info(float("nan"), 4)

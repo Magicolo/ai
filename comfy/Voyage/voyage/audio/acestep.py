@@ -146,12 +146,15 @@ def render_take(
     grid BPM so segment cuts land on beats); None keeps the legacy
     energy mapping.
     """
-    from acestep.inference import GenerationConfig, GenerationParams, generate_music
-
+    # Validate before the upstream import (issue 038): a bad call must
+    # fail as ValueError on CPU, never as ModuleNotFoundError, and never
+    # after paying for a heavy import.
     validate_bpm(bpm)
     validate_duration_seconds(duration_seconds)
     validate_task_type(task_type)
     validate_reference_audio(src_audio)
+    from acestep.inference import GenerationConfig, GenerationParams, generate_music
+
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     params = GenerationParams(

@@ -1,6 +1,6 @@
 # 053 — Container: `WORKDIR /opt/longlive` swallows output on bare `docker run`; root-owned bind-mount artifacts
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: WORKDIR /app + --user pin + recipe)
 - Severity: medium (data-loss-class CWD trap + host can't clean/inspect outputs)
 - Area: containers/permissions — `worker/Dockerfile.video:97`, scripts, `output/`
 - Rank rationale: AGENTS history confirms this class already bit once; observed
@@ -82,3 +82,14 @@ Voyage/output/` after any container render.
   only `-w /app`; `qualify.sh:31` summary `docker run` still without `-w` —
   outputs pasted in Evidence). Added `## Why this is an issue`. No staleness.
 - Open: WORKDIR fix + `--user` rollout.
+- 2026-09-29 (this track): PARTLY FIXED, remainder documented. WORKDIR
+  half ADOPTED (fixed by another track: `WORKDIR /app` in all three images,
+  `worker/Dockerfile.video:145` with the LongLive CWD-contract comment;
+  `run.sh` keeps `-w /app`). This track: `scripts/qualify.sh:34` summary
+  `docker run` gains `-w /app` (belt-and-braces; WORKDIR already covers
+  it); `docs/TROUBLESHOOTING.md` disk-full section gains the root-owned
+  cleanup recipe (`docker run --rm -v "$PWD:/app" voyage:latest rm -rf
+  /app/output/<run>`) + WORKDIR note. `--user` rollout DEFERRED (needs a
+  `/models` writability fallback — GPU-box follow-up, noted in the doc).
+  Tests: scripts/docs-only (bash -n clean by inspection). Scoped gates
+  green for related suites.

@@ -66,7 +66,8 @@ def _default_settings_path() -> Path:
 FIELD_HELP = {
     "backend": "Video backend preset (geometry + device + audio pairing). "
     "ltxv/longlive2/causvid need the CUDA worker image + a GPU.",
-    "duration": "Target length, e.g. '5s', '90', '1m30s', '2m'. Rounds up to whole segments.",
+    "duration": "Target length, e.g. '5s', '90', '1m30s', '2m', '1h', '1h2m3.5s'. "
+    "Rounds up to whole segments, so the video never runs short.",
     "style": "Human-owned style string. Required — baked into the run config and every prompt.",
     "name": "Run + folder name. Required — the run lands in output/<name>/ with final.mp4 inside.",
     "seed": "Base seed (integer). Video/audio takes derive deterministically from it.",

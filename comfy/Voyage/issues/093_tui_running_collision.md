@@ -64,3 +64,18 @@ repeatedly under load; observe intermittent ~30 s hangs. Inspect
   Previously-failing `test_base_exception_in_worker_restores_form` now passes
   in 1.57s (was a 30s hang → assert). Racy Pilot scroll/click idiom remains
   open as a test-hardening follow-up (no helper added yet).
+- 2026-09-29 (orchestrator): Pilot half FIXED. Root cause confirmed in
+  the installed Textual 8.2.8: `Pilot.click` returns False (no raise)
+  when the widget is not under the mouse, and every call site ignored
+  the return — a scroll-raced click looks exactly like a hung run. New
+  `_click_generate_when_ready` helper (scroll + poll click-True, fail
+  loud after 100 tries) at all 7 Generate sites; startup-gate waits
+  10 s → 30 s via `_STARTUP_WAIT_ITERATIONS` (finish-waits untouched).
+  File suite green repeatedly; full-suite flakes under box contention
+  only (concurrent pytest at 100% CPU).
+- 2026-09-29 (orchestrator): Pilot half FIXED (see collision-half entry
+  above for the rename). `_click_generate_when_ready` helper (return
+  value honored, fail loud) at all 7 Generate sites + unused-import
+  cleanup + `_STARTUP_WAIT_ITERATIONS` 600 for the 5 startup gates
+  (finish-waits untouched). File suite green repeatedly; residual
+  full-suite failures under box contention only.

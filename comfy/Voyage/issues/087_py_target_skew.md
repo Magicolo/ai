@@ -1,6 +1,6 @@
 # 087 — Lint/type targets (py312) exceed the video runtime (py3.10): latent 3.11+ rewrite hazard
 
-- Status: open
+- Status: resolved (verified 2026-09-25: py310 target)
 - Severity: low (next "cleanup" can break the video image with no gate catching it)
 - Area: toolchain — `Voyage/pyproject.toml:33-35,40-44`,
   `Voyage/worker/Dockerfile.video:15` (`python3.10`)
@@ -60,3 +60,11 @@ Set `target-version = "py310"` and `mypy python_version = "3.10"` (the minimum i
   are now THREE sites (`logrotate.py:28,47` plus the two cited) — the hazard
   described here has already grown once more.
 - Open: retarget or document.
+- 2026-09-29 (this track, scope target only): re-read live — ADOPTED, no
+  duplicate work. RETARGETED by another track: `pyproject.toml:57`
+  `target-version = "py310"` + `:116` `python_version = "3.10"` (minimum in
+  `requires-python`), with the why-comments; the three `UP017` sites stay
+  deliberate (`logrotate.py:28,47`, `concepts.py:115`, `persistence.py:36`).
+  No edit in this track. Pre-existing note: `tui_state.py:72` (name help,
+  101 chars) exceeds line-length 100 — left for the owning track (this
+  track touched only the duration help string per scope).

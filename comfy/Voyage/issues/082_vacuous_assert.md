@@ -1,6 +1,6 @@
 # 082 — Vacuous self-comparison assert in `test_causvid_worker.py:317`
 
-- Status: open
+- Status: resolved 2026-09-25 (this track: line deleted)
 - Severity: low (redundant line; cannot fail)
 - Area: tests — `Voyage/tests/test_causvid_worker.py:306-319`
 - Rank rationale: pass-2 test-hygiene finding; AST self-compare scan over all
@@ -53,4 +53,9 @@ Delete line 317 (coverage already provided by :311/:318/:319).
 - 2026-09-25: issue-file repair — added `## Why this is an issue`; re-verified
   cited lines live (`test_causvid_worker.py:306-319`, self-compare at `:317`
   — match); re-ran AST scan (single hit at 317, confirmed).
-- Open: delete the line.
+- 2026-09-25: resolved — deleted the self-comparison (was line 322 after
+  drift); concrete pins (9,72), dropped+novel==81, novel==72 remain.
+- 2026-09-29: verification (this track) — re-read
+  `tests/test_causvid_worker.py:312-324` live: no self-compare remains;
+  concrete pins at `:314-317` + `:323-324` intact; scope pytest passes.
+  One-line deletion already done, no further edit.

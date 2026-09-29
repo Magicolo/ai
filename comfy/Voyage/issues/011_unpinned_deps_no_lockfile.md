@@ -1,6 +1,6 @@
 # 011 — No pinned dependency set: `>=` floors, no lockfile, floating transitive closure
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: == pins + requirements.lock incl. hypothesis/coverage/sortedcontainers (review))
 - Severity: major (reproducibility / supply chain)
 - Area: packaging — `pyproject.toml`, worker images
 - Rank rationale: history already proves fragility (transformers 5.x break,
@@ -90,3 +90,21 @@ Rebuild the images weeks apart (or bump any transitive) and compare
 - 2026-09-25 (repair pass): added `## Why this is an issue`; Evidence enriched
   with live pin output; Wan `snapshot_download` still revision-less
   (`model_registry.py:233-237`).
+- 2026-09-29 (this track, scope `pyproject.toml` pins only): re-read live —
+  ADOPTED, no duplicate work. Slim side FIXED by another track:
+  `pyproject.toml:14-37` carries exact pins (`pydantic>=2.7,<2.11`,
+  `huggingface_hub==2.0.0`, `numpy==1.26.4`, `rich==15.0.0`,
+  `textual==8.2.8`, `pytest==9.1.1`, `mypy==2.3.1`, `ruff==0.16.9`,
+  `hypothesis==6.168.0`, `coverage==7.16.1`) matching `requirements.lock`
+  (slim freeze 2026-09-25, `pydantic==2.10.6` satisfies `<2.11`); `Dockerfile`
+  installs lock first + `--no-deps -e .`. Remainder out of scope:
+  Wan snapshot still `revision=None` (`model_registry.py:307`, needs registry
+  track) + `flash-attn`/upstream-`requirements.txt` float (needs GPU-box
+  freeze, noted in `Dockerfile.video:65-68,45-49). No edit in this track.
+  Scoped gates: ruff + mypy on touched files green (full `gates.sh` red on
+  concurrent hypothesis/conftest scope, pre-existing).
+- 2026-09-29 (orchestrator): lock gap closed — `requirements.lock` was
+  missing hypothesis/coverage/sortedcontainers (gate image installs from
+  the lock, so mypy failed 21× on the property files); resolved exact
+  transitives in an ephemeral container (hypothesis imports clean with
+  zero attrs) and added the three pins. mypy barrier cleared.

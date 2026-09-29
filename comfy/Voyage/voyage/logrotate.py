@@ -23,6 +23,14 @@ from voyage import paths
 
 DEFAULT_KEEP_DAYS = 30
 
+GAUGE_CADENCE_INTERVAL_SEGMENTS = 1
+"""Default gauge cadence: sample on every segment (issue 032).
+
+Matches the supervisor's `RESOURCE_GAUGE_INTERVAL_SEGMENTS` default;
+raise the interval to pay the 3-health-RPC fan-out every K segments
+instead of every commit.
+"""
+
 METRICS_FILENAME = "metrics.jsonl"
 """Live metrics filename; rotated siblings are `metrics-YYYY-MM-DD.jsonl`."""
 
@@ -31,6 +39,27 @@ _ROTATED_SUFFIX = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})$")
 
 def _today() -> datetime.date:
     return datetime.datetime.now(datetime.timezone.utc).date()  # noqa: UP017
+
+
+def should_sample_gauges(
+    segment_number: int, interval_segments: int = GAUGE_CADENCE_INTERVAL_SEGMENTS
+) -> bool:
+    """Cadence gate for per-commit gauge sampling (issue 032).
+
+    Pure helper so the policy is unit-testable: sample when
+    `segment_number` lands on the interval grid. Non-positive
+    intervals clamp to 1 (sample every segment), mirroring the
+    supervisor's `max(1, RESOURCE_GAUGE_INTERVAL_SEGMENTS)`.
+
+    Supervisor hook (not wired here — `supervisor.py` is out of scope
+    for this change): replace the inline
+    `if int(segment_id) % interval != 0: return` grid check in
+    `Supervisor._sample_gauges` with
+    `if not should_sample_gauges(int(segment_id), interval): return`
+    so the cadence lives in one tested place.
+    """
+    interval = max(1, interval_segments)
+    return segment_number % interval == 0
 
 
 def _rotated_name(path: Path, day: datetime.date) -> Path:

@@ -41,7 +41,12 @@ shortest slice; every assembly step verifies non-empty outputs.
 
 ## Final mix
 
-`finalize` muxes each segment's video.mp4 + audio.wav, concats, and
-encodes once (768×432 @ 24 fps, `voyage/media.py:465-467`, AAC 256k
-bitrate at 48 kHz sample rate, `voyage/media.py:606-608`) with checksum, frame-range, and
-A/V-alignment checks (§56 steps 4–6). Config: 48 kHz stereo throughout.
+`finalize` re-slices each segment window (extended half the overlap per
+side) from the takes ledger and blends pairwise with manual fades
+(`voyage/media.py: _blend_pair` — afade out/in + adelay + amix,
+2 inputs per ffmpeg call, never `acrossfade`: a 31-input chain
+deadlocks the filter scheduler and long-first pairs collapse), then
+concats the segment videos with a stream copy and muxes the mix
+(`-shortest` safety; AAC 256k at 48 kHz) with checksum, frame-range,
+and A/V-alignment checks (§56 steps 4–6). Config: 48 kHz stereo
+throughout.

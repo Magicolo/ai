@@ -188,3 +188,28 @@ Target: worker-internals tails below the previous line windows, TUI Pilot
 failure-path matrices, DESIGN §§ cross-check of whatever lands next. New files
 as `093+`; if a HIGH appears, prefix `0xxa/b` to sort with its rank and note it
 here. Stop only when a full 3-track sweep returns zero new findings.
+
+## Resolution status, batch 5 (orchestrator-maintained)
+
+- Batch 5 DONE 2026-09-29 (perf/tools/tests/docs/containers, 5 parallel
+  tracks + orchestrator review, gates green): RESOLVED 013 (ahead-guard
+  validator), 014 (tail-embed warming), 027 (concepts vectorization),
+  028 (tensor handoff), 029 (single shuttle), 030 (LRU-8), 031
+  (concat-copy + slice memo), 032 (seg0 anchor + select-filter + cadence
+  helper), 033 (hit-rate + soak wiring in review), 034 (lint subset +
+  ratchet), 035 (scoped mypy), 036 (boundary types + ratchet), 039
+  (hypothesis + properties), 041 (gpu deselect + coverage ratchet), 042
+  (cache env + pins), 038/040/082/088/089/090 (tests verified/fixed),
+  044 (verified clean + convergent names), 046 (time-box + helpers),
+  011/012/054/055/057/083/087 (pins/digests verified), 047/048/049/051/
+  052/053 (docs + readers + reserve + workdir/user), 076/077/081
+  (as-built DESIGN notes), 094 (commit probe+clamp + re-plan loop),
+  095 (joint compensation + exact tiling), 093-Pilot (click helper +
+  startup budgets). Review fixes: requirements.lock +3 (mypy barrier),
+  render_take validate-before-import, bpm-floor pin, ltxv stub
+  EmbedCache, serve-map/bridge tests, TUI click/budgets, soak prefetch
+  line, 003-hook/016-reanchor (batch 3 leftovers closed in review).
+- OPEN with concrete next steps (4): 015 (VAE tiling needs idle GPU),
+  045 (GenerateBlocksRequest/BoundaryKind/Unset refactor), 056
+  (VLM vendor/audit security task), 092 (gate-scope alignment + video
+  smoke gate).

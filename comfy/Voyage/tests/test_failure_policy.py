@@ -15,8 +15,9 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import default_config_toml, load_config
+from voyage.config import load_config
 from voyage.errors import (
     DiskSpaceError,
     FatalWorkerError,
@@ -24,29 +25,13 @@ from voyage.errors import (
     VoyageError,
 )
 from voyage.media import finalize_run
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    read_state,
-    write_manifest,
-    write_state,
-)
+from voyage.persistence import read_state
 from voyage.rpc import SubprocessWorker
 from voyage.supervisor import Supervisor
 
 
 def _init_run(run_dir: Path, run_id: str = "failure-policy") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml(run_id, "pastel neon line-art, peaceful", 11),
-        encoding="utf-8",
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _always_fail(op: str, payload: dict[str, Any], timeout: float = 600.0) -> dict[str, Any]:
@@ -147,7 +132,9 @@ def test_worker_call_times_out_on_silent_worker() -> None:
         started = time.monotonic()
         with pytest.raises(RecoverableWorkerError, match="timed out"):
             worker.call("health", {}, timeout=0.2)
-        assert time.monotonic() - started < 10.0
+        # Wide wall bound (issue 089): the call itself resolves in ~0.2 s;
+        # the 60 s budget only guards the hang class on loaded machines.
+        assert time.monotonic() - started < 60.0
     finally:
         os.close(read_fd)
         os.close(write_fd)

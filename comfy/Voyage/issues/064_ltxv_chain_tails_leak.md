@@ -98,3 +98,7 @@ a short anchor); validate `fps>0` in `generate_blocks` (and
   fps unit/handler rejection). Gates: `ruff check` clean, `ruff
   format --check voyage tests` clean, `mypy voyage` strict clean (40
   files), `pytest` 472 passed.
+- 2026-09-29 (orchestrator): follow-up fix — the 030 LRU migration broke
+  this issue's `test_encode_moves_mask_to_session_device` double
+  (`_embed_cache={}` has no `.put`); switched the stub to the real
+  `EmbedCache()`. Green.

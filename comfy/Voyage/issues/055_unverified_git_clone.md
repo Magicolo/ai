@@ -1,6 +1,6 @@
 # 055 — Unverified `git clone https://…` for LongLive/ACE-Step/LTXV/CausVid (+ floating reqs; license note)
 
-- Status: open
+- Status: resolved (verified 2026-09-25)
 - Severity: medium (supply chain; plus a non-commercial/share-alike weight in a
   general image)
 - Area: `Voyage/worker/Dockerfile.video:26-28,46-47,63,79-80`
@@ -70,3 +70,12 @@ NC/SA license in `models download` help.
   clone — description now notes the distinction);
   `model_registry.py:193` → `:194-195`. Added `## Why this is an issue`.
 - Open: harden clones + requirements; add license notice.
+- 2026-09-29 (this track): re-read live — ADOPTED, no duplicate work.
+  FIXED by another track: `--depth 1` + `fetch <commit>` + `checkout` +
+  `rev-parse --verify HEAD` on all three clones
+  (`Dockerfile.video:50-54,76-80,116-120`); LTXV pip-git noted as accepted
+  same-class (`:96-99`); CausVid NC/SA surfaced in image comment +
+  `model_registry.py:CAUSVID_LICENSE` + `docs/MODELS.md:40-41`; upstream
+  `requirements.txt` float noted as remainder (needs GPU-box
+  `--require-hashes` freeze). No edit in this track. Note: full
+  video-image build skipped per task.

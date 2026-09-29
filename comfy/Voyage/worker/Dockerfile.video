@@ -1,4 +1,10 @@
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+# Base pinned by digest (issue 012): linux/amd64 manifest of
+# nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 resolved 2026-09-25
+# (`docker buildx imagetools inspect --raw ...`). The tag alone drifts
+# (CUDA/ffmpeg/libx264 encode bytes included); the digest freezes it.
+# Bump procedure: resolve the new amd64 digest the same way, update FROM,
+# re-freeze the pip pins below on a GPU box, note in docs/INSTALL.md.
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04@sha256:2a015be069bda4de48d677b6e3f271a2794560c7d788a39a18ecf218cae0751d
 
 # Phase 1 video worker env: CUDA 12.8 + Python 3.10 + torch 2.8.0/cu128 +
 # TorchAO FP8 PTQ + LongLive@6b36d20 + voyage package. Eager mode
@@ -14,17 +20,37 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3.10 python3.10-venv python3-pip git gcc g++ ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+# NOTE (issue 012 remainder): the apt set above stays unversioned on
+# purpose — exact Ubuntu/CUDA-repo versions were not frozen (resolving
+# them needs a full GPU-box build). The digest-pinned FROM above is the
+# stronger guarantee: the same snapshot always yields the same apt
+# versions. Next GPU build should freeze (`apt-cache policy ...`) and pin.
 
-RUN pip install --upgrade pip \
+# pip pinned exact (issue 012): 25.0.1 still supports python3.10.
+RUN pip install "pip==25.0.1" \
     && pip install torch==2.8.0 torchvision==0.23.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
 RUN pip install torchao==0.13.0 "huggingface_hub[cli]" "pydantic>=2.7,<2.11"
 
+# Verified-fetch clones (issue 055): `--depth 1` keeps the build context
+# small; `fetch <commit>` + `checkout <commit>` + `rev-parse --verify`
+# prove the pinned commit is exactly what got checked out (a bare
+# `clone <url>` + `checkout` trusts the transport with no verification).
+# License surface: the CausVid DMD checkpoint pulled at runtime is
+# CC BY-NC-SA 4.0 (non-commercial, share-alike — see model_registry.py
+# CAUSVID_LICENSE + docs/MODELS.md); the LongLive/LTXV/ACE-Step stacks
+# carry their own upstream licenses — check before redistributing images.
+#
 # LongLive at the pinned commit (DESIGN §140). Full requirements (matches
-# upstream env; heavy but reproducible).
-RUN git clone https://github.com/NVlabs/LongLive /opt/longlive \
+# upstream env; heavy but reproducible). The upstream requirements.txt
+# itself floats (issue 011 remainder): hashing it (`--require-hashes`)
+# needs a GPU-box freeze first — never `pip install -r` a second
+# requirements file here (see the CausVid note below for why).
+RUN git clone --depth 1 https://github.com/NVlabs/LongLive /opt/longlive \
+    && git -C /opt/longlive fetch --depth 1 origin 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
     && git -C /opt/longlive checkout 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
+    && git -C /opt/longlive rev-parse --verify HEAD \
     && pip install -r /opt/longlive/requirements.txt
 
 # Python headers for JIT builds at runtime (triton compiles its CUDA utils
@@ -36,6 +62,9 @@ RUN apt-get update \
 
 # Mandatory attention backend (see header note). Built for the host GPU
 # family at image build time; sm89 (Ada) is covered by the default arch list.
+# NOTE (issue 011 remainder): flash-attn floats with no version — it must be
+# built against the host GPU family at image build time, so the pin can only
+# be frozen on a GPU box (`pip freeze` after a good build, then pin exact).
 RUN pip install flash-attn --no-build-isolation
 
 # ACE-Step 1.5 music stack (Phase 4, DESIGN §140): same pinned clone the
@@ -43,8 +72,11 @@ RUN pip install flash-attn --no-build-isolation
 # lacks (probe-verified 2026-09-22 under torch 2.8.0+cu128: 30s take in
 # 4.3s, peak 12.84GB — identical to torch 2.10). torchaudio must match
 # torch 2.8.0 from the cu128 index; the rest are stable leaf deps.
-RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+# Verified-fetch clone (issue 055): see the LongLive note above.
+RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+    && git -C /opt/ACE-Step-1.5 fetch --depth 1 origin ca1e85fe9430179831e6bc6be790c332190a3866 \
     && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
+    && git -C /opt/ACE-Step-1.5 rev-parse --verify HEAD \
     && pip install soundfile loguru numba vector_quantize_pytorch sentence-transformers \
     && pip install torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu128
@@ -61,6 +93,10 @@ RUN pip install transformers==4.57.6
 # needs; the T5 code path used here is stable across 4.x (probe-verified).
 # The [inference] extra (imageio[ffmpeg], av, torchvision) plus
 # sentencepiece/einops/timm land explicitly below.
+# NOTE (issue 055): the pip-git fetch below is the same unverified-fetch
+# class as the clones (commit-pinned via @rev, but no --depth/hash check
+# is expressible in a PEP 508 URL) — accepted: the rev is pinned and the
+# tree is small; vendor a tarball with sha256 if this ever moves to prod.
 RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightricks/LTX-Video@4b2d053057623ddd4d0a1d3e9cd28890e9ef487f" \
     && pip install "imageio[ffmpeg]" av sentencepiece einops timm
 
@@ -76,18 +112,24 @@ RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightri
 # confirmed by grepping the cloned sources at the pin). export_to_video
 # (diffusers) and TextDataset (causvid.data) from the upstream demo script
 # are NOT needed — Voyage has its own ffmpeg media I/O.
-RUN git clone https://github.com/tianweiy/CausVid /opt/causvid \
+# Verified-fetch clone (issue 055): see the LongLive note above.
+RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
+    && git -C /opt/causvid fetch --depth 1 origin adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
     && git -C /opt/causvid checkout adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
+    && git -C /opt/causvid rev-parse --verify HEAD \
     && pip install omegaconf easydict ftfy diffusers
 
+# Console progress (rich) + launcher TUI (textual) land first (issue 054):
+# pure-leaf installs before any COPY, so voyage-code edits never reinstall
+# them. Versions match the slim lockfile.
+RUN pip install "rich==15.0.0" "textual==8.2.8"
+
 # Voyage supervisor package (pure-python here; torch lives only behind the
-# worker module import). --no-deps: pydantic already pinned above, so rich
-# (console progress, a core dependency) and textual (launcher TUI, also
-# core) land explicitly on this line.
+# worker module import). --no-deps: pydantic already pinned above, so the
+# editable install adds only the voyage package itself.
 COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
-RUN pip install --no-deps -e /app \
-    && pip install "rich>=13.7" "textual>=8.0"
+RUN pip install --no-deps -e /app
 
 # Run as the invoking host user (issue 053 follow-up): the supervisor and
 # its worker subprocesses share bind mounts with the host ($PWD:/app,
@@ -110,5 +152,18 @@ ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/app \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-WORKDIR /opt/longlive
+# WORKDIR /app (issue 053): the old /opt/longlive CWD swallowed relative
+# outputs on bare `docker run` (only run.sh's `-w /app` saved it). Safe:
+# the workers satisfy upstream's CWD contract themselves at runtime
+# (`_enter_longlive_tree` / `_enter_causvid_tree` chdir into the repo
+# trees with absolute voyage paths, so the chdir is side-effect free).
+# Keep `-w /app` in run.sh as belt-and-braces.
+WORKDIR /app
+
+# Build-time doctor gate (issue 048): same probe the slim image runs —
+# verifies ffmpeg/torch-CUDA/disk/models facts inside THIS image's CUDA
+# stack. Exit code is ffmpeg-only, so missing models at build time warn
+# via facts without failing the build.
+RUN voyage doctor
+
 CMD ["voyage", "doctor"]

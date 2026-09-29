@@ -1,6 +1,6 @@
 # 033 — Director prefetch serialized by the single JSONL lock ("parallel" rarely overlaps)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: hit-rate aggregation + soak wiring (review) + tests; restructuring deferred until rate data, see log)
 - Severity: medium (lost overlap; hit rate unreported)
 - Area: performance — prefetch vs commit contention
 - Rank rationale: design claims "CPU director vs GPU video — no contention", but
@@ -65,3 +65,19 @@ Run fake-backend multi-segment; aggregate hit/miss events (currently manual).
   executor / handle_benchmark refs re-verified live, current; pasted hit lines
   into Evidence.
 - Open: measure hit rate; then pick (1) or (2).
+- 2026-09-26 (resolution, measurement slice — PARTIAL): `summarize_prefetch_outcome`
+  (`voyage/supervisor.py:178-200`) aggregates `director_prefetch_hit/miss`
+  events into `{prefetch_hits, prefetch_misses, prefetch_hit_rate}`
+  (None with no events, never 0/0). Deliberately supervisor-side and
+  read-only: no worker/lock restructuring (per scope — candidates 1/2 stay
+  decision-gated on the measured rate). Tests:
+  `tests/test_prefetch_summary.py` (5 tests: empty, mixed, unrelated,
+  all-hit, all-miss). FOLLOW-UP (one line, `cli.py:cmd_soak` — out of this
+  change's scope): add `"prefetch": summarize_prefetch_outcome(events)` to
+  the soak `metrics` dict (import from `voyage.supervisor` beside the
+  existing `summarize_gauges` import) so the §104 soak report carries the
+  rate before any (1)/(2) work is considered.
+- 2026-09-29 (orchestrator): soak wiring landed — `cli.cmd_soak` imports
+  `summarize_prefetch_outcome` and reports it as the `prefetch` metrics
+  key (verified: ruff/format/mypy clean, prefetch tests green). Restructure
+  candidates (1)/(2) stay deferred until the rate data justifies them.

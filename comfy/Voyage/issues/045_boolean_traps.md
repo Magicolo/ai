@@ -70,4 +70,33 @@ empty-string + config `None` into one `Unset` sentinel.
 - 2026-09-25: found by structure sweep.
 - 2026-09-25: repair pass — added `## Why this is an issue`; all def-line refs
   re-verified live, current; pasted rg output into Evidence.
-- Open: introduce option dataclasses; enforce keyword-only args.
+- 2026-09-25: partial resolution (this track) — `FinalizeOptions` dataclass
+  landed in `voyage/media.py` (`skip_bad`, `sample_rate`, `channels`,
+  `overlap_fraction`, `overlap_cap_seconds`, `joint_style: blend|hard-splice`
+  with `__post_init__` validation + `effective_overlap_fraction()`), and
+  `finalize_run` accepts `options=` (legacy scalars build an equivalent
+  instance; `overlap_fraction=0` maps to hard-splice, so behavior is
+  identical for existing callers; pinned by new integration tests). The
+  explicit `joint_style` also answers 046's blend-vs-splice collapse for
+  the finalize path. HOOK NOTES for the concurrent pass (out of my scope):
+  `GenerateBlocksRequest` for the three `generate_blocks` (causvid/ltxv/
+  longlive — triplicated, coordinate with 019), `BoundaryKind.FRESH|CONTINUE`
+  for the `scene_cut: bool` thread (longlive:42,521 / causvid:667+), one
+  `Unset` sentinel collapsing TUI empty-string + config `None`
+  (config.py:372 `apply_draft_overrides` + `GenerateFormState`), keyword-only
+  args + LongLive `__init__` precision/geometry split.
+- Open: option dataclasses for video workers + Unset (concurrent pass owns).
+- 2026-09-29: verification (this track) — re-read `voyage/media.py:505-613`
+  live: `JointStyle`, `FinalizeOptions` (`skip_bad`, `sample_rate`,
+  `channels`, `overlap_fraction`, `overlap_cap_seconds`, `joint_style` with
+  `__post_init__` validation + `effective_overlap_fraction()`), and
+  `finalize_run(..., options=...)` with legacy-scalar equivalence
+  (`overlap_fraction=0` maps to hard-splice) all present. Pinned by
+  `tests/test_integration.py:100-112` (blend + hard-splice finalize
+  identically, unknown style rejects). No edit needed (already fixed);
+  `GenerateBlocksRequest` / `BoundaryKind` / `Unset` remain concurrent-owned
+  (loop.py/rpc.py/cli.py/supervisor.py untouched).
+- 2026-09-29 (orchestrator): FinalizeOptions/JointStyle landed
+  (verified); GenerateBlocksRequest + BoundaryKind + Unset sentinel
+  remain — a worker-payload refactor needing GPU-adjacent validation.
+  Kept OPEN narrowed to exactly that remainder.

@@ -1,6 +1,6 @@
 # 081 — DESIGN §§56–57 vs code: finalize keeps generation resolution instead of normalizing to 768×432
 
-- Status: open
+- Status: resolved (annotated 2026-09-25: as-built DESIGN note)
 - Severity: low (spec drift — deliberate as-built deviation without a DESIGN
   note)
 - Area: spec/code drift — DESIGN §56 (`DESIGN.md:2857`, step 10), §57
@@ -66,3 +66,9 @@ legacy), as done for §118.
   DESIGN §56 step 10 + §57 768×432 normative text — both present); re-ran
   `rg` probes (pasted above).
 - Open: annotate DESIGN.
+- 2026-09-29 (this track, docs-only — `cli.py` finalize out of scope):
+  ANNOTATED. `DESIGN.md` §§56-57 as-built note
+  (`§§56-57-generation-resolution-2026-09-29`): finalize keeps generation
+  resolution (`cli.py` passes `config.video.width/height/fps`; verified
+  live) while §56 step 10 + §57 read as normative 768×432 legacy. Code
+  untouched. Tests: docs-only.

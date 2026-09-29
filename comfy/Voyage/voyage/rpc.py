@@ -7,6 +7,7 @@ Stdout is reserved for RPC — never log there from a worker.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import select
 import subprocess
@@ -16,9 +17,21 @@ import time
 from pathlib import Path
 from typing import Any, TextIO
 
+from voyage.atomic import JsonValue
 from voyage.errors import FatalWorkerError, RecoverableWorkerError
 from voyage.logrotate import rotate_log
 from voyage.models import WorkerErrorDetail, WorkerRequest, WorkerResponse
+
+RpcPayload = dict[str, JsonValue]
+"""One worker request payload: JSON-shaped, never bare `Any` (issue 036).
+
+Per-op shapes stay `dict`-level for now — full `TypedDict`s per op would
+reach into the worker implementations (out of scope); this alias is the
+ratchet point (see issues/036).
+"""
+
+RpcResult = dict[str, JsonValue]
+"""One worker result: same boundary contract as the payload."""
 
 OPS = (
     "init",
@@ -71,7 +84,7 @@ def decode_response(line: str) -> WorkerResponse:
     return WorkerResponse.model_validate_json(line)
 
 
-def success(request_id: str, result: dict[str, Any]) -> WorkerResponse:
+def success(request_id: str, result: RpcResult) -> WorkerResponse:
     return WorkerResponse(id=request_id, ok=True, result=result)
 
 
@@ -97,7 +110,7 @@ class SubprocessWorker:
         workdir: Path,
         log_path: Path,
         init_op: str | None = "init",
-        init_payload: dict[str, Any] | None = None,
+        init_payload: RpcPayload | None = None,
         timeout: float = DEFAULT_RPC_TIMEOUT_SECONDS,
     ) -> None:
         self._module = module
@@ -137,10 +150,8 @@ class SubprocessWorker:
         """Close the supervisor-side log handle, if any (best-effort)."""
         handle, self._log_file = self._log_file, None
         if handle is not None:
-            try:
+            with contextlib.suppress(OSError):
                 handle.close()
-            except OSError:
-                pass
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
@@ -148,10 +159,9 @@ class SubprocessWorker:
             self._close_log_file()
             return
         if proc.stdin:
-            try:
+            # Peer already dead (e.g. SIGKILL); still reap below.
+            with contextlib.suppress(BrokenPipeError, OSError):
                 proc.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass  # Peer already dead (e.g. SIGKILL); still reap below.
         try:
             proc.wait(timeout=WORKER_STOP_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
@@ -159,10 +169,8 @@ class SubprocessWorker:
             # Reap after the kill (issue 058): without this wait the child
             # stays a zombie — wait() returns once SIGKILL lands, so this
             # cannot block beyond a short grace.
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=WORKER_STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                pass
         finally:
             self._close_log_file()
 
@@ -193,7 +201,10 @@ class SubprocessWorker:
         deadline, never as an unbounded hang.
         """
         stdout = proc.stdout
-        assert stdout is not None  # checked by the caller
+        if stdout is None:
+            # Unreachable via call() (it rejects a missing stdout first),
+            # but explicit: asserts vanish under `python -O` (issue 034).
+            raise FatalWorkerError(f"worker {self._module} has no stdout")
         # Test doubles pass a raw fd int as stdout; production passes a
         # TextIO. Both select and os.read accept either form.
         raw_stdout: Any = stdout
@@ -203,14 +214,12 @@ class SubprocessWorker:
         else:
             raw_fd = int(raw_stdout)
             readable = raw_fd
-        try:
+        # Best-effort only: select() already gated this fd readable, so
+        # a single os.read still returns promptly even if the flag
+        # change fails (odd fds in tests) — and the deadline bounds us
+        # regardless.
+        with contextlib.suppress(OSError, ValueError):
             os.set_blocking(raw_fd, False)
-        except (OSError, ValueError):
-            # Best-effort only: select() already gated this fd readable, so
-            # a single os.read still returns promptly even if the flag
-            # change fails (odd fds in tests) — and the deadline bounds us
-            # regardless.
-            pass
         deadline = time.monotonic() + effective_timeout
         buffer = bytearray()
         while True:
@@ -257,6 +266,10 @@ class SubprocessWorker:
         001): `select` only guarantees *some* bytes are readable, so a
         worker dribbling a partial line can never wedge this call past the
         deadline. Lines past MAX_RESPONSE_LINE_BYTES fail the same way.
+
+        `payload` stays `dict[str, Any]` (not `RpcPayload`) for now: callers
+        hold `dict[str, object]`, which is not JSON-shaped, and those call
+        sites belong to other passes (issue 036 follow-up).
         """
         proc = self._proc
         if proc is None or proc.stdin is None or proc.stdout is None:
@@ -296,5 +309,5 @@ class SubprocessWorker:
             raise error
         return response.result
 
-    def health(self) -> dict[str, Any]:
+    def health(self) -> RpcResult:
         return self.call("health", {})

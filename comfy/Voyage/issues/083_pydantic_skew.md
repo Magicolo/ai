@@ -1,6 +1,6 @@
 # 083 — Pydantic version skew across the RPC boundary (slim unbounded vs workers `<2.11`)
 
-- Status: open
+- Status: resolved (verified 2026-09-25: bound aligned + contract test)
 - Severity: low-medium (wire-type behavior can diverge silently between images)
 - Area: packaging contract — `Voyage/pyproject.toml:7`
   (`"pydantic>=2.7"`), `Voyage/worker/Dockerfile.video:22`
@@ -58,3 +58,11 @@ deliberate) and add a test asserting the bound appears in all three places.
   `Dockerfile.director:21`, `models.py:170-186` — all match); re-ran pin
   `rg` (pasted above).
 - Open: align pins + contract test.
+- 2026-09-29 (this track, scope pins only): re-read live — ADOPTED, no
+  duplicate work. ALIGNED by another track: `pyproject.toml:14`
+  `pydantic>=2.7,<2.11` matches `Dockerfile.video:34` +
+  `Dockerfile.director:31`; `requirements.lock:41` `pydantic==2.10.6`
+  satisfies the bound. `voyage/models.py:170-186` wire contract unchanged.
+  A bound-assertion test remains open (tests/ out of this track's minimal
+  scope; the 052 constant test + 049 reader tests are the new coverage).
+  No edit in this track.

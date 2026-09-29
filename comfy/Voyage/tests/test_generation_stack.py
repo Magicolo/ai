@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.config import (
     AudioConfig,
@@ -29,13 +30,7 @@ from voyage.media import (
     validate_video,
 )
 from voyage.media import probe as media_probe
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    read_state,
-    write_manifest,
-    write_state,
-)
+from voyage.persistence import read_state
 from voyage.supervisor import Supervisor
 
 
@@ -89,16 +84,7 @@ def test_overrides_plumb_beats_and_drift(tmp_path: Path) -> None:
 
 
 def _init_run(run_dir: Path, style: str = "pastel neon line-art, peaceful") -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml("stack", style, 7), encoding="utf-8"
-    )
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
+    initialize_run_directory(run_dir, run_id="stack", style=style, seed=7)
 
 
 def _metric_events(run_dir: Path, event: str) -> list[dict[str, object]]:
@@ -265,6 +251,6 @@ def test_generate_defaults_to_qwen_director_with_offline_fallback(tmp_path: Path
     from voyage.config import load_config as _load
 
     config, _ = _load(run_dir / paths.CONFIG_FILENAME)
-    assert config.director.backend == "deterministic"  # file default untouched
+    assert config.director.backend == "qwen"  # stored config matches the qwen default
     state = read_state(run_dir)
     assert state.committed_segments == 1

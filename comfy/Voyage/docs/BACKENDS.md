@@ -55,14 +55,19 @@ acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
 renders text-to-video from cached CPU T5 bf16 embeds
 (`text_encoder=None` — the pipeline would otherwise move the 18.8 GB
 fp32 encoder to GPU); blocks 1+ render tail-conditioned extensions from
-the previous block's tail frame, frame 0 deduped. Each block writes a
-chain PNG; the last becomes the segment tail, the rest are deleted. The
-tail PNG doubles as the crash-recovery tape beside the segment video
-(`recovery.pt` carries profile `ltxv` — tapes never resume across
-backends); `scene_cut` forces a fresh start. Native 768×512; draft
-640×352 verified. Needs `models download ltxv-2b`. The `benchmark` op
- saves/restores tail state around its probes, so unlike longlive it does
- not advance any stream — safe to run mid-sequence.
+the previous block's tail frame, frame 0 deduped. Stream-A accounting
+(DESIGN §5.3, `voyage/workers/video_ltxv.py`): every segment renders
+121-frame clips; fresh blocks commit all 121, conditioned blocks drop the
+25-frame prefix and commit 96 novel. The tail file `video_tail.mp4`
+(last 25 committed frames) beside the segment video is the
+crash-recovery anchor, so the supervisor's resume/rebuild flow works
+unchanged; `recovery.pt` carries the §5.3 JSON record (clean break from
+old torch-pickle tapes — unresumable by design) with profile `ltxv`
+(tapes never resume across backends or numerics); `scene_cut` forces a
+fresh start. Native 768×512; draft 640×352 verified. Needs
+`models download ltxv-2b`. The `benchmark` op saves/restores tail state
+around its probes, so unlike longlive it does not advance any stream —
+safe to run mid-sequence.
 
 ## CausVid chaining model (`causvid`, Stream D alternative)
 

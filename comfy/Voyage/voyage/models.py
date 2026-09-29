@@ -133,15 +133,33 @@ class DirectorDestination(BaseModel):
 
 
 class DirectorVideoPlan(BaseModel):
+    """Ordered scene descriptions, current world → destination (DESIGN §19).
+
+    The stages ARE the video caption family: each stage must carry
+    concrete visual detail (motion, scenes, objects, characters, shots,
+    angles) derived from the style charter + general prompt, and must
+    drift gradually as the general prompt drifts — never jump.
+    """
+
     stages: list[str] = Field(default_factory=list)
 
 
 class DirectorAudioPlan(BaseModel):
+    """Music + SFX caption families (DESIGN §19, three-caption doctrine).
+
+    Both captions derive from the same style charter + general prompt as
+    the video stages and evolve with it: a drifted concept yields drifted
+    captions, a held concept yields stable captions. The slow-loop music
+    planner keys repaints on `music_caption` only — `sfx_caption` drift
+    never triggers a music take render.
+    """
+
     music_caption: str = "slow ambient electronic composition"
     energy: float = 0.48
     tempo_bpm: int = 74
     texture: str = ""
     environment: list[str] = Field(default_factory=list)
+    sfx_caption: str = ""
 
 
 class DirectorNovelty(BaseModel):

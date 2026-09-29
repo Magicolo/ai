@@ -1,6 +1,6 @@
 # 076 — DESIGN §19 vs code: director prompt demands `novelty.distinguishes_from`, schema drops it
 
-- Status: open
+- Status: resolved (annotated 2026-09-25: as-built DESIGN note)
 - Severity: low-medium (spec'd contract unfulfillable; distinction rationale
   never persisted)
 - Area: spec/code drift — DESIGN §19 (`DESIGN.md:1530`),
@@ -56,3 +56,10 @@ demanded prompt keys. Persist it in the concept record if kept.
   cited lines live (`director.py:80-86` prompt demand, `models.py:113-114`
   `DirectorNovelty`, `DESIGN.md:1530` §19 header — all match).
 - Open: align schema with prompt (or prompt with schema).
+- 2026-09-29 (this track, docs-only — `models.py`/`director.py` out of
+  scope): ANNOTATED. `DESIGN.md` §19 as-built note
+  (`§19-novelty-distinguishes-2026-09-29`): prompt demands
+  `distinguishes_from` but `DirectorNovelty` persists only `why_new`
+  (verified live: `models.py:147-148`, `director.py:80,86`). Code
+  untouched; schema-vs-prompt alignment remains open for the owning track.
+  Tests: docs-only.

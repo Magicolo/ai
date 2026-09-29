@@ -1,6 +1,6 @@
 # 048 — `voyage doctor` implements ~3 of ~13 spec checks (+ build-time false gate)
 
-- Status: open
+- Status: resolved (fixed 2026-09-25: probe extension + gap docs + build gates)
 - Severity: medium (over-promises; build implies a verified stack)
 - Area: observability — `voyage/doctor.py:26-50`, `cli.py:122-132`, Dockerfiles
 - Rank rationale: spec §64 requires 13 checks; `probe()` returns 6 fields with
@@ -104,3 +104,12 @@ verified stack.
 FIXED (doctor half): `voyage/doctor.py` now reports torch-CUDA, disk,
 and models facts; docs name the remaining gaps. Build-gate half
 explicitly deferred (Dockerfiles out of scope).
+- 2026-09-29 (this track, scope Dockerfile half only): re-read live —
+  ADOPTED, no duplicate work. Build-gate half FIXED by another track:
+  `RUN voyage doctor` in all three builds (`Dockerfile:33`,
+  `worker/Dockerfile.video:151`, `worker/Dockerfile.director:54`) with
+  issue-048 comments (ffmpeg-only exit, warns without failing on missing
+  models). `docs/INSTALL.md:54-60` + `docs/TROUBLESHOOTING.md:16-22` name
+  coverage + remaining gaps. No edit in this track. Note: full
+  video/director image builds skipped per task (slim build via `gates.sh`
+  only).

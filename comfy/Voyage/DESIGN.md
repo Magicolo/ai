@@ -1577,6 +1577,12 @@ Example:
 
 The worker must reject invalid JSON and retry generation rather than returning malformed data downstream.
 
+> As-built (§19-novelty-distinguishes-2026-09-29, issue 076): the prompt
+> demands `novelty {why_new, distinguishes_from}`, but `DirectorNovelty`
+> persists only `why_new` (extra keys dropped) — distinction rationale is
+> asked for but never stored. Keep the prompt or extend the schema; do not
+> assume the field survives validation.
+
 ---
 
 # 20. Director prompt design
@@ -2512,6 +2518,12 @@ It should **not** block video generation unless an explicit closed-loop mode is 
 
 This is important: an unavailable or slow inspector must not stop an otherwise healthy voyage.
 
+> As-built (§44-vlm-trust-2026-09-29, issue 056): the Qwen3.5-9B inspector
+> loads with `trust_remote_code=True` (custom modeling/processor code —
+> required), while the Qwen3 text path stays `False`. Pin + allow-list
+> (`chat_template.jinja`) mitigate availability, not execution; vendoring
+> + hash-pinning the modeling files and minimal mounts are the follow-up.
+
 ---
 
 # 45. Worker RPC protocol
@@ -2904,6 +2916,12 @@ pad remaining pixels symmetrically
 Do not crop creative content unless the configuration explicitly requests cropping.
 
 The finalizer must report the exact transform it applied.
+
+> As-built (§§56-57-generation-resolution-2026-09-29, issue 081): finalize
+> keeps the generation resolution (no downscale; `cli.py` passes
+> `config.video.width/height/fps`) — 768×512 runs finalize natively.
+> Steps 10 (§56) and §57 still read as normative 768×432 legacy; treat
+> them as legacy unless a downscale pass is deliberately reintroduced.
 
 ---
 
@@ -3517,6 +3535,12 @@ persist decision
 ```
 
 A decision should be immutable once associated with a committed segment.
+
+> As-built (§74-accept-order-2026-09-29, issue 077): code enforces style
+> before novelty (cheap code-level gate, then embed + similarity), while
+> the diagram above lists novelty first. Both gates run; violation
+> attribution follows the code order. Reorder code or diagram deliberately —
+> do not "fix" one side without the other.
 
 ---
 
@@ -7047,3 +7071,43 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - `tests/test_run_sh.py`: `id` added to the isolated-PATH core tools
   (run.sh resolves `--user` on every path incl. the dry-run seam) + a new
   test pinning the `user=--user=UID:GID` report.
+
+## 2026-09-29 — Three caption families with drift evolution (SFX slice 1)
+
+- User doctrine: the director generates all three caption families from
+  the style charter + evolving general prompt — video captions
+  (motion/scenes/visuals/objects/characters/shots/angles), music
+  captions (instruments/harmony/melody), SFX captions (concrete audio
+  descriptions of objects/environments/creatures) — and every family
+  must evolve as the general prompt slowly drifts each segment.
+- Schema (`voyage/models.py`): `DirectorAudioPlan` gains `sfx_caption`
+  (default `""`, so pre-slice transition.json files validate unchanged);
+  `DirectorVideoPlan` keeps `stages` as the video caption family, now
+  documented as carrying concrete visual detail. The slow-loop music
+  planner keys repaints on `music_caption` only — SFX drift never
+  triggers a music take render.
+- Drift mechanism (`voyage/director.py` + `voyage/supervisor.py`): new
+  pure `format_previous_captions` renders the prior segment's video
+  stages + music/SFX captions as a PREVIOUS CAPTIONS block; the system
+  prompt + response-shape text now require all three families to
+  continue from it with a slow drift, never jump or restart. The
+  supervisor feeds it from two sources: `_decide_payload` loads the
+  previous committed `transition.json` best-effort (missing/torn/legacy
+  → `""`, never breaks a commit) via `previous_transition_captions`,
+  and the director-prefetch path formats the just-accepted decision
+  directly (its speculative state has no segment number). The Qwen
+  worker forwards `previous_captions` (plus the previously-dropped
+  `measured_context`) into the user message. `transition.json` already
+  persists the full decision, so caption history is automatic.
+- Deterministic fallback: captions derive from concept + charter
+  (`{charter}: {concept} in continuous gentle motion…` /
+  `slow ambient electronic composition for {concept}…` /
+  `quiet concrete sounds of {concept}…`) — drifted concepts yield
+  drifted captions, held concepts yield bit-stable captions.
+- Console: `_segment_plan_info` surfaces `audio_sfx_caption` alongside
+  the music caption so the drift is visible per segment.
+- Proof: `tests/test_three_captions.py` (9 TDD tests, watched fail on
+  missing symbols/params, then green) + `tests/test_phase3.py` payload
+  key update; full `scripts/gates.sh` green (ruff + format + mypy
+  strict + 867 pytest, 1 deselected). Next: SFX worker + VRAM ladder
+  (slice 2), finalize windowing/sharding/mix (slice 3).
