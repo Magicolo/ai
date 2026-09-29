@@ -97,3 +97,13 @@ the script headers.
   base has no `python` shim). Verified verbatim in the existing
   `voyage-video:latest` (no rebuild): smoke prints ok; `bash -n` clean on
   all three scripts. `test.sh` stays pytest-only by documented design.
+- 2026-09-29 (orchestrator, supersession note): the `_add_sfx_args`
+  review fix below was absorbed by a broader concurrent SFX/augment
+  evolution (shared helper gained `include_no_sfx`, an `sfx` verb, and
+  `getattr`-default reads at every forwarding site) — strictly more
+  robust, so this track's helper version was dropped rather than
+  committed. What ships in this commit: the video smoke gate +
+  snapshot/live scope contracts. The parser-parity test
+  (`tests/test_sfx_parser_parity.py`, written + green against the
+  evolved tree) stays untracked until the SFX-flag surface it pins
+  lands — it cannot pass against a tree without those flags.
