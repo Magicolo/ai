@@ -1124,17 +1124,28 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print("INVALID:")
         for error in errors:
             print(f"  - {error}")
-        if not args.skip_bad:
+        if not getattr(args, "skip_bad", False):
             print(
                 "aborting before finalize (re-run with --skip-bad to salvage)",
                 file=sys.stderr,
             )
             return 1
         print("continuing with --skip-bad ...", file=sys.stderr)
-    final = Path(args.final_video).resolve() if args.final_video else run_dir / "final.mp4"
+    final_video = getattr(args, "final_video", None)
+    final = Path(final_video).resolve() if final_video else run_dir / "final.mp4"
     final.parent.mkdir(parents=True, exist_ok=True)
     final_code = cmd_finalize(
-        argparse.Namespace(run=str(run_dir), output=str(final), skip_bad=args.skip_bad)
+        argparse.Namespace(
+            run=str(run_dir),
+            output=str(final),
+            skip_bad=getattr(args, "skip_bad", False),
+            no_sfx=getattr(args, "no_sfx", False),
+            sfx_backend=getattr(args, "sfx_backend", None),
+            sfx_caption=getattr(args, "sfx_caption", None),
+            sfx_device=getattr(args, "sfx_device", None),
+            sfx_model_size=getattr(args, "sfx_model_size", None),
+            sfx_workers=getattr(args, "sfx_workers", 1),
+        )
     )
     if final_code != 0:
         return final_code

@@ -7305,3 +7305,29 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   Pilot flake under load. Own-scope files (config/cli/tui_state +
   registry/cli-split/generate/adapter/hardening/state tests): 197 passed,
   only the foreign absolute-output failure.
+
+## 2026-09-29 — issue 097 resolved: TUI generate × SFX namespace collision fixed
+
+- Root cause confirmed live: `to_generate_namespace` emitted `no_sfx` /
+  `sfx_device` / `sfx_model_size` / `sfx_workers` but not `sfx_backend` /
+  `sfx_caption`, while `cmd_generate`'s finalize block read all six plus
+  `skip_bad` via direct `args.*` access — TUI runs died with
+  `AttributeError: 'Namespace' object has no attribute 'sfx_backend'`
+  after segments committed.
+- Fix (option 1 from the issue file, plus completing the partial TUI
+  namespace): `to_generate_namespace` now emits `sfx_backend=None` /
+  `sfx_caption=None` (parser defaults, single default source kept), and
+  `cmd_generate`'s finalize block + `skip_bad` / `final_video` reads use
+  `getattr` with parser-matching defaults; `cmd_finalize`'s
+  `sfx_device` / `sfx_model_size` / `sfx_workers` reads hardened the same
+  way. Regression test
+  `tests/test_tui_state.py::test_generate_namespace_carries_finalize_sfx_attrs`.
+- Verified in-container: namespace probe shows all six attrs present;
+  `test_tui_state` 57 passed, cli-split/generate/registry/adapter 75
+  passed, mypy clean (47 files), and the previously failing
+  `test_tui.py::test_generate_end_to_end_fake_backend` passes. Full suite:
+  923 passed, 3 failed — all in `tests/test_tui_app.py`, all Pilot
+  viewport flakes (`OutOfBounds` on click/scroll, or passing in
+  isolation), none touching the SFX path. (The `Voyage/issues/097_*`
+  investigation file this section was drafted against has since been
+  archived — it lives on in git history only; see AGENTS.md §11.)

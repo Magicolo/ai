@@ -290,3 +290,20 @@ def test_last_settings_round_trip_control_characters(raw: str, tmp_path: Path) -
     file_bytes = settings_file.read_bytes()
     assert all(byte >= 0x20 or byte == 0x0A for byte in file_bytes)
     assert load_last_settings(settings_file) == state
+
+
+def test_generate_namespace_carries_finalize_sfx_attrs() -> None:
+    """Issue 097: the TUI namespace must satisfy cmd_generate's finalize block.
+
+    cmd_generate forwards sfx_*/no_sfx/skip_bad into cmd_finalize; a missing
+    attribute is an AttributeError after segments commit. Parser defaults are
+    the contract (None/None/None/None/1 + no_sfx False).
+    """
+    ns = to_generate_namespace(GenerateFormState(style="x", backend="fake", name="sfxns"))
+    assert ns.skip_bad is False
+    assert ns.no_sfx is False
+    assert ns.sfx_backend is None
+    assert ns.sfx_caption is None
+    assert ns.sfx_device is None
+    assert ns.sfx_model_size is None
+    assert ns.sfx_workers == 1
