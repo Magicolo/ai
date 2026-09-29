@@ -107,7 +107,9 @@ def test_streaming_payload_matches_supervisor_inline_shape() -> None:
     assert payload["prompts"] == ["pastel neon line-art, peaceful"] * 3
     assert payload["seeds"] == [11, 12, 13]
     assert payload["scene_cuts"] == [False, False, False]
-    assert payload["frames"] == 48
+    # ltxv registry row: 96 novel frames/segment (was 48 before the
+    # BackendRecord.segment_frames column removed the fake-row leak).
+    assert payload["frames"] == 96
 
 
 def test_staged_block_sequences_ride_through_verbatim() -> None:

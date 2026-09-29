@@ -171,8 +171,8 @@ def test_plan_counts_match_cli_truth_all_backends_and_blocks() -> None:
     """Single-source planning (issue 024): TUI == cli._frames_per_segment math.
 
     Cross-test over every backend × blocks 1..3 against a planning-only
-    ProjectConfig with preset fps — the same inputs cmd_generate plans
-    with. Any drift on either side fails here.
+    ProjectConfig with preset fps/segment_frames — the same inputs
+    cmd_generate plans with. Any drift on either side fails here.
     """
     from voyage.cli import _frames_per_segment, segments_for_duration
     from voyage.config import ProjectConfig, VideoConfig, _video_preset
@@ -181,11 +181,18 @@ def test_plan_counts_match_cli_truth_all_backends_and_blocks() -> None:
         preset = _video_preset(backend)
         raw_fps = preset.get("fps", 24)
         assert isinstance(raw_fps, int)
+        raw_frames = preset.get("segment_frames", 48)
+        assert isinstance(raw_frames, int)
         for blocks in (1, 2, 3):
             state = GenerateFormState(style="x", backend=backend, duration="5s", blocks=str(blocks))
             config = ProjectConfig(
                 style="planning",
-                video=VideoConfig(backend=backend, blocks_per_segment=blocks, fps=raw_fps),
+                video=VideoConfig(
+                    backend=backend,
+                    blocks_per_segment=blocks,
+                    fps=raw_fps,
+                    segment_frames=raw_frames,
+                ),
             )
             frames_per_segment = _frames_per_segment(config)
             segments = segments_for_duration(5.0, raw_fps, frames_per_segment)

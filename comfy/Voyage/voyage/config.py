@@ -93,6 +93,10 @@ class BackendRecord:
     width: int
     height: int
     fps: int
+    # Natural novel frames per committed segment at blocks_per_segment=1
+    # (the duration-math source for presets/toml; the per-backend segment
+    # duration formulas in cli stay authoritative for planning).
+    segment_frames: int
     latent_shape: tuple[int, ...]
     device: str
     audio_backend: AudioBackendName
@@ -110,8 +114,9 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # until a memory-optimization pass lands); longlive2 renders native
     # 1280x704 (latent_shape x16 spatial — the worker ignores the request
     # geometry), so the preset pins that geometry: anything else fails the
-    # commit-time resolution check (qual-longlive2, 2026-09-24); fake is
-    # the config default, spelled out for explicitness; causvid renders
+    # commit-time resolution check (qual-longlive2, 2026-09-24); ltxv is
+    # the config default (2026-09-29 backend decision), spelled out for
+    # explicitness; causvid renders
     # native 832x480 @ 16 fps (the worker rejects anything else — same
     # native-geometry rule as longlive2).
     # fps + latent_shape ride the row too (default_config_toml writes them
@@ -123,6 +128,7 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         width=768,
         height=432,
         fps=24,
+        segment_frames=48,
         latent_shape=(1, 8, 48, 44, 80),
         device="cpu",
         audio_backend="fake",
@@ -135,6 +141,7 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         width=1280,
         height=704,
         fps=24,
+        segment_frames=29,
         latent_shape=(1, 8, 48, 44, 80),
         device="cuda:0",
         audio_backend="acestep",
@@ -147,6 +154,7 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         width=768,
         height=512,
         fps=24,
+        segment_frames=96,
         latent_shape=(1, 8, 48, 44, 80),
         device="cuda:0",
         audio_backend="acestep",
@@ -162,6 +170,7 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         # DESIGN §5.4: never relabel 16 fps media as 24; the 24 fps
         # presentation resample is a separate finalize-stage slice).
         fps=16,
+        segment_frames=72,
         latent_shape=(1, 21, 16, 60, 104),
         device="cuda:0",
         audio_backend="acestep",
@@ -175,26 +184,26 @@ state mode + streaming shape. This table IS the BACKEND_GEOMETRY table
 (geometry columns live in each row) and the preset/state registries —
 every dict below is a derived view, never a second source."""
 
-_FAKE_ROW: BackendRecord = BACKEND_REGISTRY["fake"]
-"""VideoConfig defaults spell this row (issue 025: defaults = fake row)."""
+_DEFAULT_ROW: BackendRecord = BACKEND_REGISTRY["ltxv"]
+"""VideoConfig defaults spell this row (issues 025 + 2026-09-29 ltxv decision)."""
 
 
 class VideoConfig(BaseModel):
-    # Defaults ARE the fake registry row (issue 025) — change the row,
+    # Defaults ARE the ltxv registry row (issue 025) — change the row,
     # not these references. Pinned by tests/test_backend_registry.py.
-    backend: VideoBackendName = "fake"
-    profile: str = _FAKE_ROW.profile
-    width: int = _FAKE_ROW.width
-    height: int = _FAKE_ROW.height
-    fps: int = _FAKE_ROW.fps
-    segment_frames: int = 48
-    device: str = _FAKE_ROW.device
+    backend: VideoBackendName = "ltxv"
+    profile: str = _DEFAULT_ROW.profile
+    width: int = _DEFAULT_ROW.width
+    height: int = _DEFAULT_ROW.height
+    fps: int = _DEFAULT_ROW.fps
+    segment_frames: int = _DEFAULT_ROW.segment_frames
+    device: str = _DEFAULT_ROW.device
     # LongLive backend only: host path (or /models mount in the worker
     # image) holding wan_models/ + longlive2/, and the latent shape the
     # pipeline denoises. [1,8,48,44,80] decodes to 1280x704 (x16 spatial;
     # 8 latents -> 8 frames chunked, 29 causal).
     models_dir: str = "/models"
-    latent_shape: list[int] = Field(default_factory=lambda: list(_FAKE_ROW.latent_shape))
+    latent_shape: list[int] = Field(default_factory=lambda: list(_DEFAULT_ROW.latent_shape))
     # Phase 2: DiT blocks per committed segment (1 block = 8 latents).
     # The stream session holds caches across blocks, so memory stays flat;
     # only wall time grows. Fake backend ignores this (renders segment_frames).
@@ -482,15 +491,16 @@ def default_config_toml(
     run_id: str,
     style: str,
     seed: int,
-    video_backend: VideoBackendName = "fake",
+    video_backend: VideoBackendName = "ltxv",
     director_backend: str = "qwen",
 ) -> str:
     preset = _video_preset(video_backend)
     backend = str(preset.get("backend", video_backend))
-    profile = str(preset.get("profile", "fake-432p"))
+    profile = str(preset.get("profile", "ltxv-512p"))
     width = _preset_int(preset, "width", 768)
-    height = _preset_int(preset, "height", 432)
+    height = _preset_int(preset, "height", 512)
     fps = _preset_int(preset, "fps", 24)
+    segment_frames = _preset_int(preset, "segment_frames", 96)
     raw_latent = preset.get("latent_shape", [1, 8, 48, 44, 80])
     latent_dims = (
         [int(dim) for dim in raw_latent] if isinstance(raw_latent, list) else [1, 8, 48, 44, 80]
@@ -510,13 +520,13 @@ seed = {seed}
 min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}
 
 [video]
-# "fake" (built-in testsrc) | "longlive2" (CUDA) | "ltxv" (CUDA) | "causvid" (CUDA, 16 fps)
+# "ltxv" (CUDA) | "longlive2" (CUDA) | "causvid" (CUDA, 16 fps) | "fake" (built-in testsrc)
 backend = "{backend}"
 profile = "{profile}"
 width = {width}
 height = {height}
 fps = {fps}
-segment_frames = 48
+segment_frames = {segment_frames}
 device = "{device}"
 models_dir = "/models"
 latent_shape = {latent_toml}
@@ -731,6 +741,7 @@ _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int | list[int]]] = {
         "width": record.width,
         "height": record.height,
         "fps": record.fps,
+        "segment_frames": record.segment_frames,
         "latent_shape": list(record.latent_shape),
         "device": record.device,
     }

@@ -30,7 +30,7 @@ def _parse(verb_args: list[str]) -> argparse.Namespace:
 def test_init_parser_defaults() -> None:
     args = _parse(["init", "--output", "out", "--style", "calm"])
     assert args.func is cli.cmd_init
-    assert args.backend == "fake"
+    assert args.backend == "ltxv"
     assert args.seed == 0
 
 
@@ -41,7 +41,7 @@ def test_doctor_parser() -> None:
 def test_models_parser_defaults() -> None:
     args = _parse(["models", "list"])
     assert args.func is cli.cmd_models
-    assert args.models_target == "longlive2-bf16"
+    assert args.models_target == "ltxv-2b"
 
 
 def test_run_parser_defaults() -> None:

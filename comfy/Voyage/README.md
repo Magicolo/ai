@@ -56,8 +56,8 @@ aborts if validation fails unless `--skip-bad`):
 VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
   --style "pastel neon line-art, peaceful"
 # -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
-# --backend causvid renders 832x480 @ 16 fps (CausVid DMD + Wan2.1-1.3B base);
-# --backend longlive2 renders 1280x704 @ 24 fps; --backend fake needs no GPU.
+# ltxv (the default) renders 768x512 @ 24 fps; --backend fake needs no GPU.
+# --backend longlive2|causvid need their models downloaded first (see above).
 ```
 
 Step-by-step (for pause/resume and unbounded runs):

@@ -160,7 +160,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    backend: VideoBackendName = getattr(args, "backend", None) or "fake"
+    backend: VideoBackendName = getattr(args, "backend", None) or "ltxv"
     director_backend: str = getattr(args, "director", None) or "qwen"
     config_text = default_config_toml(
         args.run_id, args.style, args.seed, video_backend=backend, director_backend=director_backend
@@ -1232,6 +1232,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             style="pastel neon line-art, peaceful",
             seed=11,
             force=True,
+            backend="fake",
         )
         if cmd_init(init_args) != 0:
             return 1
@@ -1386,7 +1387,7 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     init.add_argument(
         "--backend",
         choices=("fake", "longlive2", "ltxv", "causvid"),
-        default="fake",
+        default="ltxv",
         help="video backend preset written into the run config",
     )
     init.add_argument(
@@ -1416,7 +1417,7 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
     models.add_argument(
         "models_target",
         nargs="?",
-        default="longlive2-bf16",
+        default="ltxv-2b",
         choices=[
             "longlive2-bf16",
             "ltxv-2b",
@@ -1425,7 +1426,7 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
             "audio-acestep",
             "inspector-qwen35",
         ],
-        help="weight bundle for download (default longlive2-bf16)",
+        help="weight bundle for download (default ltxv-2b)",
     )
     models.add_argument("--models-dir", default=None, help="model root (default /models)")
     models.set_defaults(func=cmd_models)

@@ -38,6 +38,8 @@ def _init_fake_run(run_dir: Path, run_id: str = "hardening") -> None:
                 run_id,
                 "--style",
                 _STYLE,
+                "--backend",
+                "fake",
             ]
         )
         == 0
@@ -157,6 +159,8 @@ def test_init_then_run_with_relative_paths(tmp_path: Path, monkeypatch: pytest.M
                 "rel",
                 "--style",
                 _STYLE,
+                "--backend",
+                "fake",
             ]
         )
         == 0
@@ -370,7 +374,7 @@ def test_cuda_blame_names_audio_backend(
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
     (tmp_path / "voyage.toml").write_text(
-        default_config_toml("blame", _STYLE, 11), encoding="utf-8"
+        default_config_toml("blame", _STYLE, 11, video_backend="fake"), encoding="utf-8"
     )
     config, _digest = load_config(tmp_path / "voyage.toml")
     config.audio.backend = "acestep"

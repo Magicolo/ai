@@ -27,7 +27,8 @@ def test_no_cuda_warning_for_cpu_device(tmp_path: Path, capsys: pytest.CaptureFi
     from voyage.config import default_config_toml, load_config
 
     (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+        default_config_toml("preset", "pastel neon line-art, peaceful", 11, video_backend="fake"),
+        encoding="utf-8",
     )
     config, _ = load_config(tmp_path / "voyage.toml")
     _warn_if_no_cuda(config)
@@ -101,7 +102,7 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
     assert (ltxv.video.width, ltxv.video.height) == (768, 512)
     assert ltxv.video.device == "cuda:0"
     # Source config untouched (pure function).
-    assert config.video.backend == "fake"
+    assert config.video.backend == "ltxv"
 
 
 def test_longlive2_preset_pins_native_geometry(tmp_path: Path) -> None:
@@ -119,7 +120,7 @@ def test_longlive2_preset_pins_native_geometry(tmp_path: Path) -> None:
     assert (longlive.video.width, longlive.video.height) == (1280, 704)
     assert longlive.video.device == "cuda:0"
     # Source config untouched (pure function).
-    assert config.video.backend == "fake"
+    assert config.video.backend == "ltxv"
 
 
 def test_frames_per_segment_longlive2_follows_decode_expansion(tmp_path: Path) -> None:
@@ -182,7 +183,7 @@ def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
     # CUDA video backends pair with ACE-Step music.
     assert causvid.audio.backend == "acestep"
     # Source config untouched (pure function).
-    assert config.video.backend == "fake"
+    assert config.video.backend == "ltxv"
 
 
 def test_frames_per_segment_causvid_uses_novel_minimum(tmp_path: Path) -> None:
@@ -226,7 +227,7 @@ def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:
         assert applied.audio.device == "cuda:0"
         assert applied.audio.models_dir == "/models"
     # Source config untouched (pure function).
-    assert config.audio.backend == "fake"
+    assert config.audio.backend == "acestep"
 
 
 def test_fake_preset_keeps_fake_audio(tmp_path: Path) -> None:
@@ -327,7 +328,8 @@ def test_cuda_guard_passes_for_fake_without_torch(
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
     (tmp_path / "voyage.toml").write_text(
-        default_config_toml("guard", "pastel neon line-art, peaceful", 11), encoding="utf-8"
+        default_config_toml("guard", "pastel neon line-art, peaceful", 11, video_backend="fake"),
+        encoding="utf-8",
     )
     config, _ = load_config(tmp_path / "voyage.toml")
     assert _require_cuda_stack(config) is True

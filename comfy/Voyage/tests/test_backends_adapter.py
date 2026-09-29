@@ -26,7 +26,19 @@ from voyage.errors import ConfigurationError, FatalWorkerError, RecoverableWorke
 
 
 def _video_config(**overrides: Any) -> VideoConfig:
-    fields: dict[str, Any] = {"backend": "fake", "blocks_per_segment": 1}
+    from voyage.config import BACKEND_REGISTRY
+
+    backend = str(overrides.get("backend", "fake"))
+    row = BACKEND_REGISTRY[backend]  # type: ignore[literal-required]
+    fields: dict[str, Any] = {
+        "backend": backend,
+        "blocks_per_segment": 1,
+        # Registry row owns the per-backend shape (2026-09-29 ltxv
+        # decision: VideoConfig field defaults are the ltxv row, so a
+        # bare backend= override would otherwise leak them).
+        "segment_frames": row.segment_frames,
+        "fps": row.fps,
+    }
     fields.update(overrides)
     return VideoConfig(**fields)
 

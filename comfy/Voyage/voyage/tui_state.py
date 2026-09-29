@@ -300,14 +300,25 @@ def _planning_frames_and_fps(backend: str, blocks: int) -> tuple[int, int]:
         # Literal below would otherwise raise ValidationError instead).
         return _FALLBACK_FRAMES_PER_SEGMENT, _FALLBACK_FPS
     try:
-        preset_fps = _video_preset(backend).get("fps", 24)
+        preset = _video_preset(backend)
+        preset_fps = preset.get("fps", 24)
         fps = preset_fps if isinstance(preset_fps, int) and preset_fps > 0 else 24
+        preset_frames = preset.get("segment_frames", _FALLBACK_FRAMES_PER_SEGMENT)
     except ValueError:
         fps = 24
+        preset_frames = _FALLBACK_FRAMES_PER_SEGMENT
+    frames = (
+        preset_frames
+        if isinstance(preset_frames, int) and preset_frames > 0
+        else _FALLBACK_FRAMES_PER_SEGMENT
+    )
     planning_config = ProjectConfig(
         style="planning",
         video=VideoConfig(
-            backend=cast(VideoBackendName, backend), blocks_per_segment=blocks, fps=fps
+            backend=cast(VideoBackendName, backend),
+            blocks_per_segment=blocks,
+            fps=fps,
+            segment_frames=frames,
         ),
     )
     return _frames_per_segment(planning_config), fps

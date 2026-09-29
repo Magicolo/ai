@@ -31,7 +31,7 @@ from typing import Literal
 import pytest
 
 from voyage import paths
-from voyage.config import default_config_toml, load_config
+from voyage.config import VideoBackendName, default_config_toml, load_config
 from voyage.persistence import (
     build_manifest,
     initial_state,
@@ -84,6 +84,7 @@ def initialize_run_directory(
     style: str = DEFAULT_STYLE,
     seed: int = DEFAULT_RUN_SEED,
     visual_inspector: bool = False,
+    video_backend: VideoBackendName = "fake",
 ) -> None:
     """Create a minimal valid run directory: config, manifest, state.
 
@@ -91,11 +92,14 @@ def initialize_run_directory(
     order, same empty concepts store) so converted call sites keep
     passing unchanged. The `visual_inspector` flag applies the same
     TOML string replacement the inspector test modules use.
+    `video_backend` pins the CPU fake pipeline (2026-09-29 ltxv
+    decision: product defaults are ltxv/CUDA, but the suite runs
+    CPU-only on fake workers — no GPU, no model weights).
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    toml_text = default_config_toml(run_id, style, seed)
+    toml_text = default_config_toml(run_id, style, seed, video_backend=video_backend)
     if visual_inspector:
         toml_text = toml_text.replace("visual_inspector = false", "visual_inspector = true")
     (run_dir / paths.CONFIG_FILENAME).write_text(toml_text, encoding="utf-8")

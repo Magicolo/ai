@@ -7235,3 +7235,73 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   all 13 in other agents' in-flight areas (fake 48f→96f segment-math
   change, backend-adapter/config/finalize/scoreboard — none touch the
   ensure path; verified by failure signatures + `git diff` scope).
+
+## 2026-09-29 — ltxv wins the backend dilemma: all defaults to ltxv, other models deleted
+
+- User decision: ltxv has by far the best tradeoff between generation
+  speed, consistency, quality and memory usage. Other backends stay in
+  the codebase (code + tests + docs), but their models are deleted and
+  every default option now selects ltxv.
+- Code (`voyage/config.py`): `BackendRecord` gained `segment_frames`
+  (fake 48 / longlive2 29 / ltxv 96 / causvid 72 — the natural novel
+  counts previously hardcoded in `cli._frames_per_segment`), so presets,
+  TOML and `VideoConfig` derive it instead of leaking the fake row's 48
+  (or ltxv's 96 into fake TOML — `_VIDEO_BACKEND_PRESETS` was missing
+  the key, one-line fix). `_FAKE_ROW` renamed `_DEFAULT_ROW` =
+  `BACKEND_REGISTRY["ltxv"]`; `VideoConfig` defaults are now the ltxv
+  row (backend/profile/geometry/fps/segment_frames/device/latent_shape);
+  `default_config_toml` defaults `video_backend` to ltxv, writes
+  `segment_frames` into the body, `[video]` comment reordered ltxv-first.
+  `voyage/cli.py`: `init --backend` default fake→ltxv, `cmd_init`
+  fallback ltxv, `models` default target longlive2-bf16→ltxv-2b,
+  benchmark end-to-end passes explicit `backend="fake"` (CPU benchmark
+  must stay fake). `voyage/tui_state.py`: `_planning_frames_and_fps`
+  passes `segment_frames` from the video preset (was leaking 96 for
+  fake). `generate --backend` and the TUI backend list were already
+  ltxv-first/default — no change.
+- Tests: registry defaults→ltxv, init/models parser defaults, 4
+  `test_generate` source-purity asserts (video→ltxv, audio→acestep),
+  `conftest.initialize_run_directory` gained `video_backend="fake"`
+  (covers all CPU fake-pipeline callers, zero call-site edits), fake-guard
+  tests pinned `video_backend="fake"`, adapter-contract payload frames
+  48→96 (old value was the fake-row leak), `_video_config` row-aware.
+  Note: a concurrent agent reverted one `--backend fake` re-pin
+  mid-session; re-applied — re-read before editing shared test files.
+- Models deleted from `~/.cache/voyage-models` (~70 GB, 915G disk
+  78%→70%): `causvid` 11G + `longlive2` 9.4G + `Wan2.1-T2V-1.3B` 17G +
+  `wan_models` 32G (verified no live GPU users — only CPU gates/test
+  containers running). Kept: `ltxv-2b`, `PixArt-XL-2-1024-MS` 18G (LTXV
+  TE), `acestep`, `Qwen3-8B` (default director backend), `Qwen3.5-9B`,
+  `all-MiniLM-L6-v2`, `mmaudio` (SFX agent in-flight). `manifest.json`
+  kept untouched — entries are sha bookkeeping for re-download verify,
+  not presence claims. README `generate` example comment updated
+  (ltxv default 768×512@24; longlive2/causvid need downloads first).
+- Gates at switch time: own scope ruff + format + mypy (51 files) clean,
+  pytest 895 passed; full-tree ruff red only in the concurrent agent's
+  untracked `voyage/models_ensure.py`, 2 test failures in their in-flight
+  files (`test_empty_prompts_rejected` ordering, rewritten
+  `test_init_accepts_absolute_output` + stray `Voyage/rel-run/`).
+
+## 2026-09-29 — ltxv-default follow-up: fake-plan test fix + TUI×SFX collision filed
+
+- `tests/test_tui_state.py::test_plan_counts_match_cli_truth_all_backends_and_blocks`
+  failed post-switch: the test built `VideoConfig(backend="fake")` without
+  `segment_frames`, inheriting the new ltxv default (96) while TUI planning
+  (correctly) uses the fake preset (48). Production never produces that
+  config (`resolve_config` always carries preset `segment_frames`), so the
+  test now pins `segment_frames` from the preset like production does.
+- Full gates at follow-up: ruff + format + mypy green; pytest 918 passed,
+  5 failed — 1 is the known foreign `test_init_accepts_absolute_output`,
+  1 the known foreign `test_empty_prompts_rejected`, 2 are TUI e2e
+  (`test_generate_end_to_end_fake_backend`,
+  `test_generate_button_runs_real_fake_backend_to_completion`) broken by a
+  collision between two other in-flight passes: SFX wiring added direct
+  `args.sfx_backend` reads in `cmd_generate:1250` while the issue-045
+  `to_generate_namespace` rewrite emits no `sfx_*` attrs (CLI `generate`
+  is unaffected — verified exit 0 with/without `--no-sfx`). Filed as
+  `Voyage/issues/097_tui_generate_missing_sfx_namespace_attrs.md`
+  (repro + fix candidates, owner = SFX finalize wiring). The 5th
+  (`test_worker_failure_restores_form_with_error`) passes in isolation —
+  Pilot flake under load. Own-scope files (config/cli/tui_state +
+  registry/cli-split/generate/adapter/hardening/state tests): 197 passed,
+  only the foreign absolute-output failure.

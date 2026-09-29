@@ -59,10 +59,10 @@ def test_registry_covers_exactly_the_video_vocabulary() -> None:
     assert set(BACKEND_REGISTRY) == set(get_args(VideoBackendName))
 
 
-def test_video_config_defaults_equal_fake_row() -> None:
-    row = BACKEND_REGISTRY["fake"]
+def test_video_config_defaults_equal_ltxv_row() -> None:
+    row = BACKEND_REGISTRY["ltxv"]
     defaults = VideoConfig()
-    assert defaults.backend == "fake"
+    assert defaults.backend == "ltxv"
     assert defaults.profile == row.profile
     assert (defaults.width, defaults.height) == (row.width, row.height)
     assert defaults.fps == row.fps
