@@ -132,9 +132,11 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
 def _load_inspector(model_id: str) -> tuple[Any, Any]:
     """Lazily load the Qwen3.5-9B VLM + processor on CPU (bf16, mmap-fast).
 
-    trust_remote_code is required: the model ships custom modeling and
-    processor code (Step 0 probe). The weights (~19GB BF16) live in
-    system RAM — never on the 16GB GPU.
+    trust_remote_code stays False (issue 056): transformers 5.17.0 ships
+    NATIVE qwen3_5 modeling (Qwen3_5ForConditionalGeneration) plus the
+    multimodal auto class, verified live 2026-09-29 — the True flag was a
+    4.57.6-era requirement (that stack lacks both) and is now dead. The
+    weights (~19GB BF16) live in system RAM — never on the 16GB GPU.
     """
     # Issue 075: same reload-on-id-change contract as `_load_qwen`.
     if "model" not in _INSPECTOR or _INSPECTOR.get("model_id") != model_id:
@@ -143,13 +145,13 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
         import torch
         from transformers import AutoModelForMultimodalLM, AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=False)
         model = AutoModelForMultimodalLM.from_pretrained(
             model_id,
             dtype=torch.bfloat16,
             device_map="cpu",
             low_cpu_mem_usage=True,
-            trust_remote_code=True,
+            trust_remote_code=False,
         )
         model.eval()
         _INSPECTOR["model"] = model

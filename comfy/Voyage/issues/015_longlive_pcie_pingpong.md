@@ -1,6 +1,6 @@
 # 015 — LongLive per-segment double PCIe ping-pong (VAE-offload + generator-offload)
 
-- Status: open
+- Status: resolved (fixed 2026-09-29: fusion slice landed; elimination measured not-viable, see log)
 - Severity: major (~11.5% steady wall, measured)
 - Area: performance — `generate_blocks` offload choreography
 - Rank rationale: measured, on every segment, with a known upstream fix direction
@@ -110,3 +110,23 @@ offload wedge on every segment.
   work (VAE tiling or streaming-port, upstream `streaming_vae`) needs an
   idle-GPU measurement session per the 3-step plan above. Kept OPEN for
   that session.
+- 2026-09-29 (orchestrator): ELIMINATION INVESTIGATED ON IDLE GPU —
+  verdict: NOT VIABLE, issue resolved on the fusion slice. Probe (real
+  `WanVAEWrapper.decode_to_pixel_chunk` path, full-res [1,8,48,44,80]
+  latents, VAE-only 2.8 GB session): temporal `chunk_size=4` on 8 latent
+  frames yields 26 video frames vs 29 full-pass (2×13 — each chunk
+  independently drops its 3-frame causal warmup; `use_cache=False`
+  carries no context across chunks). The wrapper's chunk loop only
+  preserves counts with `cached_decode`, which `Wan2_2_VAE` does not
+  implement (`decode` + `clear_cache` only — the code comment was
+  right). Spatial tiling has no upstream support and would hand-roll
+  overlapping tiles through a causal 3D-conv VAE (seam/blending risk on
+  every frame) for ~4.4 s/segment — rejected on quality-risk grounds.
+  Side findings: Wan2.2 VAE is 48ch/16x-spatial (not 16ch/8x — the
+  [1,8,48,44,80] preset is exact); the full session needs ~24 GB host
+  RAM (T5 11.4 + DiT 10 + VAE 2.8) and died silently on this shared box
+  (35 GB available minus concurrent containers) — serialize GPU+RAM
+  access for future probes. Landed state stands: fusion slice (peak +
+  fragmentation) + stage timers; the 44% DiT + 43% VAE remainder is
+  model work, not overhead. Probe drivers were /tmp-only, never
+  committed; the `VOYAGE_VAE_CHUNK_FRAMES` vehicle was reverted.

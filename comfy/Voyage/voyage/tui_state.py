@@ -229,15 +229,22 @@ def validate(state: GenerateFormState) -> list[str]:
 def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
     """Build the ``cmd_generate`` namespace (raises ValueError if invalid)."""
     from voyage.cli import parse_duration
+    from voyage.config import Unset, UnsetType
 
     errors = validate(state)
     if errors:
         raise ValueError("; ".join(errors))
 
-    def optional_int(raw: str) -> int | None:
-        return int(raw.strip()) if raw.strip() else None
+    def optional_int(raw: str) -> int | UnsetType:
+        # Absent-encoding (issue 045): blank form fields emit Unset — the
+        # single "not provided" value — instead of a second encoding
+        # (None) that config consumers would also have to agree on.
+        # `apply_draft_overrides`/`resolve_config` tolerate both.
+        return int(raw.strip()) if raw.strip() else Unset
 
     take_raw = state.take_seconds.strip()
+    min_fps_raw = state.min_fps.strip()
+    min_resolution_raw = state.min_resolution.strip()
     name = state.name.strip()
     output = str(Path("output") / name)
     return argparse.Namespace(
@@ -253,12 +260,22 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         draft=state.draft,
         director=state.director,
         blocks=optional_int(state.blocks),
-        take_seconds=float(take_raw) if take_raw else None,
+        take_seconds=float(take_raw) if take_raw else Unset,
         quantization=state.quantization,
         beats_per_segment=optional_int(state.beats_per_segment),
         drift_every_n=optional_int(state.drift_every_n),
+        # default" (Unset); 0 / "0" explicitly disable a floor. The form
+        # defaults ("32" / "1280x720") match the config defaults, so an
         verbose=state.verbose,
         no_color=state.no_color,
+        # Finalize-time SFX pass-through (the generate parser defaults;
+        # kept explicit so the TUI namespace always satisfies cmd_finalize).
+        no_sfx=False,
+        sfx_backend=None,
+        sfx_caption=None,
+        sfx_device=None,
+        sfx_model_size=None,
+        sfx_workers=1,
     )
 
 

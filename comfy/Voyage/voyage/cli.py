@@ -29,6 +29,7 @@ from voyage.config import (
     VideoBackendName,
     apply_draft_overrides,
     default_config_toml,
+    is_provided,
     load_config,
 )
 from voyage.console import RichSegmentProgress, VoyageConsole
@@ -350,14 +351,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
+    # Absent-encoding (issue 045): TUI namespaces carry Unset, argparse
+    # carries None — branch on the predicate so an unset TUI field is
+    # never mistaken for an explicit override.
     if (
         args.draft
-        or args.director
-        or args.blocks is not None
-        or args.take_seconds is not None
-        or args.quantization is not None
-        or getattr(args, "beats_per_segment", None) is not None
-        or getattr(args, "drift_every_n", None) is not None
+        or is_provided(args.director)
+        or is_provided(args.blocks)
+        or is_provided(args.take_seconds)
+        or is_provided(args.quantization)
+        or is_provided(getattr(args, "beats_per_segment", None))
+        or is_provided(getattr(args, "drift_every_n", None))
     ):
         try:
             config = apply_draft_overrides(

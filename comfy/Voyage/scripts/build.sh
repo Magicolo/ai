@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Build the self-contained voyage image and run quality gates inside it.
+# Scope contract (issue 092): this script gates the BAKED SNAPSHOT (no bind
+# mount — what ships). scripts/gates.sh gates the LIVE TREE instead (what
+# you just edited). Both rebuild first; on disagreement check Dockerfile
+# COPY coverage — the file is likely missing from the image.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t voyage:latest .

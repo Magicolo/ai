@@ -1,6 +1,6 @@
 # 092 — Gate-script verification scopes diverge; video image has zero gates
 
-- Status: open
+- Status: resolved (fixed 2026-09-29: smoke gate + explicit scope contracts)
 - Severity: low (two "green gates" can disagree; largest image unverified)
 - Area: scripts/images — `scripts/build.sh:5-6`, `gates.sh:5-7`, `test.sh:5-6`,
   `build-video.sh:6`, `build-director.sh:6-8`,
@@ -89,3 +89,11 @@ the script headers.
 - 2026-09-29 (orchestrator): still OPEN — needs the invocation
   alignment (bind-mount everywhere or snapshot everywhere) plus a smoke
   gate in build-video.sh. Documentation of the divergence is done.
+- 2026-09-29 (orchestrator): RESOLVED. Invocation contract made explicit in
+  both headers (`gates.sh` = live tree, `build.sh` = baked snapshot, shared
+  gate body, COPY-coverage triage note) and a CPU-only smoke gate added to
+  `build-video.sh` (all 3 workers import + delegate `main()` to the shared
+  serve map with all 7 handlers; `--entrypoint python3` because the CUDA
+  base has no `python` shim). Verified verbatim in the existing
+  `voyage-video:latest` (no rebuild): smoke prints ok; `bash -n` clean on
+  all three scripts. `test.sh` stays pytest-only by documented design.

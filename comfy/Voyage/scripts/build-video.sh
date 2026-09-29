@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # Build the CUDA video worker image (long pole: torch + LongLive deps +
 # flash-attn). Run in background and poll /tmp/videobuild.log.
+# Ends with the issue-092 smoke gate: all three video workers must import
+# and delegate main() to the shared serve map. CPU-only (no --gpus, no
+# models, no network) — it catches broken stacks/pins, not numerics.
+# NOTE: the CUDA base image has no `python` shim, so the smoke runs under
+# --entrypoint python3 (the nvidia entrypoint execs `python` otherwise).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -f worker/Dockerfile.video -t voyage-video:latest .
+docker run --rm --user="$(id -u):$(id -g)" -e PYTHONDONTWRITEBYTECODE=1 \
+  --entrypoint python3 voyage-video:latest -c "
+from voyage.workers import video_causvid, video_longlive, video_ltxv
+import inspect
+for mod in (video_longlive, video_ltxv, video_causvid):
+    src = inspect.getsource(mod.main)
+    assert 'standard_serve_map' in src, mod.__name__
+    for handler in ('handle_init', 'handle_health', 'handle_generate_blocks', 'handle_benchmark', 'handle_evict_gpu', 'handle_rebuild', 'handle_resume'):
+        assert handler in src, (mod.__name__, handler)
+print('video smoke ok: 3 workers import + delegate to shared serve map')
+"

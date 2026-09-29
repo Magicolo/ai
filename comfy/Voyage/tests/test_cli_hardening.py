@@ -126,9 +126,11 @@ def test_init_accepts_absolute_output(tmp_path: Path) -> None:
                 "--output",
                 str(target),
                 "--run-id",
-                "fine",
+                "rel",
                 "--style",
                 _STYLE,
+                "--backend",
+                "fake",
             ]
         )
         == 0

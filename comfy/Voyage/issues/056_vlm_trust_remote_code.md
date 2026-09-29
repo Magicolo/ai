@@ -1,6 +1,6 @@
 # 056 — VLM inspector requires `trust_remote_code=True` (remote code execution by design)
 
-- Status: open
+- Status: resolved (fixed 2026-09-29: native 5.17.0 stack + trust=False, E2E proven)
 - Severity: medium (supply chain — compromised rev = RCE in the director
   container)
 - Area: `voyage/workers/director.py:89-111`, `voyage/model_registry.py:70-95`
@@ -73,3 +73,30 @@ exception in DESIGN §5 alongside the `False` default.
 - 2026-09-29 (orchestrator): documented + scoped (DESIGN §44 + MODELS
   notes); vendor/audit/minimal-mounts remain a dedicated security task.
   Kept OPEN for it.
+- 2026-09-29 (orchestrator): RESOLVED — trust eliminated, not vendored.
+  Key finding: the local Qwen3.5-9B snapshot ships ZERO `.py` files and
+  transformers 4.57.6 has neither the qwen3_5 module nor
+  `AutoModelForMultimodalLM` — the flag was load-bearing AND the model
+  was unloadable without Hub code. transformers 5.17.0 (verified in a
+  throwaway container: native classes + sentence-transformers 6.1.0
+  coexist) ships both natively. Director image moved to 5.17.0
+  (4.x stays video-only for LongLive) + full freeze (torch 2.14.0,
+  torchvision 0.29.0, st 6.1.0, accelerate 1.15.0, safetensors 0.8.0,
+  hub 1.33.0, numpy 1.26.4, pillow 12.3.0 — numpy 2.5 stubs break the
+  py3.10 mypy target, caught live); `_load_inspector` flipped to
+  `trust_remote_code=False` (both calls); processor + 9.4B model load
+  verified live with False. Single-frame E2E inspect pending (running).
+  DESIGN §44 + MODELS.md notes rewritten (no vendoring needed).
+- 2026-09-29 (orchestrator): RESOLVED. Director image moved to
+  transformers 5.17.0 (native `Qwen3_5ForConditionalGeneration` +
+  `AutoModelForMultimodalLM`; the 4.x pin stays video-only) with a full
+  freeze (torch 2.14.0, torchvision 0.29.0, st 6.1.0, accelerate 1.15.0,
+  safetensors 0.8.0, hub 1.33.0, numpy 1.26.4, pillow 12.3.0);
+  `_load_inspector` flipped to `trust_remote_code=False` (both calls).
+  Verified live, no remote code: processor resolves as Qwen3VLProcessor,
+  9.4B params load, and a single-frame `handle_inspect` E2E returns an
+  accurate summary (`{"scene_summary": "A vibrant, abstract animation
+  ...", "inspected": true}` on a testsrc frame). No vendoring needed —
+  the snapshot ships no `.py` files at all. DESIGN §44 + MODELS.md
+  rewritten. Follow-up kept: `build-director.sh` gates needed a
+  bind-mount fix (tests/ not baked — fixed same session).

@@ -24,13 +24,119 @@ import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
 
-from voyage.workers.loop import Handler, validate_benchmark_counts
+from voyage.workers.loop import Handler, checked_request, validate_benchmark_counts
+
+BoundaryKind = Literal["fresh", "continue"]
+"""Per-block continuity vocabulary (issue 045).
+
+Replaces the bare `scene_cut: bool` thread with a named state: `fresh`
+starts a new scene (cut prefix, tail ignored), `continue` extends the
+rolling stream. The RPC wire keeps `scene_cuts: list[bool]` (compat);
+`boundary_from_scene_cut` converts at the boundary.
+"""
+
+
+def boundary_from_scene_cut(scene_cut: bool) -> BoundaryKind:
+    """Name a scene-cut flag (issue 045)."""
+    return "fresh" if scene_cut else "continue"
+
+
+@dataclass(frozen=True)
+class GenerateBlocksRequest:
+    """Validated `generate_blocks` payload (issue 045).
+
+    The three video workers parsed prompts/seeds/scene_cuts inline with
+    `assert isinstance` shape checks — triplicated, positional-arg prone,
+    and (as asserts) strippable. All cross-process construction goes
+    through `from_payload`: one validated struct, keyword-only use.
+    Session `generate_blocks` bodies keep their signatures; handlers
+    unpack this struct into keyword calls.
+    """
+
+    prompts: tuple[str, ...]
+    seeds: tuple[int, ...]
+    scene_cuts: tuple[bool, ...]
+    output_path: Path
+    width: int | None
+    height: int | None
+    fps: int
+    segment_id: str = "000000"
+    prompt_plan_digest: str | None = None
+    requested_frames: int | None = None
+    profile_stages: bool = False
+
+    @property
+    def boundaries(self) -> tuple[BoundaryKind, ...]:
+        """Per-block continuity states derived from `scene_cuts`."""
+        return tuple(boundary_from_scene_cut(cut) for cut in self.scene_cuts)
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        width_default: int | None,
+        height_default: int | None,
+    ) -> GenerateBlocksRequest:
+        """Parse + validate a `generate_blocks` RPC payload.
+
+        Handles the multi-block form (`prompts`/`seeds`/`scene_cuts`
+        lists) and the single-block form (`prompt`/`seed`/`scene_cut`
+        scalars); geometry falls back to the backend-native defaults.
+        Raises KeyError (missing), TypeError (mistyped) or ValueError
+        (empty/mismatched) — never asserts, so `-O` cannot strip it.
+        """
+        checked_request(payload, segment_id=str, output_path=str, fps=int)
+        if "prompts" in payload or "seeds" in payload:
+            checked_request(payload, prompts=list, seeds=list)
+            raw_prompts = payload["prompts"]
+            raw_seeds = payload["seeds"]
+            if not isinstance(raw_prompts, list) or not isinstance(raw_seeds, list):
+                raise TypeError("payload prompts/seeds must be lists")
+            prompts = tuple(str(item) for item in raw_prompts)
+            seeds = tuple(int(item) for item in raw_seeds)
+            raw_cuts = payload.get("scene_cuts", [False] * len(prompts))
+            if not isinstance(raw_cuts, list) or len(raw_cuts) != len(prompts):
+                raise ValueError("payload scene_cuts must match prompts in length")
+            scene_cuts = tuple(bool(item) for item in raw_cuts)
+        else:
+            checked_request(payload, prompt=str, seed=int)
+            prompts = (str(payload["prompt"]),)
+            seeds = (int(payload["seed"]),)
+            scene_cuts = (bool(payload.get("scene_cut", False)),)
+        if not prompts or not (len(prompts) == len(seeds) == len(scene_cuts)):
+            raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
+        raw_width = payload.get("width", width_default)
+        raw_height = payload.get("height", height_default)
+        width = None if raw_width is None else int(raw_width)
+        height = None if raw_height is None else int(raw_height)
+        raw_requested = payload.get("frames")
+        if isinstance(raw_requested, bool):
+            requested = None
+        else:
+            requested = int(raw_requested) if isinstance(raw_requested, int) else None
+        raw_digest = payload.get("prompt_plan_hash")
+        return cls(
+            prompts=prompts,
+            seeds=seeds,
+            scene_cuts=scene_cuts,
+            output_path=Path(str(payload["output_path"])),
+            width=width,
+            height=height,
+            fps=int(payload["fps"]),
+            segment_id=str(payload["segment_id"]),
+            prompt_plan_digest=str(raw_digest) if isinstance(raw_digest, str) else None,
+            requested_frames=requested,
+            profile_stages=bool(payload.get("profile_stages", False)),
+        )
+
 
 TAIL_FILENAME = "video_tail.mp4"
 """Crash-recovery anchor beside the segment video (ltxv + causvid)."""

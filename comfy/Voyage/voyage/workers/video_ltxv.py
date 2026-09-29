@@ -805,41 +805,29 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
     validate_fps(int(payload["fps"]))
     if _SESSION is None:
         raise RuntimeError("video_ltxv not initialized — send `init` first")
-    if "prompts" in payload or "seeds" in payload:
-        checked_request(payload, segment_id=str, output_path=str, fps=int)
-        raw_prompts = payload["prompts"]
-        raw_seeds = payload["seeds"]
-        assert isinstance(raw_prompts, list) and isinstance(raw_seeds, list)
-        prompts = [str(item) for item in raw_prompts]
-        seeds = [int(item) for item in raw_seeds]
-        raw_cuts = payload.get("scene_cuts", [False] * len(prompts))
-        assert isinstance(raw_cuts, list) and len(raw_cuts) == len(prompts)
-        scene_cuts = [bool(item) for item in raw_cuts]
-    else:
-        checked_request(payload, segment_id=str, prompt=str, seed=int, output_path=str, fps=int)
-        prompts = [str(payload["prompt"])]
-        seeds = [int(payload["seed"])]
-        scene_cuts = [bool(payload.get("scene_cut", False))]
-    output = Path(str(payload["output_path"]))
-    segment_id = str(payload["segment_id"])
-    requested = payload.get("frames")
-    prompt_digest_raw = payload.get("prompt_plan_hash")
-    prompt_digest = str(prompt_digest_raw) if isinstance(prompt_digest_raw, str) else None
+    # One validated struct (issue 045): payload forms + shape checks live
+    # in GenerateBlocksRequest.from_payload — no inline asserts.
+    request = video_common.GenerateBlocksRequest.from_payload(
+        payload, width_default=768, height_default=512
+    )
+    output = request.output_path
+    if request.width is None or request.height is None:
+        raise ValueError("video_ltxv requires width/height geometry (got native defaults)")
     result = _SESSION.generate_blocks(
-        prompts=prompts,
-        seeds=seeds,
-        scene_cuts=scene_cuts,
+        prompts=list(request.prompts),
+        seeds=list(request.seeds),
+        scene_cuts=list(request.scene_cuts),
         output_path=output,
-        width=int(payload.get("width", 768)),
-        height=int(payload.get("height", 512)),
-        fps=int(payload["fps"]),
-        segment_id=segment_id,
-        prompt_plan_digest=prompt_digest,
-        requested_frames=int(requested) if isinstance(requested, int) else None,
+        width=request.width,
+        height=request.height,
+        fps=request.fps,
+        segment_id=request.segment_id,
+        prompt_plan_digest=request.prompt_plan_digest,
+        requested_frames=request.requested_frames,
     )
     artifacts = [str(output), str(result["conditioning_tail_path"]), str(result["recovery_path"])]
     return {
-        "blocks_generated": len(prompts),
+        "blocks_generated": len(request.prompts),
         "artifacts": artifacts,
         "video": result,
     }

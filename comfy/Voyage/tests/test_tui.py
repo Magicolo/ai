@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from voyage import cli
+from voyage.config import Unset
 from voyage.tui_state import (
     GenerateFormState,
     plan_summary,
@@ -64,14 +65,15 @@ def test_unknown_choices_rejected() -> None:
     assert any("director" in error for error in errors)
 
 
-def test_namespace_maps_empty_optionals_to_none() -> None:
+def test_namespace_maps_empty_optionals_to_unset() -> None:
+    """Blank TUI optionals emit Unset (issue 045), never None."""
     namespace = to_generate_namespace(_valid_state())
     assert namespace.duration == pytest.approx(5.0)
     assert namespace.run_id == "voyage"
-    assert namespace.blocks is None
-    assert namespace.take_seconds is None
-    assert namespace.beats_per_segment is None
-    assert namespace.drift_every_n is None
+    assert namespace.blocks is Unset
+    assert namespace.take_seconds is Unset
+    assert namespace.beats_per_segment is Unset
+    assert namespace.drift_every_n is Unset
     assert namespace.seed == 0
 
 

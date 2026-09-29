@@ -725,10 +725,13 @@ class LongLiveSession:
         models_dir: Path,
         device: str,
         latent_shape: list[int],
+        *,
         quantization: str = "fp8",
         local_attn_size: int = 8,
         sink_size: int = 8,
     ) -> None:
+        # Precision + cache geometry are keyword-only (issue 045): they
+        # are independent tunables that must never shift positionally.
         import torch
         from pipeline import CausalDiffusionInferencePipeline  # type: ignore[import-not-found]
         from utils.fp8 import quantize_model_fp8  # type: ignore[import-not-found]
@@ -1004,9 +1007,9 @@ def _build_session() -> LongLiveSession:
         models_dir,
         str(_INIT_PARAMS["device"]),
         list(_INIT_PARAMS["latent_shape"]),
-        str(_INIT_PARAMS["quantization"]),
-        int(_INIT_PARAMS.get("local_attn_size", 8)),
-        int(_INIT_PARAMS.get("sink_size", 8)),
+        quantization=str(_INIT_PARAMS["quantization"]),
+        local_attn_size=int(_INIT_PARAMS.get("local_attn_size", 8)),
+        sink_size=int(_INIT_PARAMS.get("sink_size", 8)),
     )
 
 
@@ -1071,36 +1074,25 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
     if _SESSION is None:
         raise RuntimeError("video_longlive not initialized — send `init` first")
-    # Multi-block form (Phase 2): prompts/seeds lists, one entry per block.
-    # Single-block form (Phase 1): bare prompt/seed.
-    if "prompts" in payload or "seeds" in payload:
-        checked_request(payload, segment_id=str, output_path=str, fps=int)
-        raw_prompts = payload["prompts"]
-        raw_seeds = payload["seeds"]
-        assert isinstance(raw_prompts, list) and isinstance(raw_seeds, list)
-        prompts = [str(item) for item in raw_prompts]
-        seeds = [int(item) for item in raw_seeds]
-        raw_cuts = payload.get("scene_cuts", [False] * len(prompts))
-        assert isinstance(raw_cuts, list) and len(raw_cuts) == len(prompts)
-        scene_cuts = [bool(item) for item in raw_cuts]
-    else:
-        checked_request(payload, segment_id=str, prompt=str, seed=int, output_path=str, fps=int)
-        prompts = [str(payload["prompt"])]
-        seeds = [int(payload["seed"])]
-        scene_cuts = [bool(payload.get("scene_cut", False))]
-    output = Path(str(payload["output_path"]))
-    profile_stages = bool(payload.get("profile_stages", False))
+    # One validated struct (issue 045): the multi/single payload forms and
+    # shape checks live in GenerateBlocksRequest.from_payload — no inline
+    # asserts, no positional construction. Native geometry has no
+    # width/height override (None = backend native).
+    request = video_common.GenerateBlocksRequest.from_payload(
+        payload, width_default=None, height_default=None
+    )
+    output = request.output_path
     result = _SESSION.generate_blocks(
-        prompts=prompts,
-        seeds=seeds,
-        scene_cuts=scene_cuts,
+        prompts=list(request.prompts),
+        seeds=list(request.seeds),
+        scene_cuts=list(request.scene_cuts),
         output_path=output,
-        fps=int(payload["fps"]),
-        profile_stages=profile_stages,
+        fps=request.fps,
+        profile_stages=request.profile_stages,
     )
     artifacts = [str(output), str(result["recovery_path"])]
     return {
-        "blocks_generated": len(prompts),
+        "blocks_generated": len(request.prompts),
         "artifacts": artifacts,
         "video": result,
     }

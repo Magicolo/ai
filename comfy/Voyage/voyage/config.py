@@ -11,7 +11,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard, TypeVar
 
 try:
     import tomllib
@@ -38,10 +38,51 @@ contract so the two modules never spell the modes apart.
 """
 
 
+class UnsetType:
+    """Sentinel type for "option not provided" (issue 045).
+
+    The CLI spells absence as `None` (argparse defaults) while the TUI
+    form spells it as `""` — two encodings for one meaning, forcing every
+    consumer to agree on which emptiness means "default". New option
+    plumbing uses `Unset` instead; `None` stays a tolerated legacy alias
+    so existing callers keep working. Never construct directly.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Unset"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+Unset = UnsetType()
+"""The single "not provided" value for option plumbing (issue 045)."""
+
+
+_ProvidedT = TypeVar("_ProvidedT")
+
+
+def is_provided(value: _ProvidedT | UnsetType | None) -> TypeGuard[_ProvidedT]:
+    """Whether an option was explicitly provided (issue 045).
+
+    The one absent-check for option plumbing: `Unset` (new code) and
+    `None` (argparse legacy) both mean absent; anything else passes.
+    A TypeGuard (not identity checks inline) so every typechecker
+    narrows `X | UnsetType | None` to `X` in the true branch —
+    singleton `is`-narrowing is not reliable across checkers.
+    Consumers only ever branch on this predicate, never on `is not
+    None` (which would mistake Unset for a value).
+    """
+    return value is not None and not isinstance(value, UnsetType)
+
+
 @dataclass(frozen=True)
 class BackendRecord:
     """One row of BACKEND_REGISTRY: a video backend's geometry, audio
-    pairing, continuation mode, and streaming shape (issues 022 + 025).
+    pairing, SFX pairing, continuation mode, and streaming shape
+    (issues 022 + 025).
 
     Frozen so the single source of truth cannot drift at runtime; every
     preset dict, state-mode map, and streaming set below derives from
@@ -549,14 +590,18 @@ def load_config(path: Path) -> tuple[ProjectConfig, str]:
 def resolve_config(
     config: ProjectConfig,
     *,
-    backend: VideoBackendName | None = None,
+    backend: VideoBackendName | None | UnsetType = Unset,
     draft: bool = False,
-    director: str | None = None,
-    blocks: int | None = None,
-    take_seconds: float | None = None,
-    quantization: str | None = None,
-    beats_per_segment: int | None = None,
-    drift_every_n_segments: int | None = None,
+    director: str | None | UnsetType = Unset,
+    blocks: int | None | UnsetType = Unset,
+    take_seconds: float | None | UnsetType = Unset,
+    quantization: str | None | UnsetType = Unset,
+    beats_per_segment: int | None | UnsetType = Unset,
+    drift_every_n_segments: int | None | UnsetType = Unset,
+    music_caption: str | None | UnsetType = Unset,
+    video_caption: str | None | UnsetType = Unset,
+    min_fps: int | None | UnsetType = Unset,
+    min_resolution: str | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issues 022 + 025): backend preset,
     then the stored [draft] overlay, then targeted overrides — in that
@@ -568,16 +613,23 @@ def resolve_config(
     backends raise ValueError (same message as the old preset lookup).
     This replaces the apply_draft_overrides + with_video_backend pair —
     both survive below as thin wrappers for their existing callers.
+
+    Absent-encoding (issue 045): defaults are `Unset`; `None` (argparse
+    legacy) is tolerated as absent too — every branch below goes through
+    `is_provided`, so the body never checks `is not None` (which would
+    mistake Unset for a value).
     """
     video = config.video
     audio = config.audio
+    sfx = config.sfx
     director_config = config.director
     voyage_config = config.voyage
-    if backend is not None:
+    if is_provided(backend):
         video = VideoConfig(**{**video.model_dump(), **_video_preset(backend)})
         audio = AudioConfig(
             **{**audio.model_dump(), **_audio_preset(backend), "models_dir": "/models"}
         )
+        sfx = SfxConfig(**{**sfx.model_dump(), **_sfx_preset(backend), "models_dir": "/models"})
     if draft:
         profile = config.draft
         video = VideoConfig(
@@ -590,24 +642,44 @@ def resolve_config(
             }
         )
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": profile.take_seconds})
-    if director is not None:
+    if is_provided(director):
         director_config = DirectorConfig(**{**director_config.model_dump(), "backend": director})
-    if blocks is not None:
+    if is_provided(blocks):
         video = VideoConfig(**{**video.model_dump(), "blocks_per_segment": blocks})
-    if quantization is not None:
+    if is_provided(quantization):
         video = VideoConfig(**{**video.model_dump(), "quantization": quantization})
-    if take_seconds is not None:
+    if is_provided(take_seconds):
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": take_seconds})
-    if beats_per_segment is not None:
+    if is_provided(beats_per_segment):
         audio = AudioConfig(**{**audio.model_dump(), "beats_per_segment": beats_per_segment})
-    if drift_every_n_segments is not None:
+    if is_provided(drift_every_n_segments):
         voyage_config = VoyageConfig(
             **{**voyage_config.model_dump(), "drift_every_n_segments": drift_every_n_segments}
+        )
+    if is_provided(music_caption):
+        audio = AudioConfig(**{**audio.model_dump(), "music_caption": music_caption})
+    if is_provided(video_caption):
+        video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
+    augment = config.augment
+    if is_provided(min_fps) or is_provided(min_resolution):
+        resolved_fps = augment.min_fps
+        resolved_width = augment.min_width
+        resolved_height = augment.min_height
+        if is_provided(min_fps):
+            resolved_fps = min_fps
+        if is_provided(min_resolution):
+            resolved_width, resolved_height = parse_min_resolution(min_resolution)
+        augment = AugmentConfig(
+            min_fps=resolved_fps,
+            min_width=resolved_width,
+            min_height=resolved_height,
         )
     return config.model_copy(
         update={
             "video": video,
             "audio": audio,
+            "sfx": sfx,
+            "augment": augment,
             "director": director_config,
             "voyage": voyage_config,
         }
@@ -618,17 +690,22 @@ def apply_draft_overrides(
     config: ProjectConfig,
     *,
     draft: bool = False,
-    director: str | None = None,
-    blocks: int | None = None,
-    take_seconds: float | None = None,
-    quantization: str | None = None,
-    beats_per_segment: int | None = None,
-    drift_every_n_segments: int | None = None,
+    director: str | None | UnsetType = Unset,
+    blocks: int | None | UnsetType = Unset,
+    take_seconds: float | None | UnsetType = Unset,
+    quantization: str | None | UnsetType = Unset,
+    beats_per_segment: int | None | UnsetType = Unset,
+    drift_every_n_segments: int | None | UnsetType = Unset,
+    music_caption: str | None | UnsetType = Unset,
+    video_caption: str | None | UnsetType = Unset,
+    min_fps: int | None | UnsetType = Unset,
+    min_resolution: str | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Apply the draft profile + targeted run overrides (fast loop).
 
     Thin wrapper over resolve_config (issue 025) — kept for the CLI and
     existing tests. New code should call resolve_config directly.
+    Absent-encoding (issue 045): defaults are `Unset`, `None` tolerated.
     """
     return resolve_config(
         config,

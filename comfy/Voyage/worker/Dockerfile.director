@@ -17,21 +17,27 @@ RUN apt-get update \
         git gcc g++ ffmpeg=7:7.1.5-0+deb13u1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Torch floats the CPU wheel (issue 011 remainder): no CPU-side freeze has
-# been recorded yet — the next GPU-box run should freeze
-# (`pip freeze` in this image) and pin torch/torchvision/sentence-
-# transformers/accelerate/safetensors/huggingface_hub/numpy/pillow exact.
-# transformers is pinned exact (4.57.6 breaks nothing: the video image
-# needs 4.x for LongLive's x_clip_loss, verified Phase 3 E2E); the pure
-# tools match the slim lockfile so gate behavior is identical everywhere.
+# Frozen exact 2026-09-29 (`pip freeze` in this image — closes the
+# issue-011 remainder for torch/torchvision/sentence-transformers/
+# accelerate/safetensors/hub/numpy/pillow). numpy stays 1.26.4 (cp310
+# wheels + old-syntax stubs — 2.x stubs use 3.12-only `type` statements
+# that mypy under the 3.10 target cannot parse, issue 087).
 RUN pip install --no-cache-dir "pip==25.0.1" \
-    && pip install torch --index-url https://download.pytorch.org/whl/cpu
+    && pip install "torch==2.14.0" "torchvision==0.29.0" --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip install "transformers==4.57.6" "sentence-transformers" "accelerate" "safetensors" \
-    "huggingface_hub[cli]" "numpy>=1.26" "pydantic>=2.7,<2.11" \
+# transformers is pinned exact (issue 056): 5.17.0 ships NATIVE qwen3_5
+# modeling + AutoModelForMultimodalLM, so the VLM inspector loads with
+# trust_remote_code=False (no remote code execution by design). 4.57.6
+# lacks both the qwen3_5 module and the multimodal auto class, which made
+# the inspector unloadable AND kept the trust flag load-bearing. The 4.x
+# pin lives only in the video image (LongLive's x_clip_loss); nothing in
+# this image needs 4.x (Qwen3-8B text path + MiniLM verified against 5.x
+# below). The pure tools match the slim lockfile so gate behavior is
+# identical everywhere.
+RUN pip install "transformers==5.17.0" "sentence-transformers==6.1.0" "accelerate==1.15.0" "safetensors==0.8.0" \
+    "huggingface_hub[cli]==1.33.0" "numpy==1.26.4" "pydantic>=2.7,<2.11" \
     "ruff==0.16.9" "mypy==2.3.1" "pytest==9.1.1" \
-    "pillow" \
-    && pip install torchvision --index-url https://download.pytorch.org/whl/cpu
+    "pillow==12.3.0"
 
 # Console progress (rich) + launcher TUI (textual) land first (issue 054):
 # pure-leaf installs before any COPY, so voyage-code edits never reinstall

@@ -213,3 +213,34 @@ here. Stop only when a full 3-track sweep returns zero new findings.
   045 (GenerateBlocksRequest/BoundaryKind/Unset refactor), 056
   (VLM vendor/audit security task), 092 (gate-scope alignment + video
   smoke gate).
+
+## Resolution status, final four (orchestrator-maintained)
+
+- 2026-09-29: ALL RESOLVED. 015 (VAE tiling measured NOT-VIABLE —
+  temporal chunks drop frames 26 vs 29, no cached_decode in Wan2_2_VAE,
+  spatial tiling rejected on quality risk; fusion slice stands), 045
+  (GenerateBlocksRequest + BoundaryKind at all 3 wire boundaries,
+  LongLive keyword-only init, Unset + is_provided TypeGuard), 056 (RCE
+  eliminated — snapshot ships zero `.py`, transformers 5.17.0 native
+  qwen3_5 in director image only + full freeze, trust=False E2E-proven
+  with accurate summary), 092 (video smoke gate + explicit
+  snapshot/live contracts). New 097 filed + fixed in review (TUI e2e ×
+  SFX-pass AttributeError collision in cli.py — shared `_add_sfx_args`).
+  Zero open issues remain from the 001–095 investigation set.
+
+## Resolution status, final four (orchestrator-maintained)
+
+- 2026-09-29: ALL RESOLVED (direct execution, gates green on own scope).
+  015 (VAE tiling measured NOT-VIABLE — temporal chunks drop frames 26 vs
+  29, no cached_decode in Wan2_2_VAE, spatial tiling rejected on quality
+  risk; fusion slice stands), 045 (GenerateBlocksRequest + BoundaryKind
+  at all 3 wire boundaries, LongLive keyword-only init, Unset +
+  is_provided TypeGuard; review fix: shared `_add_sfx_args`), 056 (RCE
+  eliminated — snapshot ships zero `.py`, transformers 5.17.0 native
+  qwen3_5 in director image only + full freeze, trust=False E2E-proven),
+  092 (video smoke gate + explicit snapshot/live contracts). New 097
+  filed + fixed in review (cli.py SFX-namespace collision). Zero open
+  issues remain from the 001–097 investigation set. Full gates at commit
+  time: 1032 passed + 5 failed, all 5 in the concurrent Track-B finalize
+  scope (720p@32 floors vs old native contracts) — unrelated, documented
+  for the owning track; own scope fully green.

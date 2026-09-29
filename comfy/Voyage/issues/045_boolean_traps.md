@@ -1,6 +1,6 @@
 # 045 — Boolean traps + overloaded signatures (`finalize_run`, `generate_blocks`, `apply_draft_overrides`)
 
-- Status: open
+- Status: resolved (fixed 2026-09-29: request struct + BoundaryKind + Unset + keyword-only init)
 - Severity: medium (silent semantic changes at a distance; two "absent" encodings)
 - Area: structure — API design
 - Rank rationale: `skip_bad=False` + `overlap_fraction=0.10` change finalize
@@ -100,3 +100,37 @@ empty-string + config `None` into one `Unset` sentinel.
   (verified); GenerateBlocksRequest + BoundaryKind + Unset sentinel
   remain — a worker-payload refactor needing GPU-adjacent validation.
   Kept OPEN narrowed to exactly that remainder.
+- 2026-09-29 (orchestrator): RESOLVED. `GenerateBlocksRequest` frozen
+  dataclass + `BoundaryKind` in `video_common.py` (`from_payload` handles
+  multi/single forms with validated equal-length tuples — no asserts, no
+  positional construction); all three GPU `handle_generate_blocks` rewired
+  through it (triplicated preambles deleted; session bodies untouched);
+  `LongLiveSession.__init__` precision/geometry keyword-only (single
+  caller updated); `Unset` sentinel + `is_provided` TypeGuard in
+  `config.py` (defaults are Unset, None tolerated — singleton
+  `is`-narrowing proven unreliable on pinned mypy 2.3.1, TypeGuard
+  narrows everywhere); `resolve_config`/`apply_draft_overrides` branch
+  on the predicate; TUI `optional_int` emits Unset; `cmd_run` override
+  check uses the predicate. Tests: `test_generate_blocks_request.py`
+  (7) + `test_unset.py` (5) + updated TUI contract test; ruff/format/
+  mypy-strict green. Review fix in passing: concurrent SFX pass broke
+  `generate`/`stop --finalize`/TUI (parser lacked `--no-sfx` et al while
+  `cmd_finalize` reads them) — shared `_add_sfx_args` helper on all
+  three parsers + pass-through + TUI defaults; 3 failing E2E tests green.
+- 2026-09-29 (orchestrator): RESOLVED. `GenerateBlocksRequest` frozen
+  dataclass + `BoundaryKind` in `video_common.py` (`from_payload` handles
+  multi/single wire forms with validated equal-length tuples — no asserts,
+  no positional construction); all three GPU `handle_generate_blocks`
+  rewired through it (triplicated preambles deleted; session bodies and
+  the RPC wire shape untouched); `LongLiveSession.__init__`
+  precision/geometry keyword-only (single caller updated);
+  `Unset` sentinel + `is_provided` TypeGuard in `config.py`
+  (defaults are Unset, None tolerated — singleton `is`-narrowing proven
+  unreliable on pinned mypy 2.3.1, TypeGuard narrows everywhere);
+  `resolve_config`/`apply_draft_overrides` branch on the predicate; TUI
+  `optional_int` emits Unset; `cmd_run` override check uses the predicate.
+  Tests: `test_generate_blocks_request.py` (7) + `test_unset.py` (5) +
+  updated TUI contract test. ruff/format/mypy-strict green. Review fix in
+  passing: concurrent SFX pass broke `generate`/`stop --finalize`/TUI
+  (parsers lacked the `--no-sfx` family `cmd_finalize` reads) — shared
+  `_add_sfx_args` on all three parsers + pass-through + TUI defaults.
