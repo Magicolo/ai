@@ -10,6 +10,8 @@ the silent default.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from pathlib import Path
 
 from voyage.cli import _add_generate_parser, _add_init_parser, _add_run_parser
 from voyage.config import DirectorConfig, default_config_toml, load_config
@@ -20,14 +22,14 @@ def test_director_config_defaults_to_qwen() -> None:
     assert DirectorConfig().backend == "qwen"
 
 
-def test_default_toml_writes_qwen_director(tmp_path) -> None:
+def test_default_toml_writes_qwen_director(tmp_path: Path) -> None:
     path = tmp_path / "voyage.toml"
     path.write_text(default_config_toml("qwen-default", "pastel neon", 7), encoding="utf-8")
     config, _ = load_config(path)
     assert config.director.backend == "qwen"
 
 
-def test_default_toml_allows_explicit_deterministic_opt_out(tmp_path) -> None:
+def test_default_toml_allows_explicit_deterministic_opt_out(tmp_path: Path) -> None:
     path = tmp_path / "voyage.toml"
     path.write_text(
         default_config_toml("qwen-default", "pastel neon", 7, director_backend="deterministic"),
@@ -41,7 +43,7 @@ def test_director_worker_defaults_to_qwen() -> None:
     assert director_worker._CONFIG["backend"] == "qwen"
 
 
-def _parse(parser_adder, args: list[str]) -> argparse.Namespace:
+def _parse(parser_adder: Callable[..., None], args: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     parser_adder(sub)

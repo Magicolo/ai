@@ -6642,7 +6642,7 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   memory-optimization pass (VAE tiling/chunked decode); model
   post-upscale stays a Zoomy concern per `docs/MODELS.md`.
 - Director: `generate` defaults `--director` to qwen when unspecified
-  (file default stays deterministic; explicit flags win). New
+  (file default was deterministic at the time; explicit flags win). New
   `VoyageConfig.drift_every_n_segments=1` — non-drift segments hold via
   the deterministic path (`drift_hold` metric). Parallel prefetch:
   after each accept, the raw N+1 proposal is submitted to a 1-thread
@@ -7111,3 +7111,35 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   key update; full `scripts/gates.sh` green (ruff + format + mypy
   strict + 867 pytest, 1 deselected). Next: SFX worker + VRAM ladder
   (slice 2), finalize windowing/sharding/mix (slice 3).
+
+## 2026-09-29 — Director backend qwen by default (poulah freeze fix)
+
+- User report on the poulah run (31 segments): the general prompt never
+  evolved — the stored `voyage.toml` carried `backend = "deterministic"`,
+  so the director degraded to the hold path on every segment and the
+  phase cycle (ESTABLISH/DRIFT/TRANSFORM/…) spun with frozen content.
+  User directive: qwen is the default everywhere; deterministic is an
+  explicit opt-out only.
+- Change (`voyage/config.py`, `voyage/cli.py`,
+  `voyage/workers/director.py`): `DirectorConfig.backend` defaults to
+  `"qwen"`; `default_config_toml` writes `backend = "qwen"` and takes an
+  optional `director_backend` override; `init` gains `--director
+  (qwen|deterministic)` defaulting to qwen and `cmd_init` forwards it;
+  `generate` already defaulted `--director` to qwen and now forwards it
+  into the stored config via `init_args`; `run --director` stays an
+  in-memory override (None = respect the stored file); the director
+  worker `_CONFIG` and `handle_decide` fallback default to qwen; the
+  benchmark probe keeps its explicit deterministic payload (it measures
+  that path on purpose). The supervisor drift-hold still uses the local
+  `DeterministicDirector` by design (miss deadline → hold, never block).
+- Offline behavior unchanged: without cached Qwen weights the worker
+  fails fast (offline-first) to the deterministic fallback, so
+  file-backed scaffold runs still commit.
+- Proof: new `tests/test_director_default.py` (7 tests: config default,
+  toml default + explicit deterministic opt-out, worker default, init /
+  generate parser defaults, run leaves the file alone — watched fail on
+  the missing `director_backend` param, then green); updated
+  `test_generation_stack.py` (stored config now asserts qwen) and
+  `test_integration.py` (decide probe passes explicit deterministic);
+  live `run.sh init` verified default qwen + `--director deterministic`
+  opt-out; full `scripts/gates.sh` green.
