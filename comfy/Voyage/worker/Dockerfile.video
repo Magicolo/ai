@@ -119,6 +119,17 @@ RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
     && git -C /opt/causvid rev-parse --verify HEAD \
     && pip install omegaconf easydict ftfy diffusers
 
+# Pre-created wan_models links (causvid-perms fix): the worker shims
+# (`_enter_causvid_tree` / `_enter_longlive_tree`) must satisfy upstream's
+# CWD contract with a `wan_models/` symlink inside the repo clone, but the
+# clones are root-owned while workers run as the host-mapped `voyager`
+# user — a runtime mkdir/symlink there dies with Errno 13. Pre-creating
+# the default-`/models` links here (as root) plus the skip-when-correct
+# shim logic means the steady state performs zero writes under /opt.
+RUN mkdir -p /opt/causvid/wan_models \
+    && ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B \
+    && ln -sfn /models/wan_models /opt/longlive/wan_models
+
 # Console progress (rich) + launcher TUI (textual) land first (issue 054):
 # pure-leaf installs before any COPY, so voyage-code edits never reinstall
 # them. Versions match the slim lockfile.
@@ -143,7 +154,9 @@ ARG GID=1000
 RUN set -eux; \
   getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
   getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
-  mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager
+  mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
+  chown -R "${UID}:${GID}" /opt/longlive /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio; \
+  chmod 777 /opt/longlive /opt/causvid/wan_models
 ENV HOME=/home/voyager
 USER voyager
 

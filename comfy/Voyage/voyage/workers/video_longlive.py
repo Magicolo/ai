@@ -200,6 +200,11 @@ def _enter_longlive_tree(models_dir: Path) -> None:
     """
     link = VOYAGE_LONGLIVE_DIR / "wan_models"
     target = models_dir / "wan_models"
+    if link.is_symlink() and Path(os.readlink(link)) == target:
+        # Already correct (pre-created at image build): zero writes, so a
+        # root-owned checkout stays usable for the host-mapped worker user.
+        os.chdir(VOYAGE_LONGLIVE_DIR)
+        return
     if link.is_symlink():
         link.unlink()
     if not link.exists():

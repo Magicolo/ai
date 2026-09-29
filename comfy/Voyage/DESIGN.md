@@ -7143,3 +7143,49 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   `test_integration.py` (decide probe passes explicit deterministic);
   live `run.sh init` verified default qwen + `--director deterministic`
   opt-out; full `scripts/gates.sh` green.
+
+- Causvid `/opt` permission fix 2026-09-29 (user report: `WORKER_ERROR:
+  [Errno 13] Permission denied: '/opt/causvid/wan_models'` on a causvid
+  run): the repo clones are root-owned while workers run as the
+  host-mapped `voyager` user, and `_enter_causvid_tree` /
+  `_enter_longlive_tree` unconditionally unlinked + recreated the
+  `wan_models` symlink (a write) on every call. Fix:
+  `voyage/workers/video_causvid.py` + `video_longlive.py` skip the
+  unlink/recreate when the link already points at the wanted target
+  (zero writes, just chdir); `worker/Dockerfile.video` pre-creates the
+  default-`/models` links at build (as root), chowns all `/opt` trees to
+  `${UID}:${GID}`, and chmods the two symlink-parent dirs 777 (stale-image
+  UID-mismatch insurance). A one-off `chown` cannot fix this class of bug
+  (ephemeral `--rm` containers + `--user` pin — only the image persists).
+- Proof: new `tests/test_enter_repo_trees.py` (4 tests: correct-link +
+  read-only parent succeeds for both shims — watched fail with the exact
+  reported `PermissionError` — plus stale-link repoint; green); rebuilt
+  `voyage-video` (smoke ok) and probed both shims as the host-mapped user
+  against `/models` (zero-write path, links resolve to the `/models`
+  defaults). Full gates: 901 passed, 1 pre-existing unrelated failure
+  (`test_generate_blocks_request.py::test_empty_prompts_rejected` —
+  scene_cuts/prompt message mismatch from concurrent in-flight work, not
+   this change).
+
+- Backend excerpts 2026-09-29 (1-min silent slow-morph, deterministic
+  director, drift 4, blocks=1, fake audio; user 30-min cap per excerpt):
+  LTXV 15x96f committed in ~8+6 min, VALID 1490f, finalized
+  `output/excerpt-ltxv-slow1_final.mp4` (62s, 768x512 h264 + AAC, 4.7 MiB;
+  steady ~15.5 s/segment; seg10 committed 121f fresh after a tail-less
+  resume — top-up boundary, validate-clean); CausVid 14x72f committed,
+  VALID 1008f, finalized `output/excerpt-causvid-probe_final.mp4` (63s,
+  832x480 lifted 16->24fps, 10.3 MiB) with a 4-segments-per-worker CUDA
+  OOM pattern (fresh worker ~47 s/seg, degrading to ~106 s, then OOM +
+  circuit breaker; 3 resumes + one pkill-9 needed — contention vs leak
+  inconclusive per the GPU-contention rule). LongLive2 excerpt DROPPED
+  per the user's fall-back: worker dies at `loading generator
+  checkpoint ...` with RC=137; kernel OOM record shows
+  `anon-rss:39629176kB` (~37.8 GB for the 10 GB `model_bf16.pt`, ~3.8x)
+  — filed as `issues/096_longlive_checkpoint_load_spike.md`
+  (candidates: `torch.load(mmap=True)`; docs note until fixed).
+  Workarounds used (superseded same day by the in-image /opt fix above,
+  kept here for stale-image runs): direct `docker run` mirroring run.sh
+  + `-e HF_HUB_CACHE=/tmp/voyage-hf-cache -e HF_HOME=/tmp/voyage-hf-home`
+  (run.sh `--user` + no HOME breaks HF downloads), `-v
+  /tmp/causvid-anchor:/opt/causvid/wan_models`,
+  `-e VOYAGE_LONGLIVE_DIR=/tmp/ll-tree` (host symlinks into /models).

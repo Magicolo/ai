@@ -106,6 +106,14 @@ def _enter_causvid_tree(models_dir: Path) -> None:
     repo_root = Path(os.environ.get("VOYAGE_CAUSVID_DIR", DEFAULT_CAUSVID_DIR))
     anchor = repo_root / "wan_models" / "Wan2.1-T2V-1.3B"
     target = models_dir / WAN21_SUBDIR
+    if anchor.is_symlink() and Path(os.readlink(anchor)) == target:
+        # Already correct (pre-created at image build): zero writes, so a
+        # root-owned checkout stays usable for the host-mapped worker user.
+        # The check runs before the mkdir below, so this path mutates
+        # nothing — `is_symlink` is False (not an error) when the parent
+        # is missing entirely.
+        os.chdir(repo_root)
+        return
     anchor.parent.mkdir(parents=True, exist_ok=True)
     if anchor.is_symlink():
         anchor.unlink()
