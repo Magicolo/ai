@@ -31,6 +31,6 @@ fi
 # Run dir travels via the environment (never shell-interpolated into the
 # python snippet): paths with spaces/quotes would otherwise break the
 # quoting or inject code (single quotes inside double quotes do not expand).
-docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
+docker run --rm --user="$(id -u):$(id -g)" -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
   python -c 'import json, os; from tests.test_qualification import summarize_run; \
 print(json.dumps(summarize_run(os.environ["RUN_DIR"]), indent=2))'

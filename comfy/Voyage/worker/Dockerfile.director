@@ -32,6 +32,20 @@ COPY tests/ /app/tests/
 RUN pip install --no-deps -e /app \
     && pip install "rich>=13.7" "textual>=8.0"
 
+# Run as the invoking host user (issue 053 follow-up): same bind-mount
+# ownership contract as the slim/video images — a real user carrying the
+# host's UID/GID (build args, forwarded by scripts/build-director.sh from
+# `id`; defaults 1000). Rebuild after a host-uid change. Placed late so
+# the slow torch/transformers layers above stay cached.
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+  getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
+  getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
+  mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager
+ENV HOME=/home/voyager
+USER voyager
+
 ENV PYTHONPATH=/app \
     VOYAGE_MODELS_DIR=/models
 

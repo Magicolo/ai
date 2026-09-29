@@ -104,10 +104,16 @@ tty_args=()
 if [ -t 0 ] && [ -t 1 ]; then
   tty_args=(--interactive --tty)
 fi
+# Host-user mapping (issue 053 follow-up): images carry a real `voyager`
+# user whose UID/GID match the builder host, and --user pins the runtime
+# ids explicitly so even a stale image (built under other ids) still
+# leaves host-owned files on the bind mounts ($PWD:/app, /tmp:/tmp,
+# $models:/models) instead of root-owned ones.
+user_args=("--user=$(id -u):$(id -g)")
 if [ "${VOYAGE_DRY_RUN:-}" = "1" ]; then
-  printf 'image=%s\ngpus=%s\n' "$image" "${gpu_args[*]:-none}"
+  printf 'image=%s\ngpus=%s\nuser=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}"
   exit 0
 fi
-docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -w /app "${gpu_args[@]}" "${tty_args[@]}" \
+docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
   -v "$PWD:/app" -v /tmp:/tmp -v "$models:/models" \
   "$image" voyage "$@"

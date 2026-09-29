@@ -50,6 +50,15 @@
 - The run rests at `PAUSED_DISK_FULL` (never FAILED): free space, `run`
   again. Default reserve is 5.0 GiB in dev TOML (spec default 20.0) —
   raise for production. `finalize` preflights the same reserve.
+- Containers run as the invoking host user (`voyager`, UID/GID baked at
+  build time from `id` and pinned with `--user` at runtime), so renders
+  leave host-owned files on bind-mounts (`output/`, `/tmp`, `~/.cache/
+  voyage-models`) and plain `rm -rf` works. All images use `WORKDIR /app`
+  (video image fixed, issue 053), so bare `docker run` with relative paths
+  lands in `/app`, not ephemeral layers; `run.sh` keeps `-w /app` as
+  belt-and-braces. If you see root-owned files, the image predates the
+  user rollout: rebuild (`scripts/build*.sh`) and one-time
+  `sudo chown -R $(id -u):$(id -g)` the affected dirs.
 
 ## Corrupt checkpoint / segment
 

@@ -6976,3 +6976,74 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   `--backend fake` stays slim on a GPU box. Docs: OPERATIONS TUI +
   run.sh paragraphs rewritten, `cli._cuda_stack_error` / `_require`
   docstring mention bare launches.
+
+## 2026-09-29 — finalize audio: acrossfade out, manual fades everywhere
+
+- User report (run-id poulah, 31 segments): `finalize` never finished —
+  the process sat 3+ days with no output. Root causes, both in ffmpeg
+  7.1.5 `acrossfade`, both reproduced live: (1) the final blend built
+  ONE invocation chaining 31 acrossfades — that graph deadlocks the
+  filter scheduler (futex wait, zero bytes out), while a 2-input graph
+  finishes in milliseconds; (2) even a 2-input acrossfade collapses
+  whenever the FIRST input is much longer than the second (86s+1s at
+  d=0.4 came out as ~0.2s; window 21's 3.49s+0.91s slices came out as
+  ~1–3s instead of ~4.0s). Short-first and equal-length pairs are fine,
+  which is why 4-segment runs (karl) always worked.
+- Fix (`voyage/media.py`, new `_blend_pair` + `_audio_duration_seconds`):
+  every blend is now afade-out on the first tail + afade-in on the
+  second head + adelay + amix (normalize=0), 2 inputs per ffmpeg call,
+  s32le intermediates, fade clamped to half the shortest input.
+  `build_final_audio` reduces pairwise through it (was: N-input chain);
+  `assemble_segment_audio` left-folds through it (was: inline N-chain).
+  This is the recipe `docs/AUDIO.md` already prescribed ("manual fades
+  + delay, never acrossfade") — the code had regressed away from it.
+- Proof: `tests/test_final_blend_scale.py` (+2 TDD tests, watched fail:
+  20s+1s pair and 3.49s+0.91s slices both collapsed on acrossfade, both
+  exact on manual fades) + an instrumented 31-window blend run logging
+  every step exp==actual. Poulah finalized: 125.29s h264 768x512 + AAC,
+  A/V drift 0.08s. Known residuals (open, inaudible): take files render
+  ~0.175s short of ledger on 45.375s takes (ACE variance, crossfades
+   absorb it); take-joint windows shrink by the assemble fade instead of
+   tiling exactly (~0.67s over 31 segments, subsumed in wider blends).
+
+## 2026-09-29 — Containers run as the host user (issue 053 follow-up)
+
+- User report: every render left root-owned files on host bind mounts
+  (`output/`, `/tmp`, `~/.cache/voyage-models`), needing a manual
+  `chown goulade:goulade` after each run. Root cause: no Dockerfile set
+  `USER` and no script passed `--user`, so everything ran as root.
+- Fix: all three images (`Dockerfile`, `worker/Dockerfile.video`,
+  `worker/Dockerfile.director`) create a real `voyager` user carrying the
+  host's UID/GID (`ARG UID/GID`, defaults 1000; `getent`-tolerant so
+  rebuilds and pre-existing ids never fail), with `HOME=/home/voyager`
+  (user-owned, so torch/triton/HF caches work rootless) and `USER voyager`
+  as the default. The block sits after the slow pip layers so rebuilds
+  stay cached; the slim build-time `voyage doctor` now runs AS voyager,
+  proving the stack resolves without root. `scripts/build*.sh` forward
+  `--build-arg UID=$(id -u) GID=$(id -g)` (rebuild after a host-uid
+  change); `run/gates/test/qualify.sh` pass `--user=$(id -u):$(id -g)`
+  explicitly, so even a stale image (built under other ids) still writes
+  host-owned files. GPU workers are supervisor subprocesses inside the
+  same container, so one flag covers them too.
+- `/models` writability (the deferred-follow-up concern in
+  `docs/TROUBLESHOOTING.md`): resolved by a one-time
+  `sudo chown -R goulade:goulade` of `~/.cache/voyage-models`,
+  `Voyage/output/`, and one stray `__pycache__` pyc (zero root-owned
+  files remain in either scope; host `/tmp` held no voyage residue).
+- Proof: slim rebuild + `scripts/gates.sh` (ruff + format + mypy strict +
+  844 pytest; the single `test_pause_mid_run_stops_at_boundary` failure
+  is a timing flake — passes on retry, untouched by this change) plus a
+  fake-backend `init → run --segments 1 → validate → finalize` into a
+  throwaway dir: `find -user root` empty, every artifact (segments,
+  logs, `state.json`, `final.mp4`) `goulade:goulade`. Director + video
+  images rebuilt from cache with the same user block: director probes
+  `uid=1000(voyager)`, `HOME=/home/voyager`, host-owned bind-mount writes
+  (ruff + format pass; its mypy gate hits a pre-existing numpy-stub
+  syntax error in site-packages — unpinned-numpy drift per issue 011
+  remainder, untouched here). Video image probes identical CPU-side
+  (`voyage doctor` runs as voyager). GPU-as-voyager execution probe still
+  open — GPU 0 held ~7 GiB by another process at the time (contention
+  rule: re-run idle).
+- `tests/test_run_sh.py`: `id` added to the isolated-PATH core tools
+  (run.sh resolves `--user` on every path incl. the dry-run seam) + a new
+  test pinning the `user=--user=UID:GID` report.

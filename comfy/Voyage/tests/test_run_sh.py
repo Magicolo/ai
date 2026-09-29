@@ -10,13 +10,16 @@ state (real GPUs, real HOME) cannot leak in.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
 RUN_SH = Path(__file__).resolve().parent.parent / "scripts" / "run.sh"
-_CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname")
+# run.sh resolves --user from `id -u`/`id -g` on every path (including the
+# dry-run seam), so the isolated PATH must provide it alongside coreutils.
+_CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname", "id")
 _SMI_MODE = Literal["present-ok", "present-fail", "absent"]
 
 needs_bash = pytest.mark.skipif(
@@ -126,3 +129,14 @@ def test_explicit_fake_backend_stays_slim_despite_gpu(tmp_path: Path) -> None:
     selection = _dry_run(tmp_path, ["--backend", "fake"], "present-ok")
     assert selection["image"] == "voyage:latest"
     assert selection["gpus"] == "none"
+
+
+@needs_bash
+def test_dry_run_reports_host_user_mapping(tmp_path: Path) -> None:
+    """The container runs as the host ids so bind-mount writes stay owned.
+
+    run.sh pins --user to the invoking host's uid:gid (issue 053
+    follow-up); the dry-run seam reports it as user=--user=UID:GID.
+    """
+    selection = _dry_run(tmp_path, ["generate"], "absent")
+    assert selection["user"] == f"--user={os.getuid()}:{os.getgid()}"

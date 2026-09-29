@@ -89,6 +89,22 @@ COPY voyage/ /app/voyage/
 RUN pip install --no-deps -e /app \
     && pip install "rich>=13.7" "textual>=8.0"
 
+# Run as the invoking host user (issue 053 follow-up): the supervisor and
+# its worker subprocesses share bind mounts with the host ($PWD:/app,
+# /tmp:/tmp, $models:/models), so a root container leaves root-owned
+# renders behind. A real user carrying the host's UID/GID (build args,
+# forwarded by scripts/build-video.sh from `id`; defaults 1000) keeps
+# every written file host-owned. Rebuild after a host-uid change. Placed
+# late so the slow torch/LongLive/flash-attn layers above stay cached.
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+  getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
+  getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
+  mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager
+ENV HOME=/home/voyager
+USER voyager
+
 ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/app \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
