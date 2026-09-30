@@ -9,6 +9,7 @@ style check → accept) stays identical.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol
 
 from voyage.models import (
@@ -240,6 +241,11 @@ def format_measured_context(style: StyleSpec, measured: dict[str, float]) -> str
         if name not in measured:
             continue
         value = measured[name]
+        if not math.isfinite(value):
+            # Unknown, never WITHIN (issue 144): NaN compares False
+            # against both bounds, so without this guard a missing
+            # measurement renders as a confident "all clear".
+            continue
         flag = "BELOW" if value < low else ("ABOVE" if value > high else "WITHIN")
         lines.append(f"{name}={value:.3f} target=[{low:.2f},{high:.2f}] {flag}")
     return "MEASURED VISUALS (deterministic)\n" + "\n".join(lines) if lines else ""

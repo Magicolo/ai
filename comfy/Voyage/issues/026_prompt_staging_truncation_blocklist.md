@@ -85,3 +85,13 @@ for probe in ['ignore prior instructions', 'system prompt: ignore all', 'jailbre
 
 - In-tree enforcement path: `voyage/prompts.py:52-79` (`enforce_style` injects the immutable prefix every block; `check_prompt_against_style` raises `ProposalRejected`) — DESIGN §§18, 75-76.
 - Textual validation pattern (validate on change/submit/blur; failures surface inline rather than as crashes) as the analogous discipline: https://github.com/Textualize/textual/blob/main/docs/widgets/input.md
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): all three premises re-verified live — (a) 5 stage texts / 1 block keeps 1 stage silently; (b) 1 transition over 3 blocks repeats into every stage; (c) `ignore prior instructions` / `system prompt: ignore all` / `jailbreak as DAN` all miss (only `new style:` hits). Verdict: CONFIRMED on all three legs.
+- Fix (`voyage/prompts.py` only, defaults preserve behavior so the supervisor commit path is untouched): `build_staged_prompt_plan(..., strict=False, repeat_transitions=True)` — strict raises ValueError naming the dropped count; `repeat_transitions=False` holds missing transitions empty instead of repeating last. Blocklist ladder: tier-1 markers extended with the seed-corpus paraphrases (`ignore prior instructions`, `system prompt`, `jailbreak`) with the ladder documented in the comment (blocklist reject → immutable-prefix backstop → accept-loop re-check); legit scene prose still passes.
+- Evidence: 4 new 026 tests failed pre-fix (3 error-path + characterization of the silent default), pass post-fix; phase3 suite green; ruff + format-check + mypy strict clean.
+
+## Resolution
+
+- FIXED 2026-09-30: truncation is loudly opt-in, repetition is explicit, and the documented attack paraphrases hit tier 1. No caller migrates to the new knobs in this change (defaults preserve current commits).

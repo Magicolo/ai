@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,32 @@ SCENE_CUT_PREFIX = "The scene transitions. "
 
 NUM_FRAME_PER_BLOCK = 8
 """Latent frames per block: baked into the config below and the capacity floor."""
+
+VAE_DECODE_CHUNK_LATENTS = 8
+"""Latents per VAE decode chunk (one block): the decode streams per chunk
+so full-segment latents + fp pixels + uint8 are never co-resident (048).
+VAE tiling/slicing stays off — a measure-only probe, never enabled blindly."""
+
+
+def split_latent_chunks(
+    total_latents: int, chunk_latents: int = VAE_DECODE_CHUNK_LATENTS
+) -> Iterator[tuple[int, int]]:
+    """Yield `(offset, size)` latent windows tiling `[0, total_latents)` (048).
+
+    Pure chunk math for the streaming decode below: one block per chunk by
+    default, remainder in the tail. Rejects non-positive inputs like the
+    other validators in this module.
+    """
+    if isinstance(total_latents, bool) or not isinstance(total_latents, int):
+        raise TypeError(f"total_latents must be an int (got {type(total_latents).__name__})")
+    if isinstance(chunk_latents, bool) or not isinstance(chunk_latents, int):
+        raise TypeError(f"chunk_latents must be an int (got {type(chunk_latents).__name__})")
+    if total_latents < 0:
+        raise ValueError(f"total_latents must be >= 0 (got {total_latents})")
+    if chunk_latents < 1:
+        raise ValueError(f"chunk_latents must be >= 1 (got {chunk_latents})")
+    for offset in range(0, total_latents, chunk_latents):
+        yield (offset, min(chunk_latents, total_latents - offset))
 
 
 def validate_latent_shape(latent_shape: list[int]) -> list[int]:
@@ -108,8 +135,8 @@ _STAGE_NAMES: tuple[str, ...] = (
     "tape_encode_ms",
     "offload_for_decode_ms",
     "vae_decode_ms",
-    "restore_after_decode_ms",
     "media_write_ms",
+    "restore_after_decode_ms",
 )
 
 
@@ -889,7 +916,6 @@ class LongLiveSession:
         with torch.inference_mode():
             for prompt, cut in zip(prompts, scene_cuts, strict=True):
                 block_latents.append(self._stream.append_block(prompt, cut))
-        latents = torch.cat(block_latents, dim=1)
         if timer is not None:
             timer.stop("denoise_blocks_ms")
         # Recovery tail (DESIGN §27): last block's clean latents + embeds so
@@ -918,13 +944,16 @@ class LongLiveSession:
         }
         recovery_path = output_path.with_name("recovery.pt")
         torch.save(tape, str(recovery_path))
-        # Full causal decode (93f per 3-block segment): the VAE transient at
-        # 1280x704 is ~10 GB regardless of chunk size (full-frame spatial
+        # Streaming causal decode (93f per 3-block segment): the VAE transient
+        # at 1280x704 is ~10 GB regardless of chunk size (full-frame spatial
         # intermediates), so chunking alone cannot fit it alongside the
         # resident stack. Offload generator + caches to CPU (measured:
-        # 1.34 GB resident, decode adds ~nothing), decode the whole
-        # segment causally in one call, then restore. PCIe roundtrip costs
-        # tens of seconds; the stream (caches) survives intact.
+        # 1.34 GB resident, decode adds ~nothing), decode one block chunk
+        # at a time with per-chunk write + del — the full-segment latents
+        # are never concatenated and fp pixels + uint8 are never co-resident
+        # for the whole segment (048). PCIe roundtrip costs tens of seconds;
+        # the stream (caches) survives intact. VAE tiling/slicing stays off
+        # (measure-only probe, never enabled blindly).
         pipe = self._pipeline
         if timer is not None:
             timer.start("offload_for_decode_ms")
@@ -943,14 +972,36 @@ class LongLiveSession:
         if timer is not None:
             timer.stop("offload_for_decode_ms")
         try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             if timer is not None:
-                timer.start("vae_decode_ms")
-            with torch.inference_mode():
-                generated = pipe.vae.decode_to_pixel_chunk(
-                    latents, use_cache=False, chunk_size=int(latents.shape[1])
-                )
+                timer.start("media_write_ms")
+            total_frames = 0
+            height = 0
+            width = 0
+            with imageio.get_writer(
+                str(output_path), fps=fps, codec="libx264", macro_block_size=None
+            ) as writer:
+                if timer is not None:
+                    timer.start("vae_decode_ms")
+                for chunk in block_latents:
+                    with torch.inference_mode():
+                        generated = pipe.vae.decode_to_pixel_chunk(
+                            chunk, use_cache=False, chunk_size=int(chunk.shape[1])
+                        )
+                    video_chunk = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(
+                        torch.uint8
+                    )
+                    pipe.vae.model.clear_cache()
+                    del generated
+                    height, width = int(video_chunk.shape[2]), int(video_chunk.shape[3])
+                    for index in range(video_chunk.shape[1]):
+                        writer.append_data(video_chunk[0, index].numpy())
+                        total_frames += 1
+                    del video_chunk, chunk
+                    gc.collect()
             if timer is not None:
                 timer.stop("vae_decode_ms")
+                timer.stop("media_write_ms")
         finally:
             if timer is not None:
                 timer.start("restore_after_decode_ms")
@@ -958,23 +1009,9 @@ class LongLiveSession:
             self._stream.restore_caches()
             if timer is not None:
                 timer.stop("restore_after_decode_ms")
-        if timer is not None:
-            timer.start("media_write_ms")
-        video = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(torch.uint8)
-        pipe.vae.model.clear_cache()
-        del latents, generated, block_latents
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        frames = [video[0, index].numpy() for index in range(video.shape[1])]
-        with imageio.get_writer(
-            str(output_path), fps=fps, codec="libx264", macro_block_size=None
-        ) as writer:
-            for frame in frames:
-                writer.append_data(frame)
-        if timer is not None:
-            timer.stop("media_write_ms")
-        height, width = int(video.shape[2]), int(video.shape[3])
+        del block_latents
         result: dict[str, Any] = {
-            "frames": len(frames),
+            "frames": total_frames,
             "fps": fps,
             "width": width,
             "height": height,

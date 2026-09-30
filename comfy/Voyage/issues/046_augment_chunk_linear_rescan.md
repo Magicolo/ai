@@ -37,3 +37,12 @@ time ffmpeg -hide_banner -nostdin -y -i /tmp/a.mp4 \
 **Refs:** ffmpeg seek docs (`-ss` as input vs output option); `augment.py:34-35` chunk-size provenance comment.
 
 **Overlaps with:** 047 (augment-worker reload/stack — same augment path, complementary halves; not a duplicate).
+
+## Progress log
+
+- 2026-09-30: re-verified live in slim `voyage:latest` (torch spec None): `ffmpeg_decode_chunk` carries input `-ss` (`start/rate`, 6 decimals) before `-i` with the select filter re-based to `between(n,0,count-1)` when `fps` is given and `start_frame > 0`; without `fps` (or at chunk 0) the exact from-start `between(n,start,end)` path is preserved; a non-fresh `dest_dir` raises `MediaError` before ffmpeg spawns. Verdict: premise confirmed, fix present in the working tree.
+- TDD: `tests/test_worker_perf_rank2.py` (4 tests: stale-dir reject, fast-seek argv order + value + re-based filter, exact fallback, bad-fps validation) failed on base HEAD (all 4 red) and passes with the fix.
+
+## Resolution
+
+- Fixed in `voyage/augment.py`: `_require_fps` validator + `fps` keyword on `ffmpeg_decode_chunk`, fast-seek branch, fresh-`dest_dir` enforcement (`MediaError` naming the stale count). Tests: `tests/test_worker_perf_rank2.py` (046 block). Residual: the segment-demuxer alternative is not needed — input seek + exact fallback covers both; `-ss` granularity edge stays on the exact path by construction.

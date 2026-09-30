@@ -36,3 +36,12 @@ assert "torch.stack" in inspect.getsource(a.upscale_frames)
 **Refs:** PyTorch reference-cycle post (explicit `gc.collect()` necessity); diffusers VAE-tiling note (decode in patches, not whole-batch).
 
 **Overlaps with:** 046 (augment chunk rescan — same path, complementary; not a duplicate).
+
+## Progress log
+
+- 2026-09-30: re-verified live in slim `voyage:latest` (torch absent): resident `_RRDB_CACHE`/`_FILM_CACHE` keyed by `(weights path, device)` with `evict_augment_models`; `_prepare_model` casts `half()` before `.to(device)`; `_run_stacked` runs `gc.collect()` before `empty_cache`; `upscale_frames` routes through `_run_frame_batches` (list-halving seam) with `timings` (`load_ms`/`infer_ms`) on all three entry points. Verdict: premise confirmed, fix present.
+- TDD: `tests/test_worker_perf_rank2.py` (5 tests: cache key/evict, half-before-move source order, gc-before-empty_cache order, list-halving seam, synthetic-tensor timing split torch-gated) failed on base HEAD (red) and passes with the fix (timing test skips cleanly in slim).
+
+## Resolution
+
+- Fixed in `voyage/workers/augment_worker.py`: session caches + `_model_cache_key`/`evict_augment_models`, stack-first replaced by `_run_frame_batches`, `gc` before `empty_cache` in both OOM branches, half-before-move, per-call `load_ms` vs `infer_ms`. Tests: `tests/test_worker_perf_rank2.py` (047 block). Residual: forward-OOM inside `_run_stacked` still halves the stacked tensor via slices (parent retained until the call returns) rather than dropping to list halves — the stack-OOM path does halve the list; acceptable because the chunking cap (32) bounds the stacked CPU tensor and the GPU transient halves with the tensor; a drop-to-list-halves hardening is open if a forward-OOM parent-retention peak is ever measured.

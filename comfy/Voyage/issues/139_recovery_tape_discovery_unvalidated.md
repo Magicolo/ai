@@ -118,3 +118,13 @@ function's body (as-read).
 - 2026-09-30: filed by Track A sweep; live re-verified via Read (concurrent uncommitted edits
   noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`,
   `config/persistence/rpc/supervisor` — citations are as-read values above).
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): premise PARTIALLY REFUTED on live re-read — the filed "zero validation" no longer holds: `_latest_recovery_tape` (`voyage/supervisor.py:714-755`) already carries the issue-016 discovery mirror (resolve-containment + `is_file` on the resolved tape + loud `recovery_tape_skipped` metric + skip-and-continue), covered by `test_latest_recovery_tape_skips_planted_entries` / `..._skips_directory_tape`. Remaining gap found live: a 0-byte torn tape (crash between torch.save and DONE) passes every existing check and is handed to the worker, burning restart budget. Size bounds are otherwise 171's scope (upper bound open there).
+- Fix (discovery region only): skip zero-byte/un-stat-able tapes with a loud `recovery_tape_skipped` (reason `empty file (torn write)`) and fall through to the next-newest DONE segment (fresh stream when none remain). No change to `_resume_video_worker`, commit, prefetch, or gauge regions.
+- Evidence: 2 new 139 tests failed pre-fix, pass post-fix; supervisor-hardening + phase2 suites green; ruff + format-check + mypy strict clean.
+
+## Resolution
+
+- FIXED (residual leg) 2026-09-30: discovery now skips is_file + containment + empty tapes with metrics; the filed zero-validation premise itself had already landed via the 016 mirror. Upper size bound stays with 171.

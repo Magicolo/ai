@@ -55,6 +55,68 @@ def _require_torch() -> None:
         )
 
 
+def _session_device_index() -> int:
+    """CUDA index of the session `_device` ("cuda:N" → N, else 0, never raises)."""
+    try:
+        prefix, _, index = _device.partition(":")
+        if prefix == "cuda" and index.strip().isdigit():
+            return int(index)
+    except (AttributeError, ValueError):
+        pass
+    return 0
+
+
+def _cuda_available() -> bool:
+    """Whether a CUDA context exists (guard for every peak-memory call, 156)."""
+    import torch
+
+    return bool(torch.cuda.is_available())
+
+
+def _reset_peak_stats() -> None:
+    """Reset the session device's peak counter, or no-op off-GPU (156)."""
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(_session_device_index())
+
+
+def _peak_gib() -> float | None:
+    """Session-device peak GiB, or None off-GPU (156, honest unknowns)."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    return float(torch.cuda.max_memory_allocated(_session_device_index())) / BYTES_PER_GIB
+
+
+def _benchmark_report(
+    *,
+    warmup: int,
+    measured: int,
+    duration: float,
+    walls: list[float],
+    peaks: list[float],
+    cuda_available: bool,
+    device: str,
+) -> dict[str, Any]:
+    """Shape the benchmark report (156, pure): device + availability always,
+    VRAM peaks null off-GPU (extends `_benchmark_env`'s honest-unknown doctrine)."""
+    mean = sum(walls) / len(walls)
+    return {
+        "backend": "acestep",
+        "device": device,
+        "cuda_available": cuda_available,
+        "warmup_takes": warmup,
+        "measured_takes": measured,
+        "take_wall_seconds": [round(wall, 3) for wall in walls],
+        "takes_per_second": round(1.0 / mean, 3),
+        "audio_seconds_per_wall_second": round(duration / mean, 3),
+        "vram_peak_gib": round(max(peaks), 2) if peaks else None,
+        "vram_avg_gib": round(sum(peaks) / len(peaks), 2) if peaks else None,
+    }
+
+
 def validate_sample_rate(sample_rate: int) -> None:
     """Reject non-positive output sample rates (issue 063)."""
     if sample_rate <= 0:
@@ -201,7 +263,6 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     measured = int(payload.get("measured", 3))
     validate_benchmark_counts(warmup, measured)
     _require_torch()
-    import torch
 
     _require_stack()
     probe: dict[str, Any] = {
@@ -215,30 +276,30 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     }
     walls: list[float] = []
     peaks: list[float] = []
+    cuda_available = _cuda_available()
     with tempfile.TemporaryDirectory(prefix="voyage-bench-") as staging_directory:
         for take_index in range(warmup + measured):
-            torch.cuda.reset_peak_memory_stats()
+            _reset_peak_stats()
             started = time.monotonic()
             handle_generate_audio(
                 {**probe, "output_path": str(Path(staging_directory) / f"t{take_index}.wav")}
             )
             elapsed = time.monotonic() - started
-            peak_gib = torch.cuda.max_memory_allocated() / BYTES_PER_GIB
+            peak_gib = _peak_gib()
             if take_index >= warmup:
                 walls.append(elapsed)
-                peaks.append(peak_gib)
-    mean = sum(walls) / len(walls)
+                if peak_gib is not None:
+                    peaks.append(peak_gib)
     duration = probe["duration_seconds"]
-    return {
-        "backend": "acestep",
-        "warmup_takes": warmup,
-        "measured_takes": measured,
-        "take_wall_seconds": [round(wall, 3) for wall in walls],
-        "takes_per_second": round(1.0 / mean, 3),
-        "audio_seconds_per_wall_second": round(duration / mean, 3),
-        "vram_peak_gib": round(max(peaks), 2),
-        "vram_avg_gib": round(sum(peaks) / len(peaks), 2),
-    }
+    return _benchmark_report(
+        warmup=warmup,
+        measured=measured,
+        duration=duration,
+        walls=walls,
+        peaks=peaks,
+        cuda_available=cuda_available,
+        device=_device,
+    )
 
 
 def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:

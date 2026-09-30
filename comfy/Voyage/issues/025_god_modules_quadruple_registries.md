@@ -67,3 +67,13 @@ print(sorted(backends._STREAMING_BACKENDS), sorted(supervisor.STREAMING_VIDEO_BA
 ## Refs
 
 - Single-source precedent in-tree: `BackendRecord` docstring at `voyage/config.py:88-97` ("every preset dict, state-mode map, and streaming set below derives from the registry instead of restating these values") — the fix is extending that rule to the two modules that opted out.
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): premise re-verified live — `backends._STREAMING_BACKENDS`, `supervisor.STREAMING_VIDEO_BACKENDS`, and the registry streaming projection all equal `{'causvid','longlive2','ltxv'}`; `VIDEO_WORKER_MODULES` keys equal BACKEND_REGISTRY keys; `cli._CUDA_*` sets are already registry-derived (021 landed). No unity enforcement exists (no import-time assert, no test). Verdict: CONFIRMED (agreement coincidental, not enforced).
+- Fix (test-only by ownership: supervisor module-header region is owned by concurrent groups, so no source derivation here): import-time unity test in `tests/test_surface_rank2.py` — streaming triple-equality, worker-module key equality, and CUDA-set-vs-device projections. Fails the gate on drift instead of on a GPU box at midnight. Source derivation of the two supervisor literals stays open for the supervisor owner.
+- Evidence: unity tests pass (agreement holds today); ruff + format-check + mypy strict clean. Note: ruff 0.16.9 SIM300 treats SCREAMING_CASE module attrs as constants — asserts read `expected == module.SET` per the linter.
+
+## Resolution
+
+- GUARDED 2026-09-30 (not restructured): registry unity is now gate-enforced by test; the `cli.py` split + supervisor derivation (fix candidates 1-2) remain open and owned elsewhere.

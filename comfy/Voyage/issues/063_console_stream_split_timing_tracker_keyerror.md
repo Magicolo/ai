@@ -27,3 +27,17 @@ self._progress.update(self._tasks[label], completed=1)
 except RuntimeError: pass"` → `✗ video failed` (no seconds); `c.error('x')` lands on stderr. `grep -n "except Exception" voyage/console.py`.
 - **Fix candidates:** Route `error()` through `self._stream` (keep a stderr mirror behind a flag if desired); add elapsed to the plain failure line; `except BaseException` for spinner teardown with re-raise; `.get()` + warning line for unknown tracker labels; document the stream contract in the module docstring.
 - **Refs:** `voyage/console.py` (console-only contract); `docs/OPERATIONS.md:23-41` (TTY vs pipe parity promise); Textual validation pattern (validate-then-report discipline for tracker labels).
+
+## Progress log
+
+- 2026-09-30 re-verified live (container `voyage:latest`): `VoyageConsole(no_color=True, stream=s).error('boom')` leaves `s` empty (goes to real stderr) — CONFIRMED; plain `stage` failure prints `✗ video failed` with no elapsed (rich path prints `failed after Xs`) — CONFIRMED; both `stage` branches use `except Exception` (BaseException skips `stop.set()`/`status.stop()`) — CONFIRMED by read; `succeed/fail` index `self._tasks[label]` directly (KeyError on TTY-with-rich for unknown labels; non-TTY path skips the index so no crash but also no warning — verified: unknown label prints a ready line with no warning). `_started.get` half already guarded — CONFIRMED.
+- TDD: `tests/test_observability_rank2.py` first run — all 4 console assertions failed as designed (empty stream on error, `failed after` absent, KeyboardInterrupt teardown, `unknown` warning absent).
+- Fix in `voyage/console.py` only: `error()` routes through `self._stream`; plain failure line gains `failed after {elapsed:.1f}s`; both `stage` branches catch `BaseException` with re-raise (spinner/status always torn down); `succeed`/`fail` use `.get()` + `⚠ unknown download label` warning on either path (rich or plain); stream contract documented in the module docstring.
+- Gates (container): `ruff check` + `ruff format --check` + `mypy` clean; 41 passed.
+- 028 FOLDED here on fix (same file, same stream-split root cause — see 028 file).
+
+## Resolution
+
+- Fixed in `voyage/console.py` (stream-routed `error`, elapsed parity on failure, `BaseException` teardown, guarded tracker with warning) with coverage in `tests/test_observability_rank2.py` (4 console tests).
+- Residuals: none in this module — all four sub-issues closed here. TTY-rich teardown under real `KeyboardInterrupt` (spinner thread join timing) verified by code path only, not a live TTY test (no TTY in gates).
+- DESIGN patch proposals (text only): §59 console contract notes the stream rule ("same words, either sink — `error()` writes to the injected stream") + failure lines always carry elapsed + tracker labels validate-then-report with a warning line.

@@ -26,8 +26,10 @@ module is an in-process library called with tensors.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import pickle
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,30 @@ pickles surface as `UnpicklingError` (a `PickleError`, outside the original
 five); safetensors decode failures are normalized to `ValueError` in
 `_load_state_dict` so they land here too.
 """
+
+_RRDB_CACHE: dict[tuple[str, str], Any] = {}
+"""Resident Real-ESRGAN nets keyed by (weights path, device) — issue 047.
+
+A 32-chunk augment must not pay 32x construction + disk load + H2D;
+the first call warms the entry, later chunks reuse it. `evict_augment_models`
+drops both caches (GPU hand-off, DESIGN §40).
+"""
+
+_FILM_CACHE: dict[tuple[str, str], Any] = {}
+"""Resident FILM stand-ins keyed by (weights path, device) — issue 047."""
+
+
+def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
+    """Cache identity for a resident net: stringified weights path + device."""
+    return (str(weights_path), str(device))
+
+
+def evict_augment_models() -> int:
+    """Drop all resident augment nets; return the evicted entry count."""
+    count = len(_RRDB_CACHE) + len(_FILM_CACHE)
+    _RRDB_CACHE.clear()
+    _FILM_CACHE.clear()
+    return count
 
 
 def _require_torch() -> None:
@@ -144,13 +170,18 @@ def _resolve_device(preferred: str) -> Any:
 
 
 def _prepare_model(model: Any, device: str) -> tuple[Any, Any]:
-    """Move `model` to `device` (half precision on CUDA); return (torch_device, dtype)."""
+    """Move `model` to `device` (half precision on CUDA); return (torch_device, dtype).
+
+    The fp16 cast lands before the host-to-device move so CUDA loads pay
+    one fp16 H2D instead of a full fp32 move plus an in-place half.
+    """
     import torch
 
     torch_device = _resolve_device(device)
-    model.to(torch_device)
     if torch_device.type == "cuda":
         model.half()
+    model.to(torch_device)
+    if torch_device.type == "cuda":
         return torch_device, torch.float16
     return torch_device, torch.float32
 
@@ -468,6 +499,7 @@ def _run_stacked(forward: Callable[[Any], Any], stacked: Any) -> list[Any]:
     except RuntimeError as exc:
         if "out of memory" not in str(exc).lower() or int(stacked.shape[0]) <= 1:
             raise
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         half = int(stacked.shape[0]) // 2
@@ -478,18 +510,64 @@ def _run_stacked(forward: Callable[[Any], Any], stacked: Any) -> list[Any]:
     return [outputs[index] for index in range(int(outputs.shape[0]))]
 
 
+def _run_frame_batches(
+    forward: Callable[[Any], Any],
+    frame_tensors: list[Any],
+    torch_device: Any,
+    dtype: Any,
+) -> list[Any]:
+    """Run `forward` over CPU frame tensors, halving the list before stacking (047).
+
+    The full-batch `torch.stack` is the allocation the chunking was built to
+    avoid, so it is never built: slices stack per half inside the recursion
+    and the failed half's tensors release before splitting further. Falls
+    back to `_run_stacked`'s tensor halving once a half is stacked, so both
+    the stack and the activation transient halve together.
+    """
+    import torch
+
+    if not frame_tensors:
+        raise ValueError("augment worker needs at least one frame (got none)")
+    if len(frame_tensors) == 1:
+        stacked = torch.stack(frame_tensors).to(torch_device, dtype=dtype)
+        try:
+            return _run_stacked(forward, stacked)
+        finally:
+            del stacked
+    try:
+        stacked = torch.stack(frame_tensors).to(torch_device, dtype=dtype)
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        half = len(frame_tensors) // 2
+        return [
+            *_run_frame_batches(forward, frame_tensors[:half], torch_device, dtype),
+            *_run_frame_batches(forward, frame_tensors[half:], torch_device, dtype),
+        ]
+    try:
+        return _run_stacked(forward, stacked)
+    finally:
+        del stacked
+
+
 def upscale_frames(
     frames: list[Any],
     weights: Path | str,
     *,
     scale: int = 2,
     device: str = "cuda:0",
+    timings: dict[str, float] | None = None,
 ) -> list[Any]:
     """Upscale (3, H, W) float frames in [0, 1] by `scale` (Real-ESRGAN x4 + downscale).
 
     One x4 model pass serves every allowed target: 4 is native, 2/1
     downscale the x4 output (bicubic). Outputs are float32 CPU tensors
-    clamped to [0, 1] — the caller concatenates/encodes on CPU.
+    clamped to [0, 1] — the caller concatenates/encodes on CPU. The net
+    is resident per (weights, device) across calls; `timings` records
+    `load_ms` vs `infer_ms` separately when given (benchmark attribution).
     """
     target = validate_upscale_factor(scale)
     weights_path = _require_weights(weights, "Real-ESRGAN")
@@ -498,15 +576,22 @@ def upscale_frames(
     import torch
     from torch.nn import functional as functional
 
-    model = _load_rrdb_net(weights_path)
+    load_started = time.monotonic()
+    key = _model_cache_key(weights_path, device)
+    model = _RRDB_CACHE.get(key)
+    if model is None:
+        model = _load_rrdb_net(weights_path)
+        _RRDB_CACHE[key] = model
+    load_ms = (time.monotonic() - load_started) * 1000.0
     torch_device, dtype = _prepare_model(model, device)
     model.eval()
-    stacked = torch.stack([torch.as_tensor(frame, dtype=torch.float32) for frame in frames]).to(
-        torch_device, dtype=dtype
-    )
+    cpu_frames = [torch.as_tensor(frame, dtype=torch.float32) for frame in frames]
     results: list[Any] = []
-    with torch.no_grad():
-        for single in _run_stacked(model, stacked):
+    infer_started = time.monotonic()
+    try:
+        with torch.no_grad():
+            batched = _run_frame_batches(model, cpu_frames, torch_device, dtype)
+        for single in batched:
             refined = single.clamp(0.0, 1.0)
             if target != RRDB_NATIVE_SCALE:
                 refined = functional.interpolate(
@@ -516,6 +601,11 @@ def upscale_frames(
                     align_corners=False,
                 ).squeeze(0)
             results.append(refined.float().cpu())
+    finally:
+        del cpu_frames
+    if timings is not None:
+        timings["load_ms"] = load_ms
+        timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
     return results
 
 
@@ -526,15 +616,22 @@ def interpolate_pair(
     *,
     moment: float = 0.5,
     device: str = "cuda:0",
+    timings: dict[str, float] | None = None,
 ) -> Any:
     """One mid frame between `before` and `after` at blend `moment` (FILM stand-in)."""
-    time = validate_blend_time(moment)
+    blend = validate_blend_time(moment)
     weights_path = _require_weights(weights, "FILM")
     _require_torch()
     _require_frame_batch([before, after])
     import torch
 
-    model = _load_film_net(weights_path)
+    load_started = time.monotonic()
+    key = _model_cache_key(weights_path, device)
+    model = _FILM_CACHE.get(key)
+    if model is None:
+        model = _load_film_net(weights_path)
+        _FILM_CACHE[key] = model
+    load_ms = (time.monotonic() - load_started) * 1000.0
     torch_device, dtype = _prepare_model(model, device)
     model.eval()
     batched = torch.stack(
@@ -543,8 +640,15 @@ def interpolate_pair(
             torch.as_tensor(after, dtype=torch.float32),
         ]
     ).to(torch_device, dtype=dtype)
-    with torch.no_grad():
-        mids = _run_stacked(lambda batch: model(batch, time), batched.unsqueeze(0))
+    infer_started = time.monotonic()
+    try:
+        with torch.no_grad():
+            mids = _run_stacked(lambda batch: model(batch, blend), batched.unsqueeze(0))
+    finally:
+        del batched
+    if timings is not None:
+        timings["load_ms"] = load_ms
+        timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
     return mids[0].float().cpu()
 
 
@@ -555,6 +659,7 @@ def interpolate_triplet(
     weights: Path | str,
     *,
     device: str = "cuda:0",
+    timings: dict[str, float] | None = None,
 ) -> tuple[Any, Any]:
     """Mid frames for (first, middle) and (middle, last) sharing one model load."""
     weights_path = _require_weights(weights, "FILM")
@@ -562,7 +667,13 @@ def interpolate_triplet(
     _require_frame_batch([first, middle, last])
     import torch
 
-    model = _load_film_net(weights_path)
+    load_started = time.monotonic()
+    key = _model_cache_key(weights_path, device)
+    model = _FILM_CACHE.get(key)
+    if model is None:
+        model = _load_film_net(weights_path)
+        _FILM_CACHE[key] = model
+    load_ms = (time.monotonic() - load_started) * 1000.0
     torch_device, dtype = _prepare_model(model, device)
     model.eval()
     first_tensor = torch.as_tensor(first, dtype=torch.float32)
@@ -574,6 +685,13 @@ def interpolate_triplet(
             torch.stack([middle_tensor, last_tensor]),
         ]
     ).to(torch_device, dtype=dtype)
-    with torch.no_grad():
-        mids = _run_stacked(lambda batch: model(batch, 0.5), batched)
+    infer_started = time.monotonic()
+    try:
+        with torch.no_grad():
+            mids = _run_stacked(lambda batch: model(batch, 0.5), batched)
+    finally:
+        del batched
+    if timings is not None:
+        timings["load_ms"] = load_ms
+        timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
     return (mids[0].float().cpu(), mids[1].float().cpu())

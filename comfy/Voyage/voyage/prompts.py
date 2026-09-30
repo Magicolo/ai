@@ -12,6 +12,8 @@ prompt chain.
 
 from __future__ import annotations
 
+import math
+
 from voyage.models import PromptPlan, PromptStage, StyleSpec
 
 # Motion-pace bands derived from the charter's motion_energy_max (§18.1
@@ -22,16 +24,24 @@ _MOTION_CALM_MAX = 0.35
 _MOTION_SLOW_MAX = 0.6
 
 # Fragments that attempt to override the human-owned style charter (§18.1
-# step 5). Matched case-insensitively as substrings; the check is
-# deliberately narrow so legitimate scene language never trips it.
+# step 5). Matched case-insensitively as substrings. The ladder is:
+# (1) this blocklist rejects the known phrasings via ProposalRejected,
+# (2) `enforce_style` re-injects the immutable prefix every block so a
+# paraphrase that slips past still cannot remove the charter, (3) the
+# supervisor accept loop re-checks every stage against the charter.
+# Tier 1 stays narrow enough that legitimate scene language never trips
+# it; the seed corpus in the 026 tests pins the documented paraphrases.
 STYLE_OVERRIDE_MARKERS = (
     "ignore previous",
     "ignore all previous",
+    "ignore prior instructions",
     "disregard the style",
     "override the style",
     "forget the style",
     "new style:",
     "change the style to",
+    "system prompt",
+    "jailbreak",
 )
 
 
@@ -90,19 +100,30 @@ def feedback_amendments(measured: dict[str, float], style: StyleSpec) -> list[st
         return []
     amendments = []
     motion = measured.get("motion_energy")
-    if motion is not None:
+    # Non-finite readings mean "unknown", never a deviation (issue 144):
+    # NaN > max and NaN < min are both False, so unguarded code steers
+    # nothing while the label path claims WITHIN.
+    if motion is not None and math.isfinite(motion):
         if motion > style.motion_energy_max:
             amendments.append("calm static composition, minimal motion")
         elif motion < style.motion_energy_min:
             amendments.append("gentle continuous motion throughout the shot")
     complexity = measured.get("visual_complexity")
-    if complexity is not None and complexity > style.visual_complexity_max:
+    if (
+        complexity is not None
+        and math.isfinite(complexity)
+        and complexity > style.visual_complexity_max
+    ):
         amendments.append("sparse composition, few simple shapes, large empty areas")
     drift = measured.get("semantic_change_rate")
-    if drift is not None and drift < style.semantic_drift_min:
+    if drift is not None and math.isfinite(drift) and drift < style.semantic_drift_min:
         amendments.append("gradual visible transformation unfolding across the shot")
     similarity = measured.get("style_similarity")
-    if similarity is not None and similarity < style.style_similarity_min:
+    if (
+        similarity is not None
+        and math.isfinite(similarity)
+        and similarity < style.style_similarity_min
+    ):
         amendments.append("strictly in the charter style, signature palette and linework")
     return amendments
 
@@ -162,11 +183,20 @@ def build_staged_prompt_plan(
     transition_texts: list[str],
     num_blocks: int,
     blocks_per_stage: int,
+    *,
+    strict: bool = False,
+    repeat_transitions: bool = True,
 ) -> PromptPlan:
     """Map semantic stages onto block ranges (§18.2).
 
     Each stage covers `blocks_per_stage` blocks; the final stage absorbs
-    any remainder. Stage texts beyond the block range are dropped.
+    any remainder. Stage texts beyond the block range are dropped —
+    silently by default (documented long-standing behavior), or loudly
+    with `strict=True`, which raises ValueError naming the dropped
+    count instead (issue 026: callers should know 4 of 5 stages
+    vanished). Short transition lists repeat their last entry by
+    default; `repeat_transitions=False` holds them empty past their
+    range so "repeat last" and "hold" stay distinguishable.
     """
     if num_blocks <= 0:
         raise ValueError("num_blocks must be positive")
@@ -179,6 +209,12 @@ def build_staged_prompt_plan(
     # count so the tail never becomes a 1-block stub; the final stage
     # absorbs whatever remains.
     num_stages = max(1, (num_blocks + blocks_per_stage // 2) // blocks_per_stage)
+    if strict and len(stage_texts) > num_stages:
+        dropped = len(stage_texts) - num_stages
+        raise ValueError(
+            f"{dropped} stage texts exceed the {num_stages} planned stages "
+            f"({num_blocks} blocks at {blocks_per_stage} per stage)"
+        )
     for index in range(num_stages):
         start = index * blocks_per_stage
         if index < num_stages - 1:
@@ -188,7 +224,10 @@ def build_staged_prompt_plan(
         text = stage_texts[min(index, len(stage_texts) - 1)]
         transition = ""
         if transition_texts:
-            transition = transition_texts[min(index, len(transition_texts) - 1)]
+            if repeat_transitions:
+                transition = transition_texts[min(index, len(transition_texts) - 1)]
+            elif index < len(transition_texts):
+                transition = transition_texts[index]
         stages.append(
             PromptStage(
                 stage=index,

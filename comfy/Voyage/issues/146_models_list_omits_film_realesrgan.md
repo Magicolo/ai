@@ -51,3 +51,13 @@ docker run --rm -v "$PWD/Voyage:/app" -w /app voyage:latest \
 ## Refs
 
 - `voyage/cli.py:337-347` vs `:348-371` (verify) vs `:372-418` (download dispatch).
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): premise re-verified live — `models list` printed 7 rows (video x3, audio, sfx, director, inspector) with no film/realesrgan line, while download dispatch (:410-413) and verify (:365-368) support both. Verdict: CONFIRMED.
+- Fix (as 146 fix candidate, plus full-name discovery): list verb now prints full download-target names (audio-acestep, sfx-mmaudio, director-qwen8b, director-qwen4b-awq, inspector-qwen35) and a new `augment:` row for film + realesrgan-anime. Only the list branch touched; download/verify branches untouched.
+- Evidence: `tests/test_surface_rank2.py::test_models_list_names_film_and_realesrgan` + `test_models_list_names_every_download_target` pass (were failing pre-fix).
+
+## Resolution
+
+- FOLDED into 065 on fix (same stale-list root cause; shared mirror test in `tests/test_surface_rank2.py`). No separate close-out needed.

@@ -56,3 +56,13 @@ print(feedback_amendments({'motion_energy': float('nan')}, StyleSpec()))
 ## Refs
 
 - `voyage/director.py:230-245`; `voyage/prompts.py:85-107`; `voyage/config.py:305-310` (finite-guard precedent); issue 100 (nan/inf config validation).
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): premise re-verified live — `format_measured_context(StyleSpec(prompt=...), {'motion_energy': nan})` rendered `motion_energy=nan target=[0.20,0.35] WITHIN` with `feedback_amendments(...) == []`; +inf → ABOVE + amendment, -inf → BELOW. Verdict: CONFIRMED exactly as filed.
+- Fix: per-metric `math.isfinite` skip in `format_measured_context` (`voyage/director.py`, line dropped, never labeled) + per-family `math.isfinite` guards in `feedback_amendments` (`voyage/prompts.py`, NaN/+-inf steer nothing). Finite behavior unchanged (control test pins ABOVE + amendment).
+- Evidence: 4 new 144 tests failed pre-fix, pass post-fix; neighboring suites green; ruff + format-check + mypy strict clean.
+
+## Resolution
+
+- FIXED 2026-09-30: non-finite measured metrics are skipped per-metric in both consumers — unknown is never labeled WITHIN and never steers.

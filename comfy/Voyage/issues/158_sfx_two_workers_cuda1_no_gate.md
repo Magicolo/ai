@@ -37,3 +37,12 @@ Single-GPU box: `voyage sfx --run <dir> --sfx-workers 2` (or finalize with `--sf
 
 - `Voyage/voyage/sfx_finalize.py:255-314`; `Voyage/voyage/augment.py:216-263`; `Voyage/voyage/cli.py:1175-1260,1773-1817`; `Voyage/voyage/tui_state.py:542-548`; DESIGN §40 (residency/pairing), §104 (ladders).
 - Adjacent, not overlapping: 054 (two-worker ledger race — same flag, threading half); 021 (CUDA set from the video side); 156 (benchmark guards + device defaults); 153 (half-ledger duplicate lines the late failure leaves behind).
+
+## Progress log
+
+- 2026-09-30: re-verified live in slim `voyage:latest`: `render_sfx_bed` with `num_workers=2` resolves visibility via `augment_devices()` and raises `MediaError("--sfx-workers 2 needs 2 visible GPUs…")` before any worker starts (no ledger writes); `_cuda_offenders` lists `sfx 'mmaudio'` for a fake/fake/mmaudio config (preflight membership present); `--sfx-workers` help names the 2-visible-GPU requirement. Verdict: premise confirmed, fix present.
+- TDD: `tests/test_worker_perf_rank2.py` (4 tests: single-GPU fail-fast with no ledger, two-GPU fake shard end-to-end, preflight offender pin, help-text pin) failed on base HEAD (red) and passes with the fix. `voyage/cli.py` touched only at the `--sfx-workers` help line; validate/finalize/models regions belong to concurrent groups and were not restructured.
+
+## Resolution
+
+- Fixed in `voyage/sfx_finalize.py` (presence gate via `augment_devices()`, fail fast at plan time) + `voyage/cli.py` help line only (`--sfx-workers` help states the 2-visible-GPU need). The `:283-287` cuda:1 size guard is kept (6 GB ladder result). Tests: `tests/test_worker_perf_rank2.py` (158 block). Residual: `_CUDA_SFX_BACKENDS`/`_cuda_offenders` membership lives in the cli validate region owned by a concurrent group (021) — pinned by test but not modified here; the 1-GPU/2-GPU pairing matrix (1 worker any size, 2 workers small/small) is documented in help + plan error, full prose belongs in a docs follow-up.

@@ -378,10 +378,15 @@ def _plan_details(state: GenerateFormState) -> tuple[int, int, float, int, int] 
 
     Single source (issue 024): frames/fps come from
     :func:`_planning_frames_and_fps` (CLI truth). Both public planners
-    build on this struct and never re-derive frame math.
+    build on this struct and never re-derive frame math. An unknown
+    backend (issue 178: a typo, not a future backend) has no plan —
+    None, so the plan line agrees with the errors line instead of
+    quoting fallback geometry the run will never produce.
     """
     from voyage.cli import parse_duration, segments_for_duration
 
+    if state.backend not in BACKENDS:
+        return None
     try:
         duration_seconds = parse_duration(state.duration)
     except ValueError:
@@ -413,6 +418,8 @@ def plan_summary(state: GenerateFormState) -> str:
     """One-line derived plan (segments/frames/seconds) or the first error."""
     from voyage.cli import parse_duration
 
+    if state.backend not in BACKENDS:
+        return f"cannot plan: backend must be one of {', '.join(BACKENDS)}, got {state.backend!r}"
     try:
         parse_duration(state.duration)
     except ValueError as exc:

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
+from voyage.augment import augment_devices
 from voyage.errors import MediaError
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
@@ -214,6 +215,9 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
     """Read-only SFX checks: files exist, windows tile the timeline.
 
     No ledger (SFX never ran / old run) is clean — the pass is optional.
+    Duplicate `window_id` lines (re-render appends) dedupe last-wins and
+    the walk sorts by start, so ledger order can never false-positive
+    coverage (153, mirroring the `existing` dict in `render_sfx_bed`).
     """
     ledger = run_dir / "audio" / SFX_STEMS_DIRNAME / SFX_LEDGER_NAME
     if not ledger.exists():
@@ -223,9 +227,11 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
         records = load_sfx_ledger(ledger)
     except (OSError, ValueError) as exc:
         return [f"sfx ledger unreadable: {exc}"]
+    deduped = {str(record.get("window_id", "")): record for record in records}
+    ordered = sorted(deduped.values(), key=lambda record: float(record.get("start", 0.0)))
     cursor = 0.0
     covered_until = 0.0
-    for record in records:
+    for record in ordered:
         try:
             stem = resolve_stored_path(run_dir, str(record.get("path", "")))
         except MediaError as exc:
@@ -256,6 +262,44 @@ def _sfx_worker_module(backend: str) -> str:
         raise MediaError(f"unknown sfx backend {backend!r} (known: {known})") from None
 
 
+def _stem_cache_hit(record: dict[str, Any], window: SfxWindow, model_size: str) -> bool:
+    """Whether a ledger record satisfies a planned window (153, pure).
+
+    Duration matches fuzzily within `AV_ALIGNMENT_TOLERANCE_SECONDS` (the
+    same budget the bed/timeline checks use) so a re-finalize after float
+    rounding drift still hits; caption/seed/model_size must match exactly
+    so real plan changes always re-render. Malformed durations miss.
+    """
+    if record.get("caption") != window.caption:
+        return False
+    if record.get("seed") != window.seed:
+        return False
+    if record.get("model_size") != model_size:
+        return False
+    try:
+        logged = float(record.get("duration", float("nan")))
+    except (TypeError, ValueError):
+        return False
+    return abs(logged - window.duration) <= AV_ALIGNMENT_TOLERANCE_SECONDS
+
+
+def _prune_stale_partials(sfx_dir: Path) -> int:
+    """Remove crashed-render `*.partial.wav` leftovers (153, best-effort).
+
+    Runs at plan time so a killed render never orphans bytes the next
+    finalize mistakes for stems. Returns the pruned count. The temp name
+    keeps the `.wav` suffix so every backend's ffmpeg/soundfile format
+    inference keeps working on the temp path.
+    """
+    pruned = 0
+    if sfx_dir.is_dir():
+        for partial in sorted(sfx_dir.glob("*.partial.wav")):
+            with contextlib.suppress(OSError):
+                partial.unlink()
+                pruned += 1
+    return pruned
+
+
 def render_sfx_bed(
     run_dir: Path,
     final_video: Path,
@@ -275,7 +319,8 @@ def render_sfx_bed(
 
     Windows shard round-robin over one worker, or two same-model workers
     on cuda:0/cuda:1 when num_workers=2 (small on both — see
-    SFX_DUAL_MODEL_SIZE). Stems persist under audio/sfx/ with ledger
+    SFX_DUAL_MODEL_SIZE; two workers need two visible GPUs, gated below
+    via `augment_devices`). Stems persist under audio/sfx/ with ledger
     entries; the bed joins stems with manual-fade `_blend_pair`s and
     verifies timeline-exactness before returning.
     """
@@ -289,6 +334,14 @@ def render_sfx_bed(
             f"sfx model {model_size} cannot fit cuda:1 (6 GB) — the ladder measured "
             "medium OOM there; use --sfx-model-size small_44k or --sfx-device cuda:0"
         )
+    if num_workers == 2:
+        visible = augment_devices()
+        if len(visible) < 2:
+            seen = ", ".join(visible) if visible else "none"
+            raise MediaError(
+                f"--sfx-workers 2 needs 2 visible GPUs, saw {len(visible)} "
+                f"({seen}); use --sfx-workers 1 on a single-GPU box"
+            )
     sizes = [model_size] * num_workers
     devices = [device] * num_workers
     if num_workers == 2:
@@ -297,6 +350,8 @@ def render_sfx_bed(
     windows = plan_sfx_windows(timeline_seconds, bounds, seed_base=seed_base)
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     ledger = sfx_dir / SFX_LEDGER_NAME
+    sfx_dir.mkdir(parents=True, exist_ok=True)
+    _prune_stale_partials(sfx_dir)
     existing = {record["window_id"]: record for record in load_sfx_ledger(ledger)}
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     stems: list[Path] = []
@@ -324,31 +379,39 @@ def render_sfx_bed(
             record = existing.get(window.window_id)
             if (
                 record is not None
-                and record.get("caption") == window.caption
-                and record.get("seed") == window.seed
-                and record.get("model_size") == sizes[slot]
-                and record.get("duration") == window.duration
+                and _stem_cache_hit(record, window, sizes[slot])
                 and resolve_stored_path(run_dir, str(record.get("path", ""))).exists()
             ):
                 return resolve_stored_path(run_dir, str(record["path"]))
-            if backend == "mmaudio" and stem.exists():
-                stem.unlink()
-            result = workers[slot].call(
-                "generate_sfx",
-                {
-                    "window_id": window.window_id,
-                    "caption": window.caption,
-                    "video_path": str(final_video),
-                    "start_seconds": window.start,
-                    "duration_seconds": window.duration,
-                    "seed": window.seed,
-                    "output_path": str(stem),
-                    "sample_rate": sample_rate,
-                    "channels": channels,
-                },
-            )
+            # Render-to-temp + atomic replace (153): a failed render leaves
+            # the old stem and ledger line intact — validate never sees a
+            # half-written window, and the old stem stays the valid fallback.
+            # The temp keeps the `.wav` suffix (format inference in workers).
+            tmp_stem = sfx_dir / f"{window.window_id}.partial.wav"
+            try:
+                result = workers[slot].call(
+                    "generate_sfx",
+                    {
+                        "window_id": window.window_id,
+                        "caption": window.caption,
+                        "video_path": str(final_video),
+                        "start_seconds": window.start,
+                        "duration_seconds": window.duration,
+                        "seed": window.seed,
+                        "output_path": str(tmp_stem),
+                        "sample_rate": sample_rate,
+                        "channels": channels,
+                    },
+                )
+            except Exception:
+                with contextlib.suppress(OSError):
+                    tmp_stem.unlink()
+                raise
             if not isinstance(result, dict):
+                with contextlib.suppress(OSError):
+                    tmp_stem.unlink()
                 raise MediaError(f"sfx {window.window_id}: worker returned no result")
+            os.replace(tmp_stem, stem)
             # Truncated tail (EOF edge): the ledger records reality so the
             # bed join and coverage math follow the stem, not the plan.
             resolved = result.get("duration_seconds", window.duration)

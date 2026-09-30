@@ -85,7 +85,11 @@ never leave root-owned `__pycache__` in the bind mount.
 ./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB)
 ./scripts/run.sh models download causvid        # CausVid DMD + Wan2.1-1.3B base (~28 GB)
 ./scripts/run.sh models download director-qwen8b  # director (~16 GB)
+./scripts/run.sh models download director-qwen4b-awq  # GPU director decider (~2.6 GB)
 ./scripts/run.sh models download audio-acestep    # audio checkpoints
+./scripts/run.sh models download sfx-mmaudio      # video-synced SFX (~13 GB, CC-BY-NC-4.0)
+./scripts/run.sh models download film             # finalize interpolation (~66 MB, MIT + Apache-2.0)
+./scripts/run.sh models download realesrgan-anime # finalize upscaler (~18 MB, BSD-3-Clause)
 ./scripts/run.sh models download inspector-qwen35 # VLM (~19 GB, optional)
 ./scripts/run.sh models verify                    # presence + size checks
 ```

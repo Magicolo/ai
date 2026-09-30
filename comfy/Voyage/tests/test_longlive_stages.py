@@ -243,8 +243,8 @@ def test_stage_names_cover_all_pipeline_stages() -> None:
         "tape_encode_ms",
         "offload_for_decode_ms",
         "vae_decode_ms",
-        "restore_after_decode_ms",
         "media_write_ms",
+        "restore_after_decode_ms",
     )
 
 

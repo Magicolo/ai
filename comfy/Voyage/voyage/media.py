@@ -95,8 +95,25 @@ def check_free_space(run_dir: Path, min_free_gib: float) -> float:
     return free_gib
 
 
-def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, check=False)
+#: Default bound for every local ffmpeg/ffprobe spawn (issue 019). Mirrors
+#: `rpc.DEFAULT_RPC_TIMEOUT_SECONDS` and `[voyage] rpc_timeout_seconds` —
+#: the local-subprocess layer gets the same budget as the worker RPC layer.
+FFMPEG_TIMEOUT_SECONDS = 600.0
+
+
+def run_capture(
+    argv: list[str], timeout: float = FFMPEG_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[str]:
+    """Run argv capturing output; a wedged child maps to MediaError (issue 019).
+
+    `timeout` mirrors `[voyage] rpc_timeout_seconds` / RPC 600 s default —
+    callers may thread the configured value through; the default keeps
+    existing call sites bounded without a config round-trip.
+    """
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"{argv[0] if argv else 'subprocess'} timed out after {timeout}s") from exc
 
 
 def probe(path: Path) -> dict[str, Any]:
@@ -115,7 +132,10 @@ def probe(path: Path) -> dict[str, Any]:
     )
     if proc.returncode != 0:
         raise MediaError(f"ffprobe failed for {path}: {proc.stderr[-2000:]}")
-    data: Any = json.loads(proc.stdout or "{}")
+    try:
+        data: Any = json.loads(proc.stdout or "{}")
+    except ValueError as exc:
+        raise MediaError(f"ffprobe returned invalid JSON for {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise MediaError(f"ffprobe returned non-object for {path}")
     return data
@@ -1026,7 +1046,7 @@ def finalize_run(
     if plan.needs_minterpolate:
         lift = f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(prefix="voyage-final-", dir=run_dir) as tmp:
         tmpdir = Path(tmp)
         # Blended final mix (overlap re-sliced from takes; previews untouched).
         final_audio = build_final_audio(

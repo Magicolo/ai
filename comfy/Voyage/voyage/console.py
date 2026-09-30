@@ -13,6 +13,11 @@ an optional display dependency: when it is missing, the stream is not
 a TTY (tests, pipes), or ``--no-color``/``NO_COLOR`` is set, every
 method degrades to plain ``print`` lines with the same words, so
 substring assertions in tests keep passing either way.
+
+Stream contract (063/028): every method — including ``error()`` — writes
+to the injected ``stream`` (default ``sys.stdout``), never to the real
+``sys.stderr`` directly, so embeds and tests capturing the stream see
+the same words either way.
 """
 
 from __future__ import annotations
@@ -147,7 +152,7 @@ class VoyageConsole:
         self.styled("⚠", message, "yellow")
 
     def error(self, message: str) -> None:
-        print(f"✗ {message}", file=sys.stderr)
+        print(f"✗ {message}", file=self._stream)
 
     def rule(self, title: str) -> None:
         """Section header (rich rule on a TTY, plain dashes otherwise)."""
@@ -177,7 +182,7 @@ class VoyageConsole:
             ticker.start()
             try:
                 yield
-            except Exception:
+            except BaseException:
                 stop.set()
                 status.stop()
                 elapsed = time.monotonic() - started
@@ -191,8 +196,9 @@ class VoyageConsole:
             self.line(f"▸ {head} ...")
             try:
                 yield
-            except Exception:
-                self.line(f"✗ {label} failed")
+            except BaseException:
+                elapsed = time.monotonic() - started
+                self.line(f"✗ {label} failed after {elapsed:.1f}s")
                 raise
             elapsed = time.monotonic() - started
             self.line(f"✓ {label} in {elapsed:.1f}s")
@@ -362,14 +368,26 @@ class ParallelDownloadTracker:
         """Mark one model fetched + verified (prints its elapsed time)."""
         elapsed = time.monotonic() - self._started.get(label, time.monotonic())
         if self._progress is not None:
-            self._progress.update(self._tasks[label], completed=1)
+            task_id = self._tasks.get(label)
+            if task_id is None:
+                self._console.line(f"⚠ unknown download label: {label}")
+            else:
+                self._progress.update(task_id, completed=1)
+        elif label not in self._started:
+            self._console.line(f"⚠ unknown download label: {label}")
         self._console.styled("✓", f"{label} ready ({elapsed:.1f}s)", "green")
 
     def fail(self, label: str, detail: str = "") -> None:
         """Mark one model failed (stays on stdout so TUI capture keeps it)."""
         suffix = f": {detail}" if detail else ""
         if self._progress is not None:
-            self._progress.update(self._tasks[label], completed=1)
+            task_id = self._tasks.get(label)
+            if task_id is None:
+                self._console.line(f"⚠ unknown download label: {label}")
+            else:
+                self._progress.update(task_id, completed=1)
+        elif label not in self._started:
+            self._console.line(f"⚠ unknown download label: {label}")
         self._console.styled("✗", f"{label} failed{suffix}", "red")
 
     def _finish(self) -> None:

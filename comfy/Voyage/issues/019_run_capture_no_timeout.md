@@ -59,3 +59,18 @@ Host cannot run ffmpeg reliably here, but the stdlib contract is sufficient: `su
 - `voyage/media.py:75-76` (helper), callers at `:80` (`probe`), `:175` (`slice_take`), `:253+` (assembly), `:1050+` (finalize).
 - Contrast `voyage/rpc.py:59-63,192-254` (bounded worker calls, issue 001) and `voyage/supervisor.py:110-120` (`GAUGE_TIMEOUT_SECONDS`/`EMBED_TIMEOUT_SECONDS` — bounded *worker* probes, unbounded *local*ffmpeg).
 - Python `subprocess.run(timeout=...)`: https://docs.python.org/3/library/subprocess.html#subprocess.run
+
+## Progress log
+
+- 2026-09-30: re-verified live in-container before touching anything — holds as-read: `voyage/media.py:98-99` (`subprocess.run(argv, capture_output=True, text=True, check=False)`, zero `timeout` occurrences in the file). Every ffmpeg/ffprobe call site (`probe`, `slice_take`, `assemble_segment_audio`, `_blend_pair`, finalize concat/encode) funnels through the helper and inherits the unbounded wait.
+- 2026-09-30 (TDD red): wrote `Voyage/tests/test_media_robustness_rank2.py` first; the three 019 tests failed as required (`FFMPEG_TIMEOUT_SECONDS` missing, no `timeout` param, `TimeoutExpired` escaping raw).
+- 2026-09-30 (implement, `voyage/media.py` only — candidate 1): added `FFMPEG_TIMEOUT_SECONDS = 600.0` (mirrors `rpc.DEFAULT_RPC_TIMEOUT_SECONDS` / `[voyage] rpc_timeout_seconds`); `run_capture(argv, timeout=FFMPEG_TIMEOUT_SECONDS)` passes `timeout=` through and maps `subprocess.TimeoutExpired → MediaError("<bin> timed out after <N>s")`. Existing call sites unchanged (default keeps them bounded with no config round-trip); callers may thread the configured value explicitly later.
+- 2026-09-30 (TDD green + gates): 18 passed in the new file; related suites 93 passed + 1 torch-gated skip; `ruff check` + `ruff format --check` + `mypy` (strict) clean on all touched files.
+
+## Resolution
+
+- Verdict: fixed in scope (helper + constant). All callers inherit the bound at once; the commit path can now fail safe (restart budget / `--skip-bad`) instead of wedging the run lock at RUNNING.
+- Files changed: `Voyage/voyage/media.py` (`FFMPEG_TIMEOUT_SECONDS` + `run_capture`), `Voyage/tests/test_media_robustness_rank2.py` (new: default-value pin, `TimeoutExpired→MediaError`, kwargs-threading pin).
+- Test evidence: `test_run_capture_exposes_default_timeout` (constant 600.0 + `timeout` param present), `test_run_capture_timeout_expired_maps_to_media_error` (stubbed `subprocess.run` raising `TimeoutExpired` → `MediaError` matching "timed out"), `test_run_capture_threads_timeout_to_subprocess` (timeout=7.5 reaches `subprocess.run` kwargs).
+- DESIGN.md as-built proposal (not applied — DESIGN.md untouched per directive): in the media/RPC section, add "local ffmpeg/ffprobe spawns carry the same 600 s budget as worker RPC (`FFMPEG_TIMEOUT_SECONDS`, threadable from `[voyage] rpc_timeout_seconds`); expiry is a `MediaError`, never a wedged commit."
+- Residuals / follow-ups: per-op overrides (short probe vs long finalize encode) not added — one budget for all callers for now; kill-group hygiene (`start_new_session` + `killpg` for ffmpeg filter-graph grandchildren, candidate 2) left as follow-up.

@@ -61,3 +61,13 @@ print(plan_summary(s))   # confident plan (lie)
 
 - `voyage/tui_state.py:329-332,358-382,394-416` vs `:175-176`; `voyage/cli.py:1158-1168` (`_frames_per_segment` — no fallback, config Literal rejects first).
 - Not-a-duplicate: 024 (single-source frames/fps math — this is the invalid-input branch it never gated); 111 (take_seconds > ahead invariant — different field); 062 (finite guards — different layer).
+
+## Progress log
+
+- 2026-09-30 (surface-rank2 track): premise re-verified live — `GenerateFormState(backend='bogus')` gave `_plan_details == (3, 144, 6.0, 48, 24)`, `plan_summary == '≈6.0s · 3 segment(s) · 144 frames · bogus 48f/segment @ 24fps'` while `field_errors` correctly flagged the backend. Verdict: CONFIRMED. (Track brief labels this "024"; the content is this file 178 — real 024 is the unbounded-output-paths CLI issue, whose validate/finalize/sfx regions are owned by concurrent groups and were not touched.)
+- Fix (tui_state only): `_plan_details` returns None for unknown backends; `plan_summary` returns `cannot plan: backend must be one of ...` (same wording as the errors line); `plan_counts` goes None through the existing struct. `_planning_frames_and_fps` fallback untouched (genuinely-unknown future backends, not form typos). Valid-backend plans byte-identical (control test).
+- Evidence: 3 new 178 tests failed pre-fix, pass post-fix; tui suites green; ruff + format-check + mypy strict clean.
+
+## Resolution
+
+- FIXED 2026-09-30: the TUI plan line agrees with the errors line — unknown backend renders invalid/blocked, never a confident fallback plan.

@@ -53,6 +53,69 @@ def _require_torch() -> None:
         )
 
 
+def _session_device_index() -> int:
+    """CUDA index of the session `_device` ("cuda:N" → N, else 0, never raises)."""
+    try:
+        prefix, _, index = _device.partition(":")
+        if prefix == "cuda" and index.strip().isdigit():
+            return int(index)
+    except (AttributeError, ValueError):
+        pass
+    return 0
+
+
+def _cuda_available() -> bool:
+    """Whether a CUDA context exists (guard for every peak-memory call, 156)."""
+    import torch
+
+    return bool(torch.cuda.is_available())
+
+
+def _reset_peak_stats() -> None:
+    """Reset the session device's peak counter, or no-op off-GPU (156)."""
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(_session_device_index())
+
+
+def _peak_gib() -> float | None:
+    """Session-device peak GiB, or None off-GPU (156, honest unknowns)."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    return float(torch.cuda.max_memory_allocated(_session_device_index())) / BYTES_PER_GIB
+
+
+def _benchmark_report(
+    *,
+    warmup: int,
+    measured: int,
+    duration: float,
+    walls: list[float],
+    peaks: list[float],
+    cuda_available: bool,
+    device: str,
+) -> dict[str, Any]:
+    """Shape the benchmark report (156, pure): device + availability always,
+    VRAM peaks null off-GPU (extends `_benchmark_env`'s honest-unknown doctrine)."""
+    mean = sum(walls) / len(walls)
+    return {
+        "backend": "mmaudio",
+        "model_size": _model_size,
+        "device": device,
+        "cuda_available": cuda_available,
+        "warmup_windows": warmup,
+        "measured_windows": measured,
+        "window_wall_seconds": [round(wall, 3) for wall in walls],
+        "windows_per_second": round(1.0 / mean, 3),
+        "audio_seconds_per_wall_second": round(duration / mean, 3),
+        "vram_peak_gib": round(max(peaks), 2) if peaks else None,
+        "vram_avg_gib": round(sum(peaks) / len(peaks), 2) if peaks else None,
+    }
+
+
 def validate_sample_rate(sample_rate: int) -> None:
     """Reject non-positive output sample rates (issue 063 class)."""
     if sample_rate <= 0:
@@ -343,13 +406,13 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     measured = int(payload.get("measured", 3))
     validate_benchmark_counts(warmup, measured)
     _require_torch()
-    import torch
 
     _require_stack()
     duration = float(payload.get("duration_seconds", 8.0))
     validate_duration_seconds(duration)
     walls: list[float] = []
     peaks: list[float] = []
+    cuda_available = _cuda_available()
     with tempfile.TemporaryDirectory(prefix="voyage-sfx-bench-") as staging_directory:
         staging = Path(staging_directory)
         probe_video = staging / "probe.mp4"
@@ -378,7 +441,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         if probe.returncode != 0:
             raise RuntimeError(f"sfx benchmark probe render failed: {probe.stderr.strip()}")
         for window_index in range(warmup + measured):
-            torch.cuda.reset_peak_memory_stats()
+            _reset_peak_stats()
             started = time.monotonic()
             handle_generate_sfx(
                 {
@@ -394,22 +457,20 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             elapsed = time.monotonic() - started
-            peak_gib = torch.cuda.max_memory_allocated() / BYTES_PER_GIB
+            peak_gib = _peak_gib()
             if window_index >= warmup:
                 walls.append(elapsed)
-                peaks.append(peak_gib)
-    mean = sum(walls) / len(walls)
-    return {
-        "backend": "mmaudio",
-        "model_size": _model_size,
-        "warmup_windows": warmup,
-        "measured_windows": measured,
-        "window_wall_seconds": [round(wall, 3) for wall in walls],
-        "windows_per_second": round(1.0 / mean, 3),
-        "audio_seconds_per_wall_second": round(duration / mean, 3),
-        "vram_peak_gib": round(max(peaks), 2),
-        "vram_avg_gib": round(sum(peaks) / len(peaks), 2),
-    }
+                if peak_gib is not None:
+                    peaks.append(peak_gib)
+    return _benchmark_report(
+        warmup=warmup,
+        measured=measured,
+        duration=duration,
+        walls=walls,
+        peaks=peaks,
+        cuda_available=cuda_available,
+        device=_device,
+    )
 
 
 def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:

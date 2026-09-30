@@ -16,6 +16,7 @@ paths. The CLI `inspect scoreboard` target renders the compact table.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,22 @@ METRIC_KEYS = [
 
 _DELTA_ROUND_DIGITS = 3
 """Decimal places for per-segment metric deltas (enough to see drift)."""
+
+
+def _finite_float(value: Any) -> float | None:
+    """Numeric cell as float, or None when the cell is absent/unusable.
+
+    Why the guard: one hand-edited metrics.json with a string stage or
+    metric value used to abort the whole scoreboard (062/027). Bool is
+    excluded (it subclasses int); non-finite floats are dropped like the
+    hardened `_slowest_stage` sibling in cli.py.
+    """
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -70,8 +87,32 @@ def _stages_by_segment(run_dir: Path) -> dict[str, dict[str, float]]:
             segment_id = event.get("segment_id")
             raw_stages = event.get("stages")
             if isinstance(segment_id, str) and isinstance(raw_stages, dict):
-                stages[segment_id] = {str(key): float(value) for key, value in raw_stages.items()}
+                cleaned: dict[str, float] = {}
+                for key, value in raw_stages.items():
+                    sample = _finite_float(value)
+                    if sample is not None:
+                        cleaned[str(key)] = sample
+                stages[segment_id] = cleaned
     return stages
+
+
+def partial_segment_ids(run_dir: Path) -> list[str]:
+    """Sorted ids of segment dirs without a DONE marker (062).
+
+    Why a helper, not a silent skip: non-DONE dirs are stalled partial
+    commits, invisible in the very table meant for iteration. The row
+    builder keeps skipping them (DONE-gating invariant,
+    docs/STATE_AND_RECOVERY.md); the CLI renders this list as a trailing
+    `partial: [...]` line so stalls stay visible.
+    """
+    segments_root = run_dir / paths.SEGMENTS_DIRNAME
+    if not segments_root.is_dir():
+        return []
+    return sorted(
+        segment.name
+        for segment in segments_root.iterdir()
+        if segment.is_dir() and not (segment / paths.DONE_MARKER).exists()
+    )
 
 
 def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
@@ -80,6 +121,7 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
     stages = _stages_by_segment(run_dir)
     rows: list[dict[str, Any]] = []
     previous: dict[str, float] | None = None
+    previous_id: str | None = None
     if not segments_root.is_dir():
         return rows
     for segment in sorted(p for p in segments_root.iterdir() if p.is_dir()):
@@ -89,25 +131,44 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
         transition = _read_json(segment / "transition.json") or {}
         audio_state = _read_json(segment / "audio_state.json") or {}
         video = metrics.get("video")
-        frames = video.get("frames") if isinstance(video, dict) else None
+        raw_frames = video.get("frames") if isinstance(video, dict) else None
+        if isinstance(raw_frames, bool):
+            frames: int | None = None
+        elif isinstance(raw_frames, int) and raw_frames >= 0:
+            frames = raw_frames
+        else:
+            frames = None
         visual = metrics.get("visual")
         current: dict[str, float] | None = None
+        errors: list[str] = []
         if isinstance(visual, dict) and isinstance(visual.get("metrics"), dict):
-            current = {
-                key: float(visual["metrics"][key])
-                for key in METRIC_KEYS
-                if key in visual["metrics"]
-            }
+            raw_metrics = visual["metrics"]
+            cleaned_metrics: dict[str, float] = {}
+            for key in METRIC_KEYS:
+                if key not in raw_metrics:
+                    continue
+                sample = _finite_float(raw_metrics[key])
+                if sample is None:
+                    errors.append(f"metric {key}: non-numeric value skipped")
+                else:
+                    cleaned_metrics[key] = sample
+            current = cleaned_metrics or None
+            if current is None and any(key in raw_metrics for key in METRIC_KEYS):
+                errors.append("metrics: no usable cells in visual.metrics")
         deltas: dict[str, float] | None = None
+        baseline_segment_id: str | None = None
         if current is not None:
             if previous is None:
                 deltas = dict.fromkeys(current, 0.0)
             else:
+                baseline_segment_id = previous_id
                 deltas = {}
                 for key in current:
                     baseline = previous.get(key, current[key])
                     deltas[key] = round(current[key] - baseline, _DELTA_ROUND_DIGITS)
         destination = transition.get("destination")
+        video_path = segment / "video.mp4"
+        audio_path = segment / "audio.wav"
         row = {
             "segment_id": segment.name,
             "done": True,
@@ -115,15 +176,20 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
             "stages": stages.get(segment.name, {}),
             "metrics": current,
             "deltas": deltas,
+            "baseline_segment_id": baseline_segment_id,
+            "errors": errors,
             "destination": destination.get("canonical_name")
             if isinstance(destination, dict)
             else None,
             "phase": transition.get("phase"),
             "take_ids": audio_state.get("take_ids"),
-            "video_path": str(segment / "video.mp4"),
-            "audio_path": str(segment / "audio.wav"),
+            "video_path": str(video_path),
+            "audio_path": str(audio_path),
+            "video_exists": video_path.exists(),
+            "audio_exists": audio_path.exists(),
         }
         rows.append(row)
         if current is not None:
             previous = current
+            previous_id = segment.name
     return rows

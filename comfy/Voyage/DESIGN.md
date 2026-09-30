@@ -914,6 +914,9 @@ The SFX provider abstraction must make future model replacement possible without
 > `torch.stack`; CLIP = even temporal subsample, sync = CPU downscale
 > 384→224) with a 2 GiB pre-stack byte budget and pad-to-16-sync-frames
 > tails. Evict drops the extra device-to-host copy.
+> As-built (§7-stem-cache-2026-09-30, issue 153): fuzzy stem-cache reuse (0.6 s tolerance) + render-to-tmp + atomic-replace + prune-on-plan.
+> As-built (§7-sfx-workers-2026-09-30, issue 158): `--sfx-workers 2` fail-fasts via `augment_devices()` unless 2 GPUs are visible.
+> As-built (§7-vocoder-2026-09-30, issue 072): vocoder snapshot is data-only — verify rejects any `.py` (canonical note under §85).
 
 ---
 
@@ -1684,6 +1687,9 @@ allow_concept_revisit = false
 
 A later configuration may allow transformed motifs, but the novelty system should still demand substantial semantic distance.
 
+> As-built (§21-embed-fallback-2026-09-30, issue 103): uncoercible/non-finite embed vectors degrade to the token-set fallback.
+> As-built (§21-measured-finite-2026-09-30, issue 144): MEASURED context skips non-finite metrics per-metric (never WITHIN); `feedback_amendments` steers nothing on skipped metrics.
+
 ---
 
 # 22. LongLive 2.0 streaming integration
@@ -1845,6 +1851,8 @@ mirroring the existing generator-offload-for-decode. Measured full-res
 fp8 stage peaks: build 6.06 / encode 6.07 / buffers+8F-cache 8.67 /
 forward peak 13.16GB; local-16 projects to 13.16 + 2.59 (extra 8F cache)
 − 1.31 (VAE) = 14.44GB — fits with ~1.5GB headroom.
+
+> As-built (§22.5-chunked-decode-2026-09-30, issue 048): per-block chunked VAE decode with per-chunk write+del — full latents are never `torch.cat`'d.
 
 ---
 
@@ -2016,6 +2024,7 @@ Real GPU inference need not be byte-for-byte deterministic across hardware, driv
 > advance state, and clamps stored `frames` to the same
 > `1..REPORTED_FRAMES_SLACK × segment_frames` ceiling as the live-report
 > gate — drifted or absurd orphans raise `MediaError` instead of adopting.
+> As-built (§27-tape-discovery-2026-09-30, issue 139): discovery skips empty/un-stat-able tapes with a `recovery_tape_skipped` metric.
 
 ---
 
@@ -2945,6 +2954,8 @@ duration > 0
 
 The validator should use the executable directly, not a shell pipeline.
 
+> As-built (§54-probe-taxonomy-2026-09-30, issue 018): malformed ffprobe JSON raises `MediaError` (retryable / `--skip-bad`-able), never a raw `JSONDecodeError`.
+
 ---
 
 # 55. ffmpeg process execution
@@ -2973,6 +2984,8 @@ subprocess.run(f"ffmpeg ... {user_string}", shell=True)
 No shell interpolation.
 
 Capture stderr and include the relevant last lines in `MediaError`.
+
+> As-built (§55-ffmpeg-budget-2026-09-30, issue 019): local ffmpeg/ffprobe spawns carry the 600 s RPC-mirroring budget `FFMPEG_TIMEOUT_SECONDS`; expiry is `MediaError`.
 
 ---
 
@@ -3005,6 +3018,7 @@ Finalizer steps:
 > As-built (§56-align-2026-09-30, issue 003): step 6 and `voyage validate`
 > enforce the same 0.6 s A/V budget through the shared `av_drift_seconds`
 > helper — read-only error strings on the validate side.
+> As-built (§56-staging-2026-09-30, issue 102): staging uses `TemporaryDirectory(prefix="voyage-final-", dir=run_dir)` — preflighted filesystem, greppable names.
 
 Never mutate the source segment files during finalization.
 
@@ -3222,6 +3236,9 @@ Storage
 ```
 
 Human-readable formatting can evolve without changing the machine-readable state files.
+
+> As-built (§59-scoreboard-2026-09-30, issue 062, folds 027): scoreboard degrades per-row — errors cell, `baseline_segment_id`, video/audio existence flags, `partial_segment_ids`, int-validated frames.
+> As-built (§59-console-2026-09-30, issue 063, folds 028): console stream rule — all output incl. `error()` via the injected stream; elapsed on both success+failure stage lines; validate-then-report tracker.
 
 ---
 
@@ -3583,6 +3600,7 @@ Never silently mutate a run during validation.
 > As-built (§70-fps-corrupt-2026-09-30, issue 029): `validate` reports
 > `state fps is corrupt` for `fps <= 0`; the 24-fallback below it is
 > SFX-math-only and runs after reporting.
+> As-built (§70-never-raises-2026-09-30, issue 017): `validate_run` never raises — every filesystem anomaly (`IsADirectoryError`/`OSError`/`RecursionError`, dir-as-artifact, torn metrics) maps to an INVALID line.
 
 ---
 
@@ -4257,6 +4275,7 @@ No model download should overwrite an existing model without an explicit flag.
 > in the pinned `/opt/mmaudio` clone); `verify_sfx_models` fails loud on any
 > `.py` under the vocoder dir. Per-file vocoder hashes await measurable
 > bytes (issue 071 follow-up).
+> As-built (§85-mirror-2026-09-30, issue 065, folds 146): every `MODEL_SPECS` key must appear in INSTALL + README + `models list` output — enforced by the mirror test.
 
 ## 85.1 Reference model download commands
 
@@ -4990,6 +5009,9 @@ text-encoding percentage
 
 Exclude first-run compiler/model-load startup from steady-state FPS measurements.
 
+> As-built (§104-gauges-2026-09-30, issues 059/051): resource gauges now carry per-worker `vram_free_first/last/min_gib` + `vram_total_gib` + `vram_workers_reporting`; `timing_stats_ex` (p50/p95/std) is the percentile source, `timing_stats` frozen.
+> As-built (§104-bench-devices-2026-09-30, issue 156): SFX/audio bench peaks are session-device-indexed with an honest-null report shape off-GPU.
+
 ---
 
 # 105. Test matrix
@@ -5313,6 +5335,7 @@ The supervisor must not depend on a concrete backend implementation.
 ---
 
 > **As-built note (2026-09-24):** only `longlive2` (persistent KV, `recovery.pt` with tail latents + prompt embeds + `noise_rng_state`) and `ltxv` (reconstructable prefix, `recovery.pt{profile:ltxv, tail_png}` + `<stem>_tail.png`, 768×512, `25+(B-1)*24` frames, bf16-first, `generate --backend ltxv` default) are wired. `CausVidBackend` is still spec-only.
+> As-built (§118-unity-2026-09-30, issue 025): backend-set unity across registries is test-guarded (streaming triple-equality, worker-module keys, CUDA projections).
 # 119. Generator upgrade and benchmark policy
 
 LongLive 2.0, LTX-Video 0.9.8, and CausVid are all explicit generator profiles. Their selection must be driven by local benchmark evidence rather than a permanent ranking in this document. New model releases may be added behind the same interface.
@@ -7723,6 +7746,7 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   (fastpath/stack tests pin legacy path with min_*=0, integration pins
   new defaults); full gates 1067 passed + 1 TUI Pilot flake (passes in
   isolation).
+- Batch 5 augment notes (2026-09-30, issues 046/047/074): chunk decode uses input `-ss` fast-seek with exact-fallback + fresh `dest_dir` enforcement (046); resident `_RRDB_CACHE`/`_FILM_CACHE` keyed `(weights, device)` + `evict_augment_models` + `load_ms`/`infer_ms` split (047); `.safetensors` decodes via safetensors, `.pth` via `torch.load(weights_only=True)`, size+manifest pre-checks torch-free (074).
 
 ## 2026-09-30 — GPU director: Qwen3-4B-AWQ on cuda:1, unified image, eager attention
 
@@ -7779,3 +7803,4 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   execution needs a GPU box); mid-run worker-log rotation (056);
   shared TOML escaper, caption-pin forwarding, validate-side AV budget
   via `av_drift_seconds` (020/022/003).
+- Batch 5 (2026-09-30): resolved 059/051/062(+027 fold)/063(+028 fold)/017/018/019/102/103/046/047/048/153/156/158/065(+146 fold)/144/139/178/025/026; real 024 (unbounded --output paths) stays OPEN (concurrent owner).

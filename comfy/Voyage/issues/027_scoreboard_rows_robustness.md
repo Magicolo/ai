@@ -78,3 +78,11 @@ print(scoreboard.scoreboard_rows(tmp))"
 
 - In-tree hardened pattern to copy: `voyage/scoreboard.py:47-74` (`_stages_by_segment` — torn lines skipped, live + rotated siblings, later-wins).
 - Rotation helper: `voyage/logrotate.py:iter_metric_files` (DESIGN §60).
+
+## Progress log
+
+- 2026-09-30 re-verified live alongside 062 (same module, same probes): bad metric string crashes the table, paths unverified, baseline stale across gaps, `frames` unvalidated. Premise CONFIRMED.
+
+## Resolution
+
+- FOLDED into 062 on fix (same module, same root cause). Fix lives in `voyage/scoreboard.py`, coverage in `tests/test_observability_rank2.py` (7 scoreboard tests) — see 062 Progress log / Resolution for verdict, files, test evidence, residuals, and DESIGN proposals. This file kept intact as the fold record; no separate implementation.

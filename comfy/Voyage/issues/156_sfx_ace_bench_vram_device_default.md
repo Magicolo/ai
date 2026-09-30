@@ -38,3 +38,12 @@ CPU-only (torch-CPU build, no GPU): call either `handle_benchmark` with `warmup=
 
 - `Voyage/voyage/workers/sfx_mmaudio.py:37-52,77-101,254-332`; `Voyage/voyage/workers/audio_acestep.py:35-55,79-97,194-241`; `Voyage/voyage/config.py:360-372`; `Voyage/voyage/sfx_finalize.py:280-314`; DESIGN §104 (benchmarks), §40 (residency).
 - Adjacent, not overlapping: 051 (report content); 115 (CLI preflight); 154 (missing sfx/augment targets — the CLI surface this file's guarded probes would serve); 158 (dual-shard cuda:1 gating).
+
+## Progress log
+
+- 2026-09-30: re-verified live in slim `voyage:latest` (torch absent): both `sfx_mmaudio` and `audio_acestep` bracket windows via `_reset_peak_stats`/`_peak_gib` (guarded by `torch.cuda.is_available()`, device-indexed via `_session_device_index`), and shape reports via `_benchmark_report` carrying `device` + `cuda_available` with VRAM null off-GPU. `voyage/audio/mmaudio_sfx.py:420` was already guarded (no change needed). Verdict: premise confirmed, fix present within the tasked scope (device-index + report).
+- TDD: `tests/test_worker_perf_rank2.py` (5 tests: sfx device-index parse, both off-GPU guard probes with stubbed torch, report shape, guarded-helper source pins) failed on base HEAD (red) and passes with the fix.
+
+## Resolution
+
+- Fixed in `voyage/workers/sfx_mmaudio.py` + `voyage/workers/audio_acestep.py`: `_session_device_index`/`_cuda_available`/`_reset_peak_stats`/`_peak_gib`/`_benchmark_report` (session-device-indexed peaks, honest-null off-GPU, device always reported). Tests: `tests/test_worker_perf_rank2.py` (156 block). Residual (out of tasked scope, proposal only): worker `handle_init` still defaults `device` to `"cuda:0"` while `SfxConfig.device` defaults to `"cpu"` — the task scoped this file to device-index + report, so defaults were left untouched; unifying them (or requiring device) is a config-contract follow-up, not done here.

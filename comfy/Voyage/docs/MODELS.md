@@ -78,6 +78,16 @@ instead of silently falling back. Any other known registry repo id maps
 the same way; unknown ids and local directory paths pass through to
 hub/cache behavior untouched.
 
+## Director — Qwen3-4B-AWQ GPU decider (`models download director-qwen4b-awq`, ~2.6 GB)
+
+| Artifact | Repo | Revision |
+|----------|------|----------|
+| 4-bit AWQ decider | pinned in `voyage/model_registry.py` (`director-qwen4b-awq` spec) | pinned snapshot in registry |
+
+Default placement is cuda:1 (the second GPU) via `VOYAGE_DIRECTOR_PYTHON`;
+`--director-device cpu` opts back into the Qwen3-8B CPU path above.
+Full row (repo id, revision, allow-list): `MODEL_SPECS["director-qwen4b-awq"]`.
+
 ## Inspector — Qwen3.5-9B VLM (`models download inspector-qwen35`, ~19 GB, optional)
 
 | Artifact | Repo | Revision |

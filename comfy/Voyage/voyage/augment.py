@@ -21,6 +21,7 @@ with its device round-robin so the pairing is visible in the plan;
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
@@ -133,36 +134,77 @@ def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, capture_output=True, text=True, check=False)
 
 
+def _require_fps(name: str, value: float | None) -> float | None:
+    """Validate an optional fps override: finite positive number, bools rejected."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number (got {type(value).__name__})")
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise ValueError(f"{name} must be finite and > 0 (got {value})")
+    return rate
+
+
 def ffmpeg_decode_chunk(
     source_video: Path,
     dest_dir: Path,
     start_frame: int,
     frame_count: int,
+    *,
+    fps: float | None = None,
 ) -> list[Path]:
     """Decode one source window to PNG frames via a frame-accurate select filter.
 
-    `dest_dir` must be a fresh per-chunk directory (stale `frame_*.png`
-    files would be picked up by the glob below). Seeking is exact but
-    linear from the file start — a `-ss` fast-seek follow-up can skip the
-    already-decoded prefix once chunk offsets grow large.
+    `dest_dir` must be a fresh per-chunk directory: any pre-existing
+    `frame_*.png` files raise before ffmpeg spawns (a stale dir would
+    silently merge old frames into the chunk). With `fps` given and
+    `start_frame > 0`, an input `-ss` fast-seek skips the already-decoded
+    prefix and the select filter re-bases to `between(n,0,count-1)`; without
+    `fps` (or at chunk 0) the exact from-start select path is preserved.
     """
     start = _require_count("start_frame", start_frame, 0)
     count = _require_count("frame_count", frame_count, 1)
+    rate = _require_fps("fps", fps)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    end = start + count - 1
-    argv = [
-        "ffmpeg",
-        "-hide_banner",
-        "-nostdin",
-        "-y",
-        "-i",
-        str(source_video),
-        "-vf",
-        f"select='between(n\\,{start}\\,{end})',setpts=N/FRAME_RATE/TB",
-        "-vsync",
-        "0",
-        str(dest_dir / "frame_%06d.png"),
-    ]
+    stale = sorted(dest_dir.glob("frame_*.png"))
+    if stale:
+        raise MediaError(
+            f"chunk dest_dir not fresh: {dest_dir} already holds "
+            f"{len(stale)} frame_*.png file(s) (pass a fresh per-chunk directory)"
+        )
+    if rate is not None and start > 0:
+        end = count - 1
+        argv = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-ss",
+            f"{start / rate:.6f}",
+            "-i",
+            str(source_video),
+            "-vf",
+            f"select='between(n\\,0\\,{end})',setpts=N/FRAME_RATE/TB",
+            "-vsync",
+            "0",
+            str(dest_dir / "frame_%06d.png"),
+        ]
+    else:
+        end = start + count - 1
+        argv = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source_video),
+            "-vf",
+            f"select='between(n\\,{start}\\,{end})',setpts=N/FRAME_RATE/TB",
+            "-vsync",
+            "0",
+            str(dest_dir / "frame_%06d.png"),
+        ]
     proc = run_capture(argv)
     if proc.returncode != 0:
         raise MediaError(f"chunk decode failed for frames {start}-{end}: {proc.stderr[-2000:]}")

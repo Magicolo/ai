@@ -83,3 +83,11 @@ grep -n "except Exception" voyage/console.py
 ## Refs (with links/quotes)
 
 - Textual validation pattern (validators run on change/submit/blur; failures surface inline rather than as crashes) — the analogous discipline for console trackers is validate-then-report. — https://github.com/Textualize/textual/blob/main/docs/widgets/input.md
+
+## Progress log
+
+- 2026-09-30 re-verified live alongside 063 (same file, same probes): `error()` ignores the injected stream, `stage()` leaks the spinner on `BaseException` and drops elapsed on the plain failure path, tracker indexes `_tasks` directly. Premise CONFIRMED.
+
+## Resolution
+
+- FOLDED into 063 on fix (same file, same stream-split root cause). Fix lives in `voyage/console.py`, coverage in `tests/test_observability_rank2.py` (4 console tests) — see 063 Progress log / Resolution for verdict, files, test evidence, residuals, and DESIGN proposals. This file kept intact as the fold record; no separate implementation.

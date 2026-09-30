@@ -21,3 +21,17 @@ Probe: `float("not-a-number")` → `ValueError`; `float(None)` → `TypeError`; 
 - **Repro:** Append one `segment_committed` event with `"stages": {"video": "unknown"}` to `logs/metrics.jsonl`, run `inspect scoreboard` → traceback instead of a table. `mkdir segments/000007 && touch segments/000007/video.mp4` without `DONE` → row absent with no notice.
 - **Fix candidates:** Guard like `_slowest_stage` (skip non-finite, count `stages_dropped`); per-row try/except with an `errors` cell; mark paths with `exists: bool` or `"(missing)"`; add a trailing `partial: [...]` line listing non-DONE dirs; advance `previous` per committed segment or record the baseline id; full header names or a `--wide` legend.
 - **Refs:** `voyage/bench.py:40-56` (issue-071 precedent); `docs/STATE_AND_RECOVERY.md:1-8` (DONE-gating invariant the view should make visible, not silent).
+
+## Progress log
+
+- 2026-09-30 re-verified live (container `voyage:latest`): `_stages_by_segment` with `{"video":"unknown"}` raises `ValueError`; `scoreboard_rows` with `{"motion_energy":"NaN-string"}` raises `ValueError` (zero rows); committed row without `video.mp4`/`audio.wav` still advertises both paths (`exists False` on disk); non-DONE dirs skipped silently; `previous` advances only on visuals (stale baseline unattributed); `frames "many"` passes through raw. All five premises CONFIRMED, no drift.
+- TDD: `tests/test_observability_rank2.py` first run — all 7 scoreboard assertions failed as designed (stages crash, metrics crash, missing `video_exists`/`audio_exists`/`baseline_segment_id`/`errors`, missing `partial_segment_ids`, raw `frames`).
+- Fix in `voyage/scoreboard.py` only (no `cli.py` touches): `_finite_float` guard on stages + metric cells (bool/strings/None/non-finite skipped, matching `_slowest_stage`); per-row `errors` cell; `video_exists`/`audio_exists` flags (paths kept for compat); new `partial_segment_ids()` helper (DONE-gating kept, stalls now listable); `baseline_segment_id` recorded per row (gaps explicitly attributed instead of silently stale); `frames` validated to non-negative int else `None`.
+- Gates (container): `ruff check` + `ruff format --check` + `mypy` clean; 41 passed (15 new + existing scoreboard/benchmark/console suites).
+- 027 FOLDED here on fix (same module, same root cause — see 027 file).
+
+## Resolution
+
+- Fixed in `voyage/scoreboard.py` (`_finite_float`, guarded `_stages_by_segment`, `partial_segment_ids`, hardened `scoreboard_rows` with `errors`/`video_exists`/`audio_exists`/`baseline_segment_id`/validated `frames`) with coverage in `tests/test_observability_rank2.py` (7 scoreboard tests).
+- Residuals (CLI track owns `voyage/cli.py:1660-1677`, untouched): header still truncates to 12 chars (`key[:12]`, no legend); `view:` line still prints raw paths (should check `video_exists`/`audio_exists` and mark `"(missing)"`); `partial:` trailing line still to render from `partial_segment_ids()`; missing `frames` still prints `None` (should render `"?"`).
+- DESIGN patch proposals (text only): §59 scoreboard contract gains per-row degradation (`errors` cell, `baseline_segment_id`, existence flags) + `partial_segment_ids` as the stall-visibility source; CLI renderer uses full metric names or a `--wide` legend and `"?"` for missing frames.

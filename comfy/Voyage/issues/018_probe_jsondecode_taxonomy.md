@@ -87,3 +87,18 @@ MediaError? False
 - `voyage/cli.py:972-974` (`cmd_finalize` catches `MediaError`, misses `JSONDecodeError`); `voyage/supervisor.py:643-690` (commit `except VoyageError` vs generic `except Exception` — wrong branch taken).
 - Python `json.JSONDecodeError` subclasses `ValueError`: https://docs.python.org/3/library/json.html#json.JSONDecodeError
 - Issue 002 (non-`VoyageError` escapes) / 007 (taxonomy erased) — same family.
+
+## Progress log
+
+- 2026-09-30: re-verified live in-container before touching anything — holds as-read: `voyage/media.py:118` (`data: Any = json.loads(proc.stdout or "{}")`, zero `try` around it; only the returncode and non-dict branches raise `MediaError`). `JSONDecodeError` confirmed `ValueError`, not `MediaError`; `cmd_finalize` catches `(MediaError, StateError, DiskSpaceError)`, so the raw error escapes the `finalize failed:` path.
+- 2026-09-30 (TDD red): wrote `Voyage/tests/test_media_robustness_rank2.py` first; `test_probe_invalid_json_raises_media_error` + `test_probe_garbage_stdout_raises_media_error` failed with raw `JSONDecodeError` as predicted.
+- 2026-09-30 (implement, `voyage/media.py` only — candidate 1, the one-liner): `probe` wraps `json.loads` in `try/except ValueError → MediaError(f"ffprobe returned invalid JSON for {path}: {exc}")`. `probed_take_seconds`' existing `except (OSError, ValueError)` wrap kept as-is (redundant but harmless — a `MediaError` from `probe` propagates unchanged, which is already the taxonomy).
+- 2026-09-30 (TDD green + gates): 18 passed in the new file; related suites 93 passed + 1 torch-gated skip; `ruff check` + `ruff format --check` + `mypy` (strict) clean on all touched files.
+
+## Resolution
+
+- Verdict: fixed in scope (one hunk in `probe`). Every caller (commit, finalize, validate-via-probe, assembly) inherits the taxonomy at once.
+- Files changed: `Voyage/voyage/media.py` (`probe`), `Voyage/tests/test_media_robustness_rank2.py` (new: invalid/garbage-JSON tests + happy-path pin).
+- Test evidence: stubbed `run_capture` returning `("{truncated", 0)` / `("not json at all", 0)` now raises `MediaError` (was `json.JSONDecodeError`); `test_probe_valid_json_still_parses` pins the happy path.
+- DESIGN.md as-built proposal (not applied — DESIGN.md untouched per directive): in §§54-57 (media taxonomy), add "malformed ffprobe JSON (truncated stdout, wedged binary with exit 0) is a `MediaError`, retryable/`--skip-bad`-able like any media failure."
+- Residuals: none in this leg — `probed_take_seconds`' wrap could be simplified to rely on `probe`'s guarantee, but it is harmless and out of the minimal-diff scope.

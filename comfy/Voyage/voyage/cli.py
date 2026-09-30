@@ -342,10 +342,17 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
-        print("audio: fake (built-in) | acestep (ACE-Step 1.5 turbo + 0.6B planner)")
-        print("sfx: fake (built-in) | mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")
-        print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
-        print("inspector: skipped (built-in) | qwen3.5-9b (Qwen3.5-9B VLM, experimental)")
+        print("audio: fake (built-in) | audio-acestep (ACE-Step 1.5 turbo + 0.6B planner)")
+        print("sfx: fake (built-in) | sfx-mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")
+        print(
+            "director: deterministic (built-in) | director-qwen8b (Qwen3-8B + MiniLM) "
+            "| director-qwen4b-awq (Qwen3-4B-AWQ GPU decider)"
+        )
+        print("inspector: skipped (built-in) | inspector-qwen35 (Qwen3.5-9B VLM, experimental)")
+        print(
+            "augment: film (FILM interpolation weights) "
+            "| realesrgan-anime (Real-ESRGAN anime upscaler)"
+        )
         return 0
     if action == "verify":
         ok, message = verify_longlive2_bf16(_models_dir(args))
@@ -793,7 +800,7 @@ def _check_segment_checksums(segment: Path) -> list[str]:
         return errors  # missing file already reported by the caller
     try:
         expected = json.loads(checksums_path.read_text(encoding="utf-8"))
-    except ValueError:
+    except (ValueError, OSError, RecursionError):
         return [f"{segment.name} has unreadable sha256.json"]
     if not isinstance(expected, dict):
         return [f"{segment.name} has malformed sha256.json"]
@@ -802,9 +809,18 @@ def _check_segment_checksums(segment: Path) -> list[str]:
         target = segment / artifact
         if not target.exists():
             continue  # missing artifact already reported by the caller
+        if not target.is_file():
+            errors.append(f"{segment.name} {artifact} is not a file")
+            continue
         if not isinstance(recorded, str) or not recorded:
             errors.append(f"{segment.name} sha256.json missing entry for {artifact}")
-        elif sha256_file(target) != recorded:
+            continue
+        try:
+            digest = sha256_file(target)
+        except OSError as exc:
+            errors.append(f"{segment.name} {artifact} is unreadable ({exc})")
+            continue
+        if digest != recorded:
             errors.append(f"{segment.name} checksum mismatch for {artifact}")
     for artifact in (
         "metrics.json",
@@ -819,7 +835,15 @@ def _check_segment_checksums(segment: Path) -> list[str]:
         target = segment / artifact
         if not target.exists():
             continue  # missing artifact already reported by the caller
-        if sha256_file(target) != recorded:
+        if not target.is_file():
+            errors.append(f"{segment.name} {artifact} is not a file")
+            continue
+        try:
+            digest = sha256_file(target)
+        except OSError as exc:
+            errors.append(f"{segment.name} {artifact} is unreadable ({exc})")
+            continue
+        if digest != recorded:
             errors.append(f"{segment.name} checksum mismatch for {artifact}")
     return errors
 
@@ -842,7 +866,7 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
     try:
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         frames = int(metrics.get("frames", 0))
-    except (ValueError, KeyError, AttributeError, TypeError):
+    except (ValueError, KeyError, AttributeError, TypeError, OSError, RecursionError):
         return [f"{segment.name} has unreadable metrics.json"], 0
     if frames <= 0:
         errors.append(f"{segment.name} has non-positive frame count {frames}")
@@ -1882,7 +1906,8 @@ def _add_sfx_args(parser: argparse.ArgumentParser, *, include_no_sfx: bool = Tru
         type=int,
         default=1,
         choices=[1, 2],
-        help="1 = one worker (default); 2 = shard small_44k across cuda:0+cuda:1",
+        help="1 = one worker (default); 2 = shard small_44k across cuda:0+cuda:1 "
+        "(needs 2 visible GPUs, fails fast otherwise)",
     )
 
 

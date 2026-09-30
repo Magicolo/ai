@@ -41,7 +41,11 @@ Fake backends need nothing. Real backends need one download each
 ./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights
 ./scripts/run.sh models download causvid        # ~28 GB CausVid DMD + Wan2.1-1.3B base
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
+./scripts/run.sh models download director-qwen4b-awq  # ~2.6 GB GPU director decider
 ./scripts/run.sh models download audio-acestep    # ACE-Step checkpoints
+./scripts/run.sh models download sfx-mmaudio      # ~13 GB MMAudio SFX (CC-BY-NC-4.0)
+./scripts/run.sh models download film             # ~66 MB FILM interpolation (MIT + Apache-2.0)
+./scripts/run.sh models download realesrgan-anime # ~18 MB Real-ESRGAN anime upscaler (BSD-3-Clause)
 ./scripts/run.sh models download inspector-qwen35 # ~19 GB VLM (optional)
 ./scripts/run.sh models verify                    # check every weight file
 ```

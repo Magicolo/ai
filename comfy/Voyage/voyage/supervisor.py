@@ -16,6 +16,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import json
+import math
 import os
 import signal
 import time
@@ -751,6 +752,24 @@ class Supervisor:
                         }
                     )
                     continue
+                try:
+                    empty_tape = resolved_tape.stat().st_size == 0
+                except OSError:
+                    empty_tape = True
+                if empty_tape:
+                    # Torn write (crash between torch.save and DONE, issue
+                    # 139): a 0-byte tape deserializes nowhere, so skip to
+                    # the next-newest tape instead of burning the shared
+                    # restart budget on a knowably bad input. An
+                    # un-stat-able tape reads as torn for the same reason.
+                    self._log_metric(
+                        {
+                            "event": "recovery_tape_skipped",
+                            "segment_id": segment.name,
+                            "reason": "empty file (torn write)",
+                        }
+                    )
+                    continue
                 return tape
         return None
 
@@ -1014,6 +1033,7 @@ class Supervisor:
 
         Bounded by EMBED_TIMEOUT_SECONDS (issue 017): a wedged director
         degrades to the token-set fallback instead of stalling the commit.
+        Hostile/non-finite worker vectors (issue 103) degrade the same way.
         """
         try:
             result = self._director.call("embed", {"texts": texts}, timeout=EMBED_TIMEOUT_SECONDS)
@@ -1023,10 +1043,16 @@ class Supervisor:
         if not isinstance(vectors, list):
             return None
         cleaned: list[list[float]] = []
-        for row in vectors:
-            if not isinstance(row, list):
-                return None
-            cleaned.append([float(value) for value in row])
+        try:
+            for row in vectors:
+                if not isinstance(row, list):
+                    return None
+                values = [float(value) for value in row]
+                if not all(math.isfinite(value) for value in values):
+                    return None
+                cleaned.append(values)
+        except (ValueError, TypeError):
+            return None
         return cleaned
 
     def _decide_payload(

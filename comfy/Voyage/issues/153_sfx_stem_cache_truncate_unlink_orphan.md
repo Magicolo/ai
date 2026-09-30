@@ -39,3 +39,12 @@ Static (deterministic, CPU-only): (1) render one window, then call `_render_one`
 
 - `Voyage/voyage/sfx_finalize.py:76-132,181-244,293-365`; `Voyage/voyage/media.py:441-446` (`AV_ALIGNMENT_TOLERANCE_SECONDS`); DESIGN three-caption doctrine / SFX slices.
 - Adjacent, not overlapping: 054 (two-thread concurrent append race — threading, this file is single-worker cache logic); 101 (ledger fsync gaps — durability, not key semantics); 098 (orphan scan gaps — validator coverage, not the cache that feeds it).
+
+## Progress log
+
+- 2026-09-30: re-verified live in slim `voyage:latest` (torch absent): `_stem_cache_hit` matches duration fuzzily within `AV_ALIGNMENT_TOLERANCE_SECONDS` with caption/seed/model_size exact; `_render_one` renders to `wXXXX.partial.wav` + `os.replace` on success (failure unlinks only the temp, old stem + ledger line intact); `_prune_stale_partials` runs at plan time; `validate_sfx_ledger` dedupes last-wins by `window_id` and walks sorted by start. Verdict: premise confirmed, fix present.
+- TDD: `tests/test_worker_perf_rank2.py` (6 tests: 1e-9 fuzzy hit, real-change miss ×3, failing-worker keeps old stem + clean validate, tmp-atomic replace shape, duplicate/out-of-order ledger validates, stale-partial prune) failed on base HEAD (red) and passes with the fix.
+
+## Resolution
+
+- Fixed in `voyage/sfx_finalize.py`: `_stem_cache_hit`, render-to-tmp + atomic replace, `_prune_stale_partials` at plan time, validator last-wins dedupe + start-sorted walk. `voyage/audio/mmaudio_sfx.py` needed no change. Tests: `tests/test_worker_perf_rank2.py` (153 block). Residual: truncated tails re-render when the timeline itself grows past the 0.6 s tolerance (correct — new audio is genuinely needed); ledger truncate re-log still appends a second line per re-render, which the validator now dedupes rather than the writer replacing (append-only ledger discipline kept).
