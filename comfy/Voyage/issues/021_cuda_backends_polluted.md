@@ -83,3 +83,51 @@ grep -n "_CUDA_BACKENDS" voyage/cli.py voyage/tui_state.py
 
 - "Encode that order in one place … with no `if ENV == …` branching anywhere." Same applies to backend sets — one registry, derived views. — https://python-config-secrets-hub.com/core-configuration-patterns-file-formats/configuration-precedence-rules/
 - "A single source of truth for configuration values … A clear and logical precedence." — https://cobra.dev/docs/tutorials/12-factor-app/
+
+## Progress log (2026-09-30, resolution track)
+
+- Checked for concurrent-agent changes first: live tree still carried the
+  hand-maintained `_CUDA_BACKENDS = frozenset({"ltxv", "longlive2",
+  "causvid", "acestep"})` at `voyage/cli.py:1184` (line drifted from the
+  issue's `:1174` by unrelated growth, same content) — no concurrent fix
+  to adapt to, so derived the sets fresh.
+- TDD: wrote `tests/test_cuda_preflight_021.py` (7 tests) first, watched
+  5 fail on the buggy tree (the 2 all-fake/CPU tests passed pre-fix as
+  correct-path anchors), then fixed.
+- Fix in `voyage/cli.py` (only file needing the change; no
+  `voyage/backends.py` derivation needed — `BACKEND_REGISTRY` already
+  carries the device columns): `_CUDA_VIDEO_BACKENDS` /
+  `_CUDA_AUDIO_BACKENDS` / `_CUDA_SFX_BACKENDS` derived from the
+  registry device rows; `_CUDA_BACKENDS` kept as their union for the
+  `tui_state.gpu_warning` import and name-level readers;
+  `_cuda_offenders` gained the `sfx.backend` branch;
+  `_require_cuda_stack` checks all three vocabularies;
+  `cmd_generate`'s pre-init check uses `_CUDA_VIDEO_BACKENDS`
+  (`args.backend` is always a video backend). `voyage/tui_state.py`
+  `gpu_warning` docstring updated (signature kept — `voyage/tui.py`
+  calls it with a bare string and is out of scope).
+- Test correction mid-track: the first version assumed
+  `ProjectConfig()` is all-fake, but the product default video is
+  `ltxv`/CUDA — helpers now pin `VideoConfig(backend="fake")`
+  explicitly (verified live: `VideoConfig().backend == 'ltxv'`).
+- Evidence: 15/15 new tests green in-container
+  (`test_cuda_preflight_021` + `test_tui_absent_defaults_023` +
+  `test_inspect_metrics_fps_029`); adjacent suites green
+  (`test_generate`/`test_cli_hardening`/`test_state_integrity`/
+  `test_scoreboard`/`test_observability`/`test_cli_validate_handoff`:
+  126 passed; `test_tui`/`test_tui_state`/`test_augment_config`/
+  `test_unset`/`test_config_resolution`/`test_backend_registry`/
+  `test_precision`/`test_cli_tui_split`: 167 passed + 1 expected
+  failure, see 023); `ruff check` + `ruff format --check` + `mypy`
+  strict green on all touched files.
+
+## Resolution: FIXED
+
+- Verdict: fixed (registry-derived per-vocabulary sets + SFX branch).
+- `fake/fake/mmaudio` without torch now fast-fails naming
+  `sfx 'mmaudio'`; `gpu_warning('mmaudio')` warns;
+  `acestep`/`mmaudio` are no longer tested as video backends anywhere
+  (video check uses `_CUDA_VIDEO_BACKENDS`).
+- Residuals: none in this issue's scope. `run.sh` image selection for
+  SFX-only CUDA runs is a shell-script concern outside the file
+  contract — flagged for the orchestrator, not fixed here.

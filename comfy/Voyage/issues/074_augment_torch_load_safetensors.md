@@ -57,3 +57,69 @@ Point `interpolate_pair`/`upscale_frames` at the real FILM `.safetensors` → `t
 - `torch.load` docs ("uses an unpickler… Never load data from an untrusted source… `weights_only`") — https://docs.pytorch.org/docs/stable/generated/torch.load
 - "safetensors is a secure alternative to pickle" — https://huggingface.co/docs/diffusers/main/en/using-diffusers/using_safetensors
 - Safetensors format rationale — https://github.com/huggingface/safetensors
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live
+  `Voyage/voyage/workers/augment_worker.py` (both loaders unconditional
+  `torch.load(weights_only=True)`; `_LOAD_ERRORS` five-tuple without
+  `UnpicklingError`; `_require_weights` exists + non-empty only) and
+  `Voyage/voyage/model_registry.py` (071 already records `checkpoint_sha256`
+  + `checkpoint_file` for film/realesrgan and checks them in `verify_model`;
+  the remaining gap is worker load-time, mirroring `video_longlive` /
+  `video_causvid` which `verify_checkpoint_against_manifest` before
+  `torch.load`). Dockerfile.video:157-168 already documents the intended
+  split (FILM via safetensors, ESRGAN via torch.load weights_only) with
+  `safetensors==0.8.0` in the video image — the worker just never branched.
+- 2026-09-30: TDD — six failing-first tests in
+  `tests/test_augment_weight_loading.py` (`UnpicklingError` in
+  `_LOAD_ERRORS`, `.safetensors` via safe loader, `.pth` via weights-only,
+  corrupt pickle → compatibility, size floor, manifest mismatch; 5 failed +
+  1 missing-helper error pre-fix). All green post-fix (10/10 with the 072
+  file in the same run).
+- 2026-09-30: gates (scoped) — ruff + format + mypy strict clean on
+  `voyage/workers/augment_worker.py` + `tests/test_augment_weight_loading.py`
+  (one `import-not-found` ignore for `safetensors.torch`, absent from the slim
+  image by design — the video image carries it); scoped suite 107 passed /
+  3 skipped (same set as the 072 log). Full `gates.sh` is the orchestrator's
+  job. Two ruff findings fixed on sight (TRY004 non-dict decode → TypeError,
+  TRY203 bare re-raise removed).
+- NOTE (issue 166): the vendored RRDBNet/FilmNetMini architectures
+  structurally do NOT match the pinned Real-ESRGAN/FILM weights
+  (`strict=True` raises `ModelCompatibilityError` by construction — module
+  docstring :9-19 states it). This fix does NOT claim the pinned weights now
+  load: the format branch + pre-verify gates are correct and testable on
+  synthetic blobs, but end-to-end loading of the pinned weights awaits the
+  upstream FILM port + SRVGG loader (166 follow-up).
+
+## Resolution
+
+- Fix candidate 1 applied (format branch): new `_load_state_dict` helper —
+  `.safetensors` (case-insensitive suffix) decodes via
+  `safetensors.torch.load_file` (never the pickle machine; decode failures
+  normalize to `ValueError`, missing package raises `ImportError` unchanged
+  as an environment issue), every other suffix via
+  `torch.load(weights_only=True)`; non-dict payloads raise `TypeError`.
+  Both `_load_rrdb_net` / `_load_film_net` route through it (their
+  `import torch` preamble is gone — the helper owns loader imports).
+- Fix candidate 2 applied (pre-verify, torch-free, before any loader):
+  `_verify_weights_size` enforces the registry floor (`FILM_MIN_BYTES` /
+  `REALESRGAN_ANIME_MIN_BYTES`, lazily imported so the worker top level
+  stays torch-free) and `_verify_weights_manifest` walks up to the nearest
+  `manifest.json` and checks the 071 shapes (`checkpoint_sha256` +
+  `checkpoint_file`, plus `checkpoint_shas` dicts) for exactly this file —
+  mismatch raises `ModelCompatibilityError` before any decoder runs; no
+  manifest / no entry / unreadable manifest passes through (ingest-time
+  constants + `verify_model` stay the closed gates there, torn manifests are
+  `validate_run` territory).
+- Fix candidate 3 applied (taxonomy): `pickle.UnpicklingError` joins
+  `_LOAD_ERRORS`, so corrupt pickles map to `ModelCompatibilityError` at the
+  loader boundary instead of surfacing as generic worker errors; the stale
+  docstring claiming safetensors-via-torch-load is rewritten to describe the
+  branch.
+- Residuals: pinned-weight end-to-end stays red by construction (166 —
+  `strict=True` shape mismatch); the worker smoke tests needing real torch
+  still skip in slim (3 skips, by design); `voyage/audio/mmaudio_sfx.py` and
+  the registry need no change for this issue (its `.pth` vocoder weight
+  already loads `weights_only=True`; vocoder snapshot hashing is 072/071
+  territory).

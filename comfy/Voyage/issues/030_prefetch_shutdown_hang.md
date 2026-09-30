@@ -72,3 +72,18 @@ $ grep -n "def _call\|_director.call\|shutdown(wait" comfy/Voyage/voyage/supervi
 - `voyage/supervisor.py:709-765` (prefetch submit), `:767-792` (take/miss), `:444-453` (`stop_workers`), `:317-323` (director timeout = 600 s default), `voyage/rpc.py:127-131` (shared `_call_lock`), `:256-277` (`timeout=None` → worker default).
 - Python `Executor.shutdown(wait, cancel_futures)` — "cancel_futures ... only pending": https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.Executor.shutdown
 - Python `threading.Thread.daemon` default `False`, non-daemon threads join at exit: https://docs.python.org/3/library/threading.html#threading.Thread.daemon
+
+## Progress log (resolution 2026-09-30)
+
+- As-read re-verified: `_call` at `supervisor.py:956` carried no `timeout=` override (contrast `_embed_texts`, which passes `EMBED_TIMEOUT_SECONDS`); `stop_workers` at `supervisor.py:555-564` dropped the future without cancel/drain after `shutdown(wait=False, cancel_futures=True)`.
+- TDD: wrote `tests/test_prefetch_shutdown.py` first — collection failed with `ImportError: PREFETCH_TIMEOUT_SECONDS` (constant absent), proving the unbounded-timeout leg before any fix.
+- Fix (`voyage/supervisor.py` only): new `PREFETCH_TIMEOUT_SECONDS = 60.0` (LLM-class budget mirroring `EMBED_TIMEOUT_SECONDS`, not the 600 s default) passed explicitly in `_call`; new `PREFETCH_SHUTDOWN_DRAIN_SECONDS = 2.0` with `future.cancel()` + `future.result(timeout=...)` best-effort drain in `stop_workers` (exceptions swallowed — a wedged prefetch must never fail shutdown).
+- 137 resync preserved by construction: the prefetch still goes through `SubprocessWorker.call()`, so a prefetch timeout raises `RecoverableWorkerError` inside `_call` (caught to `None`) and the late line stays subject to the stale-line discard loop on the next synchronous decide. No `rpc.py` call-loop lines touched.
+- Concurrent-agent note: another track's 104/095 hunks landed in `supervisor.py` mid-task (constants block, slice walk, checksum writer) — all in disjoint regions; re-read before each edit, no foreign hunk modified.
+
+## Resolution
+
+- Verdict: RESOLVED. Worst-case exit hold drops from 600 s to 60 s (the orphaned thread's own prefetch budget), and `stop_workers` itself returns in ~2 s worst case even with a wedged prefetch.
+- Files changed: `voyage/supervisor.py` (2 constants + `_call` timeout + `stop_workers` cancel/drain); new `tests/test_prefetch_shutdown.py` (2 tests: bounded-timeout recording stub, wedged-prefetch shutdown timing).
+- Test evidence (in-container, CPU-only): new module 2/2 green; scoped regressions `test_rpc_timeout` (137 resync), `test_generation_stack` (prefetch-hit), `test_supervisor_lifecycle`, `test_prefetch_summary` all green (126 passed across the 13-module scoped suite); `ruff check` + `ruff format --check` clean on touched files; `mypy voyage` clean (49 files).
+- Residuals: threads stay non-daemon (no custom ThreadFactory — larger hunk, concurrent-edit risk); a wedged prefetch therefore still joins interpreter exit up to 60 s. If sub-5 s exit is ever required, daemonize the prefetch executor as a follow-up. Lock-contention candidate 3 (dedicated prefetch handle) untouched — out of scope.

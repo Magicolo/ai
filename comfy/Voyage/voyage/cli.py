@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from voyage import paths
 from voyage.concepts import ConceptStore, validate_concepts
 from voyage.config import (
+    BACKEND_REGISTRY,
     ProjectConfig,
     VideoBackendName,
     apply_draft_overrides,
@@ -780,7 +781,12 @@ _SEGMENT_ID_PATTERN = re.compile(r"^\d{6}$")
 
 
 def _check_segment_checksums(segment: Path) -> list[str]:
-    """Recompute sha256.json entries (DESIGN §70: checksum mismatches)."""
+    """Recompute sha256.json entries (DESIGN §70: checksum mismatches).
+
+    Media entries are required; metadata entries (issue 095) verify when
+    recorded and stay silent when absent, so pre-fix two-entry manifests
+    keep validating (additive, never a new error on legacy runs).
+    """
     errors: list[str] = []
     checksums_path = segment / "sha256.json"
     if not checksums_path.exists():
@@ -799,6 +805,21 @@ def _check_segment_checksums(segment: Path) -> list[str]:
         if not isinstance(recorded, str) or not recorded:
             errors.append(f"{segment.name} sha256.json missing entry for {artifact}")
         elif sha256_file(target) != recorded:
+            errors.append(f"{segment.name} checksum mismatch for {artifact}")
+    for artifact in (
+        "metrics.json",
+        "transition.json",
+        "prompt_plan.json",
+        "audio_state.json",
+        "world_state.json",
+    ):
+        recorded = expected.get(artifact)
+        if not isinstance(recorded, str) or not recorded:
+            continue  # legacy manifest: media only means "not covered"
+        target = segment / artifact
+        if not target.exists():
+            continue  # missing artifact already reported by the caller
+        if sha256_file(target) != recorded:
             errors.append(f"{segment.name} checksum mismatch for {artifact}")
     return errors
 
@@ -929,6 +950,11 @@ def validate_run(run_dir: Path) -> list[str]:
     novelty_dir = run_dir / "novelty"
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))
+    if not isinstance(state.fps, int) or state.fps <= 0:
+        errors.append(
+            f"state fps is corrupt: {state.fps!r} (expected a positive integer; "
+            "repair with the run config's video fps)"
+        )
     fps = state.fps if isinstance(state.fps, int) and state.fps > 0 else 24
     timeline = state.timeline_frames / fps
     if timeline > 0.0:
@@ -1181,7 +1207,33 @@ def segments_for_duration(duration_seconds: float, fps: int, frames_per_segment:
     return max(1, math.ceil(duration_seconds * fps / frames_per_segment - 1e-9))
 
 
-_CUDA_BACKENDS = frozenset({"ltxv", "longlive2", "causvid", "acestep"})
+_CUDA_VIDEO_BACKENDS: frozenset[str] = frozenset(
+    name for name, record in BACKEND_REGISTRY.items() if record.device.startswith("cuda")
+)
+"""Video backends needing the CUDA worker stack (derived, issue 021)."""
+
+_CUDA_AUDIO_BACKENDS: frozenset[str] = frozenset(
+    record.audio_backend
+    for record in BACKEND_REGISTRY.values()
+    if record.audio_device.startswith("cuda")
+)
+"""Audio backends needing the CUDA worker stack (derived, issue 021)."""
+
+_CUDA_SFX_BACKENDS: frozenset[str] = frozenset(
+    record.sfx_backend
+    for record in BACKEND_REGISTRY.values()
+    if record.sfx_device.startswith("cuda")
+)
+"""SFX backends needing the CUDA worker stack (derived, issue 021)."""
+
+_CUDA_BACKENDS = _CUDA_VIDEO_BACKENDS | _CUDA_AUDIO_BACKENDS | _CUDA_SFX_BACKENDS
+"""Legacy union across the video/audio/sfx vocabularies (issue 021).
+
+Kept for the TUI warning import (tui_state.gpu_warning) and any reader
+that only needs "does this name need CUDA". Per-branch checks above are
+the vocabulary-correct source — never test a video backend against the
+union (``acestep``/``mmaudio`` are not video backends).
+"""
 
 
 def _torch_available() -> bool:
@@ -1201,16 +1253,21 @@ def _cuda_stack_error(backend: str) -> str:
 
 
 def _cuda_offenders(config: ProjectConfig) -> list[str]:
-    """CUDA backends configured on this run, video/audio qualified (051).
+    """CUDA backends configured on this run, video/audio/sfx qualified (021).
 
     The old message always blamed the video backend even when only the
-    audio stack needed CUDA (e.g. acestep-audio + fake-video on CPU).
+    audio stack needed CUDA (e.g. acestep-audio + fake-video on CPU);
+    the old set also never inspected the SFX backend, so a
+    fake/fake/mmaudio run passed preflight and died late in the worker.
+    Each branch checks its own vocabulary set (issue 021).
     """
     offenders: list[str] = []
-    if config.video.backend in _CUDA_BACKENDS:
+    if config.video.backend in _CUDA_VIDEO_BACKENDS:
         offenders.append(f"video {config.video.backend!r}")
-    if config.audio.backend in _CUDA_BACKENDS:
+    if config.audio.backend in _CUDA_AUDIO_BACKENDS:
         offenders.append(f"audio {config.audio.backend!r}")
+    if config.sfx.backend in _CUDA_SFX_BACKENDS:
+        offenders.append(f"sfx {config.sfx.backend!r}")
     return offenders
 
 
@@ -1224,7 +1281,11 @@ def _require_cuda_stack(config: ProjectConfig) -> bool:
     find_spec locates torch without importing it — the supervisor never
     imports GPU libraries (§83).
     """
-    needs_cuda = config.video.backend in _CUDA_BACKENDS or config.audio.backend in _CUDA_BACKENDS
+    needs_cuda = (
+        config.video.backend in _CUDA_VIDEO_BACKENDS
+        or config.audio.backend in _CUDA_AUDIO_BACKENDS
+        or config.sfx.backend in _CUDA_SFX_BACKENDS
+    )
     if not needs_cuda or _torch_available():
         return True
     offenders = _cuda_offenders(config)
@@ -1252,7 +1313,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # Fail before init: generate always writes a fresh config from the
     # backend preset (CUDA video backends pair with ACE-Step audio), so the
     # preset alone decides the stack.
-    if args.backend in _CUDA_BACKENDS and not _torch_available():
+    if args.backend in _CUDA_VIDEO_BACKENDS and not _torch_available():
         print(_cuda_stack_error(args.backend), file=sys.stderr)
         return 1
     run_id = _effective_run_id(args)
@@ -1642,16 +1703,13 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"{name}: PROBE FAILED ({exc})")
         return 0
     if args.inspect_target == "metrics":
-        import json
-
-        metrics_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
-        if not metrics_path.exists():
+        events = _read_all_metric_events(run_dir)
+        if not events:
             print("no metrics yet")
             return 0
-        lines = metrics_path.read_text(encoding="utf-8").splitlines()
-        print(f"{len(lines)} metric events")
-        for line in lines[-5:]:
-            event = json.loads(line)
+        files = iter_metric_files(run_dir)
+        print(f"{len(events)} metric events across {len(files)} files")
+        for event in events[-5:]:
             print(f"  {event.get('event')}: {event.get('segment_id', event.get('worker', ''))}")
         return 0
     return 2

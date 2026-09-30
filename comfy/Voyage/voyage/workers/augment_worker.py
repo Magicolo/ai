@@ -27,6 +27,7 @@ module is an in-process library called with tensors.
 from __future__ import annotations
 
 import importlib.util
+import pickle
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -57,11 +58,15 @@ _LOAD_ERRORS: tuple[type[BaseException], ...] = (
     ValueError,
     TypeError,
     EOFError,
+    pickle.UnpicklingError,
 )
-"""torch.load / load_state_dict failures meaning "weights unusable here".
+"""Weight-load failures meaning "weights unusable here" (issue 074).
 
-Exotic failures outside this tuple (e.g. unpickling errors from a
-safetensors file passed to torch.load) propagate as worker errors instead.
+Covers `torch.load` / `safetensors` decode / `load_state_dict` shape errors —
+every one maps to `ModelCompatibilityError` at the loader boundary. Corrupt
+pickles surface as `UnpicklingError` (a `PickleError`, outside the original
+five); safetensors decode failures are normalized to `ValueError` in
+`_load_state_dict` so they land here too.
 """
 
 
@@ -298,13 +303,130 @@ def _build_film_net() -> Any:
     return _FilmNetMini()
 
 
+def _load_state_dict(weights_path: Path) -> dict[str, Any]:
+    """Decode a weight file by suffix without ever unpickling safetensors (074).
+
+    `.safetensors` decodes via `safetensors.torch.load_file` (no pickle machine);
+    every other suffix loads via `torch.load(weights_only=True)`. Safetensors
+    decode failures normalize to `ValueError` so the loader boundary maps them
+    to `ModelCompatibilityError` via `_LOAD_ERRORS`; a missing `safetensors`
+    package raises `ImportError` unchanged (environment issue, not weights).
+    """
+    if weights_path.suffix.lower() == ".safetensors":
+        from safetensors.torch import load_file  # type: ignore[import-not-found]
+
+        try:
+            decoded: Any = load_file(str(weights_path))
+        except Exception as exc:
+            raise ValueError(f"safetensors decode failed for {weights_path}: {exc}") from exc
+        if not isinstance(decoded, dict):
+            raise TypeError(
+                f"safetensors file at {weights_path} decoded to "
+                f"{type(decoded).__name__}, not a state dict"
+            )
+        return decoded
+    import torch
+
+    decoded_torch: Any = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+    if not isinstance(decoded_torch, dict):
+        raise TypeError(
+            f"torch file at {weights_path} loaded to {type(decoded_torch).__name__}, "
+            "not a state dict"
+        )
+    return decoded_torch
+
+
+def _verify_weights_size(weights_path: Path, kind: str, floor_bytes: int) -> None:
+    """Fail loud when a weight file is smaller than its registry floor (074).
+
+    Runs torch-free before any loader: a truncated download must read as
+    incompatible, never as a model that fails deep in the decoder.
+    """
+    actual_bytes = weights_path.stat().st_size
+    if actual_bytes < floor_bytes:
+        raise ModelCompatibilityError(
+            f"{kind} weights at {weights_path} size {actual_bytes} bytes below "
+            f"floor {floor_bytes} bytes "
+            "(truncated download — re-provision via `voyage models download`)"
+        )
+
+
+def _verify_weights_manifest(weights_path: Path) -> None:
+    """Sha-verify against a nearby manifest record when one exists (074).
+
+    Walks up from the weights file looking for `manifest.json`; when a record
+    carries a sha for exactly this file (`checkpoint_sha256` + `checkpoint_file`
+    or a `checkpoint_shas` dict entry, the 071 shapes), a mismatch raises
+    `ModelCompatibilityError` before any loader runs. No manifest, no entry,
+    or an unreadable manifest passes through (the ingest-time constants in
+    `download_model` and `verify_model` are the closed gates there).
+    """
+    import json
+
+    from voyage.hashing import sha256_file
+
+    try:
+        target = weights_path.resolve()
+    except OSError:
+        return
+    for ancestor in target.parents:
+        manifest_path = ancestor / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(loaded, dict):
+            return
+        for entry in loaded.values():
+            if not isinstance(entry, dict):
+                continue
+            recorded = entry.get("checkpoint_sha256")
+            relative = entry.get("checkpoint_file")
+            if isinstance(recorded, str) and recorded and isinstance(relative, str) and relative:
+                try:
+                    if (ancestor / relative).resolve() == target:
+                        actual = sha256_file(weights_path)
+                        if actual.lower() != recorded.lower():
+                            raise ModelCompatibilityError(
+                                f"weights at {weights_path} hash mismatch: manifest "
+                                f"records {recorded}, file hashes {actual} — refusing "
+                                "to load an untrusted file"
+                            )
+                        return
+                except OSError:
+                    continue
+            shas = entry.get("checkpoint_shas")
+            if isinstance(shas, dict):
+                for relative_path, expected in shas.items():
+                    if isinstance(relative_path, str) and isinstance(expected, str) and expected:
+                        try:
+                            if (ancestor / relative_path).resolve() == target:
+                                actual = sha256_file(weights_path)
+                                if actual.lower() != expected.lower():
+                                    raise ModelCompatibilityError(
+                                        f"weights at {weights_path} hash mismatch: "
+                                        f"manifest records {expected}, file hashes "
+                                        f"{actual} — refusing an untrusted file"
+                                    )
+                                return
+                        except OSError:
+                            continue
+        return
+    return
+
+
 def _load_rrdb_net(weights_path: Path) -> Any:
     """Build RRDBNet and load `weights_path`; shape/content failures become compatibility errors."""
-    import torch
+    from voyage.model_registry import REALESRGAN_ANIME_MIN_BYTES
+
+    _verify_weights_size(weights_path, "Real-ESRGAN", REALESRGAN_ANIME_MIN_BYTES)
+    _verify_weights_manifest(weights_path)
 
     model = _build_rrdb_net()
     try:
-        state = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+        state = _load_state_dict(weights_path)
         model.load_state_dict(state, strict=True)
     except _LOAD_ERRORS as exc:
         raise ModelCompatibilityError(
@@ -316,11 +438,14 @@ def _load_rrdb_net(weights_path: Path) -> Any:
 
 def _load_film_net(weights_path: Path) -> Any:
     """Build the FILM stand-in and load `weights_path`; failures become ModelCompatibilityError."""
-    import torch
+    from voyage.model_registry import FILM_MIN_BYTES
+
+    _verify_weights_size(weights_path, "FILM", FILM_MIN_BYTES)
+    _verify_weights_manifest(weights_path)
 
     model = _build_film_net()
     try:
-        state = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+        state = _load_state_dict(weights_path)
         model.load_state_dict(state, strict=True)
     except _LOAD_ERRORS as exc:
         raise ModelCompatibilityError(

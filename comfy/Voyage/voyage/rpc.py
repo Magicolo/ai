@@ -8,6 +8,7 @@ Stdout is reserved for RPC — never log there from a worker.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import select
 import subprocess
@@ -107,6 +108,28 @@ def _is_stale_response(response_id: str, request_id: str) -> bool:
     seen = _request_sequence_number(response_id)
     expected = _request_sequence_number(request_id)
     return seen is not None and expected is not None and seen < expected
+
+
+def _require_finite_positive_timeout(module: str, operation: str, timeout_value: float) -> None:
+    """Reject timeouts that would break deadline math (issue 100).
+
+    `select.select` needs a finite non-negative timeout: NaN raises raw
+    `ValueError`, inf raises raw `OverflowError`, and neither is a
+    `VoyageError` — so both would bypass the supervisor's
+    branch-on-class restart path. Reject every non-finite or
+    non-positive value here as `RecoverableWorkerError` (the same class
+    a genuinely expired deadline raises), before any deadline is
+    computed. Mirrors `audio.beat._require_finite`.
+    """
+    if (
+        not isinstance(timeout_value, (int, float))
+        or not math.isfinite(timeout_value)
+        or timeout_value <= 0
+    ):
+        raise RecoverableWorkerError(
+            f"worker {module} refusing non-finite or non-positive timeout "
+            f"({timeout_value!r} on {operation})"
+        )
 
 
 def success(request_id: str, result: RpcResult) -> WorkerResponse:
@@ -252,6 +275,7 @@ class SubprocessWorker:
             # Unreachable via call() (it rejects a missing stdout first),
             # but explicit: asserts vanish under `python -O` (issue 034).
             raise FatalWorkerError(f"worker {self._module} has no stdout")
+        _require_finite_positive_timeout(self._module, op, effective_timeout)
         # Test doubles pass a raw fd int as stdout; production passes a
         # TextIO. Both select and os.read accept either form.
         raw_stdout: Any = stdout
@@ -347,6 +371,7 @@ class SubprocessWorker:
         if proc is None or proc.stdin is None or proc.stdout is None:
             raise FatalWorkerError(f"worker {self._module} is not running")
         effective_timeout = self._timeout if timeout is None else timeout
+        _require_finite_positive_timeout(self._module, op, effective_timeout)
         with self._call_lock:
             self._counter += 1
             request = WorkerRequest(id=f"req-{self._counter:06d}", op=op, payload=payload)

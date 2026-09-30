@@ -49,3 +49,57 @@ The `_pinned_vocoder` redirect proves the `.py` files land where a HubMixin load
 ## Refs
 
 - HF "Pickle Scanning… displaying/vetting the list of imports… do not unpickle data from untrusted sources" — https://huggingface.co/docs/hub/security-pickle
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live `Voyage/voyage/model_registry.py`
+  (`MMAUDIO_VOCODER_ALLOW` still carries `*.py` + `alias_free_activation/*`;
+  `verify_sfx_models` is presence + size-floors only via `verify_model`).
+  071-seam check: `ExpectedHash` + `download_model` pre-merge verification
+  technically fits snapshot files (any `relative_path` under the snapshot
+  subdir verifies the same way), but NO baseline hash exists for either
+  vocoder file — 071 resolved multi-file snapshots (Qwen/ACE/MMAudio) as
+  explicit future work, and inventing a hash is forbidden (a wrong pin fails
+  every provision loudly). Verdict: standalone gate now, per-file vocoder
+  shas join the 071 follow-up when provisioned bytes are measurable.
+  Enumeration: `_load_feature_utils` (`mmaudio_sfx.py:224-274`) imports
+  `BigVGANv2` from the pinned `/opt/mmaudio` clone (`MMAUDIO_CODE_COMMIT`)
+  and calls `from_pretrained(vocoder_dir)` with `trust_remote_code` never
+  set — HubMixin resolves only `config.json` + `bigvgan_generator.pt`;
+  zero snapshot activation files are consumed (activation code ships in the
+  clone). Enumerated activation files = none; the allow-list is exactly the
+  two data files.
+- 2026-09-30: TDD — four failing-first tests in
+  `tests/test_vocoder_allowlist.py` (allow-list data-only, top-level `.py`
+  rejected, nested `alias_free_activation/*.py` rejected; 3 failed pre-fix,
+  1 clean-tree control passed pre-fix). All green post-fix.
+- 2026-09-30: gates (scoped) — ruff + format + mypy strict clean on
+  `voyage/model_registry.py` + `tests/test_vocoder_allowlist.py`; scoped
+  suite 107 passed / 3 skipped (torch arch-smoke skips in slim):
+  `test_vocoder_allowlist` + `test_augment_weight_loading` +
+  `test_augment_models` + `test_augment_runner` + `test_registry_pins` +
+  `test_sfx_contract` + `test_checkpoint_safety`. Full `gates.sh` is the
+  orchestrator's job (not run here per scope contract).
+
+## Resolution
+
+- Fix candidate 1 applied (narrow): `MMAUDIO_VOCODER_ALLOW` is now exactly
+  `("config.json", "bigvgan_generator.pt")` — the two files
+  `_load_feature_utils` resolves. The `*.py` glob and the
+  `alias_free_activation/*` subtree are gone; a code comment records the
+  provenance (class from the pinned clone, snapshot is data-only).
+- Fix candidate 3 applied (fail-loud gate): new `_vocoder_python_files`
+  helper lists every `.py` under the vocoder snapshot dir; `verify_sfx_models`
+  runs it after the presence checklist and returns `(False, ... .py ...)`
+  naming the offenders when non-empty. Old-provision volumes carrying snapshot
+  `.py` files now fail verify until the files are removed and re-provisioned
+  under the narrowed allow-list.
+- Fix candidate 2 (git-clone for code) needs no change: vocoder CODE already
+  ships via the verified-fetch `/opt/mmaudio` clone at `MMAUDIO_CODE_COMMIT`
+  (`worker/Dockerfile.video:113-118`); the snapshot never supplied code.
+- `voyage/audio/mmaudio_sfx.py` untouched (no vocoder-load-side change needed:
+  the redirect already passes a data-only dir to an already-imported class).
+- Residuals: per-file vocoder `ExpectedHash` rows await measurable provisioned
+  bytes (071 follow-up — do NOT invent hashes); existing volumes provisioned
+  under the old glob keep their `.py` files until re-provisioned (the new
+  verify gate surfaces them).

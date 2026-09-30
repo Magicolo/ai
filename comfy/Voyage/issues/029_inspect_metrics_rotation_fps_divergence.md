@@ -80,3 +80,43 @@ sed -n '1588,1600p' voyage/cli.py
 ## Refs
 
 - In-tree rotation helper: `voyage/logrotate.py:iter_metric_files` + `voyage/cli.py:577-627` (DESIGN §60).
+
+## Progress log (2026-09-30, resolution track)
+
+- TDD: wrote `tests/test_inspect_metrics_fps_029.py` (4 tests, shared
+  with the 055 verdict below) first, watched all 4 fail on the buggy
+  tree, then fixed.
+- Fix (a) in `voyage/cli.py` `cmd_inspect` metrics branch: routed
+  through `_read_all_metric_events(run_dir)` (the 049 helper every
+  sibling reader uses) + `iter_metric_files` for the file count;
+  header now reads `N metric events across K files`; last-5 semantics
+  kept over the merged list. Side benefit: torn lines are skipped
+  instead of crashing `json.loads`, and the now-unused branch-local
+  `import json` is gone.
+- Fix (b) in `voyage/cli.py` `validate_run`: fail-loud error naming
+  `fps` for `fps <= 0` (`state fps is corrupt: … (expected a positive
+  integer; …)`); the `24` fallback directly below is kept untouched so
+  the SFX-ledger timeline math still runs after reporting. `RunState`
+  itself (`voyage/models.py`) is outside this track's file contract,
+  so the tolerance stays at the model layer and the loudness lives at
+  the check layer, exactly as the issue's fix candidate 2 prescribes.
+  `cmd_status`'s zero-timeline display intentionally unchanged (the
+  validate error is the single fail-loud surface).
+- Overlap check with 055 (required by the track): 055's branch
+  (`inspect_target == "metrics"`, live `1632-1644` → now shifted) is
+  byte-for-byte the reader fixed in (a); its repro (rotated sibling +
+  live file, scoreboard sees both) is covered by
+  `test_inspect_metrics_spans_rotated_siblings`. No distinct leg found
+  (055 cites the same helper, same branch, same fix) — 055 marked
+  SUPERSEDED in its file, fixed once here.
+- Evidence: 15/15 new tests green in-container (all three new files);
+  adjacent suites green (`test_state_integrity` etc.: 126 passed in
+  the heavy batch); `ruff check` + `ruff format --check` + `mypy`
+  strict green on all touched files.
+
+## Resolution: FIXED
+
+- Verdict: fixed — (a) rotation-aware metrics reader with visible file
+  span; (b) `validate_run` reports `fps <= 0` fail-loud while keeping
+  the 24 fallback for SFX math after reporting.
+- Residuals: none in this issue's scope.

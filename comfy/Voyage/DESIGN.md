@@ -1381,6 +1381,12 @@ The implementation must validate all numeric controller ranges and reject imposs
 > **As-built note (2026-09-24):** the live `VideoConfig` still uses `segment_frames` + `blocks_per_segment` + `quantization (fp8|bf16)` with backend presets for `fake|longlive2|ltxv` (`voyage/config.py:with_video_backend`). `segment_seconds` and `[video.longlive/ltxv/causvid]` blocks above are the target schema — adopt them (or an adapter) before implementing the CausVid backend.
 
 > **As-built note (2026-09-24, Stream C):** duration mapping lives in `voyage/backends.py` (`frames_for_segment_seconds`: ceil so segments never run short, min 1 frame; `segment_seconds_for_frames` for the reverse). `VideoConfig` is unchanged — `segment_frames` + `blocks_per_segment` stay the stored schema; per-backend `[video.*]` blocks remain a follow-up schema migration.
+> As-built (§14-finite-config-2026-09-30, issue 100): `rpc_timeout_seconds`
+> (and Draft `take_seconds`) reject non-finite/non-positive values at load —
+> a config typo can never reach `select()` as a raw `ValueError`.
+> As-built (§14-tui-inherit-2026-09-30, issue 023): untouched-at-default TUI
+> fields (`quantization`/`min_fps`/`min_resolution`) resolve as `Unset`, so
+> stored TOML wins; an untouched form never clobbers a customized run.
 # 15. Style charter model
 
 The style charter is represented by a dedicated immutable object:
@@ -2133,6 +2139,10 @@ A partially written state file must not be able to destroy the previous valid st
 > `atomic.atomic_copy` (sibling `.partial` + chunked ~1 MiB copy +
 > flush/fsync/replace/fsync_dir) — staged finals are never `read_bytes()`'d
 > into RAM. Same durability, constant memory.
+> As-built (§31-ledger-sync-2026-09-30, issue 101): the takes ledger append
+> completes the dance (flush + file-fsync + `fsync_dir`); concepts
+> jsonl/index, metrics `append_line`, and the SFX ledger stay open
+> follow-ups in their owners' scopes.
 
 ---
 
@@ -2280,6 +2290,12 @@ The director can issue a new music plan every 30–90 seconds without forcing a 
 This allows the audio to feel alive while preserving visual continuity.
 
 The audio worker should be capable of producing the next segment ahead of the video timeline when GPU capacity permits.
+
+> As-built (§35-slice-bounds-2026-09-30, issue 104): `AudioTake` geometry is
+> validated at load (`StateError`); slice walks are bounded (128 slices,
+> 50 ms piece floor, `slice_take` rejects slivers) on both the commit and
+> finalize paths, so one corrupt ledger line can no longer spawn thousands
+> of 0.1 s-floor ffmpeg slices.
 
 ---
 
@@ -2663,6 +2679,14 @@ Every operation has a stable operation name and typed payload schema.
 > so unknown ops remain the worker's `UNKNOWN_OP` fatal. Wire mapping
 > pinned: `retryable=False -> FatalWorkerError`,
 > `retryable=True -> RecoverableWorkerError`.
+> As-built (§45-timeout-finite-2026-09-30, issue 100): per-call timeouts are
+> validated finite-positive before deadline math (`RecoverableWorkerError`
+> otherwise); `positive_seconds` and Draft `take_seconds` reject non-finite
+> at config load (the `beat._require_finite` precedent).
+> As-built (§45-prefetch-budget-2026-09-30, issue 030): the speculative
+> director prefetch carries an explicit 60 s budget (never the 600 s
+> default) and `stop_workers` best-effort drains it (~2 s); worst-case exit
+> hold is 60 s, sub-5 s needs a daemon-thread follow-up.
 
 ---
 
@@ -3239,6 +3263,10 @@ Do not let logs grow without bound during multi-day runs.
 > archive to dated sibling, truncate live in place so the open stderr
 > handle continues at offset 0). Rename-based `rotate_log` stays
 > start-time only; retention via existing dated-sibling pruning.
+> As-built (§60-inspect-readers-2026-09-30, issue 029): `inspect metrics`
+> reads through the rotation-aware `iter_metric_files` helper (`N events
+> across K files`); it is a reader-list member with `status`, `scoreboard`,
+> and soak/benchmark — never a direct `metrics.jsonl` open.
 
 ---
 
@@ -3369,6 +3397,10 @@ and every check passes. Not covered: compute capability, CUDA runtime
 version, FlashAttention/Triton, checkpoint compat, fs permissions,
 worker interpreters, ACE-Step — see `docs/TROUBLESHOOTING.md`; full
 weight checks stay behind `models verify`.
+As-built (§64-cuda-preflight-2026-09-30, issue 021): CUDA preflight sets
+are derived from `BACKEND_REGISTRY` device columns (video/audio/SFX
+vocabularies, union kept for the TUI warning); the SFX branch is checked,
+so `fake/fake/mmaudio` on a torch-less box fast-fails naming the backend.
 
 ---
 
@@ -3541,6 +3573,16 @@ repair = explicit command
 ```
 
 Never silently mutate a run during validation.
+
+> As-built (§70-segment-manifest-2026-09-30, issue 095): `sha256.json` is the
+> full segment manifest (media + `metrics`/`transition`/`prompt_plan`/
+> `audio_state`/`world_state`); both verifiers check every recorded entry
+> and the adoption path too; pre-fix media-only manifests verify as
+> "not covered". The inspector's post-commit `metrics.json` rewrite
+> refreshes its checksum entry so validate never false-positives.
+> As-built (§70-fps-corrupt-2026-09-30, issue 029): `validate` reports
+> `state fps is corrupt` for `fps <= 0`; the 24-fallback below it is
+> SFX-math-only and runs after reporting.
 
 ---
 
@@ -4185,6 +4227,12 @@ During active development, a branch may be used intentionally, but the run manif
 > `VOYAGE_ALLOW_MISSING_MANIFEST=1` opt-in for external volumes).
 > `wan_revision` stays nullable until issue 070 pins the 40-hex revision
 > (wire + record + pin procedure landed; value awaits a provisioned box).
+> As-built (§84-weight-load-gates-2026-09-30, issue 074): weight loads branch
+> on suffix (`.safetensors` via `safetensors`, never pickle; `.pth` via
+> `torch.load(weights_only=True)`); torch-free size-floor + manifest-sha
+> pre-checks run before model build; `UnpicklingError` maps to
+> `ModelCompatibilityError`. Pinned RealESRGAN/FILM weights still await the
+> upstream port + SRVGG loader (issue 166 follow-up).
 
 ---
 
@@ -4203,6 +4251,12 @@ voyage models download director
 The user must be able to inspect what will be downloaded.
 
 No model download should overwrite an existing model without an explicit flag.
+
+> As-built (§85-vocoder-data-only-2026-09-30, issue 072): the MMAudio vocoder
+> snapshot is data-only (`config.json` + `bigvgan_generator.pt` — code ships
+> in the pinned `/opt/mmaudio` clone); `verify_sfx_models` fails loud on any
+> `.py` under the vocoder dir. Per-file vocoder hashes await measurable
+> bytes (issue 071 follow-up).
 
 ## 85.1 Reference model download commands
 

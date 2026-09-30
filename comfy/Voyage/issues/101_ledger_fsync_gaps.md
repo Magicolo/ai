@@ -57,3 +57,29 @@ Full live-read bodies: `planner.py:211-220`, `concepts.py:299-324`, `logrotate.p
 - In-tree correct example: `voyage/concepts.py:253-260` (`.npy` temp + fsync + rename + `fsync_dir`).
 - POSIX: `fsync` on a file vs `fsync` on the containing directory descriptor (`open(dir, O_RDONLY)` + `fsync`) — file data vs namespace durability; `O_APPEND` atomicity is per `write(2)` (see `open(2)`/`write(2)` man pages).
 - Readers depending on these files: `voyage/audio/planner.py:197-208` (`load_takes`), `voyage/concepts.py:338-346` (`load_jsonl`), `voyage/logrotate.py:107-129` (`iter_metric_files`).
+
+## Progress log
+
+- 2026-09-30: premise CONFIRMED live — `rg fsync_dir|os.fsync` shows
+  `planner.py:220`, `concepts.py:321`, `sfx_finalize.py:196` all file-fsync
+  only; `logrotate.append_line`/`rotate_log` have zero sync calls. Contract
+  limits this change to `planner.py` (+ `supervisor.py` commit-side half, which
+  needs nothing: it delegates to `append_take`), so only the ledger leg is
+  fixed here; the rest are recorded below as follow-ups for their owners.
+  TDD: new test asserting `append_take` syncs the directory entry watched
+  fail (planner had no `fsync_dir` reference), then fixed.
+
+## Resolution (PARTIALLY FIXED — ledger leg; rest changed-hands)
+
+- Fixed: `voyage/audio/planner.py::append_take` now calls
+  `fsync_dir(ledger.parent)` after the file fsync (imported from
+  `voyage.atomic`); docstring states the namespace-durability contract.
+- NOT in scope (out-of-contract files, left untouched): `concepts.py` jsonl
+  append + `_write_index` grouping, `logrotate.py` `append_line` flush/fsync +
+  `rotate_log`/`_prune_siblings` `fsync_dir`, `sfx_finalize.py` ledger twin,
+  multi-writer `O_APPEND` atomicity — same one-line `fsync_dir` pattern
+  applies; recommend the owning passes take them.
+- Tests: `test_append_take_syncs_directory_entry` (patched `fsync_dir`
+  records exactly `[ledger.parent]`).
+- Evidence: 21/21 new tests pass; audio/planner/rhythm/accounting suites
+  (62) green; ruff + format + mypy clean on touched files.

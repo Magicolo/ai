@@ -269,10 +269,14 @@ def test_tui_augment_defaults() -> None:
 
 
 def test_tui_namespace_carries_augment_attrs() -> None:
-    """Issue 097 class: the TUI namespace must satisfy cmd_generate's finalize block."""
+    """Issue 097 class: the TUI namespace must satisfy cmd_generate's finalize block.
+
+    Issue 023: untouched-at-default augment floors emit Unset (stored TOML wins),
+    never the concrete form defaults.
+    """
     namespace = to_generate_namespace(GenerateFormState(style="x", backend="fake", name="augns"))
-    assert namespace.min_fps == 32
-    assert namespace.min_resolution == "1280x720"
+    assert namespace.min_fps is Unset
+    assert namespace.min_resolution is Unset
     assert namespace.no_augment is False
 
 

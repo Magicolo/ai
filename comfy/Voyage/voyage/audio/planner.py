@@ -15,10 +15,13 @@ each segment, so already-committed segments are never rewritten.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from voyage.atomic import fsync_dir
+from voyage.errors import StateError
 from voyage.paths import resolve_stored_path
 
 TAKES_FILENAME = "takes.jsonl"
@@ -72,17 +75,51 @@ class AudioTake:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AudioTake:
-        """Rebuild from a ledger line (pre-BPM lines carry no bpm key)."""
-        bpm_raw = raw.get("bpm")
+        """Rebuild from a ledger line (pre-BPM lines carry no bpm key).
+
+        Validates geometry at the boundary (issue 104): corrupt/hand-edited
+        ledger lines (nan/inf/negative/zero durations, negative covers_from,
+        non-finite bpm) fail loud here with StateError instead of becoming
+        live takes that poison the slice walk downstream. Tiny-but-positive
+        durations still load — the walk bound owns those, not the loader.
+        """
+        try:
+            take_id = str(raw["take_id"])
+            take_path = str(raw["path"])
+            caption = str(raw["caption"])
+            seed = int(raw["seed"])
+            covers_from_value = float(raw["covers_from"])
+            duration_value = float(raw["duration"])
+            segment_index = int(raw["segment_index"])
+            bpm_raw = raw.get("bpm")
+            beat_rate: float | None = None
+            if bpm_raw is not None:
+                beat_rate = float(bpm_raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateError(f"corrupt audio take record {raw!r}: {exc}") from exc
+        if not math.isfinite(covers_from_value) or covers_from_value < 0:
+            raise StateError(
+                f"corrupt audio take {take_id!r}: covers_from must be finite >= 0 "
+                f"(got {covers_from_value})"
+            )
+        if not math.isfinite(duration_value) or duration_value <= 0:
+            raise StateError(
+                f"corrupt audio take {take_id!r}: duration must be finite > 0 "
+                f"(got {duration_value})"
+            )
+        if beat_rate is not None and (not math.isfinite(beat_rate) or beat_rate <= 0):
+            raise StateError(
+                f"corrupt audio take {take_id!r}: bpm must be finite > 0 (got {beat_rate})"
+            )
         return cls(
-            take_id=str(raw["take_id"]),
-            path=str(raw["path"]),
-            caption=str(raw["caption"]),
-            seed=int(raw["seed"]),
-            covers_from=float(raw["covers_from"]),
-            duration=float(raw["duration"]),
-            segment_index=int(raw["segment_index"]),
-            bpm=float(bpm_raw) if bpm_raw is not None else None,
+            take_id=take_id,
+            path=take_path,
+            caption=caption,
+            seed=seed,
+            covers_from=covers_from_value,
+            duration=duration_value,
+            segment_index=segment_index,
+            bpm=beat_rate,
         )
 
 
@@ -209,7 +246,13 @@ def load_takes(ledger: Path) -> list[AudioTake]:
 
 
 def append_take(ledger: Path, take: AudioTake) -> None:
-    """Durably append one take to the ledger (flush + fsync)."""
+    """Durably append one take to the ledger (flush + fsync + fsync_dir).
+
+    File fsync persists content; the directory sync persists the namespace
+    entry (issue 101, in-tree contract in voyage/atomic.py): without it a
+    crash can lose the ledger tail while the rendered take file survives,
+    and the next run re-renders audio it already has.
+    """
     import json
     import os
 
@@ -218,3 +261,4 @@ def append_take(ledger: Path, take: AudioTake) -> None:
         handle.write(json.dumps(take.to_dict()) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+    fsync_dir(ledger.parent)

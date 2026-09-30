@@ -120,6 +120,18 @@ GAUGE_TIMEOUT_SECONDS = 5.0
 #: must never be cut off so early that embeddings silently disable.
 EMBED_TIMEOUT_SECONDS = 60.0
 
+#: Seconds the speculative director prefetch may take (issue 030). The
+#: prefetch runs the full `decide` LLM call, so it needs an LLM-class
+#: budget like EMBED_TIMEOUT_SECONDS — but it must never inherit the
+#: 600 s RPC default: a best-effort thread must resolve quickly enough
+#: that interpreter exit never waits ten minutes behind a wedged call.
+PREFETCH_TIMEOUT_SECONDS = 60.0
+
+#: Seconds `stop_workers` waits for an in-flight prefetch to finish
+#: (issue 030). Best-effort drain only: expiry abandons the thread to
+#: its own PREFETCH_TIMEOUT_SECONDS instead of stalling shutdown.
+PREFETCH_SHUTDOWN_DRAIN_SECONDS = 2.0
+
 #: Sample resource gauges every K segments (issue 017). 1 keeps the
 #: per-segment cadence the benchmark/soak readers expect; raise it to
 #: thin out probe traffic on long runs (a TOML knob needs config.py,
@@ -131,6 +143,33 @@ RESOURCE_GAUGE_INTERVAL_SEGMENTS = 1
 #: `1..10 * segment_frames`. Beyond that the audio-coverage loop would
 #: slice thousands of pieces and the timeline would corrupt.
 REPORTED_FRAMES_SLACK = 10
+
+#: Smallest legitimate take-slice piece, seconds (issue 104). Takes render
+#: at >= 1 s and joints land on segment boundaries, so a sub-50 ms piece
+#: is never real music coverage — only a degenerate ledger sliver. Must
+#: match `voyage.media.MIN_SLICE_PIECE_SECONDS` (duplicated, not imported:
+#: import direction is supervisor → media for functions, and a constant
+#: import would still couple the two walk bounds textually — keep both
+#: comments in sync instead).
+MIN_SLICE_PIECE_SECONDS = 0.05
+
+#: Bound on take slices per commit walk (issue 104). The common case is one
+#: slice (two at a take joint); 128 caps ffmpeg spawns when the ledger
+#: degrades. Mirrors `voyage.media.MAX_SLICES_PER_WINDOW` (same rationale
+#: as above — keep both comments in sync).
+MAX_SLICES_PER_SEGMENT = 128
+
+#: Segment JSON artifacts the checksum manifest covers alongside media
+#: (issue 095). Mirrors `voyage.media.METADATA_CHECKSUM_ARTIFACTS` so the
+#: writer and both verifiers hash the same set without an import cycle
+#: (media never imports supervisor).
+METADATA_CHECKSUM_ARTIFACTS = (
+    "metrics.json",
+    "transition.json",
+    "prompt_plan.json",
+    "audio_state.json",
+    "world_state.json",
+)
 
 
 class ProposedSegment(NamedTuple):
@@ -531,10 +570,21 @@ class Supervisor:
         self._director.stop()
         self._workers_running = False
         executor, self._prefetch_executor = self._prefetch_executor, None
+        future, self._prefetch_future = self._prefetch_future, None
         self._prefetch_target = None
-        self._prefetch_future = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        if future is not None:
+            # Best-effort drain (issue 030): a pending future cancels; a
+            # running (wedged) one is abandoned after a short join so
+            # shutdown never stalls — its own PREFETCH_TIMEOUT_SECONDS
+            # still bounds the orphaned thread, and the next synchronous
+            # decide resyncs the pipe via the issue-137 stale-line loop.
+            try:
+                future.cancel()
+                future.result(timeout=PREFETCH_SHUTDOWN_DRAIN_SECONDS)
+            except Exception:
+                pass
 
     def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
         """Progress spinner around one commit stage (no-op when silent)."""
@@ -926,7 +976,7 @@ class Supervisor:
 
         def _call() -> dict[str, Any] | None:
             try:
-                return self._director.call("decide", payload)
+                return self._director.call("decide", payload, timeout=PREFETCH_TIMEOUT_SECONDS)
             except VoyageError:
                 return None
 
@@ -1411,17 +1461,30 @@ class Supervisor:
                 break
         # Slice the takes covering [video_time, video_time + duration).
         # A take boundary inside the segment yields two slices joined with
-        # a crossfade; the common case is exactly one slice.
+        # a crossfade; the common case is exactly one slice. Both guards
+        # below are issue 104: without them a degenerate ledger (1 ms
+        # takes, stagnant coverage) spawns thousands of ffmpeg processes
+        # that the 0.6 s A/V gate only catches after the damage.
         slices: list[Path] = []
         take_ids: list[str] = []
         cursor = video_time
         end = video_time + duration
         index = 0
         while cursor < end - 1e-6:
+            if index >= MAX_SLICES_PER_SEGMENT:
+                raise MediaError(
+                    f"segment {segment_id}: audio slice walk exceeded "
+                    f"{MAX_SLICES_PER_SEGMENT} slices — corrupt takes ledger"
+                )
             serving = planner.take_for_time(cursor)
             if serving is None or not serving.path:
                 raise MediaError(f"segment {segment_id}: audio gap at {cursor:.2f}s")
             piece = min(serving.covers_until(), end) - cursor
+            if piece < MIN_SLICE_PIECE_SECONDS:
+                raise MediaError(
+                    f"segment {segment_id}: degenerate take slice "
+                    f"({piece:.6f}s at {cursor:.2f}s) — corrupt takes ledger"
+                )
             slice_path = segment / f"slice_{index:02d}.wav"
             slice_take(
                 # Shared 016 convention: run-relative ledger entries
@@ -1496,6 +1559,13 @@ class Supervisor:
             existing = json.loads((prev_dir / "metrics.json").read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
+                try:
+                    recorded = json.loads((prev_dir / "sha256.json").read_text(encoding="utf-8"))
+                    if isinstance(recorded, dict) and "metrics.json" in recorded:
+                        recorded["metrics.json"] = sha256_file(prev_dir / "metrics.json")
+                        atomic_write_json(prev_dir / "sha256.json", recorded)
+                except (OSError, ValueError):
+                    pass
         except OSError:
             pass
         self._log_metric({"event": "segment_inspected", "segment_id": prev_id, **summary})
@@ -1932,6 +2002,24 @@ class Supervisor:
                     "verification; refusing to re-render over it — inspect or "
                     f"remove {segment} manually"
                 )
+        for name in METADATA_CHECKSUM_ARTIFACTS:
+            recorded_entry = recorded.get(name)
+            if not isinstance(recorded_entry, str) or not recorded_entry:
+                continue  # legacy manifest: media only means "not covered"
+            try:
+                actual_entry = sha256_file(segment / name)
+            except OSError as exc:
+                raise MediaError(
+                    f"segment {segment_id}: DONE exists but {name} is missing "
+                    f"({exc}); refusing to re-render over it — inspect or remove "
+                    f"{segment} manually"
+                ) from exc
+            if actual_entry != recorded_entry:
+                raise MediaError(
+                    f"segment {segment_id}: DONE exists but {name} fails checksum "
+                    "verification; refusing to re-render over it — inspect or "
+                    f"remove {segment} manually"
+                )
         frames = metrics_raw.get("frames") if isinstance(metrics_raw, dict) else None
         if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
             raise MediaError(
@@ -2069,7 +2157,11 @@ class Supervisor:
             )
             atomic_write_json(
                 segment / "sha256.json",
-                {"video.mp4": sha256_file(video_out), "audio.wav": sha256_file(audio_out)},
+                {
+                    "video.mp4": sha256_file(video_out),
+                    "audio.wav": sha256_file(audio_out),
+                    **{name: sha256_file(segment / name) for name in METADATA_CHECKSUM_ARTIFACTS},
+                },
             )
             # Single-step DONE (issue 058): one atomic write straight to
             # DONE. The old two-step (write DONE.partial, then rename left

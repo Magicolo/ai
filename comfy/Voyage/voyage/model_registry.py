@@ -291,11 +291,16 @@ MMAUDIO_LICENSE_URL = "https://huggingface.co/hkchengrex/MMAudio/blob/main/READM
 MMAUDIO_VOCODER_REPO = "nvidia/bigvgan_v2_44khz_128band_512x"
 MMAUDIO_VOCODER_REVISION = "95a9d1dcb12906c03edd938d77b9333d6ded7dfb"
 MMAUDIO_VOCODER_SUBDIR = f"{MMAUDIO_SUBDIR}/vocoder/bigvgan_v2_44khz_128band_512x"
+# Data-only snapshot (issue 072): the loader resolves exactly these two files
+# via `BigVGANv2.from_pretrained(vocoder_dir)` with the class already imported
+# from the pinned `/opt/mmaudio` clone (`MMAUDIO_CODE_COMMIT`) — snapshot
+# `.py` files are never imported (`trust_remote_code` is never set), so the
+# old `*.py` + `alias_free_activation/*` globs only widened the executable
+# surface for no runtime benefit. No activation file from the snapshot is
+# consumed (activation code ships in the clone); keep the list exact.
 MMAUDIO_VOCODER_ALLOW = (
-    "*.py",
     "config.json",
     "bigvgan_generator.pt",
-    "alias_free_activation/*",
 )
 MMAUDIO_VOCODER_MIN_BYTES = 400_000_000
 MMAUDIO_VOCODER_LICENSE = "MIT"
@@ -1422,8 +1427,31 @@ def download_sfx_models(models_dir: Path) -> dict[str, Any]:
 
 
 def verify_sfx_models(models_dir: Path) -> tuple[bool, str]:
-    """Check presence (+ size sanity) of the SFX stack."""
-    return verify_model(models_dir, "sfx-mmaudio")
+    """Check presence (+ size sanity) of the SFX stack, rejecting vocoder code."""
+    ok, message = verify_model(models_dir, "sfx-mmaudio")
+    if not ok:
+        return ok, message
+    unexpected = _vocoder_python_files(models_dir)
+    if unexpected:
+        preview = ", ".join(unexpected[:5])
+        return False, (
+            f"unexpected executable .py under {MMAUDIO_VOCODER_SUBDIR}: {preview} "
+            "— vocoder snapshot is data-only (config.json + bigvgan_generator.pt); "
+            "remove the files and re-provision"
+        )
+    return True, message
+
+
+def _vocoder_python_files(models_dir: Path) -> list[str]:
+    """Every `.py` file under the vocoder snapshot dir (issue 072).
+
+    Empty when the dir is absent (the presence checklist owns that case) —
+    non-empty means an executable fetch landed where only data belongs.
+    """
+    vocoder_dir = models_dir / MMAUDIO_VOCODER_SUBDIR
+    if not vocoder_dir.is_dir():
+        return []
+    return sorted(str(path) for path in vocoder_dir.rglob("*.py") if path.is_file())
 
 
 def download_ltxv_models(models_dir: Path) -> dict[str, Any]:

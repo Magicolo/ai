@@ -56,3 +56,33 @@ supervisor.py:1734: av_drift = check_av_alignment(...)   # 0.6 s gate trips only
 - Overlaps with 100 (NaN/inf validation family — `beat._require_finite` precedent cited by both; 100 owns the RPC-deadline leg, this issue owns the ledger/walk leg).
 - In-tree: `voyage/audio/planner.py:74-86` (unvalidated boundary), `:197-208` (`load_takes`), `voyage/supervisor.py:1251-1280` (the walk), `voyage/media.py:160-198` (the 0.1 s floor), `voyage/media.py:26-58` + `voyage/supervisor.py:1730-1734` + `voyage/cli.py:876-924` (the 0.6 s gate that catches-but-doesn't-contain), `voyage/audio/beat.py:24-33` (`_require_finite` precedent).
 - `ffmpeg -t` with absurd/NaN durations is undefined behavior at the tool boundary — another reason the floor must be guarded by validated inputs, not trusted to the callee.
+
+## Progress log
+
+- 2026-09-30: premise CONFIRMED live — `AudioTake.from_dict` bare casts,
+  commit walk `while cursor < end - 1e-6` with no cap/floor, finalize window
+  walk same shape (`media.py:570-597`). Both walks are in owned files, so both
+  fixed here per contract. TDD: 11-case ledger-matrix + walk-bound + slice-floor
+  tests watched fail (19/21 failing pre-fix alongside the 095/101 tests),
+  then fixed.
+
+## Resolution (FIXED — both walks)
+
+- Loader (`audio/planner.py::AudioTake.from_dict`): finite + `covers_from >= 0`
+  + `duration > 0` + finite positive `bpm` when present, else `StateError`
+  (malformed lines wrapped too). Tiny-but-positive (1 ms) still loads — the
+  walk bound owns tiny, not the loader. Supervisor's `load_takes` wrapper
+  already maps failures to `StateError`; finalize path now fails loud too.
+- Commit walk (`supervisor._ensure_audio_coverage`): `MAX_SLICES_PER_SEGMENT`
+  (128) + `MIN_SLICE_PIECE_SECONDS` (0.05) guards raise `MediaError` before any
+  ffmpeg spawn on breach — corrupt ledger fails fast instead of after minutes.
+- Finalize walk (`media.build_final_audio`): same bounds, degrading to the
+  existing `_concat_fallback_audio` (previews untouched) instead of raising,
+  matching that function's established fallback contract.
+- Depth (`media.slice_take`): rejects non-finite / `< 0.05 s` windows — the
+  `max(duration, 0.1)` floor can no longer amplify a sliver into 0.1 s audio.
+- Tests: ledger matrix (11 rejects + 1 tiny-accepts pin), `slice_take` floor,
+  commit walk (400×1 ms takes → `MediaError`, 0 spawns), finalize window
+  (400×10 ms takes → fallback, 0 spawns).
+- Evidence: 21/21 new tests pass; audio/rhythm/accounting (62) + integrity/
+  finalize Midpoint suites (51) green; ruff + format + mypy clean.

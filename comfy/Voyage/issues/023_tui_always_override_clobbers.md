@@ -78,3 +78,45 @@ print('min_fps:', repr(ns.min_fps), 'min_resolution:', repr(ns.min_resolution))"
 
 - "A professional CLI should allow configuration … with a clear order of precedence … 1. flag 2. env 3. config file 4. default … `viper.BindPFlags` … flags get top priority … command logic just asks Viper." — https://cobra.dev/docs/tutorials/12-factor-app/
 - "Highest to lowest: CLI flags, then OS environment variables, then … config file, then hard-coded defaults." — https://python-config-secrets-hub.com/core-configuration-patterns-file-formats/configuration-precedence-rules/
+
+## Progress log (2026-09-30, resolution track)
+
+- TDD: wrote `tests/test_tui_absent_defaults_023.py` (4 tests) first,
+  watched the 2 untouched-form tests fail (explicit-value + blank-floor
+  tests already passed as correct-path anchors), then fixed.
+- Fix in `voyage/tui_state.py` (`to_generate_namespace` — the only hook
+  the live TUI calls, `voyage/tui.py:902`, and `tui.py` is out of scope
+  so widget-level dirtiness tracking is impossible here):
+  `_DEFAULT_QUANTIZATION`/`_DEFAULT_MIN_FPS`/`_DEFAULT_MIN_RESOLUTION`
+  constants; default-valued `quantization`/`min_fps`/`min_resolution`
+  emit `Unset` (stored TOML wins); blank floors keep the pre-existing
+  `Unset` path; `0`/`"0"` still disable; non-default values still
+  override. `backend`/`director` stay concrete — correct for
+  `generate`, which inits a fresh config from the preset. `FIELD_HELP`
+  updated for the three fields.
+- Documented tradeoff: explicitly re-selecting a default value via the
+  TUI (stored `bf16` back to `fp8`) is indistinguishable from untouched
+  and now inherits — that downgrade needs the CLI flags
+  (`--quantization`/`--min-fps`/`--min-resolution`). Full dirtiness
+  tracking (per-field touched flags set by `tui.py` change events)
+  would remove the tradeoff and is left as a follow-up.
+- Evidence: 15/15 new tests green in-container (all three new files);
+  `ruff check` + `ruff format --check` + `mypy` strict green on all
+  touched files.
+
+## Resolution: FIXED (with one known test residual)
+
+- Verdict: fixed — an untouched TUI form resolves stored
+  `quantization`/`min_fps`/`min_resolution` unchanged (proven by
+  `test_untouched_form_preserves_stored_quantization_and_floors` over a
+  `bf16`/`60`/`1920x1080` base).
+- Residual (expected, for the orchestrator):
+  `tests/test_augment_config.py::test_tui_namespace_carries_augment_attrs`
+  asserts the OLD buggy contract (untouched form emits concrete
+  `32`/`"1280x720"`) and now fails. It encodes the exact behavior this
+  issue required changing, so it needs updating to the inherit
+  contract — deliberately left failing (existing-test edits are outside
+  this track's file contract). All other adjacent suites green (167
+  passed in the `test_tui`/`test_tui_state`/`test_augment_config`/
+  `test_unset`/`test_config_resolution`/`test_backend_registry`/
+  `test_precision`/`test_cli_tui_split` batch).

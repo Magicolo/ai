@@ -490,8 +490,8 @@ class VoyageConfig(BaseModel):
     @field_validator("rpc_timeout_seconds")
     @classmethod
     def positive_seconds(cls, value: float) -> float:
-        if value <= 0:
-            raise ValueError("must be positive")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("must be a finite positive number")
         return value
 
     @field_validator("novelty_threshold")
@@ -542,8 +542,8 @@ class DraftConfig(BaseModel):
     @field_validator("take_seconds")
     @classmethod
     def non_negative(cls, value: float) -> float:
-        if value < 0:
-            raise ValueError("must be non-negative")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("must be a finite non-negative number")
         return value
 
 

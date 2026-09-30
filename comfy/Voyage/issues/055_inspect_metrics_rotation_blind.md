@@ -25,3 +25,35 @@ if args.inspect_target == "metrics":
   2. `./scripts/run.sh inspect metrics --run /tmp/vdemo` → reports `1 metric events`, segment `000000` invisible. `inspect scoreboard` on the same dir sees both.
 - **Fix candidates:** Reuse `_read_all_metric_events(run_dir)` in the metrics branch; print `N metric events across K files`; keep last-5 semantics over the merged list. Add a regression test with one rotated sibling + live file.
 - **Refs:** `docs/OPERATIONS.md:220-235`; `voyage/logrotate.py:107-135`; JSONL rotation guidance — rotated siblings must be queryable as one stream (dated, sortable names; glob in order).
+
+## Progress log (2026-09-30, resolution track — overlap check FIRST per brief)
+
+- Compared 055 against 029 claim by claim on the live tree: same branch
+  (`args.inspect_target == "metrics"`, live `voyage/cli.py:1700-1712`
+  after concurrent growth), same direct-`open` of the live file, same
+  contrast helpers (`_read_all_metric_events`, `iter_metric_files`),
+  same repro shape (rotated sibling + live file; sibling reader sees
+  both), same fix (route through `_read_all_metric_events`, report the
+  file count). 029's part (b) (fps divergence) is extra scope 055 never
+  claims; 055 has no leg outside 029's part (a) — no different reader,
+  no different file, no different failure mode.
+- Live evidence for the subsumption: `grep -rn iter_metric_files
+  voyage/` shows `cli.py` (`_read_all_metric_events`,
+  `_last_commit_stages`), `scoreboard.py`, `logrotate.py` — zero
+  references in the metrics branch pre-fix, exactly as both issues
+  state; post-fix the branch calls `_read_all_metric_events` and the
+  regression test `test_inspect_metrics_spans_rotated_siblings`
+  (in `tests/test_inspect_metrics_fps_029.py`) replays 055's own repro
+  (segment `000000` rotated + `000001` live → `2 metric events across
+  2 files`, both listed).
+- No code change in 055's name: fixed once under 029 (single fix, both
+  files reference it).
+
+## Resolution: SUPERSEDED by 029
+
+- Verdict: premise fully subsumed — 055's rotation-blindness claim is
+  029 part (a) verbatim (same branch, same helper gap, same repro,
+  same fix). Marked SUPERSEDED, not fixed-twice; the fix + regression
+  tests live under 029's resolution above.
+- Residuals: none — close 055 when 029 lands (or keep as a pointer;
+  do not implement separately).

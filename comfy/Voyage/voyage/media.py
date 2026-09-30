@@ -25,6 +25,29 @@ from voyage.hashing import sha256_file
 #: stays finalizable.
 AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6
 
+#: Smallest legitimate take-slice piece, seconds (issue 104). Takes render
+#: at >= 1 s (the ACE render layer rejects anything below), and take joints
+#: land on segment boundaries — so a sub-50 ms piece is never real music
+#: coverage, only a degenerate ledger sliver the `-t` floor would amplify
+#: (0.1 s of audio per sliver) into an A/V monster.
+MIN_SLICE_PIECE_SECONDS = 0.05
+
+#: Bound on take slices per window walk (issue 104). The common case is one
+#: slice (two at a take joint); 128 is orders of magnitude above legitimate
+#: while capping ffmpeg spawns when the ledger degrades.
+MAX_SLICES_PER_WINDOW = 128
+
+#: Segment JSON artifacts the checksum manifest covers alongside media
+#: (issue 095). Additive: old manifests carry media only and still verify —
+#: missing metadata entries mean "not covered", never an error.
+METADATA_CHECKSUM_ARTIFACTS = (
+    "metrics.json",
+    "transition.json",
+    "prompt_plan.json",
+    "audio_state.json",
+    "world_state.json",
+)
+
 
 def av_drift_seconds(video_duration: float, audio_duration: float) -> float:
     """Absolute A/V duration drift in seconds (issue 003 helper).
@@ -170,7 +193,23 @@ def slice_take(
     Output is canonical segment audio (WAV s16le at the run's sample
     rate/channels) so slices from different takes always share the format
     the assembly crossfade requires.
+
+    Rejects non-finite/non-positive/sub-50 ms durations (issue 104): the
+    `max(duration, 0.1)` floor exists for ffmpeg's sake, but any caller
+    passing a sliver is a bug — fail loud here instead of amplifying it
+    into 0.1 s of audio per sliver.
     """
+    import math
+
+    if (
+        not math.isfinite(start_seconds)
+        or not math.isfinite(duration_seconds)
+        or duration_seconds < MIN_SLICE_PIECE_SECONDS
+    ):
+        raise MediaError(
+            f"take slice of {take_path} has degenerate window "
+            f"(start={start_seconds}, duration={duration_seconds})"
+        )
     dest.parent.mkdir(parents=True, exist_ok=True)
     proc = run_capture(
         [
@@ -343,6 +382,15 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
             raise MediaError(f"segment {name} sha256.json missing {artifact}")
         actual = _sha256_file(segment / artifact)
         if actual != recorded:
+            raise MediaError(f"segment {name} checksum mismatch for {artifact}")
+    for artifact in METADATA_CHECKSUM_ARTIFACTS:
+        recorded = expected.get(artifact)
+        if not isinstance(recorded, str) or not recorded:
+            continue  # legacy manifest: media only means "not covered"
+        target = segment / artifact
+        if not target.exists():
+            raise MediaError(f"segment {name} sha256.json lists missing {artifact}")
+        if _sha256_file(target) != recorded:
             raise MediaError(f"segment {name} checksum mismatch for {artifact}")
     metrics_path = segment / "metrics.json"
     try:
@@ -568,6 +616,8 @@ def build_final_audio(
         cursor = window_start
         piece = 0
         while cursor < window_end - 1e-6:
+            if piece >= MAX_SLICES_PER_WINDOW:
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
             serving = planner.take_for_time(cursor)
             if serving is None or not serving.path:
                 return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
@@ -578,6 +628,8 @@ def build_final_audio(
                 return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
             piece_end = min(serving.covers_until(), window_end)
             if piece_end <= cursor:
+                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+            if piece_end - cursor < MIN_SLICE_PIECE_SECONDS:
                 return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
             slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
             _cached_slice_take(

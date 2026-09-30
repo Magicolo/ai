@@ -76,14 +76,27 @@ FIELD_HELP = {
     "blocks": "Video blocks per segment (empty = preset default 1). More blocks = longer segments.",
     "take_seconds": "Music take length in seconds (empty = 45). Must stay above the "
     "20s audio-ahead window.",
-    "quantization": "DiT weight precision. bf16 keeps highlights clean at +~4.5GB VRAM.",
+    "quantization": "DiT weight precision. bf16 keeps highlights clean at +~4.5GB VRAM. "
+    "Untouched (fp8) inherits the stored run config.",
     "beats_per_segment": "Beats per segment for the rhythm grid (empty = 4, "
     "doubles to hold >=60 BPM).",
     "drift_every_n": "Director drifts every Nth segment (empty = 1); other segments hold.",
-    "min_fps": "Floor output fps at finalize (empty = 32; 0 disables the floor).",
+    "min_fps": "Floor output fps at finalize (untouched/32 = stored config; 0 disables).",
     "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1280x720" '
-    '(empty = 1280x720; "0" disables the floor).',
+    '(untouched/1280x720 = stored config; "0" disables).',
 }
+
+
+# Form defaults that encode "inherit the stored run config" (issue 023).
+# The TUI pre-fills these widgets, so a blank field is unreachable without
+# the user actively clearing it — the namespace therefore treats the
+# default value itself as absent (Unset). Tradeoff, documented: explicitly
+# re-selecting the default (e.g. stored bf16 back to fp8) is
+# indistinguishable from untouched, so that downgrade needs the CLI flag.
+# Non-default values always emit concrete overrides and still win.
+_DEFAULT_QUANTIZATION = "fp8"
+_DEFAULT_MIN_FPS = "32"
+_DEFAULT_MIN_RESOLUTION = "1280x720"
 
 
 @dataclass
@@ -268,6 +281,7 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
     take_raw = state.take_seconds.strip()
     min_fps_raw = state.min_fps.strip()
     min_resolution_raw = state.min_resolution.strip()
+    quantization_raw = state.quantization
     name = state.name.strip()
     output = str(Path("output") / name)
     return argparse.Namespace(
@@ -285,17 +299,21 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         director=state.director,
         blocks=optional_int(state.blocks),
         take_seconds=float(take_raw) if take_raw else Unset,
-        quantization=state.quantization,
+        quantization=Unset if quantization_raw == _DEFAULT_QUANTIZATION else quantization_raw,
         beats_per_segment=optional_int(state.beats_per_segment),
         drift_every_n=optional_int(state.drift_every_n),
-        # Finalize-time augment floors (Track A): blank means "run TOML
-        # default" (Unset); 0 / "0" explicitly disable a floor. The form
-        # defaults ("32" / "1280x720") match the config defaults, so an
-        # untouched form resolves to the same floors. no_augment stays
-        # False — the TUI has no disable-all checkbox (clear both fields
-        # or pass --no-augment on the CLI).
-        min_fps=int(min_fps_raw) if min_fps_raw else Unset,
-        min_resolution=min_resolution_raw if min_resolution_raw else Unset,
+        # Finalize-time augment floors (issue 023): blank AND the prefilled
+        # form default both mean "stored TOML wins" (Unset); 0 / "0"
+        # explicitly disable a floor, anything else overrides. An untouched
+        # form therefore resolves to the stored quantization/floors
+        # unchanged; the CLI downgrade to a default value needs --quantization
+        # / --min-fps / --min-resolution flags. no_augment stays False —
+        # the TUI has no disable-all checkbox (set 0 / "0" explicitly or
+        # pass --no-augment on the CLI).
+        min_fps=Unset if min_fps_raw in ("", _DEFAULT_MIN_FPS) else int(min_fps_raw),
+        min_resolution=(
+            Unset if min_resolution_raw in ("", _DEFAULT_MIN_RESOLUTION) else min_resolution_raw
+        ),
         no_augment=False,
         verbose=state.verbose,
         no_color=state.no_color,
@@ -532,8 +550,10 @@ def gpu_warning(backend: str) -> str:
     """One-line CUDA/GPU notice for CUDA backends, else an empty string.
 
     The CUDA set is cli._CUDA_BACKENDS (single source with the run.sh
-    image selection + the torch fast-fail, issue 024); acestep's
-    membership there is inert here because the TUI never offers it.
+    image selection + the torch fast-fail, issue 024): the union covers
+    the video/audio/sfx vocabularies, so the SFX ``mmaudio`` backend
+    warns here too (issue 021). ``acestep`` membership is inert here
+    because the TUI never offers it.
     """
     from voyage.cli import _CUDA_BACKENDS
 

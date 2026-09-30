@@ -78,3 +78,32 @@ Five `atomic_write_json` calls precede it (`world_state.json`, `transition.json`
 - `voyage/supervisor.py:1750-1781` (five metadata writes + two-entry checksum), `voyage/cli.py:781-800` (two-entry check).
 - DESIGN §70 (validate recomputes checksums) vs §74/§75 (plan persistence) — the hashed set should equal the persisted set.
 - `voyage/hashing.py:19-25` (`sha256_file` helper — reuse for JSON files, chunked, constant memory).
+
+## Progress log
+
+- 2026-09-30: premise CONFIRMED live — `supervisor.py` wrote only
+  `video.mp4` + `audio.wav`; batch-3's `EXPECTED_*_SHA256` are model-weight
+  pins (`model_registry.py`), unrelated to segment manifests. No coverage of
+  `metrics.json` / `transition.json` / `prompt_plan.json` / `audio_state.json` /
+  `world_state.json` in the writer, `cli._check_segment_checksums`, or
+  `media._verify_segment`. TDD: 5 new failing tests watched fail in-container,
+  then fixed (see Resolution).
+
+## Resolution (FIXED)
+
+- Writer (`supervisor._commit_segment`): `sha256.json` now carries all seven
+  artifacts (media + `METADATA_CHECKSUM_ARTIFACTS`). Additive — old two-entry
+  manifests still verify ("not covered", never an error).
+- Verifiers (`cli._check_segment_checksums`, `media._verify_segment`,
+  `supervisor._adopt_unaccounted_segment`): media entries required as before;
+  metadata entries verify when recorded, skip when absent (legacy runs pass).
+- Interaction found during fix: the visual inspector rewrites the previous
+  segment's `metrics.json` post-commit — `_run_previous_inspect` now refreshes
+  that segment's `metrics.json` checksum entry when present, else the next
+  validate would false-positive.
+- Tests: `tests/test_commit_side_integrity_095_101_104.py` (5 tests: unit
+  tamper detection, legacy-manifest compat, real-commit manifest contents,
+  post-commit tamper via `validate_run`, finalize-side `_verify_segment`).
+- Evidence: 21/21 new tests pass; `test_state_integrity` + `test_finalize_fastpath`
+  + `test_final_blend_scale` + `test_av_alignment_consumer` + `test_commit_hardening`
+  (51) all green; ruff + format + mypy clean on touched files.
