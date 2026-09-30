@@ -7968,6 +7968,27 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   runs WITHOUT the gate (no-gate baseline for before/after music
  comparison); gate takes effect on the segment after. Prefetch
  acceptance + Stage C still open.
+- Novelty leniency + gauges skip-busy done 2026-09-30 (user-approved):
+  boba extension post-mortem (FAILED seg 21, A/V drift 0.959s; Stage A
+  metrics showed all 6 rejections novelty, incl. seg16 burning 474s of
+  director time into a deterministic fallback). `novelty_max_rejections
+  = 2` (`VoyageConfig` + non-negative validator + TOML, no CLI flag per
+  YAGNI): at the cap the last generation is accepted with
+  `novelty_accepted=False` + a `novelty_overridden` metric (style
+  rejections still hard-fail to the deterministic fallback). Retry
+  feedback now names the rejected concept, its score vs the threshold,
+  and the last-8 visited worlds with a steer instruction. `_sample_gauges`
+  skips the director probe while a prefetch is in flight (kills boba's
+  5s/timeout + the one 23.7s block). Encode-variance probe verdict:
+  expected behavior, not a bug (resident session = 1 T5 encode ~13s vs
+  post-audio-swap fresh session = 2 encodes ~25-31s; block-count,
+  prompt-cache and prefix-drop hypotheses ruled out). Proof:
+  `tests/test_novelty_leniency.py` (5, TDD red-first) + skip-busy unit
+  test in `test_stage_a_telemetry.py` (17/17 with the file). Gates: 43
+  scoped green; full suite 1632 passed with 16 TUI/worker_perf
+  load-flakes on a loaded box (none in scope; clean on re-run).
+  Boba resume (9 segs + finalize) is GPU work, parked until the user
+  approves per the GPU-prompt rule.
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 

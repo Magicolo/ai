@@ -13,6 +13,7 @@ swap/slice/assemble windows are timed. All additive — the existing
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -317,3 +318,27 @@ def test_no_swap_breakdown_without_gpu_swap(
     finally:
         supervisor.stop_workers()
     assert _metric_events(run_dir, "audio_swap_breakdown") == []
+
+
+def test_gauges_skip_director_while_prefetch_in_flight(tmp_path: Path) -> None:
+    """A running prefetch decide blocks the director RPC queue — skip, don't stall."""
+    run_dir = tmp_path / "run"
+    initialize_run_directory(run_dir, run_id="stage-a")
+    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    supervisor = Supervisor(run_dir, config)
+    calls: list[str] = []
+
+    def _recorder(name: str):  # type: ignore[no-untyped-def]
+        def _call(op: str, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+            calls.append(name)
+            return {}
+
+        return _call
+
+    supervisor._video.call = _recorder("video")  # type: ignore[method-assign]
+    supervisor._audio.call = _recorder("audio")  # type: ignore[method-assign]
+    supervisor._director.call = _recorder("director")  # type: ignore[method-assign]
+    pending: Future[dict[str, Any] | None] = Future()
+    supervisor._prefetch_future = pending  # type: ignore[assignment]
+    supervisor._sample_gauges("000000")
+    assert sorted(calls) == ["audio", "video"]

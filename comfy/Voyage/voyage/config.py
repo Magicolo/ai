@@ -518,6 +518,12 @@ class VoyageConfig(BaseModel):
     blocks_per_prompt_stage: int = 3
     novelty_threshold: float = 0.85
     novelty_max_attempts: int = 3
+    # Novelty leniency: after this many novelty rejections the last
+    # generation is accepted anyway (novelty_accepted=False) instead of
+    # burning the remaining attempts toward a deterministic fallback.
+    # Schema/empty-stages/style rejections stay hard — only novelty goes
+    # lenient, so the style charter still always wins.
+    novelty_max_rejections: int = 2
     max_worker_restarts: int = 3
     rpc_timeout_seconds: float = 600.0
     # Thematic drift cadence: the director must propose a novel destination
@@ -530,6 +536,13 @@ class VoyageConfig(BaseModel):
     def positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("must be positive")
+        return value
+
+    @field_validator("novelty_max_rejections")
+    @classmethod
+    def non_negative_rejections(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("novelty_max_rejections must be non-negative")
         return value
 
     @field_validator("max_worker_restarts")
@@ -771,6 +784,7 @@ world_decision_interval_seconds = 16.0
 blocks_per_prompt_stage = 3
 novelty_threshold = 0.85
 novelty_max_attempts = 3
+novelty_max_rejections = 2
 max_worker_restarts = 3
 rpc_timeout_seconds = 600.0
 drift_every_n_segments = 1

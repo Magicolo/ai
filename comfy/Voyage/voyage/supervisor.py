@@ -932,6 +932,13 @@ class Supervisor:
                 ("audio", self._audio),
                 ("director", self._director),
             ):
+                if name == "director" and self._prefetch_in_flight():
+                    # The director's RPC queue is serial: a health probe
+                    # issued while the background prefetch decide runs either
+                    # blocks behind it or burns the full 5 s timeout (boba:
+                    # 5 s every tail, 23.7 s once). Skip the probe — no fields
+                    # this segment — instead of stalling the commit.
+                    continue
                 try:
                     health = worker.call("health", {}, timeout=GAUGE_TIMEOUT_SECONDS)
                 except Exception:
@@ -1117,6 +1124,16 @@ class Supervisor:
 
         self._prefetch_future = executor.submit(_call)
         self._prefetch_submitted_at = time.monotonic()
+
+    def _prefetch_in_flight(self) -> bool:
+        """Whether a background prefetch decide is still running (pure check).
+
+        The director worker serves one RPC at a time, so any other director
+        call issued while this is true queues behind the 60 s prefetch
+        budget — callers that cannot afford the wait (gauges) skip instead.
+        """
+        future = self._prefetch_future
+        return future is not None and not future.done()
 
     def _take_prefetch(
         self,
@@ -1363,8 +1380,11 @@ class Supervisor:
             )
             return hold, {"prompt_tokens": 0, "completion_tokens": 0}
         max_attempts = max(1, config.voyage.novelty_max_attempts)
+        max_novelty_rejections = max(0, config.voyage.novelty_max_rejections)
+        novelty_threshold = config.voyage.novelty_threshold
         feedback = ""
         last_score = 0.0
+        novelty_rejections = 0
         spent_prompt_tokens = 0
         spent_completion_tokens = 0
         prefetch_pending = prefetched_raw is not None and not amendments
@@ -1426,6 +1446,7 @@ class Supervisor:
             vector = vectors[0] if vectors else None
             accepted, last_score = store.check_novel(decision.destination_concept, vector)
             if not accepted and not config.voyage.allow_concept_revisit:
+                novelty_rejections += 1
                 store.append(
                     decision.destination_concept,
                     accepted=False,
@@ -1433,13 +1454,48 @@ class Supervisor:
                     vector=vector,
                     segment=state.next_segment_number,
                 )
-                feedback = (
-                    "novelty rejection: concept too similar to history "
-                    f"(similarity {last_score:.3f}); propose a different world. "
-                    f"Director's novelty claim: {decision.novelty.why_new}"
-                )
                 self._log_rejection(
                     segment_id, attempt, "novelty", {"score": round(last_score, 3)}, served_prefetch
+                )
+                if novelty_rejections >= max_novelty_rejections:
+                    # Leniency cap reached: take the last generation instead
+                    # of burning the remaining attempts toward a
+                    # deterministic fallback (which evolves nothing). Only
+                    # novelty goes lenient — schema/style already passed, so
+                    # the charter still holds. Recorded accepted (it renders)
+                    # with novelty_accepted=False (it revisits).
+                    record = store.append(
+                        decision.destination_concept,
+                        accepted=True,
+                        summary=f"novelty override after {novelty_rejections} rejections",
+                        vector=vector,
+                        segment=state.next_segment_number,
+                    )
+                    decision.novelty_accepted = False
+                    suffix = f"novelty override (similarity {last_score:.3f}) record {record.id}"
+                    decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
+                    self._log_metric(
+                        {
+                            "event": "novelty_overridden",
+                            "segment_id": segment_id,
+                            "attempt": attempt,
+                            "score": round(last_score, 3),
+                        }
+                    )
+                    return decision, {
+                        "prompt_tokens": spent_prompt_tokens,
+                        "completion_tokens": spent_completion_tokens,
+                    }
+                recent_worlds = store.history_texts()[-8:]
+                feedback = (
+                    f"novelty rejection {novelty_rejections}/{max_novelty_rejections}: "
+                    f"'{decision.destination_concept}' scores {last_score:.3f} "
+                    f"against history (bar is below {novelty_threshold:.2f}) — "
+                    f"too close to an already-visited world. Recently visited "
+                    f"worlds to avoid: {', '.join(recent_worlds) or 'none yet'}. "
+                    f"Propose a destination with a different setting, a different "
+                    f"dominant element and a different mood; keep the style charter. "
+                    f"Director's novelty claim: {decision.novelty.why_new}"
                 )
                 continue
             record = store.append(
