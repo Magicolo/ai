@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from voyage import paths
+from voyage.errors import MediaError
 from voyage.paths import (
     MAX_SEGMENT_NUMBER,
     MIN_SEGMENT_NUMBER,
@@ -53,9 +54,11 @@ def test_resolve_stored_path_resolves_relative_against_run_dir(tmp_path: Path) -
 
 
 def test_resolve_stored_path_keeps_existing_absolute(tmp_path: Path) -> None:
+    """Outside-the-run absolutes raise (issue 015) — the old trust is gone."""
     existing = tmp_path / "video.mp4"
     existing.write_bytes(b"media")
-    assert resolve_stored_path(tmp_path / "elsewhere", existing) == existing
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "elsewhere", existing)
 
 
 def test_resolve_stored_path_reanchors_moved_run(tmp_path: Path) -> None:
@@ -69,5 +72,7 @@ def test_resolve_stored_path_reanchors_moved_run(tmp_path: Path) -> None:
 
 
 def test_resolve_stored_path_returns_stale_when_unhealable(tmp_path: Path) -> None:
+    """Unhealable outside-the-run absolutes raise (issue 015)."""
     stale = tmp_path / "nowhere" / "recovery.pt"
-    assert resolve_stored_path(tmp_path / "run", stale) == stale
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "run", stale)

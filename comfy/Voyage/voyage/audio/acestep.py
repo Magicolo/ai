@@ -70,6 +70,22 @@ def validate_reference_audio(src_audio: str | Path | None) -> None:
         )
 
 
+def is_oom(failure: BaseException) -> bool:
+    """True when `failure` is an out-of-memory (issue 052).
+
+    Matches two shapes without importing torch (this module keeps heavy
+    imports function-local): the OOM exception class itself, by name
+    (`torch.cuda.OutOfMemoryError` and the `torch.OutOfMemoryError` alias
+    both end there), and any error whose message carries the allocator's
+    `out of memory` text (e.g. a RuntimeError re-raised by upstream code).
+    OOMs stay retryable — callers re-raise them unwrapped so the worker
+    loop maps them to WORKER_ERROR instead of fatal VoyageError.
+    """
+    if type(failure).__name__ == "OutOfMemoryError":
+        return True
+    return "out of memory" in str(failure).lower()
+
+
 @dataclass
 class AceStepStack:
     diffusion: Any
@@ -106,6 +122,10 @@ def initialize(models_dir: str | Path, device: str) -> AceStepStack:
             offload_to_cpu=True,
         )
     except Exception as failure:
+        # OOM during load stays retryable (issue 052): wrapping it as the
+        # base VoyageError would bypass the supervisor restart budget.
+        if is_oom(failure):
+            raise
         raise VoyageError(f"ACE-Step stack init failed: {failure}") from failure
     # Upstream swallows load-time OOMs internally (model left as None) and
     # only fails at first render with "Model not fully initialized" — fail
@@ -178,6 +198,12 @@ def render_take(
             save_dir=str(save_path.parent),
         )
     except Exception as failure:
+        # OOM during the take render stays retryable (issue 052): the
+        # 45 s DiT render is the known transient-OOM site on 16 GiB cards,
+        # and wrapping it as the base VoyageError would fail the run with
+        # no restart instead of evicting + retrying.
+        if is_oom(failure):
+            raise
         raise VoyageError(f"ACE-Step render failed: {failure}") from failure
     if not result.success or not result.audios:
         raise VoyageError(f"ACE-Step render failed: {result.error}")

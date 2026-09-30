@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from voyage.errors import MediaError
+
 SCHEMA_VERSION = 1
 
 #: Segment-number bounds (issue 091): the six-digit `%06d` id doubles as
@@ -59,28 +61,54 @@ def format_segment_id(number: int) -> str:
     return f"{number:0{SEGMENT_ID_WIDTH}d}"
 
 
+def _is_within_run(anchor: Path, path: Path) -> bool:
+    """True when `path` resolves inside the resolved run dir (issue 015).
+
+    Both sides resolve first: lexical `..` (`segments/../../evil.wav`)
+    and symlinked parents must not pass a pure `relative_to` check, and
+    the anchor resolves too so a symlinked run dir still matches its own
+    entries. Missing paths are fine — `resolve()` is non-strict — only
+    escapes fail.
+    """
+    try:
+        path.resolve().relative_to(anchor)
+    except ValueError:
+        return False
+    return True
+
+
 def resolve_stored_path(run_dir: Path, stored: str | Path) -> Path:
-    """Resolve a persisted run artifact path (issue 016 consumer side).
+    """Resolve a persisted run artifact path (issues 015, 016 consumer side).
 
     Stored form is run-relative POSIX (e.g. `audio/take_0000.wav`,
-    `segments/000000/recovery.pt`); legacy entries are absolute. An
-    existing path is used as-is (so a non-relocated absolute entry
-    keeps working); relative entries resolve against `run_dir`, so
-    `cp -r`/`mv` of a run keeps every consumer working. A missing
-    absolute entry is re-anchored on the first known layout dirname
-    (`segments/`, `audio/`, `novelty/`, `logs/`) when that target
-    exists — this heals pre-fix runs after a move; otherwise the
-    stale path is returned so the caller still fails loudly.
+    `segments/000000/recovery.pt`); legacy entries are absolute. Relative
+    entries resolve against `run_dir`, so `cp -r`/`mv` of a run keeps every
+    consumer working. A missing absolute entry is re-anchored on the first
+    known layout dirname (`segments/`, `audio/`, `novelty/`, `logs/`) when
+    that target exists inside the run — this heals pre-fix runs after a
+    move; the in-run copy wins even when the stale absolute still exists
+    at the old location.
+
+    Containment is enforced on the resolved path (issue 015): stored paths
+    come from worker reports, ledger lines, and metrics — all untrusted
+    (issue 006) — so a relative `..` escape or an absolute path outside
+    the run raises `MediaError` (the `Supervisor._checked_tape_path`
+    convention) instead of being read/written outside the run. A trusted
+    in-run path is returned in its stored form, so the lexical
+    `run_dir`-join contract for relatives is unchanged.
     """
+    anchor = run_dir.resolve()
     candidate = Path(stored)
-    if candidate.exists():
-        return candidate
-    if not candidate.is_absolute():
-        return run_dir / candidate
-    parts = candidate.parts
-    for index, part in enumerate(parts):
-        if part in _LAYOUT_ANCHORS:
-            reanchored = run_dir.joinpath(*parts[index:])
-            if reanchored.exists():
-                return reanchored
-    return candidate
+    if candidate.is_absolute():
+        for index, part in enumerate(candidate.parts):
+            if part in _LAYOUT_ANCHORS:
+                reanchored = run_dir.joinpath(*candidate.parts[index:])
+                if reanchored.exists() and _is_within_run(anchor, reanchored):
+                    return reanchored
+        if _is_within_run(anchor, candidate):
+            return candidate
+        raise MediaError(f"stored path escapes the run dir: {stored!r}")
+    joined = run_dir / candidate
+    if not _is_within_run(anchor, joined):
+        raise MediaError(f"stored path escapes the run dir: {stored!r}")
+    return joined

@@ -13,6 +13,7 @@ the supervisor validates and commits. One segment commit:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -360,15 +361,23 @@ class Supervisor:
         lock_path = self._run_dir / "state.json.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        acquired = False
         try:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
+                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    # Not contention (EBADF/EINVAL/ENOLCK, …) — a
+                    # programming or environment error. Never misreport it
+                    # as "locked by pid" (issue 004): it propagates raw so
+                    # the real cause stays visible.
+                    raise
                 holder = self._read_lock_holder(lock_path)
                 raise FatalWorkerError(
                     f"run {self._run_dir} is locked by pid {holder}; "
                     "refusing a second concurrent writer"
                 ) from exc
+            acquired = True
             os.lseek(lock_fd, 0, os.SEEK_SET)
             os.ftruncate(lock_fd, 0)
             os.write(lock_fd, str(os.getpid()).encode("utf-8"))
@@ -379,13 +388,50 @@ class Supervisor:
             except OSError:
                 pass
             os.close(lock_fd)
+            if acquired:
+                # Best-effort tidy (issue 004): remove the rendezvous file
+                # only while it still names this process — a successor that
+                # already acquired rewrote the pid, and its file must
+                # survive. Never raises: lock hygiene must not fail a
+                # commit. Residual: a contender arriving between this read
+                # and the unlink still splits onto a fresh inode (TOCTOU,
+                # documented in 004) — the lock itself stays correct.
+                try:
+                    if lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                        lock_path.unlink()
+                except OSError:
+                    pass
 
     def _read_lock_holder(self, lock_path: Path) -> str:
-        """Pid recorded by the lock holder, or 'unknown' (best-effort)."""
+        """Pid recorded by the lock holder, or 'unknown' (best-effort).
+
+        Staleness-honest (issue 004): the lock dies with its holder, so a
+        recorded pid for a dead process is residue from a previous run —
+        the live holder simply has not written its pid yet
+        (write-after-acquire). Report 'unknown' rather than naming a dead
+        process; EPERM (alive but unsignalable) still names the pid.
+        """
         try:
-            return lock_path.read_text(encoding="utf-8").strip() or "unknown"
+            text = lock_path.read_text(encoding="utf-8").strip()
         except OSError:
             return "unknown"
+        if not text:
+            return "unknown"
+        try:
+            pid = int(text, 10)
+        except ValueError:
+            return "unknown"
+        if pid <= 0:
+            return "unknown"
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "unknown"
+        except PermissionError:
+            return text
+        except OSError:
+            return "unknown"
+        return text
 
     def _stored_relative(self, absolute_path: Path) -> str:
         """Persist `absolute_path` run-relative when possible (issue 016).
@@ -401,24 +447,38 @@ class Supervisor:
             return str(absolute_path)
 
     def _checked_tape_path(self, tape: str, segment_id: str) -> str:
-        """Validate a worker-reported recovery path (issue 006).
+        """Validate a worker-reported recovery path (issues 006, 016).
 
-        Returns the absolute wire path. Anything escaping the run dir or
-        pointing at a missing file fails fast with MediaError instead of
-        burning restart budget on doomed resume/rebuild calls.
+        Returns the resolved absolute wire path. Anything escaping the run
+        dir, pointing at a non-regular file (missing, directory, socket,
+        fifo, …), or hiding behind a symlink fails fast with MediaError
+        instead of burning restart budget on doomed resume/rebuild calls.
+        `resolve()` first so `segments/evil.pt -> /etc/passwd` cannot pass
+        the lexical gate; `is_file()` (not `exists()`) so directories fail
+        here with MediaError instead of IsADirectoryError downstream.
+        Residual TOCTOU (swap between this check and the worker's use) is
+        documented in 016 — full elimination needs an fd-passing design.
         """
         candidate = Path(tape)
         if not candidate.is_absolute():
             candidate = self._run_dir / candidate
         try:
-            candidate.relative_to(self._run_dir)
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise MediaError(
+                f"segment {segment_id}: worker recovery path is unresolvable: {tape!r}"
+            ) from exc
+        try:
+            resolved.relative_to(self._run_dir.resolve())
         except ValueError:
             raise MediaError(
                 f"segment {segment_id}: worker recovery path escapes the run dir: {tape!r}"
             ) from None
-        if not candidate.exists():
-            raise MediaError(f"segment {segment_id}: worker recovery path is missing: {candidate}")
-        return str(candidate)
+        if not resolved.is_file():
+            raise MediaError(
+                f"segment {segment_id}: worker recovery path is not a regular file: {candidate}"
+            )
+        return str(resolved)
 
     def inject_worker_crash(self, worker_name: str) -> int:
         """SIGKILL one worker without cleanup (crash-injection hook, §69).
@@ -537,9 +597,54 @@ class Supervisor:
                         "reason": str(exc),
                     }
                 )
-                worker.restart()
-                if restart_hook is not None:
-                    restart_hook(segment_id)
+                try:
+                    # The restart itself replays `init` over RPC
+                    # (rpc.restart = stop + start), so it can raise the same
+                    # RecoverableWorkerError the budget gates on (bad
+                    # weights, wedged binary, init OOM). Route it through
+                    # the same accounting instead of escaping raw (issue
+                    # 014): the failed restart consumes an attempt, emits
+                    # `worker_restart_failed`, and re-enters the gate, so
+                    # the terminal error is still FatalWorkerError with a
+                    # `circuit_breaker_open` event.
+                    worker.restart()
+                    if restart_hook is not None:
+                        restart_hook(segment_id)
+                except RecoverableWorkerError as restart_exc:
+                    # A Recoverable failure from the restart or the resume
+                    # hook is a second failure on the same attempt, not a
+                    # free retry. A FatalWorkerError from the hook still
+                    # propagates without further retries (not Recoverable).
+                    used = self._restarts.get(worker_name, 0)
+                    if used >= budget:
+                        self._log_metric(
+                            {
+                                "event": "circuit_breaker_open",
+                                "worker": worker_name,
+                                "op": op,
+                                "segment_id": segment_id,
+                                "restarts_used": used,
+                                "budget": budget,
+                                "reason": str(restart_exc),
+                            }
+                        )
+                        raise FatalWorkerError(
+                            f"circuit breaker open for {worker_name}/{op}: "
+                            f"{used} restarts exhausted ({restart_exc})"
+                        ) from restart_exc
+                    self._restarts[worker_name] = used + 1
+                    self._log_metric(
+                        {
+                            "event": "worker_restart_failed",
+                            "worker": worker_name,
+                            "op": op,
+                            "segment_id": segment_id,
+                            "attempt": used + 1,
+                            "budget": budget,
+                            "reason": str(restart_exc),
+                        }
+                    )
+                    continue
                 # Loop: the retried call runs at the top. A FatalWorkerError
                 # from the hook (e.g. its own budget exhausted) is not
                 # Recoverable, so it propagates without further retries.
@@ -556,8 +661,35 @@ class Supervisor:
         ):
             if (segment / paths.DONE_MARKER).exists():
                 tape = segment / "recovery.pt"
-                if tape.exists():
-                    return tape
+                # Discovery-side mirror of `_checked_tape_path` (issue
+                # 016): a planted symlink or directory at this
+                # supervisor-built path must not reach the worker — skip it
+                # (resume degrades to a fresh stream) instead of crashing
+                # downstream with IsADirectoryError or leaking an outside
+                # file into the resume call. The skip is metric-visible so
+                # a poisoned segment never hides silently.
+                try:
+                    resolved_tape = tape.resolve()
+                    resolved_tape.relative_to(self._run_dir.resolve())
+                except (OSError, RuntimeError, ValueError):
+                    self._log_metric(
+                        {
+                            "event": "recovery_tape_skipped",
+                            "segment_id": segment.name,
+                            "reason": "escapes the run dir",
+                        }
+                    )
+                    continue
+                if not resolved_tape.is_file():
+                    self._log_metric(
+                        {
+                            "event": "recovery_tape_skipped",
+                            "segment_id": segment.name,
+                            "reason": "not a regular file",
+                        }
+                    )
+                    continue
+                return tape
         return None
 
     def _resume_video_worker(self, segment_id: str) -> None:
@@ -1713,6 +1845,112 @@ class Supervisor:
             take_reason=take_reason,
         )
 
+    def _write_state_preserving_control_plane(self, fresh: RunState) -> None:
+        """Write back commit state without clobbering stop/pause (issue 099).
+
+        Shared by the render path (`_commit_segment`) and the orphan
+        adoption path (`_adopt_unaccounted_segment`, issue 013): `voyage
+        stop` / `voyage pause` write state.json without the run lock, so a
+        request that landed after the `fresh` read — e.g. during the
+        seconds-long checksum passes — would otherwise be clobbered by
+        this write-back. The request wins; the run loop honors it at the
+        next segment boundary.
+        """
+        try:
+            live_status = read_state(self._run_dir).status
+        except VoyageError:
+            live_status = fresh.status
+        if live_status in ("STOP_REQUESTED", "PAUSE_REQUESTED"):
+            fresh.status = live_status
+        write_state(self._run_dir, fresh)
+
+    def _adopt_unaccounted_segment(
+        self, state: RunState, number: int, segment_id: str, segment: Path
+    ) -> str:
+        """Adopt a DONE-but-unaccounted segment (issue 013).
+
+        Crash window: DONE went durable in `_commit_segment` but the
+        state.json advance never landed (SIGKILL/OOM between the two
+        writes), so the retry meets the same segment number with DONE
+        already present. Re-rendering over it would silently destroy the
+        first render and its provenance — adopt instead: verify the
+        recorded checksums over the existing media, then advance the
+        counters from the orphan's own metadata without touching a single
+        media byte. Anything unverifiable (missing/torn metadata, checksum
+        mismatch) refuses loudly with MediaError: the operator inspects or
+        removes the segment manually. There is deliberately no --force
+        overwrite on this path — silent media replacement is what 013
+        eliminates.
+        """
+        video_out = segment / "video.mp4"
+        audio_out = segment / "audio.wav"
+        try:
+            recorded = json.loads((segment / "sha256.json").read_text(encoding="utf-8"))
+            metrics_raw = json.loads((segment / "metrics.json").read_text(encoding="utf-8"))
+            world_state = SegmentWorldState.model_validate(
+                json.loads((segment / "world_state.json").read_text(encoding="utf-8"))
+            )
+        except (OSError, ValueError) as exc:
+            raise MediaError(
+                f"segment {segment_id}: DONE exists but orphan metadata is unreadable "
+                f"({exc}); refusing to re-render over it — inspect or remove "
+                f"{segment} manually"
+            ) from exc
+        if (
+            not isinstance(recorded, dict)
+            or not isinstance(recorded.get("video.mp4"), str)
+            or not isinstance(recorded.get("audio.wav"), str)
+        ):
+            raise MediaError(
+                f"segment {segment_id}: DONE exists but sha256.json is malformed; "
+                f"refusing to re-render over it — inspect or remove {segment} manually"
+            )
+        for name, media_path in (("video.mp4", video_out), ("audio.wav", audio_out)):
+            try:
+                actual = sha256_file(media_path)
+            except OSError as exc:
+                raise MediaError(
+                    f"segment {segment_id}: DONE exists but {name} is missing "
+                    f"({exc}); refusing to re-render over it — inspect or remove "
+                    f"{segment} manually"
+                ) from exc
+            if actual != recorded[name]:
+                raise MediaError(
+                    f"segment {segment_id}: DONE exists but {name} fails checksum "
+                    "verification; refusing to re-render over it — inspect or "
+                    f"remove {segment} manually"
+                )
+        frames = metrics_raw.get("frames") if isinstance(metrics_raw, dict) else None
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+            raise MediaError(
+                f"segment {segment_id}: DONE exists but metrics.json carries no "
+                f"usable frame count; refusing to re-render over it — inspect or "
+                f"remove {segment} manually"
+            )
+        # The takes ledger stays the truth for audio planning (see
+        # `_ensure_audio_coverage`); the buffer gauge keeps its pre-crash
+        # value — the next commit plans from the ledger, so worst case is
+        # an extra take render, never silence.
+        fresh = read_state(self._run_dir)
+        fresh.next_segment_number = number + 1
+        fresh.committed_segments += 1
+        fresh.timeline_frames += frames
+        fresh.current_concept = world_state.current_concept
+        fresh.destination_concept = world_state.destination_concept
+        fresh.phase = world_state.phase
+        fresh.decision_index = state.decision_index + 1
+        fresh.last_error = None
+        self._write_state_preserving_control_plane(fresh)
+        self._log_metric(
+            {
+                "event": "segment_adopted",
+                "segment_id": segment_id,
+                "frames": frames,
+                "reason": "done_before_state",
+            }
+        )
+        return segment_id
+
     def _commit_segment(
         self,
         config: ProjectConfig,
@@ -1813,20 +2051,10 @@ class Supervisor:
         fresh.decision_index = state.decision_index + 1
         fresh.audio_buffer_seconds = covered.audio_ahead
         fresh.last_error = None
-        try:
-            live_status = read_state(self._run_dir).status
-        except VoyageError:
-            live_status = fresh.status
-        if live_status in ("STOP_REQUESTED", "PAUSE_REQUESTED"):
-            # Control-plane compare-and-swap (issue 099): `voyage stop` /
-            # `voyage pause` (and the TUI Stop button) write state.json
-            # without the run lock, so a request that landed after the
-            # `fresh` read above — e.g. during the seconds-long checksum
-            # passes — would otherwise be clobbered by this write-back.
-            # The request wins; the run loop honors it at the next
-            # segment boundary.
-            fresh.status = live_status
-        write_state(self._run_dir, fresh)
+        # Control-plane compare-and-swap (issue 099) lives in the shared
+        # helper so the orphan adoption path (issue 013) honors stop/pause
+        # identically — see `_write_state_preserving_control_plane`.
+        self._write_state_preserving_control_plane(fresh)
         stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
         elapsed = round(time.monotonic() - started, 3)
         self._log_metric(
@@ -1895,6 +2123,25 @@ class Supervisor:
         segment_id = paths.format_segment_id(number)
         segment = paths.segment_dir(self._run_dir, segment_id)
         segment.mkdir(parents=True, exist_ok=True)
+        if (segment / paths.DONE_MARKER).exists():
+            # Crash-window orphan (issue 013): DONE went durable but the
+            # state.json advance never landed, so this retry meets the same
+            # number with DONE already present. Never re-render over a
+            # previous render — adopt after checksum verification, else
+            # refuse loudly. Exception: an artifact-free DONE dir (DONE is
+            # written last, so the real crash window always leaves full
+            # media + metadata alongside it) holds no render to protect —
+            # fall through to a fresh render, metric-visible.
+            if sorted(child.name for child in segment.iterdir()) == [paths.DONE_MARKER]:
+                self._log_metric(
+                    {
+                        "event": "segment_reclaimed",
+                        "segment_id": segment_id,
+                        "reason": "done_without_artifacts",
+                    }
+                )
+            else:
+                return self._adopt_unaccounted_segment(state, number, segment_id, segment)
         if self._progress is not None:
             self._progress.segment_start(number, segment_id)
 

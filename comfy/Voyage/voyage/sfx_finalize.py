@@ -226,8 +226,12 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
     cursor = 0.0
     covered_until = 0.0
     for record in records:
-        stem = resolve_stored_path(run_dir, str(record.get("path", "")))
-        if not stem.exists():
+        try:
+            stem = resolve_stored_path(run_dir, str(record.get("path", "")))
+        except MediaError as exc:
+            errors.append(f"sfx {record.get('window_id')} escapes the run dir: {exc}")
+            stem = None
+        if stem is None or not stem.exists():
             errors.append(f"sfx {record.get('window_id')} missing {record.get('path')}")
         start = float(record.get("start", -1.0))
         if abs(start - cursor) > SFX_WINDOW_OVERLAP + 0.01:

@@ -846,8 +846,17 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
             )
     tape = metrics.get("recovery_tape")
     if isinstance(tape, str) and tape:
-        tape_path = paths.resolve_stored_path(run_dir, tape) if run_dir is not None else Path(tape)
-        if not tape_path.exists():
+        if run_dir is None:
+            tape_path: Path | None = Path(tape)
+        else:
+            try:
+                tape_path = paths.resolve_stored_path(run_dir, tape)
+            except MediaError as exc:
+                errors.append(
+                    f"{segment.name} references outside-the-run recovery checkpoint {tape} ({exc})"
+                )
+                return errors, frames
+        if tape_path is not None and not tape_path.exists():
             errors.append(f"{segment.name} references missing recovery checkpoint {tape}")
     return errors, frames
 

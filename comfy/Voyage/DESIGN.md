@@ -1982,6 +1982,18 @@ must yield exactly the same logical state and fake media sequence as a single un
 
 Real GPU inference need not be byte-for-byte deterministic across hardware, drivers, kernels, or quantization implementations.
 
+> As-built (§27.3-orphan-adoption-2026-09-30, issue 013): a retry meeting
+> `segments/NNNNNN/DONE` with `state.next_segment_number` unadvanced never
+> re-renders — `_adopt_unaccounted_segment` verifies `sha256.json` over the
+> existing media and advances counters from the orphan's metadata
+> (`segment_adopted` event); unverifiable orphans raise `MediaError`.
+> Artifact-free DONE dirs log `segment_reclaimed` and render fresh. Both
+> paths share the 099 stop/pause compare-and-swap.
+> As-built (§27.4-tape-containment-2026-09-30, issue 016): worker-reported
+> tapes are resolve-contained + `is_file()`-gated (`MediaError`); discovery
+> skips non-conforming tapes with `recovery_tape_skipped`. Residual:
+> check-then-use TOCTOU at the consumer.
+
 ---
 
 # 28. Segment design
@@ -2030,6 +2042,16 @@ segments/
 A segment must never be modified after `DONE` is created.
 
 If an implementation requires a replacement, create a new attempt and update the manifest through a new transaction rather than mutating historical artifacts.
+
+> As-built (§29-path-confinement-2026-09-30, issue 015):
+> `paths.resolve_stored_path` confines every stored path to the run dir
+> (resolve-then-`relative_to` containment on both branches; `..` escapes
+> and outside-the-run absolutes raise `MediaError`); layout re-anchoring
+> heals moved runs and wins over a still-existing stale absolute. The
+> read-only validate sites (`_check_segment_metrics`,
+> `validate_sfx_ledger`) convert the new `MediaError` into error strings
+> instead of tracebacks; render paths let it propagate to the existing
+> `MediaError` catches.
 
 ---
 
@@ -2601,6 +2623,12 @@ Every operation has a stable operation name and typed payload schema.
 > As-built (§45-start-fence-2026-09-30, issue 170): a failed `start()`
 > leaves no handle — the child is reaped, `_proc` cleared, the log fd
 > closed — so callers retry `start()` cleanly or observe not-running.
+> As-built (§45-call-guard-2026-09-30, issue 007): `SubprocessWorker.call`
+> fail-fasts malformed requests (`isinstance` checks on `op`/`payload`) as
+> `FatalWorkerError` before any pipe use; the op vocabulary stays unchecked
+> so unknown ops remain the worker's `UNKNOWN_OP` fatal. Wire mapping
+> pinned: `retryable=False -> FatalWorkerError`,
+> `retryable=True -> RecoverableWorkerError`.
 
 ---
 
@@ -2737,6 +2765,15 @@ If repeated OOM occurs:
 Do not automatically skip video blocks after OOM.
 
 Skipping causes timeline holes.
+
+> As-built (§49-audio-oom-2026-09-30, issue 052): the ACE-Step compat layer
+> (`voyage/audio/acestep.py`) never wraps out-of-memory failures as base
+> `VoyageError` — `is_oom()` detects the OOM class/message shape and
+> re-raises unwrapped, so the worker loop reports retryable `WORKER_ERROR`
+> and the supervisor restart budget engages. Deterministic ACE failures
+> stay fatal `VoyageError`. (Raising `RecoverableWorkerError` from the
+> compat layer would not work — it is a `VoyageError` subclass and maps to
+> the same fatal branch.)
 
 ---
 
@@ -3535,6 +3572,16 @@ This prevents an LLM from directly mutating the persistent run state.
 > before the write); the run loop honors it at the next segment boundary.
 > Full mutual exclusion with the CLI/TUI control plane is still open —
 > `_set_status` and the TUI Stop button write without the run lock.
+> As-built (§69-restart-accounting-2026-09-30, issue 014):
+> `restart()`/hook `RecoverableWorkerError`s consume budget attempts
+> (`worker_restart_failed` event); exhaustion still opens the circuit
+> breaker — at most N restarts holds on all paths. `Fatal` from the hook
+> still propagates untouched.
+> As-built (§73-run-lock-2026-09-30, issue 004): only
+> `EWOULDBLOCK`/`EAGAIN` reads as contention (other flock `OSError`s
+> propagate raw); holder-pid reads are liveness-checked
+> (`kill(pid,0)`); `state.json.lock` is pid-guarded-unlinked after close.
+> Residual: unlink/check TOCTOU (fd-passing future work).
 
 ---
 

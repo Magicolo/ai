@@ -12,11 +12,14 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.audio.planner import AudioTake
 from voyage.cli import validate_run
 from voyage.config import load_config
+from voyage.errors import MediaError
 from voyage.paths import resolve_stored_path
 from voyage.supervisor import Supervisor
 
@@ -50,9 +53,11 @@ def _make_take(take_id: str = "take_0000", path: str = "") -> AudioTake:
 
 
 def test_resolve_stored_path_prefers_existing_absolute(tmp_path: Path) -> None:
+    """Outside-the-run absolutes raise (issue 015) — existence no longer trusts."""
     target = tmp_path / "take.wav"
     target.write_bytes(b"data")
-    assert resolve_stored_path(tmp_path / "run", str(target)) == target
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "run", str(target))
 
 
 def test_resolve_stored_path_joins_missing_relative(tmp_path: Path) -> None:
@@ -61,8 +66,10 @@ def test_resolve_stored_path_joins_missing_relative(tmp_path: Path) -> None:
 
 
 def test_resolve_stored_path_keeps_missing_absolute(tmp_path: Path) -> None:
+    """Missing outside-the-run absolutes raise (issue 015)."""
     missing = tmp_path / "gone" / "take.wav"
-    assert resolve_stored_path(tmp_path / "run", str(missing)) == missing
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "run", str(missing))
 
 
 def test_resolve_stored_path_reanchors_legacy_absolute(tmp_path: Path) -> None:

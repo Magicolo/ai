@@ -94,3 +94,19 @@ The comment covers the hook's `Fatal` path but not `restart()`'s own `Recoverabl
 - `voyage/supervisor.py:483-521` (budget gate + unguarded `restart()`), `voyage/rpc.py:177-180` (`restart` = `stop` + `start`), `:133-147` (`start` replays `init` via `call`).
 - Phase 6 slice B (restart budget + circuit breaker); `voyage/supervisor.py:539-555` (`_resume_video_worker` — the hook path that *does* share budget, contrast case).
 - Python exception chaining in loops — unhandled exceptions in `except` blocks propagate without re-entering the loop: https://docs.python.org/3/tutorial/errors.html#handling-exceptions
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live `voyage/supervisor.py` as read (`_call_with_restart` at `:489-545`, budget gate `:506-527`, bare `worker.restart()` at `:540`, hook at `:541-542`). Premise held — batch-1 (b40b052) touched `start_workers` and the commit CAS only, so this stacks cleanly with 012/099 (read both regions first per task guidance; no interaction).
+- 2026-09-30: failing tests first in `tests/test_supervisor_hardening.py` (new file): `test_failed_restart_consumes_budget_and_trips_breaker`, `test_failed_restart_then_success_recovers`, and `test_failed_restart_hook_routes_through_budget` all failed pre-fix (raw `RecoverableWorkerError` escaped where `FatalWorkerError` was expected). Watched fail in-container via `scripts/test.sh`.
+- 2026-09-30: fix implemented (see Resolution). Verification — all three pass post-fix; existing budget tests unaffected (`test_restart_budget_exhaustion_opens_circuit_breaker` still counts exactly 2 restarts at budget 2 — the success path counts nothing new; `test_resume_failures_consume_the_same_budget` green, confirming the nested resume path still shares the budget). Related suites green (see 013 log for the one foreign failure). `ruff check` + `ruff format --check` + `mypy` (strict) green on touched files.
+
+## Resolution
+
+`worker.restart()` and `restart_hook` failures now route through the restart-budget accounting, inline in `voyage/supervisor.py:_call_with_restart` (`:549-650`, restart guarded at `:604-650`):
+
+- Both calls sit inside `try/except RecoverableWorkerError`. A failure re-reads the counter, re-enters the same `used >= budget` gate with the same `circuit_breaker_open` metric shape, and otherwise consumes one more attempt (`used + 1`), emits `worker_restart_failed` (worker/op/segment/attempt/budget/reason, `:638`), and `continue`s the loop.
+- `FatalWorkerError` from the hook still propagates without further retries (not `Recoverable`) — the pre-existing comment contract is preserved, now enforced by the except type rather than by accident.
+- Terminal behavior with budget 3 and an always-failing init: `worker_restart` x2, `worker_restart_failed` x1, `circuit_breaker_open` x1, `_restarts == 3`, terminal `FatalWorkerError("circuit breaker open …")` — the Phase 6 slice B promise ("at most N restarts, then FAILED") holds on the restart path too. No helper was extracted (kept strictly inside the owned function); the gate block reads twice by design.
+
+Half left open: none — exhaustion on every path (call, restart, hook) now converges on the breaker.

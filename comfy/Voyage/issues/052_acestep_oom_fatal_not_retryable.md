@@ -38,3 +38,29 @@ from voyage.errors import VoyageError, RecoverableWorkerError
 **Refs:** `voyage/errors.py:19-24` taxonomy; PyTorch OOM FAQ (recover outside `except` — the wrapped exception pins frames); audio-eviction lesson (`del` alone frees nothing).
 
 **Overlaps with:** 049 (LTXV narrow OOM catch — shared `is_oom` predicate would fix both; not duplicates).
+
+## Progress log (2026-09-30)
+
+Premise re-verified against live code before any change (all hold):
+- `voyage/audio/acestep.py:180-181`: `except Exception` → `VoyageError("ACE-Step render failed: ...")` — wraps CUDA OOM (confirmed). Same shape in `initialize` (`:108-109`, `"ACE-Step stack init failed"`).
+- `voyage/workers/loop.py:103-110`: `except VoyageError` → `retryable=False` (confirmed).
+- `voyage/rpc.py:116`: `failure(..., retryable=True)` default; `:125-127` generic `except Exception` → `WORKER_ERROR` retryable; `:372-376` wire `retryable=True` → supervisor `RecoverableWorkerError` (restart), `False` → `FatalWorkerError`.
+- `voyage/supervisor.py:510`: only `RecoverableWorkerError` restarts (read-only; file out of scope).
+- No shared `is_oom()` exists in-tree (grep: zero hits) → local predicate per the issue's fallback.
+- `loop.py` deliberately UNTOUCHED: branch-on-class is correct; the bug is class erasure in `acestep.py`. Raising `RecoverableWorkerError` there would NOT fix it (it is a `VoyageError` subclass → same fatal branch); raw propagation is the correct route.
+
+TDD (ephemeral `/tmp/issue052_oom_repro.py`, host stdlib-only, never committed):
+- Pre-fix: 1/4 — both OOM shapes (`RuntimeError("CUDA out of memory...")`, `OutOfMemoryError`-typed) plus init OOM all wrapped as `VoyageError` (bug reproduced); non-OOM still wrapped (guard).
+- Post-fix: 4/4 PASS.
+
+Wire proof (ephemeral `/tmp/issue052_wire.py`, in-container via `loop.serve` + fake `acestep.inference`):
+- OOM → `ok=False, code=WORKER_ERROR, retryable=True` (supervisor restarts).
+- Non-OOM → `code=VoyageError, retryable=False` (no over-correction).
+
+## Resolution (2026-09-30) — FIXED
+
+`voyage/audio/acestep.py` only (+30/-2): new `is_oom()` (torch-free: class-name `OutOfMemoryError` OR `out of memory` substring, both documented) + bare `raise` guards in `render_take` and `initialize` so OOMs propagate unwrapped to the worker loop's retryable branch. Non-OOM failures still wrap as `VoyageError`.
+
+Evidence: fail-first/pass-after above; related audio suites 87 passed (`test_acestep_contract`, `test_audio_*`, `test_failure_policy`, `test_commit_hardening`, `test_rpc_*`); ruff + format + mypy-strict green on touched files; full suite 1129 passed with 5 failures all foreign (`test_paths`/`test_run_relative_consumer`/`test_state_integrity` — concurrently-modified `voyage/paths.py`, `MediaError: stored path escapes the run dir`, outside this scope) and one foreign unformatted file (`tests/test_supervisor_hardening.py`, left for its owner).
+
+Residual / follow-ups (need files outside this scope): supervisor-side `gc`/evict hygiene around the audio swap (issue's 3rd candidate; `supervisor.py` untouched); plain `MemoryError` (host RAM) still wraps as fatal — CUDA-only per the issue; shared predicate for 049 stays a future import of `acestep.is_oom` by its owning pass.

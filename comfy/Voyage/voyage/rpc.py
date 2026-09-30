@@ -324,7 +324,25 @@ class SubprocessWorker:
         `payload` stays `dict[str, Any]` (not `RpcPayload`) for now: callers
         hold `dict[str, object]`, which is not JSON-shaped, and those call
         sites belong to other passes (issue 036 follow-up).
+
+        A malformed request (non-str `op`, non-dict `payload`) fails fast
+        here as FatalWorkerError (issue 007 supervisor side): retrying the
+        same bytes cannot succeed, so it must never surface as a raw
+        pydantic error outside the branch-on-class taxonomy or burn
+        restart budget. The op vocabulary itself stays unchecked — unknown
+        ops are the worker's UNKNOWN_OP fatal, so version-skewed callers
+        still get a wire answer instead of a local refusal.
         """
+        if not isinstance(op, str):
+            raise FatalWorkerError(
+                f"worker {self._module} refusing malformed request: "
+                f"op must be str, got {type(op).__name__}"
+            )
+        if not isinstance(payload, dict):
+            raise FatalWorkerError(
+                f"worker {self._module} refusing malformed request: "
+                f"payload must be a dict, got {type(payload).__name__}"
+            )
         proc = self._proc
         if proc is None or proc.stdin is None or proc.stdout is None:
             raise FatalWorkerError(f"worker {self._module} is not running")

@@ -95,3 +95,19 @@ NO HITS; only `SubprocessWorker._call_lock = threading.Lock()` (thread-local).
 - Resolution batch 3: `fcntl` run lock + fail-fast second writer landed.
 - 2026-09-30: re-verified live (lock, holder, commit coverage all present);
   reconstructed from archived pass-1 text (commit `b5d7dda`). Status → resolved.
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live `voyage/supervisor.py` as read (`_held_run_lock` at `:352-381`, `_read_lock_holder` at `:383-388`). The base lock stands (issue resolved), but three hardening gaps from the task brief confirmed live: (1) `except OSError` around `flock` reports every errno as contention — EBADF/EINVAL would print "locked by pid"; (2) holder read returns any non-empty text, including dead-pid residue and garbage; (3) `state.json.lock` persists forever after clean exit.
+- 2026-09-30: failing tests first in `tests/test_supervisor_hardening.py` (new file): `test_flock_system_error_not_misreported_as_contention` (monkeypatched `flock` raising EBADF → pre-fix `FatalWorkerError("locked")`), `test_stale_or_garbage_holder_reads_unknown`, and `test_lock_file_removed_on_clean_exit` all failed pre-fix. Watched fail in-container. (`test_lock_file_kept_when_successor_waiting` is a guard that passes pre/post — it pins the pid-guard against over-tidying.)
+- 2026-09-30: fix implemented (see Resolution). Verification — all pass post-fix; the pre-existing `test_second_writer_fails_fast_when_locked` (reads the pid inside the hold) still green, confirming the unlink happens strictly after close. Related suites green (see 013 log for the one foreign failure). `ruff check` + `ruff format --check` + `mypy` (strict) green on touched files.
+
+## Resolution
+
+Hardening inside the owned `_held_run_lock` / `_read_lock_holder` region (`voyage/supervisor.py:353-447`, plus `import errno` at `:16`):
+
+- Contention vs system error (`:364-382`): only `EWOULDBLOCK`/`EAGAIN` take the "locked by pid" path; any other flock `OSError` propagates raw so the real cause stays visible. Never misreports a programming/environment error as a second writer.
+- Staleness-honest holder read (`:405-447`): empty/missing/garbage/non-positive pid text reads `unknown`; a recorded pid is liveness-checked with `os.kill(pid, 0)` — `ProcessLookupError` (dead residue; the lock dies with its holder, so the live holder just has not written its pid yet) reads `unknown`, `PermissionError` (alive but unsignalable) still names the pid.
+- Best-effort unlink on clean exit (in `finally`, only when this process acquired): removes `state.json.lock` solely while its content still names our own pid — a successor that already acquired rewrote the pid and its file survives (pinned by `test_lock_file_kept_when_successor_waiting`). All errors swallowed; lock hygiene can never fail a commit.
+
+Half left open (documented residual): TOCTOU fd-passing — a contender arriving between the pid check and the unlink (or holding a pre-unlink fd) still splits onto a fresh inode, and a holder that acquired-but-not-yet-written reads `unknown`. Full elimination needs an fd-passing design (open + `O_NOFOLLOW` + `fstat`-verified rendezvous); the lock itself was and stays correct — only the tidy-up and the message text carry the residual.

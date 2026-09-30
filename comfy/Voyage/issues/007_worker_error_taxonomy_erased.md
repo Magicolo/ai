@@ -113,3 +113,55 @@ PASSED — bug). Current `loop.py:154-167` enforces the type.
 - Resolution batch 3: wire codes + typed `checked_request` + MALFORMED landed.
 - 2026-09-30: re-verified live (`TypeError` probe + code present); reconstructed
   from archived pass-1 text (commit `b5d7dda`). Status → resolved.
+
+## Progress log
+
+- 2026-09-30 (supervisor-side track, scope: `voyage/rpc.py`, new test
+  file only — `voyage/workers/loop.py`, `voyage/errors.py`, supervisor and
+  existing tests untouched): re-verified every premise against live code.
+  Worker-side (a)(b)(c) no longer hold — `voyage/workers/loop.py:50-167`
+  carries the landed fix (wire codes, typed `checked_request`, MALFORMED,
+  decode-once) and is pinned by `tests/test_commit_hardening.py:251-301`
+  (`test_checked_request_enforces_types`,
+  `test_worker_error_class_survives_rpc`,
+  `test_malformed_line_answers_malformed_fast`). No fix invented there.
+  One premise DID still hold in-scope: `SubprocessWorker.call`
+  (`voyage/rpc.py:334` pre-fix) performed no request checks, so a
+  malformed supervisor-side request escaped the taxonomy as a raw
+  `pydantic_core.ValidationError` (verified live — `call(123, {})` raised
+  `ValidationError: 1 validation error for WorkerRequest`, not a
+  `VoyageError`). The `retryable=False -> Fatal` mapping
+  (`rpc.py:368-377`) existed but had zero pins.
+- TDD: wrote `tests/test_rpc_paths_hardening.py` first; the 2 request-
+  validation tests failed as predicted (raw `ValidationError`), the 3
+  mapping tests passed immediately (characterization of landed behavior).
+- Fix (`voyage/rpc.py`, `call()` entry): `isinstance` fail-fast — non-str
+  `op` / non-dict `payload` raise `FatalWorkerError` before any pipe use
+  or counter increment (deterministic caller bug: never retries, never
+  burns restart budget). The op vocabulary stays unchecked on purpose:
+  unknown ops remain the worker's `UNKNOWN_OP` fatal (sibling check —
+  `sfx_finalize.py:332` calls op `generate_sfx`, which is not in `OPS`,
+  so a supervisor-side allow-list would break the SFX pass).
+- `voyage/errors.py`: no change needed — `FatalWorkerError` /
+  `RecoverableWorkerError` (`errors.py:19-24`) already exist as the
+  mapping targets.
+- Post-fix: new file 13/13 green (incl. all pre-existing pins);
+  `test_rpc_timeout.py`, `test_rpc_start.py`, `test_paths.py`
+  (25 passed, 2 failed — both 015 collateral, unrelated to this fix),
+  `test_commit_hardening.py` green. `ruff check` + `ruff format --check`
+  + `mypy strict` green on all touched files (in-container).
+
+## Resolution
+
+- Resolved (supervisor side). `SubprocessWorker.call` now enforces the
+  error-class taxonomy on the wire in both directions: malformed requests
+  fail fast as `FatalWorkerError` (no raw escapes), and every failure
+  response maps `retryable=False -> FatalWorkerError` /
+  `retryable=True -> RecoverableWorkerError` (pinned, incl. the
+  fail-safe `ok=False`-without-detail -> `Fatal UNKNOWN` branch).
+- Files changed: `voyage/rpc.py` (request validation + docstring);
+  `tests/test_rpc_paths_hardening.py` (new, 5 RPC tests: 2 fail-first +
+  3 characterization). `voyage/errors.py` intentionally unchanged.
+- Follow-ups for owning tracks (out of scope, not applied): none for
+  007 — no caller passes non-str ops or non-dict payloads (all 9
+  `.call(` sites verified), so the new guard is dormant in production.

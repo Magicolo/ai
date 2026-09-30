@@ -84,3 +84,66 @@ PY
 - Issue 008 (CLI traversal) + 016 (consumer-side convention) — same threat model, worker-influenced paths.
 - Python `pathlib.Path.relative_to` — "raises ValueError when the path is not relative to the other": https://docs.python.org/3/library/pathlib.html#pathlib.PurePath.relative_to
 - OWASP Path Traversal — canonicalize then validate containment: https://owasp.org/www-community/attacks/Path_Traversal
+
+## Progress log
+
+- 2026-09-30 (scope: `voyage/paths.py` + new test file only — callers,
+  supervisor, existing tests untouched): re-verified both premises against
+  live code — `voyage/paths.py:62-86` matched the quoted vulnerable
+  function verbatim (branch A trusts any existing absolute; branch B joins
+  relatives with no containment check; branch C returns missing absolutes
+  as-is). Both premises still held, so the fix below was built, not
+  skipped.
+- TDD: wrote `tests/test_rpc_paths_hardening.py` first; 5 of 8 path tests
+  failed as predicted (relative `..`, nested `segments/../../..`,
+  existing-absolute-outside, missing-absolute-outside, and re-anchor
+  losing to an existing stale absolute all returned hostile paths); the 3
+  regression pins (lexical relative join, in-run absolute, re-anchor of a
+  missing stale entry) passed immediately.
+- Fix (`voyage/paths.py`): `resolve_stored_path` now resolves before it
+  trusts. The run dir resolves once as the anchor; the absolute branch
+  tries layout re-anchor FIRST (the in-run copy wins even when the stale
+  absolute still exists at the old location), trusts an absolute only when
+  it resolves inside the run (existing or not — missing in-run entries
+  still flow to the callers' `.exists()` fallbacks), and raises
+  `MediaError("stored path escapes the run dir: ...")` otherwise — the
+  `Supervisor._checked_tape_path` convention (`supervisor.py:403-421`).
+  The relative branch returns the unchanged lexical `run_dir / candidate`
+  join after the resolved containment check, so the join contract is
+  preserved. Re-anchored targets are containment-checked too (an anchor
+  name followed by `..` cannot smuggle an escape). New helper
+  `_is_within_run` (non-strict `resolve()` + `relative_to`, missing paths
+  allowed, only escapes fail).
+- Post-fix: new file 13/13 green; `test_run_relative_consumer.py` and the
+  fake-backend commit/validate/relocation flows green (28 passed).
+  `ruff check` + `ruff format --check` + `mypy strict` green on touched
+  files (in-container).
+
+## Resolution
+
+- Resolved. `resolve_stored_path` confines every stored path to the run:
+  `..` escapes (relative or absolute) and outside-the-run absolutes raise
+  `MediaError`; re-anchor healing and the in-run join/absolute behavior
+  are preserved.
+- Files changed: `voyage/paths.py` (containment gate + `_is_within_run`
+  + docstring); `tests/test_rpc_paths_hardening.py` (new, 8 path tests:
+  5 fail-first + 3 regression pins).
+- KNOWN COLLATERAL — 4 existing tests pin the vulnerable branches and now
+  fail (verified: they fail only on the new `MediaError`, nothing else):
+  `tests/test_paths.py::test_resolve_stored_path_keeps_existing_absolute`
+  (branch A), `::test_resolve_stored_path_returns_stale_when_unhealable`
+  (branch C),
+  `tests/test_run_relative_consumer.py::test_resolve_stored_path_prefers_existing_absolute`
+  (branch A),
+  `::test_resolve_stored_path_keeps_missing_absolute` (branch C). Any
+  correct fix breaks them; re-pinning them is out of scope (owning
+  tracks) — suggested: assert `MediaError` for outside-the-run entries,
+  keep the in-run/re-anchor pins as-is.
+- CALLER FOLLOW-UPS for owning tracks (out of scope, not applied): the new
+  `MediaError` propagates where callers previously got a path —
+  `cli.py:849` (`_check_segment_metrics` tape check; a traversal tape now
+  raises out of `validate_run` instead of appending an error string),
+  `media.py:576` (falls to the new loud error instead of the missing-
+  take fallback), `sfx_finalize.py:229,327,329`, `supervisor.py:1286`.
+  Each site should decide catch-and-fail-safe (commit/validate budget)
+  vs propagate, mirroring how `_checked_tape_path` errors are handled.

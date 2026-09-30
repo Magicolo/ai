@@ -49,3 +49,20 @@ No `httpx*`/`httpcore*` direct dep exists. `grep -E "^[a-zA-Z]" requirements.loc
 ## Refs
 
 - Docker "Commit your lock files and use `npm ci` (or the equivalent)… prevents builds from silently pulling new versions" — https://www.docker.com/blog/software-supply-chain-security-best-practices/
+
+## Progress log (2026-09-30)
+
+Premise re-verified against live code/metadata — REFUTED for the `*2` rows:
+- Installed `huggingface_hub==2.0.0` Requires-Dist contains `httpx2<3,>=2.0.0` (unconditional, marker-free); `httpx2==2.13.1` Requires `httpcore2`; both show intact `Required-by` chains (`httpx2 ← huggingface_hub`, `httpcore2 ← httpx2`); all three import with versions in `voyage:latest`.
+- `pip download httpx2==2.13.1 --no-deps` yields a 36-entry wheel with a real `httpx2/` package (not a stub/shadow).
+- Conclusion: the rows are GENUINELY INSTALLED, not stale/corrupt — the issue's "canonical httpx/httpcore" assumption predates this `huggingface_hub` release. Renaming them to `httpx`/`httpcore` would BREAK the image (old names are unreachable from every root). No lock change made.
+- Secondary rows from the issue all check out reachable: `hf-xet` (hf_hub, platform markers), `ast_serialize` (mypy, PEP 503 separator equivalence), `librt` (mypy, CPython marker).
+- Two subtleties the gate had to handle (found by BFS over installed metadata): `linkify-it-py` is reachable ONLY via the extras edge `textual → markdown-it-py[linkify] → linkify-it-py` (naive marker eval false-flags it); `typing-inspection` is declared by NOTHING (`Required-by` empty) yet `import pydantic` loads it at runtime — pydantic 2.10.6 metadata gap, row is load-bearing and stays.
+
+## Resolution (2026-09-30) — PREMISE REFUTED, GATE ADDED (no lock change)
+
+New `tests/test_lock_manifest_agreement.py` (5 tests, all green in-container): extras-aware BFS over installed Requires-Dist; asserts both directions (marker-applicable direct deps ⊆ lock; lock rows ⊆ reachable modulo a documented `METADATA_ORPHAN_ALLOWLIST` holding only `typing-inspection`, ratcheted to stay minimal — an entry that becomes reachable fails until removed); pins the 068 verdict (`httpx2`/`httpcore2` reachable); synthetic test proves discrimination.
+
+Evidence: `evil-typo==1.0.0` appended to a scratch copy of the real lock → gate FAILS naming the offender (real code path, `/tmp` only, tree untouched); ruff + format green (file outside mypy scope, fully annotated regardless); the 5-test module passes inside the full-suite run (1129 passed; the only failures are the foreign `paths.py` ones noted in 052).
+
+Residual: index-trust (a compromised `huggingface_hub` release could bless any rename) is NOT closed by a reachability gate — hashed requirements (fix candidate 3) remain the follow-up; `typing-inspection` allowlist entry should dissolve once pydantic metadata declares it.
