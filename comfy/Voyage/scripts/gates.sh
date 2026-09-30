@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Full gates: ruff lint + format check + mypy strict + pytest, all in-container.
+# Scope contract (issue 092): this script gates the LIVE TREE (bind-mounted
+# over /app) — what you just edited. scripts/build.sh gates the BAKED
+# SNAPSHOT instead (no bind mount — what ships). Both rebuild the image
+# first, so each verdict is self-consistent; when they disagree (green here,
+# red there), check Dockerfile COPY coverage first — the file is likely
+# missing from the image. scripts/test.sh is pytest-only by design (fast
+# iteration); the video image gets its smoke gate in build-video.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker build -q --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t voyage:latest . > /dev/null
