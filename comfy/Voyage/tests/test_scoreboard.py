@@ -73,16 +73,24 @@ def test_scoreboard_skips_partial(tmp_path: Path) -> None:
 
 
 def _write_committed_segment(run_dir: Path, segment_id: str) -> None:
+    from voyage.segment_manifest import write_segment_manifest
+
     segment = run_dir / paths.SEGMENTS_DIRNAME / segment_id
     segment.mkdir(parents=True, exist_ok=True)
     (segment / paths.DONE_MARKER).write_text("", encoding="utf-8")
-    (segment / "metrics.json").write_text(json.dumps({"video": {"frames": 48}}), encoding="utf-8")
-    (segment / "transition.json").write_text(
-        json.dumps({"destination": {"canonical_name": "probe harbor"}, "phase": "HOLD"}),
-        encoding="utf-8",
-    )
-    (segment / "audio_state.json").write_text(
-        json.dumps({"take_ids": ["take-1"]}), encoding="utf-8"
+    write_segment_manifest(
+        segment,
+        {
+            "metrics": {"video": {"frames": 48}},
+            "transition": {
+                "destination": {"canonical_name": "probe harbor"},
+                "phase": "HOLD",
+            },
+            "prompt_plan": {},
+            "audio_state": {"take_ids": ["take-1"]},
+            "world_state": {},
+            "checksums": {},
+        },
     )
 
 

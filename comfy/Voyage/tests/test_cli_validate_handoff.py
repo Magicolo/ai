@@ -13,7 +13,6 @@ commit-side (supervisor), registry, and media internals.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Literal
 
@@ -51,14 +50,21 @@ def test_validate_passes_aligned_segment(tmp_path: Path) -> None:
 
 def test_validate_rejects_misaligned_stored_durations(tmp_path: Path) -> None:
     """Crafted 2 s vs 10 s stored durations must fail validate (003)."""
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
     assert _commit_one(run_dir) == ["000000"]
-    metrics_path = run_dir / "segments" / "000000" / "metrics.json"
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    payload["video"]["duration"] = 2.0
-    payload["audio"]["duration"] = 10.0
-    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    segment = run_dir / "segments" / "000000"
+    manifest = load_segment_manifest(segment)
+    metrics = dict(manifest["metrics"])
+    video_block = dict(metrics.get("video", {}))
+    audio_block = dict(metrics.get("audio", {}))
+    video_block["duration"] = 2.0
+    audio_block["duration"] = 10.0
+    metrics["video"] = video_block
+    metrics["audio"] = audio_block
+    write_segment_manifest(segment, {**manifest, "metrics": metrics})
     errors = validate_run(run_dir)
     assert any("drift" in error and "000000" in error for error in errors)
 

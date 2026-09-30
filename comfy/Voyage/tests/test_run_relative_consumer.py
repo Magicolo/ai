@@ -8,7 +8,6 @@ serving takes. 058-C: the validate orphan scan covers `*.tmp.npy` /
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 
@@ -20,7 +19,6 @@ from voyage.audio.planner import AudioTake
 from voyage.cli import validate_run
 from voyage.config import load_config
 from voyage.errors import MediaError
-from voyage.hashing import sha256_file
 from voyage.paths import resolve_stored_path
 from voyage.supervisor import Supervisor
 
@@ -35,22 +33,12 @@ def _commit(run_dir: Path, count: int) -> list[str]:
 
 
 def _rewrite_metrics(segment: Path, **overrides: object) -> None:
-    metrics_path = segment / "metrics.json"
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    payload.update(overrides)
-    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
-    # Issue 095: metrics.json is checksummed in sha256.json, so a harness-side
-    # metrics edit must refresh the entry — mirroring the inspector path in
-    # Supervisor._run_previous_inspect. Otherwise validate correctly flags
-    # the tamper, which is not what these tape-resolution tests exercise.
-    checksum_path = segment / "sha256.json"
-    try:
-        recorded = json.loads(checksum_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if isinstance(recorded, dict) and "metrics.json" in recorded:
-        recorded["metrics.json"] = sha256_file(metrics_path)
-        checksum_path.write_text(json.dumps(recorded), encoding="utf-8")
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
+    manifest = load_segment_manifest(segment)
+    metrics = dict(manifest.get("metrics", {}))
+    metrics.update(overrides)
+    write_segment_manifest(segment, {**manifest, "metrics": metrics})
 
 
 def _make_take(take_id: str = "take_0000", path: str = "") -> AudioTake:

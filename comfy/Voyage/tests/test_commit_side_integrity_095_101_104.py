@@ -90,53 +90,59 @@ def test_legacy_checksum_without_metadata_stays_valid() -> None:
 
 
 def test_commit_writes_full_checksum_manifest(tmp_path: Path) -> None:
-    """Issue 095: a real fake-backend commit must hash media + all metadata."""
+    """Pruned layout: a real fake-backend commit writes manifest + DONE only."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="checksum")
     from voyage.supervisor import Supervisor
 
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
-    recorded = json.loads(
-        (run_dir / "segments" / "000000" / "sha256.json").read_text(encoding="utf-8")
-    )
-    for name in ("video.mp4", "audio.wav", *METADATA_ARTIFACTS):
-        assert isinstance(recorded.get(name), str) and recorded[name]
+    segment = run_dir / "segments" / "000000"
+    manifest = json.loads((segment / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["format"] == 1
+    for name in ("video.mp4", "audio.wav"):
+        assert isinstance(manifest["checksums"].get(name), str) and manifest["checksums"][name]
+    for name in METADATA_ARTIFACTS:
+        assert not (segment / name).exists(), name
+    assert not (segment / "sha256.json").exists()
     assert validate_run(run_dir) == []
 
 
 def test_commit_detects_post_commit_metrics_tamper(tmp_path: Path) -> None:
-    """Issue 095: flipping metrics after commit must fail validate."""
+    """Flipping manifest metrics after commit must fail validate (timeline)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="tamper")
-    from voyage.supervisor import Supervisor
-
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
-    assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
-    metrics_path = run_dir / "segments" / "000000" / "metrics.json"
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    payload["frames"] = int(payload["frames"]) + 10
-    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
-    errors = validate_run(run_dir)
-    assert any("metrics.json" in error and "checksum" in error for error in errors)
-
-
-def test_verify_segment_detects_metadata_tamper(tmp_path: Path) -> None:
-    """Issue 095 finalize side: _verify_segment must reject tampered metadata."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="verify")
-    from voyage.media import _verify_segment
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
     from voyage.supervisor import Supervisor
 
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     segment = run_dir / "segments" / "000000"
-    transition_path = segment / "transition.json"
-    payload = json.loads(transition_path.read_text(encoding="utf-8"))
-    payload["tampered"] = True
-    transition_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(MediaError, match="transition.json"):
-        _verify_segment(segment)
+    manifest = load_segment_manifest(segment)
+    metrics = dict(manifest["metrics"])
+    metrics["frames"] = int(metrics["frames"]) + 10
+    write_segment_manifest(segment, {**manifest, "metrics": metrics})
+    errors = validate_run(run_dir)
+    assert errors, "mutated frame count must fail validate"
+    assert any("frames" in error or "timeline" in error for error in errors)
+
+
+def test_verify_segment_ignores_metadata_tamper(tmp_path: Path) -> None:
+    """Manifest metadata is not checksummed: transition edits pass verify."""
+    run_dir = tmp_path / "run"
+    initialize_run_directory(run_dir, run_id="verify")
+    from voyage.media import _verify_segment
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+    from voyage.supervisor import Supervisor
+
+    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
+    segment = run_dir / "segments" / "000000"
+    manifest = load_segment_manifest(segment)
+    transition = dict(manifest["transition"])
+    transition["tampered"] = True
+    write_segment_manifest(segment, {**manifest, "transition": transition})
+    _verify_segment(segment)
 
 
 def test_append_take_syncs_directory_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

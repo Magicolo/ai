@@ -108,8 +108,10 @@ def initialize_run_directory(
     """Create a minimal valid run directory: config, manifest, state.
 
     Mirrors the legacy `_init_run` bodies exactly (same files, same
-    order, same empty concepts store) so converted call sites keep
-    passing unchanged. The `visual_inspector` flag applies the same
+    order) so converted call sites keep passing unchanged. No root
+    concepts file is scaffolded (2026-09-30 pruning: new runs start
+    without the legacy dup; readers tolerate its absence). The
+    `visual_inspector` flag applies the same
     TOML string replacement the inspector test modules use.
     `video_backend` pins the CPU fake pipeline (2026-09-29 ltxv
     decision: product defaults are ltxv/CUDA, but the suite runs
@@ -125,7 +127,6 @@ def initialize_run_directory(
     config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
     write_manifest(run_dir, build_manifest(config, digest, {}, {}))
     write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ CPU-only: block rendering and media I/O are faked/stubbed.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -152,9 +153,38 @@ def test_fresh_success_commits_without_orphans(
     )
     assert result["frames"] == 121
     assert output.exists()
-    assert Path(str(result["conditioning_tail_path"])).exists()
+    # Run-file pruning: no `video_tail.mp4` is persisted — the tape
+    # records the would-be path; resume derives it on demand.
+    assert not Path(str(result["conditioning_tail_path"])).exists()
     assert _chain_files(tmp_path) == []
     assert [fps for _, fps in saved] == [24, 24]
+
+
+def test_generate_leaves_no_tail_file_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec (a): generate records the would-be tail path but writes no tail."""
+    _stub_save_mp4(monkeypatch)
+    session_self = _ltxv_session_self([121])
+    output = tmp_path / "seg.mp4"
+    result = video_ltxv.LTXVSession.generate_blocks(
+        session_self,
+        prompts=["amber dunes"],
+        seeds=[7],
+        scene_cuts=[True],
+        output_path=output,
+        width=768,
+        height=512,
+        fps=24,
+    )
+    tail_path = Path(str(result["conditioning_tail_path"]))
+    assert tail_path.parent == tmp_path
+    assert tail_path.name == "video_tail.mp4"
+    assert not tail_path.exists()
+    assert "conditioning_tail_sha256" not in result
+    tape = json.loads(Path(str(result["recovery_path"])).read_text(encoding="utf-8"))
+    assert tape["conditioning_tail_path"] == str(tail_path)
+    assert "conditioning_tail_sha256" not in tape
 
 
 def test_validate_fps_rejects_non_positive() -> None:

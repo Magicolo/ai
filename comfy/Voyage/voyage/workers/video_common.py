@@ -12,14 +12,24 @@ is a torch `.pt` tensor bundle (not JSON — see its `_load_recovery_tape`),
 and its segment mp4 write uses `imageio.get_writer` inside `generate_blocks`
 — both stay in `video_longlive.py`.
 
+On-demand tail derivation (run-file pruning, DESIGN §§5.3-5.4):
+`generate_blocks` (ltxv + causvid) no longer persists `video_tail.mp4`
+beside the segment video; the tape still records the would-be
+`conditioning_tail_path`. At resume, `ensure_conditioning_tail` adopts an
+existing tail as before or derives the last `DERIVED_TAIL_FRAMES` frames
+from the sibling segment video via ffmpeg, so the supervisor's
+resume/rebuild flow works unchanged while committed segments carry one
+fewer file.
+
 Top level is numpy + stdlib only (both in every image); imageio stays
-function-level — the slim gates image has no imageio, so CPU tests stub
+function-level — the slim gates image has none, so CPU tests stub
 `sys.modules["imageio.v2"]`.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import time
 from collections import OrderedDict
@@ -139,10 +149,30 @@ class GenerateBlocksRequest:
 
 
 TAIL_FILENAME = "video_tail.mp4"
-"""Crash-recovery anchor beside the segment video (ltxv + causvid)."""
+"""Crash-recovery anchor beside the segment video (ltxv + causvid).
+
+Since run-file pruning this is the derive-target name, not a
+generate-time artifact: `generate_blocks` records the would-be path in
+the tape, and `ensure_conditioning_tail` materializes it at resume.
+"""
 
 TAPE_FILENAME = "recovery.pt"
 """Recovery-tape filename (kept for supervisor discovery; JSON content)."""
+
+DERIVED_TAIL_FRAMES = 25
+"""Frames in an on-demand derived conditioning tail (run-file pruning).
+
+Matches the ltxv conditioning tail exactly and covers the causvid
+default re-encode window (9 frames at overlap 3) with room — resume
+takes the newest window it needs from the derived file. Callers with a
+larger window pass an explicit `tail_frames` instead.
+"""
+
+SEGMENT_VIDEO_FILENAME = "video.mp4"
+"""Committed segment video beside the tape (supervisor layout, §§5.3-5.4)."""
+
+TAIL_DERIVE_TIMEOUT_SECONDS = 120.0
+"""Bound for each ffmpeg/ffprobe spawn in tail derivation (short trims)."""
 
 EMBED_CACHE_CAPACITY = 8
 """Resident text-embed entries per worker session (issues 014, 030).
@@ -247,6 +277,193 @@ def write_tape_atomic(tape_path: Path, tape: dict[str, Any]) -> Path:
     tape_tmp.write_text(tape_text, encoding="utf-8")
     tape_tmp.replace(tape_path)
     return tape_path
+
+
+class TailEnsureOutcome(NamedTuple):
+    """Where the usable conditioning tail lives, and whether it was derived."""
+
+    path: Path
+    derived: bool
+
+
+def find_segment_video(segment_dir: Path) -> Path | None:
+    """Locate the segment video a missing tail can be derived from.
+
+    Prefers the supervisor-layout `video.mp4`; otherwise the newest
+    `*.mp4` in the directory (mtime, then name) — never the tail file
+    itself. None when nothing qualifies.
+    """
+    preferred = segment_dir / SEGMENT_VIDEO_FILENAME
+    if preferred.is_file():
+        return preferred
+    candidates = [
+        candidate
+        for candidate in segment_dir.glob("*.mp4")
+        if candidate.is_file() and candidate.name != TAIL_FILENAME
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name))
+
+
+def count_video_frames(source_video: Path) -> int:
+    """Exact frame count via ffprobe decode (no container estimate).
+
+    Raises ValueError when the source is not a regular file, RuntimeError
+    when ffprobe fails or its count is unparseable (operational failure,
+    not a validation one).
+    """
+    if not source_video.is_file():
+        raise ValueError(f"segment video missing: {source_video}")
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+            str(source_video),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=TAIL_DERIVE_TIMEOUT_SECONDS,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe frame count failed for {source_video}: {proc.stderr.strip()[-500:]}"
+        )
+    try:
+        return int(proc.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"ffprobe frame count unparseable for {source_video}: {proc.stdout.strip()!r}"
+        ) from exc
+
+
+def tail_start_frame(source_video: Path, tail_frames: int) -> int:
+    """First frame index of the last-`tail_frames` window (ffprobe-backed).
+
+    Raises ValueError for non-positive counts or short sources.
+    """
+    if tail_frames < 1:
+        raise ValueError(f"tail_frames must be positive (got {tail_frames})")
+    total_frames = count_video_frames(source_video)
+    if total_frames < tail_frames:
+        raise ValueError(
+            f"segment video {source_video} has {total_frames} frames, "
+            f"need {tail_frames} for the conditioning tail"
+        )
+    return total_frames - tail_frames
+
+
+def build_tail_trim_argv(
+    source_video: Path, dest_tail: Path, start_frame: int, tail_frames: int
+) -> list[str]:
+    """ffmpeg argv trimming `tail_frames` frames from `start_frame` (pure).
+
+    Frame-exact (not time-based): `-frames:v` caps the output so the
+    derived tail length never depends on timestamps. Source timestamps
+    are preserved verbatim — retiming via `setpts` drops a frame on this
+    ffmpeg build (measured 24 instead of 25), and both tail consumers
+    (ltxv conditioning, causvid re-encode) decode to frames, where only
+    the count matters. Arg-lists only (never shell); single quotes are
+    ffmpeg filter quoting, not shell.
+    """
+    if tail_frames < 1:
+        raise ValueError(f"tail_frames must be positive (got {tail_frames})")
+    if start_frame < 0:
+        raise ValueError(f"start_frame must be non-negative (got {start_frame})")
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        str(source_video),
+        "-vf",
+        f"select='gte(n,{start_frame})'",
+        "-frames:v",
+        str(tail_frames),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "ultrafast",
+        "-f",
+        "mp4",
+        str(dest_tail),
+    ]
+
+
+def derive_tail_from_segment_video(
+    source_video: Path, dest_tail: Path, tail_frames: int = DERIVED_TAIL_FRAMES
+) -> Path:
+    """Trim the last `tail_frames` frames of `source_video` into `dest_tail`.
+
+    Writes to a `.tmp` sibling then renames (a crash mid-derive leaves a
+    flagged temp, never a torn tail). Returns `dest_tail`. Raises
+    ValueError for bad counts/short sources, RuntimeError when ffmpeg
+    fails or yields an empty file.
+    """
+    dest_tmp = dest_tail.with_suffix(".tmp")
+    start = tail_start_frame(source_video, tail_frames)
+    argv = build_tail_trim_argv(source_video, dest_tmp, start, tail_frames)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=TAIL_DERIVE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffmpeg tail derive timed out after {TAIL_DERIVE_TIMEOUT_SECONDS}s "
+            f"({source_video} -> {dest_tail})"
+        ) from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg tail derive failed ({source_video} -> {dest_tail}): "
+            f"{proc.stderr.strip()[-500:]}"
+        )
+    if not dest_tmp.is_file() or dest_tmp.stat().st_size == 0:
+        dest_tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg tail derive yielded no output ({source_video} -> {dest_tail})")
+    dest_tmp.replace(dest_tail)
+    return dest_tail
+
+
+def ensure_conditioning_tail(
+    tail_path: Path, tail_frames: int = DERIVED_TAIL_FRAMES
+) -> TailEnsureOutcome:
+    """Return the usable conditioning tail, deriving it when missing.
+
+    An existing tail file is adopted untouched (resume behaves exactly as
+    before, including a stale sha — the tape hash stays advisory). A
+    missing one is derived from the sibling segment video into `tail_path`
+    itself, so later resumes hit it directly. Raises ValueError only when
+    both the tail and any derivable video are absent.
+    """
+    if tail_path.is_file():
+        return TailEnsureOutcome(tail_path, False)
+    source = find_segment_video(tail_path.parent)
+    if source is None:
+        raise ValueError(
+            f"conditioning tail missing: {tail_path} "
+            f"(no segment video in {tail_path.parent} to derive it from)"
+        )
+    derive_tail_from_segment_video(source, tail_path, tail_frames=tail_frames)
+    return TailEnsureOutcome(tail_path, True)
 
 
 def clip_array_to_uint8(scaled_frames: NDArray[Any]) -> NDArray[np.uint8]:

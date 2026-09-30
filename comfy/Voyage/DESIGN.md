@@ -531,6 +531,15 @@ Conditioning tail: **replaced the single-frame tail PNG with `video_tail.mp4`** 
 committed frames, written beside `video.mp4`, sha256 recorded). Rationale: the extension
 API needs an 8n+1 *video* prefix, and a single image carries no motion — the PNG was
 image-conditioning, not the spec's prefix replay. No PNG is written anymore.
+> As-built (§5.3-pruning-2026-09-30): `video_tail.mp4` is no longer
+> persisted at generate time. The tape still records
+> `conditioning_tail_path` (the would-be location, hash omitted until
+> observed); at resume `ensure_conditioning_tail` adopts an existing
+> tail untouched, otherwise ffmpeg-trims the last 25 frames from the
+> sibling `video.mp4` (causvid: `max(25, overlap window)`) into the
+> recorded path and re-hashes in-memory when the tape carries a hash.
+> Tail sha stays advisory — resume never hard-fails on mismatch; both
+> files missing raises `ValueError`.
 
 Recovery tape: **§5.3 JSON written to `segments/<id>/recovery.pt`** (filename kept so the
 supervisor's `recovery.pt` discovery is unchanged; content is JSON, atomically
@@ -2022,6 +2031,8 @@ Real GPU inference need not be byte-for-byte deterministic across hardware, driv
 > re-renders — `_adopt_unaccounted_segment` verifies `sha256.json` over the
 > existing media and advances counters from the orphan's metadata
 > (`segment_adopted` event); unverifiable orphans raise `MediaError`.
+> (Superseded §29-pruning-2026-09-30: verification now reads the
+> `manifest.json` checksums section, legacy `sha256.json` fallback.)
 > Artifact-free DONE dirs log `segment_reclaimed` and render fresh. Both
 > paths share the 099 stop/pause compare-and-swap.
 > As-built (§27.4-tape-containment-2026-09-30, issue 016): worker-reported
@@ -2071,15 +2082,20 @@ segments/
 └── 000042/
     ├── video.mp4
     ├── audio.wav
-    ├── world_state.json
-    ├── transition.json
-    ├── prompt_plan.json
-    ├── audio_state.json
-    ├── metrics.json
     ├── recovery.pt
-    ├── sha256.json
+    ├── manifest.json
     └── DONE
 ```
+
+`manifest.json` (`format: 1`) holds the five metadata sections
+(`transition`/`prompt_plan`/`audio_state`/`world_state`/`metrics`) plus
+`checksums` (sha256 over the binary artifacts `video.mp4`/`audio.wav`/
+`recovery.pt` only — metadata rides on the atomic manifest write, no
+self-hash). Pre-prune runs (individual JSONs + `sha256.json`) still
+load via legacy fallback in `voyage/segment_manifest.py`. Audio
+coverage slices live in a tmpdir and are never persisted; the video
+conditioning tail is derived on demand at resume (see §5.3 as-built)
+and new runs start without the root `concepts.jsonl` legacy dup.
 
 A segment must never be modified after `DONE` is created.
 
@@ -2094,6 +2110,15 @@ If an implementation requires a replacement, create a new attempt and update the
 > `validate_sfx_ledger`) convert the new `MediaError` into error strings
 > instead of tracebacks; render paths let it propagate to the existing
 > `MediaError` catches.
+> As-built (§29-pruning-2026-09-30): per-segment file count 12 → 5
+> (`DONE`, `video.mp4`, `audio.wav`, `recovery.pt`, `manifest.json`);
+> ~100 fewer files on a 15-segment run. `DONE` stays a separate file
+> (kept as the commit gate); slices stay in tmpdir; `video_tail.mp4`
+> is resume-derived; root `concepts.jsonl` no longer created;
+> `.cache/acestep` upstream writes are chdir-redirected out of the run.
+> Readers (`media`, `cli_validate`, `scoreboard`, `sfx_finalize`,
+> adopt, inspect-merge) go through `segment_manifest` with legacy
+> fallback, so old runs still validate/scoreboard/resume.
 
 ---
 
@@ -2111,7 +2136,10 @@ A segment is committed in this order:
 7. Write recovery checkpoint to .partial
 8. fsync checkpoint
 9. Atomically rename checkpoint
-10. Compute and persist checksums
+10. Compute checksums and persist them inside the manifest
+> As-built (§30-pruning-2026-09-30): step 10 persists checksums as the
+> `checksums` section of the single atomic `manifest.json` write
+> (binaries only); there is no separate `sha256.json` anymore.
 11. Write DONE.partial
 12. fsync
 13. rename DONE
@@ -3618,6 +3646,10 @@ Never silently mutate a run during validation.
 > and the adoption path too; pre-fix media-only manifests verify as
 > "not covered". The inspector's post-commit `metrics.json` rewrite
 > refreshes its checksum entry so validate never false-positives.
+> (Superseded §29-pruning-2026-09-30: the manifest is now a
+> `manifest.json` section set + binary checksums; `sha256.json` survives
+> only as a legacy fallback. Metadata tamper inside `manifest.json`
+> passes `_verify_segment` by design — atomic write is the guarantee.)
 > As-built (§70-fps-corrupt-2026-09-30, issue 029): `validate` reports
 > `state fps is corrupt` for `fps <= 0`; the 24-fallback below it is
 > SFX-math-only and runs after reporting.
@@ -7900,3 +7932,24 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Tests/process (batch-7-2026-09-30): `conftest` `short_texts`/`bounded_counts` unification + `VOYAGE_HYPOTHESIS_DATABASE=1` replay opt-in; `_init_run` ratchet test caps at 144 (`test_phase2` folded into `test_recovery`).
 - Scripts (batch-7-2026-09-30): `scripts/lib/common.sh` shared cache-env/user-args/image helpers; `run.sh` TOML sniff covers video/audio/sfx with CUDA-preferring pick; `qualify.sh` takes `--backend`/`--segments`.
 - Batch 7 (2026-09-30): resolved 079-partial/080/082-partial/083/084/085/031-doc/032/033/034/035-doc/036-tracker/037/038/039/040/041/088-proof/089-residual/090/091/092/093-partial/094-policy; real 024 stays OPEN (concurrent owner); 070 value-pin still needs a provisioned box; 086 needs voyage/ scope.
+
+- Run-file pruning done 2026-09-30 (user Q&A: fewer files first, run
+  stays resumable/validatable/re-finalizable; future runs only, boba
+  untouched): per-segment 12 files → 5 (`DONE`, `video.mp4`,
+  `audio.wav`, `recovery.pt`, `manifest.json`). Three parallel tracks:
+  A (workers tail: `generate_blocks` no longer persists
+  `video_tail.mp4`; `ensure_conditioning_tail` in
+  `workers/video_common.py` derives the last 25 frames from sibling
+  `video.mp4` at resume, causvid width `max(25, overlap)`, sha
+  advisory; `tests/test_tail_derive.py` 22 tests), B (supervisor
+  slices to `TemporaryDirectory`; 6 JSONs → `manifest.json`
+  `format: 1` via new `voyage/segment_manifest.py` with legacy
+  fallback for all readers; `tests/test_segment_manifest.py` 4
+  tests), C (`cmd_init` no longer creates root `concepts.jsonl`;
+  boba's 0-byte dup deleted after verifying the live store;
+  `audio_acestep` worker chdir-redirects upstream `.cache` writes out
+  of the run). `DONE` kept separate (round-3 reversal);
+  `audio/take_*.wav` + sfx windows kept (primary sources).
+  `tests/conftest.py` scaffold drops the root dup. Gates: ruff +
+  format + mypy strict clean; 1483 passed, 5 skipped, 1 known TUI
+  Pilot load flake (passes in isolation).

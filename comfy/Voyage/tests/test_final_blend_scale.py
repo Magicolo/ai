@@ -57,9 +57,11 @@ def _sine_take(dest: Path, seconds: float) -> Path:
 def _synthetic_run(run_dir: Path, segments: int) -> list[Path]:
     """Fabricate committed-segment dirs + one take covering the timeline.
 
-    `build_final_audio` only reads segment metrics.json (frame counts) and
-    the takes ledger — no video.mp4 or supervisor commit needed.
+    `build_final_audio` only reads segment manifest metrics (frame counts)
+    and the takes ledger — no video.mp4 or supervisor commit needed.
     """
+    from voyage.segment_manifest import write_segment_manifest
+
     timeline = segments * SEGMENT_SECONDS
     take_path = run_dir / "audio" / "take_0000.wav"
     _sine_take(take_path, timeline + 1.0)
@@ -83,8 +85,16 @@ def _synthetic_run(run_dir: Path, segments: int) -> list[Path]:
     for index in range(segments):
         segment = paths.segment_dir(run_dir, f"{index:06d}")
         segment.mkdir(parents=True, exist_ok=True)
-        (segment / "metrics.json").write_text(
-            json.dumps({"frames": FRAMES_PER_SEGMENT}), encoding="utf-8"
+        write_segment_manifest(
+            segment,
+            {
+                "metrics": {"frames": FRAMES_PER_SEGMENT},
+                "transition": {},
+                "prompt_plan": {},
+                "audio_state": {},
+                "world_state": {},
+                "checksums": {},
+            },
         )
         usable.append(segment)
     return usable

@@ -96,16 +96,24 @@ def _write_committed_segment(
     *,
     with_media: bool = False,
 ) -> Path:
+    from voyage.segment_manifest import write_segment_manifest
+
     segment = run_dir / "segments" / segment_id
     segment.mkdir(parents=True, exist_ok=True)
     (segment / "DONE").write_text("ok", encoding="utf-8")
-    (segment / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
-    (segment / "transition.json").write_text(
-        json.dumps({"destination": {"canonical_name": "probe harbor"}, "phase": "HOLD"}),
-        encoding="utf-8",
-    )
-    (segment / "audio_state.json").write_text(
-        json.dumps({"take_ids": ["take-1"]}), encoding="utf-8"
+    write_segment_manifest(
+        segment,
+        {
+            "metrics": metrics,
+            "transition": {
+                "destination": {"canonical_name": "probe harbor"},
+                "phase": "HOLD",
+            },
+            "prompt_plan": {},
+            "audio_state": {"take_ids": ["take-1"]},
+            "world_state": {},
+            "checksums": {},
+        },
     )
     if with_media:
         (segment / "video.mp4").write_bytes(b"\x00")

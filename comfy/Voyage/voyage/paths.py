@@ -29,6 +29,7 @@ SEGMENT_ID_WIDTH = 6
 
 CONFIG_FILENAME = "voyage.toml"
 MANIFEST_FILENAME = "run_manifest.json"
+SEGMENT_MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
 CONCEPTS_FILENAME = "concepts.jsonl"
 SEGMENTS_DIRNAME = "segments"

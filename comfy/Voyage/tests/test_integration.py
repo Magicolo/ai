@@ -67,8 +67,17 @@ def test_commit_one_segment_end_to_end(tmp_path: Path) -> None:
         supervisor.stop_workers()
     assert segment_id == "000000"
     segment = paths.segment_dir(run_dir, segment_id)
-    for name in ("video.mp4", "audio.wav", "DONE", "sha256.json", "prompt_plan.json"):
+    for name in ("video.mp4", "audio.wav", "DONE", "manifest.json"):
         assert (segment / name).exists(), name
+    for name in (
+        "transition.json",
+        "prompt_plan.json",
+        "audio_state.json",
+        "world_state.json",
+        "metrics.json",
+        "sha256.json",
+    ):
+        assert not (segment / name).exists(), name
     state = read_state(run_dir)
     assert state.committed_segments == 1
     assert state.next_segment_number == 1

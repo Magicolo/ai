@@ -23,6 +23,7 @@ from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
 from voyage.augment import interpolated_frame_count as interpolated_frame_count
 from voyage.errors import DiskSpaceError, MediaError
 from voyage.hashing import sha256_file
+from voyage.segment_manifest import load_segment_manifest
 
 #: Max |video duration − audio duration| per segment, seconds (DESIGN §56
 #: step 6). Same budget the commit path enforces, so anything committed
@@ -61,17 +62,6 @@ MIN_SLICE_PIECE_SECONDS = 0.05
 #: slice (two at a take joint); 128 is orders of magnitude above legitimate
 #: while capping ffmpeg spawns when the ledger degrades.
 MAX_SLICES_PER_WINDOW = 128
-
-#: Segment JSON artifacts the checksum manifest covers alongside media
-#: (issue 095). Additive: old manifests carry media only and still verify —
-#: missing metadata entries mean "not covered", never an error.
-METADATA_CHECKSUM_ARTIFACTS = (
-    "metrics.json",
-    "transition.json",
-    "prompt_plan.json",
-    "audio_state.json",
-    "world_state.json",
-)
 
 
 def av_drift_seconds(video_duration: float, audio_duration: float) -> float:
@@ -412,37 +402,42 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
     on any mismatch — fail loud, never finalize corrupt media silently.
     """
     name = segment.name
-    checksums_path = segment / "sha256.json"
-    if not checksums_path.exists():
-        raise MediaError(f"segment {name} missing sha256.json")
     try:
-        expected = json.loads(checksums_path.read_text(encoding="utf-8"))
-    except ValueError as exc:
-        raise MediaError(f"segment {name} has unreadable sha256.json: {exc}") from exc
-    if not isinstance(expected, dict):
-        raise MediaError(f"segment {name} has malformed sha256.json")
+        manifest = load_segment_manifest(segment)
+    except MediaError as exc:
+        raise MediaError(f"segment {name} has unreadable manifest: {exc}") from exc
+    expected_any = manifest.get("checksums")
+    expected = dict(expected_any) if isinstance(expected_any, dict) else {}
+    if not expected:
+        if (segment / "sha256.json").exists():
+            raise MediaError(f"segment {name} has unreadable sha256.json")
+        raise MediaError(f"segment {name} missing manifest.json")
     for artifact in ("video.mp4", "audio.wav"):
         recorded = expected.get(artifact)
         if not isinstance(recorded, str) or not recorded:
-            raise MediaError(f"segment {name} sha256.json missing {artifact}")
-        actual = _sha256_file(segment / artifact)
+            raise MediaError(f"segment {name} manifest missing {artifact}")
+        try:
+            actual = _sha256_file(segment / artifact)
+        except OSError as exc:
+            raise MediaError(f"segment {name} missing {artifact}: {exc}") from exc
         if actual != recorded:
             raise MediaError(f"segment {name} checksum mismatch for {artifact}")
-    for artifact in METADATA_CHECKSUM_ARTIFACTS:
-        recorded = expected.get(artifact)
+    for artifact, recorded in sorted(expected.items()):
+        if artifact in ("video.mp4", "audio.wav"):
+            continue
         if not isinstance(recorded, str) or not recorded:
             continue  # legacy manifest: media only means "not covered"
         target = segment / artifact
         if not target.exists():
-            raise MediaError(f"segment {name} sha256.json lists missing {artifact}")
+            raise MediaError(f"segment {name} manifest lists missing {artifact}")
         if _sha256_file(target) != recorded:
             raise MediaError(f"segment {name} checksum mismatch for {artifact}")
-    metrics_path = segment / "metrics.json"
+    metrics_any = manifest.get("metrics")
+    metrics = dict(metrics_any) if isinstance(metrics_any, dict) else {}
     try:
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         frames = int(metrics.get("frames", 0))
-    except (ValueError, KeyError, AttributeError) as exc:
-        raise MediaError(f"segment {name} has unreadable metrics.json: {exc}") from exc
+    except (ValueError, TypeError) as exc:
+        raise MediaError(f"segment {name} has unreadable manifest metrics: {exc}") from exc
     if frames <= 0:
         raise MediaError(f"segment {name} has non-positive frame count {frames}")
     video_duration = float(probe(segment / "video.mp4").get("format", {}).get("duration", 0.0))
@@ -463,12 +458,17 @@ def _segment_timeline(usable: list[Path], fps: int) -> tuple[list[float], list[f
     starts: list[float] = []
     ends: list[float] = []
     cursor = 0.0
+
     for segment in usable:
         try:
-            metrics = json.loads((segment / "metrics.json").read_text(encoding="utf-8"))
+            manifest = load_segment_manifest(segment)
+            metrics_any = manifest.get("metrics")
+            metrics = dict(metrics_any) if isinstance(metrics_any, dict) else {}
             frames = int(metrics.get("frames", 0))
-        except (ValueError, KeyError, AttributeError) as exc:
-            raise MediaError(f"segment {segment.name} has unreadable metrics.json: {exc}") from exc
+        except (ValueError, TypeError, MediaError, RecursionError) as exc:
+            raise MediaError(
+                f"segment {segment.name} has unreadable manifest metrics: {exc}"
+            ) from exc
         if frames <= 0:
             raise MediaError(f"segment {segment.name} has non-positive frame count {frames}")
         starts.append(cursor)

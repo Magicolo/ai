@@ -425,13 +425,18 @@ def test_recovery_tape_round_trip(tmp_path: Path) -> None:
 
 
 def test_recovery_tape_rejects_foreign_json(tmp_path: Path) -> None:
+    from voyage.workers import video_common
+
     with pytest.raises(ValueError, match="foreign or legacy"):
         video_causvid.parse_recovery_tape({"profile": "ltxv", "tail_png": "x"})
     with pytest.raises(ValueError, match="foreign or legacy"):
         video_causvid.parse_recovery_tape({})
+    # Run-file pruning: a missing tail file parses (resume derives it);
+    # only a missing tail *path* fails. Both-missing fails at ensure.
     tape = video_causvid.build_recovery_tape(**_tape_kwargs(tmp_path / "missing.mp4"))
+    assert video_causvid.parse_recovery_tape(json.loads(json.dumps(tape))) == tape
     with pytest.raises(ValueError, match="conditioning tail missing"):
-        video_causvid.parse_recovery_tape(tape)
+        video_common.ensure_conditioning_tail(tmp_path / "missing.mp4")
 
 
 def test_load_tape_json_rejects_non_json_bytes(tmp_path: Path) -> None:
@@ -475,15 +480,41 @@ def test_generate_blocks_end_to_end_cpu(tmp_path: Path, monkeypatch: pytest.Monk
     assert torch.generator_seeds == [7, 8]
     assert len(torch.randn_calls) == 2
     assert all("generator" in call["kwargs"] for call in torch.randn_calls)
-    # Tape + tail beside the segment, tape parses.
+    # Tape + (absent) tail beside the segment: run-file pruning records
+    # the would-be path without persisting the file; the tape parses.
     tape = json.loads(Path(result["recovery_path"]).read_text(encoding="utf-8"))
     assert video_causvid.parse_recovery_tape(tape) == tape
     assert tape["novel_frames_per_rollout"] == 72
-    assert Path(result["conditioning_tail_path"]).exists()
+    assert tape["conditioning_tail_path"] == result["conditioning_tail_path"]
+    assert "conditioning_tail_sha256" not in tape
+    assert not Path(result["conditioning_tail_path"]).exists()
+
+
+def test_generate_leaves_no_tail_file_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec (a): generate records the would-be tail path but writes no tail."""
+    session, _torch, _pipeline, media = _test_session(monkeypatch)
+    del _torch, _pipeline
+    output = tmp_path / "seg" / "segment.mp4"
+    result = session.generate_blocks(
+        prompts=["amber dunes"],
+        seeds=[7],
+        scene_cuts=[True],
+        output_path=output,
+        segment_id="000007",
+    )
+    assert result["frames"] == 72
+    assert output.exists()
+    tail_path = Path(result["conditioning_tail_path"])
+    assert tail_path.parent == output.parent
+    assert tail_path.name == "video_tail.mp4"
+    assert not tail_path.exists()
+    assert [save["path"] for save in media["saves"]] == [str(output)]
 
 
 def test_committed_markers_prove_tail_drop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Frame-index markers: rollout 0 commits [0..71], tail holds [63..71]."""
+    """Frame-index markers: a fresh rollout commits [0..71]; no tail is written."""
     session, _torch, _pipeline, media = _test_session(monkeypatch)
     del _torch, _pipeline
     session.generate_blocks(
@@ -496,16 +527,12 @@ def test_committed_markers_prove_tail_drop(tmp_path: Path, monkeypatch: pytest.M
     def _marker(frame: Any) -> int:
         return int(frame[0, 0, 0])
 
-    assert len(media["saves"]) == 2
+    assert len(media["saves"]) == 1
     segment_frames = media["saves"][0]["frames"]
-    tail_frames = media["saves"][1]["frames"]
     assert media["saves"][0]["fps"] == 16
     assert len(segment_frames) == 72
-    assert len(tail_frames) == 9
     for index, frame in enumerate(segment_frames):
         assert _marker(frame) == int(index / 81 * 255)
-    for offset, frame in enumerate(tail_frames):
-        assert _marker(frame) == int((63 + offset) / 81 * 255)
 
 
 def test_rollout_seeds_global_rng_from_rollout_seed(

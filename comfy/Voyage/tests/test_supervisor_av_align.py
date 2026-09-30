@@ -15,7 +15,6 @@ backends, real ffmpeg media, no GPU):
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -62,32 +61,30 @@ def _lie_about_video(supervisor: Supervisor, video_block: dict[str, object]) -> 
 
 
 def _build_orphan_from_committed(run_dir: Path, next_number: int) -> Path:
-    """Copy segment 000000's media/metadata into the next segment dir.
+    """Copy segment 000000's media/manifest into the next segment dir.
 
     Returns the orphan segment dir (with DONE, matching checksums).
     The caller tampers afterwards (drift audio / absurd frames) and
-    rewrites sha256.json so checksums still pass — the adoption gate
-    under test is the only thing that may refuse.
+    rewrites the manifest checksums so checksums still pass — the
+    adoption gate under test is the only thing that may refuse.
     """
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
     src = run_dir / paths.SEGMENTS_DIRNAME / "000000"
     segment_id = paths.format_segment_id(next_number)
     dst = run_dir / paths.SEGMENTS_DIRNAME / segment_id
     dst.mkdir(parents=True, exist_ok=True)
     shutil.copy(src / "video.mp4", dst / "video.mp4")
     shutil.copy(src / "audio.wav", dst / "audio.wav")
-    shutil.copy(src / "metrics.json", dst / "metrics.json")
-    world = json.loads((src / "world_state.json").read_text(encoding="utf-8"))
-    world["segment_id"] = segment_id
-    (dst / "world_state.json").write_text(json.dumps(world), encoding="utf-8")
-    (dst / "sha256.json").write_text(
-        json.dumps(
-            {
-                "video.mp4": sha256_file(dst / "video.mp4"),
-                "audio.wav": sha256_file(dst / "audio.wav"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = load_segment_manifest(src)
+    world_state = dict(manifest.get("world_state", {}))
+    world_state["segment_id"] = segment_id
+    manifest["world_state"] = world_state
+    manifest["checksums"] = {
+        "video.mp4": sha256_file(dst / "video.mp4"),
+        "audio.wav": sha256_file(dst / "audio.wav"),
+    }
+    write_segment_manifest(dst, manifest)
     (dst / paths.DONE_MARKER).write_bytes(b"")
     return dst
 
@@ -111,6 +108,7 @@ def test_commit_rejects_av_drifted_audio(tmp_path: Path, monkeypatch: pytest.Mon
 def test_adopt_rejects_av_drifted_orphan(tmp_path: Path) -> None:
     """DONE orphan with drifted audio must not adopt silently (003)."""
     from voyage.fake_backends import FakeAudioBackend
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
 
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -126,15 +124,12 @@ def test_adopt_rejects_av_drifted_orphan(tmp_path: Path) -> None:
         channels=config.audio.channels,
         duration_seconds=10.0,
     )
-    (orphan / "sha256.json").write_text(
-        json.dumps(
-            {
-                "video.mp4": sha256_file(orphan / "video.mp4"),
-                "audio.wav": sha256_file(orphan / "audio.wav"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = load_segment_manifest(orphan)
+    manifest["checksums"] = {
+        "video.mp4": sha256_file(orphan / "video.mp4"),
+        "audio.wav": sha256_file(orphan / "audio.wav"),
+    }
+    write_segment_manifest(orphan, manifest)
     supervisor = _started_supervisor(run_dir)
     try:
         with pytest.raises(MediaError, match="alignment drift"):
@@ -171,13 +166,16 @@ def test_worker_reported_bool_frames_rejected(tmp_path: Path) -> None:
 
 def test_adopt_rejects_absurd_frames(tmp_path: Path) -> None:
     """DONE orphan with `frames=10**9` must not adopt silently (006)."""
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     assert _commit(run_dir, 1) == ["000000"]
     orphan = _build_orphan_from_committed(run_dir, 1)
-    payload = json.loads((orphan / "metrics.json").read_text(encoding="utf-8"))
-    payload["frames"] = 10**9
-    (orphan / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+    manifest = load_segment_manifest(orphan)
+    metrics = dict(manifest.get("metrics", {}))
+    metrics["frames"] = 10**9
+    write_segment_manifest(orphan, {**manifest, "metrics": metrics})
     supervisor = _started_supervisor(run_dir)
     try:
         with pytest.raises(MediaError, match="implausible"):

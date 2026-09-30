@@ -36,6 +36,7 @@ from voyage.media import (
     run_capture,
 )
 from voyage.paths import resolve_stored_path
+from voyage.segment_manifest import load_transition
 
 SFX_WINDOW_SECONDS = 8.0
 """Native MMAudio window (upstream: 1.23 s per 8 s clip on small)."""
@@ -150,7 +151,7 @@ def segment_sfx_bounds(
 
     Bounds come from probed segment durations (same walk as the music
     path's `_segment_timeline`); captions read each segment's committed
-    `transition.json` audio.sfx_caption best-effort (missing/torn/legacy
+    manifest transition audio.sfx_caption best-effort (missing/torn/legacy
     → "" — a history read must never break a finalize). A
     `caption_override` replaces every segment caption (old runs whose
     decisions predate SFX captions, or a deliberate single-caption dub).
@@ -175,8 +176,9 @@ def segment_sfx_bounds(
                 duration = 0.0
         caption = ""
         try:
-            raw = json.loads((segment / "transition.json").read_text(encoding="utf-8"))
-            caption = EvolutionDecision.model_validate(raw).audio.sfx_caption
+            raw = load_transition(segment)
+            if raw:
+                caption = EvolutionDecision.model_validate(raw).audio.sfx_caption
         except (OSError, ValueError):
             caption = ""
         if caption_override is not None:

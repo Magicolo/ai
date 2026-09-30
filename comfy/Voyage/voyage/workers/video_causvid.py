@@ -26,6 +26,10 @@ Deliberate deviations from the script (each documented where it happens):
   artifact). That is an approximation of the in-flight upstream state
   (re-encoded head + raw latent tail); the qualify track must A/B resumed
   vs uninterrupted continuity before trusting long resumed runs.
+- The tail file itself (``video_tail.mp4``) is derived on demand at
+  resume from the sibling segment video — ``generate_blocks`` no longer
+  persists it (run-file pruning); the tape records the would-be path,
+  and resume writes the derived file there for later resumes.
 - Media is imageio mp4 @ native 16 fps (never relabeled — the worker
   refuses any requested fps other than 16; the 24 fps finalize stage is a
   later orchestrator track).
@@ -272,7 +276,7 @@ def build_recovery_tape(
     *,
     source_segment_id: str,
     conditioning_tail_path: str,
-    conditioning_tail_sha256: str,
+    conditioning_tail_sha256: str | None = None,
     overlap_frames: int,
     num_frame_per_block: int,
     decoded_frames_per_rollout: int,
@@ -295,15 +299,18 @@ def build_recovery_tape(
     (``novel_frames_per_rollout``) counts, latent-tail shape/dtype,
     ``start_latents_from`` (encoded video vs generated latent provenance),
     and the exact CausVid commit/config hashes plus the license record.
+
+    The tail hash rides along only when the caller hashed a file for it:
+    run-file pruning records the would-be tail path with no hash (nothing
+    is persisted to hash), and resume fills it in after deriving.
     """
     dropped = dropped_tail_frames(overlap_frames)
-    return {
+    tape: dict[str, Any] = {
         "profile": RECOVERY_PROFILE,
         "backend": RECOVERY_PROFILE,
         "state_mode": STATE_MODE,
         "source_segment_id": source_segment_id,
         "conditioning_tail_path": conditioning_tail_path,
-        "conditioning_tail_sha256": conditioning_tail_sha256,
         "num_overlap_frames": overlap_frames,
         "num_frame_per_block": num_frame_per_block,
         "decoded_frames_per_rollout": decoded_frames_per_rollout,
@@ -336,6 +343,9 @@ def build_recovery_tape(
         "height": height,
         "fps": fps,
     }
+    if conditioning_tail_sha256 is not None:
+        tape["conditioning_tail_sha256"] = conditioning_tail_sha256
+    return tape
 
 
 def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +354,10 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
     Clean break: this is the first CausVid worker, so there are no legacy
     CausVid tapes — any JSON without the causvid marker, and any non-JSON
     bytes (old torch pickles), are unresumable by design.
+
+    A missing tail *file* is not a parse error (run-file pruning): the
+    tape records the would-be path, and resume derives it from the
+    sibling segment video. Only a missing tail *path* fails here.
     """
     if not isinstance(tape, dict):
         raise ValueError("CausVid recovery tape must be a JSON object")
@@ -360,8 +374,6 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
     tail_path = tape.get("conditioning_tail_path")
     if not isinstance(tail_path, str) or not tail_path:
         raise ValueError("CausVid recovery tape has no conditioning tail path")
-    if not Path(tail_path).exists():
-        raise ValueError(f"CausVid conditioning tail missing: {tail_path}")
     overlap = tape.get("num_overlap_frames")
     block = tape.get("num_frame_per_block")
     if not isinstance(overlap, int) or not isinstance(block, int):
@@ -806,14 +818,13 @@ class CausvidSession:
             video_frames = np.concatenate(novel_clips, axis=0)
         committed_frames = int(video_frames.shape[0])
         _save_mp4(video_frames, output_path, NATIVE_FPS)
-        tail_window = select_tail_window(video_frames, self._overlap_frames)
+        # Run-file pruning: no `video_tail.mp4` is persisted — the tape
+        # records the would-be path, and resume derives it from the
+        # segment video written above.
         tail_path = output_path.parent / TAIL_FILENAME
-        _save_mp4(tail_window, tail_path, NATIVE_FPS)
-        tail_checksum = sha256_file(tail_path)
         tape = build_recovery_tape(
             source_segment_id=segment_id,
             conditioning_tail_path=str(tail_path),
-            conditioning_tail_sha256=tail_checksum,
             overlap_frames=self._overlap_frames,
             num_frame_per_block=self._num_frame_per_block,
             decoded_frames_per_rollout=decoded_per_rollout[0],
@@ -863,7 +874,6 @@ class CausvidSession:
             "start_latents_from": START_FROM_UPSTREAM,
             "seeds": list(seeds),
             "conditioning_tail_path": str(tail_path),
-            "conditioning_tail_sha256": tail_checksum,
             "recovery_path": str(tape_path),
         }
 
@@ -872,9 +882,29 @@ class CausvidSession:
 
         No GPU work here (mirrors ltxv): the anchor materializes lazily at
         the next ``generate_blocks`` via :meth:`_materialize_resume_start`.
+
+        A missing tail file is derived from the sibling segment video
+        (run-file pruning) and written to the recorded path, so later
+        resumes hit it directly. The derived file holds the last 25
+        frames, or the full re-encode window when the overlap demands
+        more — the materializer takes the newest window it needs. The
+        tape hash stays advisory: a derived tail re-hashes the tape in
+        memory when it carries a tail hash (tapes without one are left
+        alone), and an existing tail is adopted untouched — resume never
+        hard-fails on a hash mismatch.
         """
         parsed = parse_recovery_tape(tape)
         tail_path = str(parsed["conditioning_tail_path"])
+        overlap = int(parsed["num_overlap_frames"])
+        tail_frames = max(video_common.DERIVED_TAIL_FRAMES, reencode_window_frames(overlap))
+        outcome = video_common.ensure_conditioning_tail(Path(tail_path), tail_frames=tail_frames)
+        if outcome.derived:
+            print(
+                f"causvid derived missing tail from the segment video: {tail_path}",
+                file=sys.stderr,
+            )
+            if "conditioning_tail_sha256" in parsed:
+                parsed["conditioning_tail_sha256"] = sha256_file(outcome.path)
         tape_latent = parsed.get("latent_shape")
         if (
             isinstance(tape_latent, list)

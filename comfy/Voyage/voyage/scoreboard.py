@@ -22,6 +22,7 @@ from typing import Any
 
 from voyage import paths
 from voyage.logrotate import iter_metric_files
+from voyage.segment_manifest import load_audio_state, load_metrics, load_transition
 
 METRIC_KEYS = [
     "motion_energy",
@@ -51,14 +52,6 @@ def _finite_float(value: Any) -> float | None:
         return None
     result = float(value)
     return result if math.isfinite(result) else None
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return raw if isinstance(raw, dict) else None
 
 
 def _stages_by_segment(run_dir: Path) -> dict[str, dict[str, float]]:
@@ -127,9 +120,9 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
     for segment in sorted(p for p in segments_root.iterdir() if p.is_dir()):
         if not (segment / paths.DONE_MARKER).exists():
             continue
-        metrics = _read_json(segment / "metrics.json") or {}
-        transition = _read_json(segment / "transition.json") or {}
-        audio_state = _read_json(segment / "audio_state.json") or {}
+        metrics = load_metrics(segment)
+        transition = load_transition(segment)
+        audio_state = load_audio_state(segment)
         video = metrics.get("video")
         raw_frames = video.get("frames") if isinstance(video, dict) else None
         if isinstance(raw_frames, bool):

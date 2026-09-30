@@ -69,46 +69,46 @@ def test_validate_dir_as_video_returns_error_not_raise(tmp_path: Path) -> None:
 
 
 def test_validate_dir_as_metrics_returns_error_not_raise(tmp_path: Path) -> None:
-    """A directory where `metrics.json` belongs yields INVALID errors, no traceback."""
+    """A directory where `manifest.json` belongs yields INVALID errors, no traceback."""
     from voyage.cli import validate_run
 
     run_dir = tmp_path / "run"
     _commit_single_segment(run_dir)
     segment = _segment_dir(run_dir)
-    (segment / "metrics.json").unlink()
-    (segment / "metrics.json").mkdir()
+    (segment / "manifest.json").unlink()
+    (segment / "manifest.json").mkdir()
     errors = validate_run(run_dir)
-    assert errors, "dir-as-metrics.json must be reported, not silently valid"
-    assert any("metrics.json" in error for error in errors)
+    assert errors, "dir-as-manifest.json must be reported, not silently valid"
+    assert any("manifest.json" in error for error in errors)
 
 
 def test_validate_deeply_nested_metrics_returns_error_not_raise(tmp_path: Path) -> None:
-    """Deeply nested `metrics.json` maps to an error string, never RecursionError."""
+    """Deeply nested `manifest.json` maps to an error string, never RecursionError."""
     from voyage.cli import validate_run
 
     run_dir = tmp_path / "run"
     _commit_single_segment(run_dir)
     segment = _segment_dir(run_dir)
     depth = 20000
-    hostile = '{"frames": ' + "[" * depth + "1" + "]" * depth + "}"
-    (segment / "metrics.json").write_text(hostile, encoding="utf-8")
+    hostile = '{"format": 1, "metrics": {"frames": ' + "[" * depth + "1" + "]" * depth + "}}"
+    (segment / "manifest.json").write_text(hostile, encoding="utf-8")
     errors = validate_run(run_dir)
-    assert errors, "nested metrics.json must be reported, not silently valid"
-    assert any("metrics.json" in error for error in errors)
+    assert errors, "nested manifest.json must be reported, not silently valid"
+    assert any("manifest.json" in error for error in errors)
 
 
 def test_validate_dir_as_sha256_returns_error_not_raise(tmp_path: Path) -> None:
-    """A directory where `sha256.json` belongs yields INVALID errors, no traceback."""
+    """A directory where `manifest.json` belongs yields INVALID errors, no traceback."""
     from voyage.cli import validate_run
 
     run_dir = tmp_path / "run"
     _commit_single_segment(run_dir)
     segment = _segment_dir(run_dir)
-    (segment / "sha256.json").unlink()
-    (segment / "sha256.json").mkdir()
+    (segment / "manifest.json").unlink()
+    (segment / "manifest.json").mkdir()
     errors = validate_run(run_dir)
-    assert errors, "dir-as-sha256.json must be reported, not silently valid"
-    assert any("sha256.json" in error for error in errors)
+    assert errors, "dir-as-manifest.json must be reported, not silently valid"
+    assert any("manifest.json" in error for error in errors)
 
 
 # ---------------------------------------------------------------------------

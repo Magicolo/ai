@@ -13,6 +13,7 @@ module never imports `torch` at top level. `torch` appears only inside
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import time
@@ -45,6 +46,28 @@ __all__ = ["BYTES_PER_GIB", "validate_sample_rate", "validate_channels"]
 _stack: AceStepStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
+_upstream_cache_dir: Path | None = None
+"""Dedicated CWD for upstream ACE-Step relative writes (DESIGN §37, below)."""
+
+
+def _redirect_upstream_writes() -> Path:
+    """Point CWD at a dedicated tmp dir so upstream relative writes miss the run dir.
+
+    Upstream ACE-Step writes `.cache/acestep/progress_estimates.json`
+    relative to the worker process CWD, and workers spawn with CWD=run_dir —
+    every music render littered the run directory. Redirecting CWD to a fresh
+    tmp dir (created once per process, reused across re-inits) moves those
+    writes out of the run. All voyage paths are absolute (payload
+    `output_path` invariant, `TemporaryDirectory` staging, absolute
+    `models_dir`), so the chdir is side-effect free — the `video_longlive` /
+    `video_causvid` `_enter_*_tree` precedent. Runs before any ACE-Step
+    library call; idempotent.
+    """
+    global _upstream_cache_dir
+    if _upstream_cache_dir is None:
+        _upstream_cache_dir = Path(tempfile.mkdtemp(prefix="voyage-acestep-cwd-"))
+    os.chdir(_upstream_cache_dir)
+    return _upstream_cache_dir
 
 
 def _require_torch() -> None:
@@ -125,6 +148,7 @@ def _require_stack() -> AceStepStack:
     if _stack is None:
         # Lazy load: init only records where/how, so the process can start
         # while video still owns the GPU; the stack loads on first render.
+        _redirect_upstream_writes()
         _stack = initialize(_models_dir, _device)
     return _stack
 
@@ -136,8 +160,11 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     process can start while video still owns the GPU (sequential residency,
     DESIGN §40). Optional fields are type-checked when present so a
     mistyped `init` fails as INVALID_PAYLOAD instead of misdirecting the
-    later load.
+    later load. Redirects CWD out of the run dir first (before any ACE-Step
+    library call) so upstream relative writes land in a tmp dir, never in
+    the run (see `_redirect_upstream_writes`).
     """
+    _redirect_upstream_writes()
     global _models_dir, _device
     if "models_dir" in payload and not isinstance(payload["models_dir"], str):
         raise TypeError(

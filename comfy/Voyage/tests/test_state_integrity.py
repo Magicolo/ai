@@ -32,24 +32,27 @@ def _commit(run_dir: Path, count: int) -> list[str]:
 
 
 def _rewrite_metrics(segment: Path, **overrides: object) -> None:
-    metrics_path = segment / "metrics.json"
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    payload.update(overrides)
-    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
+    manifest = load_segment_manifest(segment)
+    metrics = dict(manifest.get("metrics", {}))
+    metrics.update(overrides)
+    write_segment_manifest(segment, {**manifest, "metrics": metrics})
 
 
 def _rewrite_checksums(segment: Path) -> None:
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
     from voyage.supervisor import sha256_file
 
-    (segment / "sha256.json").write_text(
-        json.dumps(
-            {
-                "video.mp4": sha256_file(segment / "video.mp4"),
-                "audio.wav": sha256_file(segment / "audio.wav"),
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = load_segment_manifest(segment)
+    checksums: dict[str, str] = {
+        "video.mp4": sha256_file(segment / "video.mp4"),
+        "audio.wav": sha256_file(segment / "audio.wav"),
+    }
+    tape = segment / "recovery.pt"
+    if tape.is_file():
+        checksums["recovery.pt"] = sha256_file(tape)
+    write_segment_manifest(segment, {**manifest, "checksums": checksums})
 
 
 def test_clean_run_validates(tmp_path: Path) -> None:
@@ -136,10 +139,14 @@ def test_validate_detects_impossible_duration(tmp_path: Path) -> None:
     _init_run(run_dir)
     _commit(run_dir, 1)
     segment = run_dir / "segments" / "000000"
-    metrics_path = segment / "metrics.json"
-    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-    payload["video"]["duration"] = 0.0
-    metrics_path.write_text(json.dumps(payload), encoding="utf-8")
+    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
+
+    manifest = load_segment_manifest(segment)
+    metrics = dict(manifest.get("metrics", {}))
+    video_block = dict(metrics.get("video", {}))
+    video_block["duration"] = 0.0
+    metrics["video"] = video_block
+    write_segment_manifest(segment, {**manifest, "metrics": metrics})
     errors = validate_run(run_dir)
     assert any("duration" in error for error in errors)
 

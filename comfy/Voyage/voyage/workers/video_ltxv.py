@@ -12,9 +12,10 @@ a persistent KV stream. Every segment renders one 121-frame clip; when a
 25-frame conditioning tail exists (and the block is not a scene cut) the
 clip is conditioned on that tail video at start frame 0, the 25-frame
 prefix is discarded, and only the ~96 novel frames are committed. The tail
-file ``video_tail.mp4`` (last 25 committed frames) beside the segment video
-is the crash-recovery anchor, so the supervisor's resume/rebuild flow works
-unchanged. Recovery tape ``recovery.pt`` carries the §5.3 JSON record (kept
+(`video_tail.mp4`, last 25 committed frames) is derived on demand at
+resume from the sibling segment video — `generate_blocks` no longer
+persists it — so the supervisor's resume/rebuild flow works unchanged.
+Recovery tape ``recovery.pt`` carries the §5.3 JSON record (kept
 filename for supervisor discovery; JSON content — old torch-pickle tapes
 are unresumable by design).
 
@@ -265,7 +266,7 @@ def build_recovery_tape(
     *,
     source_segment_id: str,
     conditioning_tail_path: str,
-    conditioning_tail_sha256: str,
+    conditioning_tail_sha256: str | None = None,
     prompts: list[str],
     seeds: list[int],
     width: int,
@@ -279,13 +280,16 @@ def build_recovery_tape(
 
     Extra ``last_prompt`` field (beyond the spec minimum) lets a resumed
     session keep reporting prompt changes truthfully.
+
+    The tail hash rides along only when the caller hashed a file for it:
+    run-file pruning records the would-be tail path with no hash (nothing
+    is persisted to hash), and resume fills it in after deriving.
     """
-    return {
+    tape: dict[str, Any] = {
         "backend": RECOVERY_PROFILE,
         "state_mode": STATE_MODE,
         "source_segment_id": source_segment_id,
         "conditioning_tail_path": conditioning_tail_path,
-        "conditioning_tail_sha256": conditioning_tail_sha256,
         "prompt_plan_hash": prompt_plan_digest or prompt_plan_hash(prompts),
         "seed": seeds[0] if seeds else 0,
         "seeds": list(seeds),
@@ -301,6 +305,9 @@ def build_recovery_tape(
         "segment_target_frames": segment_target_frames,
         "conditioning_tail_frames": conditioning_tail_frames,
     }
+    if conditioning_tail_sha256 is not None:
+        tape["conditioning_tail_sha256"] = conditioning_tail_sha256
+    return tape
 
 
 def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
@@ -309,6 +316,10 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
     Clean break (Stream A): tapes without ``backend``/``state_mode`` are the
     pre-§5.3 ``{"profile": "ltxv", "tail_png": ...}`` format and are
     unresumable — the caller must re-render from seed.
+
+    A missing tail *file* is not a parse error (run-file pruning): the
+    tape records the would-be path, and resume derives it from the
+    sibling segment video. Only a missing tail *path* fails here.
     """
     if not isinstance(tape, dict):
         raise ValueError("LTXV recovery tape must be a JSON object")
@@ -320,8 +331,6 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
     tail_path = tape.get("conditioning_tail_path")
     if not isinstance(tail_path, str) or not tail_path:
         raise ValueError("LTXV recovery tape has no conditioning tail path")
-    if not Path(tail_path).exists():
-        raise ValueError(f"LTXV conditioning tail missing: {tail_path}")
     return tape
 
 
@@ -759,7 +768,9 @@ class LTXVSession:
                     novel = block[:, :, generated_frames - novel_count :, :, :]
                 novel_clips.append(novel)
                 # Temporary tail video for the next block in this call: last 25
-                # committed frames. The final block's tail becomes video_tail.mp4.
+                # committed frames. Chain files are deleted after the commit
+                # (run-file pruning) — the tape records the would-be tail
+                # path, and resume derives it from the segment video.
                 tail_clip = novel[:, :, -conditioning_tail_frames:, :, :]
                 # Issue 064: a short `novel` slices short (negative-slice
                 # semantics) — committing that as a full 25-frame anchor
@@ -791,17 +802,11 @@ class LTXVSession:
         _save_mp4(video, output_path, fps)
         save_total_ms += (time.perf_counter() - save_started) * MILLISECONDS_PER_SECOND
         tail_path = output_path.parent / TAIL_FILENAME
-        if len(chain_tails) == 1:
-            chain_tails[0].replace(tail_path)
-        else:
-            chain_tails[-1].replace(tail_path)
-            for stale in chain_tails[:-1]:
-                stale.unlink(missing_ok=True)
-        tail_checksum = sha256_file(tail_path)
+        for stale in chain_tails:
+            stale.unlink(missing_ok=True)
         tape = build_recovery_tape(
             source_segment_id=segment_id,
             conditioning_tail_path=str(tail_path),
-            conditioning_tail_sha256=tail_checksum,
             prompts=prompts,
             seeds=seeds,
             width=width,
@@ -838,7 +843,6 @@ class LTXVSession:
             "native_fps": fps,
             "prompt_changed": prompt_changed,
             "conditioning_tail_path": str(tail_path),
-            "conditioning_tail_sha256": tail_checksum,
             "recovery_path": str(tape_path),
             "fp8_fallback": self._fp8_fallback,
             "stage_ms": {
@@ -850,9 +854,28 @@ class LTXVSession:
         }
 
     def resume_from_tape(self, tape: dict[str, Any]) -> dict[str, Any]:
-        """Adopt the previous segment's tail video as the conditioning anchor."""
+        """Adopt the previous segment's tail video as the conditioning anchor.
+
+        A missing tail file is derived from the sibling segment video
+        (run-file pruning) and written to the recorded path, so later
+        resumes hit it directly. The tape hash stays advisory: a derived
+        tail re-hashes the tape in memory when it carries a tail hash
+        (tapes without one are left alone), and an existing tail is
+        adopted untouched — resume never hard-fails on a hash mismatch.
+        """
         parsed = parse_recovery_tape(tape)
         tail_path = str(parsed["conditioning_tail_path"])
+        raw_tail_frames = parsed.get("conditioning_tail_frames", CONDITIONING_TAIL_FRAMES)
+        tail_frames = (
+            int(raw_tail_frames)
+            if isinstance(raw_tail_frames, int) and not isinstance(raw_tail_frames, bool)
+            else CONDITIONING_TAIL_FRAMES
+        )
+        outcome = video_common.ensure_conditioning_tail(Path(tail_path), tail_frames=tail_frames)
+        if outcome.derived:
+            print(f"ltxv derived missing tail from the segment video: {tail_path}", file=sys.stderr)
+            if "conditioning_tail_sha256" in parsed:
+                parsed["conditioning_tail_sha256"] = sha256_file(outcome.path)
         self._conditioning_tail_path = tail_path
         last_prompt = parsed.get("last_prompt")
         self._last_prompt = str(last_prompt) if isinstance(last_prompt, str) else None

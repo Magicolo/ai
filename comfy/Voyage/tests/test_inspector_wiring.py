@@ -9,7 +9,6 @@ shape holds in both. The inspected-True leg is covered in test_inspector.py.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from tests.conftest import initialize_run_directory
@@ -40,9 +39,9 @@ def _init_run(run_dir: Path, *, inspector: bool) -> None:
 
 
 def _read_metrics(run_dir: Path, segment_id: str) -> dict[str, object]:
-    raw = json.loads(
-        (paths.segment_dir(run_dir, segment_id) / "metrics.json").read_text(encoding="utf-8")
-    )
+    from voyage.segment_manifest import load_metrics
+
+    raw = load_metrics(paths.segment_dir(run_dir, segment_id))
     assert isinstance(raw, dict)
     return raw
 

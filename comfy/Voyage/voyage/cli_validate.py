@@ -19,28 +19,42 @@ from voyage.errors import MediaError, StateError
 from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS
 from voyage.media import av_drift_seconds as _av_drift_seconds
 from voyage.persistence import read_manifest, read_state
+from voyage.segment_manifest import load_segment_manifest
 from voyage.supervisor import sha256_file
 
 _SEGMENT_ID_PATTERN = re.compile(r"^\d{6}$")
 
 
 def _check_segment_checksums(segment: Path) -> list[str]:
-    """Recompute sha256.json entries (DESIGN §70: checksum mismatches).
+    """Recompute manifest checksums (DESIGN §70: checksum mismatches).
 
-    Media entries are required; metadata entries (issue 095) verify when
-    recorded and stay silent when absent, so pre-fix two-entry manifests
-    keep validating (additive, never a new error on legacy runs).
+    Media entries are required; any other recorded entry (recovery.pt on
+    new manifests, legacy metadata JSONs on old `sha256.json` manifests)
+    verifies when recorded and stays silent when absent, so old runs keep
+    validating (additive, never a new error on legacy runs).
     """
     errors: list[str] = []
-    checksums_path = segment / "sha256.json"
-    if not checksums_path.exists():
+    manifest_file = segment / paths.SEGMENT_MANIFEST_FILENAME
+    legacy_file = segment / "sha256.json"
+    if manifest_file.exists():
+        source = "manifest.json"
+        try:
+            manifest = load_segment_manifest(segment)
+        except (ValueError, OSError, RecursionError, MediaError):
+            return [f"{segment.name} has unreadable manifest.json"]
+        expected = manifest.get("checksums")
+        if not isinstance(expected, dict):
+            return [f"{segment.name} has malformed manifest.json"]
+    elif legacy_file.exists():
+        source = "sha256.json"
+        try:
+            expected = json.loads(legacy_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError, RecursionError):
+            return [f"{segment.name} has unreadable sha256.json"]
+        if not isinstance(expected, dict):
+            return [f"{segment.name} has malformed sha256.json"]
+    else:
         return errors  # missing file already reported by the caller
-    try:
-        expected = json.loads(checksums_path.read_text(encoding="utf-8"))
-    except (ValueError, OSError, RecursionError):
-        return [f"{segment.name} has unreadable sha256.json"]
-    if not isinstance(expected, dict):
-        return [f"{segment.name} has malformed sha256.json"]
     for artifact in ("video.mp4", "audio.wav"):
         recorded = expected.get(artifact)
         target = segment / artifact
@@ -50,7 +64,7 @@ def _check_segment_checksums(segment: Path) -> list[str]:
             errors.append(f"{segment.name} {artifact} is not a file")
             continue
         if not isinstance(recorded, str) or not recorded:
-            errors.append(f"{segment.name} sha256.json missing entry for {artifact}")
+            errors.append(f"{segment.name} {source} missing entry for {artifact}")
             continue
         try:
             digest = sha256_file(target)
@@ -59,14 +73,9 @@ def _check_segment_checksums(segment: Path) -> list[str]:
             continue
         if digest != recorded:
             errors.append(f"{segment.name} checksum mismatch for {artifact}")
-    for artifact in (
-        "metrics.json",
-        "transition.json",
-        "prompt_plan.json",
-        "audio_state.json",
-        "world_state.json",
-    ):
-        recorded = expected.get(artifact)
+    for artifact, recorded in sorted(expected.items()):
+        if artifact in ("video.mp4", "audio.wav"):
+            continue
         if not isinstance(recorded, str) or not recorded:
             continue  # legacy manifest: media only means "not covered"
         target = segment / artifact
@@ -97,13 +106,30 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
     Returns (errors, frames).
     """
     errors: list[str] = []
-    metrics_path = segment / "metrics.json"
-    if not metrics_path.exists():
+    manifest_file = segment / paths.SEGMENT_MANIFEST_FILENAME
+    legacy_metrics = segment / "metrics.json"
+    manifest_present = manifest_file.exists()
+    if not manifest_present and not legacy_metrics.exists():
+        if (segment / "sha256.json").exists():
+            return [f"{segment.name} DONE but missing metrics.json"], 0
+        return [f"{segment.name} DONE but missing manifest.json"], 0
+    try:
+        manifest = load_segment_manifest(segment)
+    except (ValueError, OSError, RecursionError, MediaError):
+        return [f"{segment.name} has unreadable manifest.json"], 0
+    metrics_any = manifest.get("metrics")
+    metrics = dict(metrics_any) if isinstance(metrics_any, dict) else {}
+    if not metrics:
+        if manifest_present:
+            return [f"{segment.name} has unreadable manifest.json"], 0
+        if legacy_metrics.exists():
+            return [f"{segment.name} has unreadable metrics.json"], 0
         return [f"{segment.name} DONE but missing metrics.json"], 0
     try:
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         frames = int(metrics.get("frames", 0))
     except (ValueError, KeyError, AttributeError, TypeError, OSError, RecursionError):
+        if manifest_present:
+            return [f"{segment.name} has unreadable manifest.json"], 0
         return [f"{segment.name} has unreadable metrics.json"], 0
     if frames <= 0:
         errors.append(f"{segment.name} has non-positive frame count {frames}")
@@ -192,9 +218,15 @@ def validate_run(run_dir: Path) -> list[str]:
             errors.append(f"segment numbering gap: expected {position:06d}, found {segment.name}")
     expected_frames = 0
     for segment in committed:
-        for name in ("video.mp4", "audio.wav", "world_state.json", "sha256.json"):
+        for name in ("video.mp4", "audio.wav"):
             if not (segment / name).exists():
                 errors.append(f"{segment.name} DONE but missing {name}")
+        if (segment / paths.SEGMENT_MANIFEST_FILENAME).exists():
+            pass  # metadata lives inside the manifest
+        else:
+            for name in ("world_state.json", "sha256.json"):
+                if not (segment / name).exists():
+                    errors.append(f"{segment.name} DONE but missing {name}")
         errors.extend(_check_segment_checksums(segment))
         metric_errors, frames = _check_segment_metrics(segment, run_dir)
         errors.extend(metric_errors)

@@ -230,18 +230,40 @@ def test_recovery_tape_rejects_legacy_torch_format(tmp_path: Path) -> None:
         video_ltxv.parse_recovery_tape(legacy)
 
 
-def test_recovery_tape_rejects_missing_tail() -> None:
+def test_recovery_tape_missing_tail_file_parses_for_derive(tmp_path: Path) -> None:
+    """Run-file pruning: a missing tail file is not a parse error.
+
+    The tape records the would-be path and resume derives it from the
+    sibling segment video — only a missing tail *path* fails parsing.
+    """
+    from voyage.workers import video_common
+
     tape = video_ltxv.build_recovery_tape(
         source_segment_id="000124",
-        conditioning_tail_path="/nonexistent/video_tail.mp4",
-        conditioning_tail_sha256="0" * 64,
+        conditioning_tail_path=str(tmp_path / "video_tail.mp4"),
         prompts=["amber dunes"],
         seeds=[7],
         width=768,
         height=512,
         fps=24,
     )
+    assert "conditioning_tail_sha256" not in tape
+    assert video_ltxv.parse_recovery_tape(json.loads(json.dumps(tape))) == tape
     with pytest.raises(ValueError, match="conditioning tail missing"):
+        video_common.ensure_conditioning_tail(tmp_path / "video_tail.mp4")
+
+
+def test_recovery_tape_rejects_missing_tail_path() -> None:
+    tape = video_ltxv.build_recovery_tape(
+        source_segment_id="000124",
+        conditioning_tail_path="",
+        prompts=["amber dunes"],
+        seeds=[7],
+        width=768,
+        height=512,
+        fps=24,
+    )
+    with pytest.raises(ValueError, match="no conditioning tail path"):
         video_ltxv.parse_recovery_tape(tape)
 
 

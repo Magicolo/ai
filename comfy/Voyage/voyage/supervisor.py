@@ -19,6 +19,7 @@ import json
 import math
 import os
 import signal
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -80,6 +81,13 @@ from voyage.prompts import (
 )
 from voyage.rpc import SubprocessWorker
 from voyage.seeds import audio_seed, video_seed
+from voyage.segment_manifest import (
+    build_segment_manifest,
+    load_segment_manifest,
+    load_transition,
+    update_manifest_metrics,
+    write_segment_manifest,
+)
 from voyage.vision.metrics import (
     Histogram,
     frame_histogram,
@@ -159,18 +167,6 @@ MIN_SLICE_PIECE_SECONDS = 0.05
 #: degrades. Mirrors `voyage.media.MAX_SLICES_PER_WINDOW` (same rationale
 #: as above — keep both comments in sync).
 MAX_SLICES_PER_SEGMENT = 128
-
-#: Segment JSON artifacts the checksum manifest covers alongside media
-#: (issue 095). Mirrors `voyage.media.METADATA_CHECKSUM_ARTIFACTS` so the
-#: writer and both verifiers hash the same set without an import cycle
-#: (media never imports supervisor).
-METADATA_CHECKSUM_ARTIFACTS = (
-    "metrics.json",
-    "transition.json",
-    "prompt_plan.json",
-    "audio_state.json",
-    "world_state.json",
-)
 
 
 class ProposedSegment(NamedTuple):
@@ -273,12 +269,9 @@ def previous_transition_captions(run_dir: Path, number: int) -> str:
     from voyage.director import format_previous_captions
 
     prev_id = paths.format_segment_id(number - 1)
-    transition_path = paths.segment_dir(run_dir, prev_id) / "transition.json"
-    try:
-        raw = json.loads(transition_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(raw, dict):
+    prev_dir = paths.segment_dir(run_dir, prev_id)
+    raw = load_transition(prev_dir)
+    if not raw:
         return ""
     try:
         decision = EvolutionDecision.model_validate(raw)
@@ -1655,49 +1648,54 @@ class Supervisor:
         # below are issue 104: without them a degenerate ledger (1 ms
         # takes, stagnant coverage) spawns thousands of ffmpeg processes
         # that the 0.6 s A/V gate only catches after the damage.
-        slices: list[Path] = []
-        take_ids: list[str] = []
-        cursor = video_time
-        end = video_time + duration
-        index = 0
-        slice_started = time.monotonic()
-        while cursor < end - 1e-6:
-            if index >= MAX_SLICES_PER_SEGMENT:
-                raise MediaError(
-                    f"segment {segment_id}: audio slice walk exceeded "
-                    f"{MAX_SLICES_PER_SEGMENT} slices — corrupt takes ledger"
+        # Slices live in a TemporaryDirectory (never the segment dir):
+        # only fully-committed segments are adopted, and slices are never
+        # read back after assembly, so crash-safety needs no segment files.
+        with tempfile.TemporaryDirectory(prefix="voyage-slices-") as slice_tmp:
+            slice_dir = Path(slice_tmp)
+            slices: list[Path] = []
+            take_ids: list[str] = []
+            cursor = video_time
+            end = video_time + duration
+            index = 0
+            slice_started = time.monotonic()
+            while cursor < end - 1e-6:
+                if index >= MAX_SLICES_PER_SEGMENT:
+                    raise MediaError(
+                        f"segment {segment_id}: audio slice walk exceeded "
+                        f"{MAX_SLICES_PER_SEGMENT} slices — corrupt takes ledger"
+                    )
+                serving = planner.take_for_time(cursor)
+                if serving is None or not serving.path:
+                    raise MediaError(f"segment {segment_id}: audio gap at {cursor:.2f}s")
+                piece = min(serving.covers_until(), end) - cursor
+                if piece < MIN_SLICE_PIECE_SECONDS:
+                    raise MediaError(
+                        f"segment {segment_id}: degenerate take slice "
+                        f"({piece:.6f}s at {cursor:.2f}s) — corrupt takes ledger"
+                    )
+                slice_path = slice_dir / f"slice_{index:02d}.wav"
+                slice_take(
+                    # Shared 016 convention: run-relative ledger entries
+                    # resolve under the current run dir; legacy absolute
+                    # entries are used as-is while they exist.
+                    serving.resolved_path(self._run_dir),
+                    cursor - serving.covers_from,
+                    piece,
+                    slice_path,
+                    audio_cfg.sample_rate,
+                    audio_cfg.channels,
                 )
-            serving = planner.take_for_time(cursor)
-            if serving is None or not serving.path:
-                raise MediaError(f"segment {segment_id}: audio gap at {cursor:.2f}s")
-            piece = min(serving.covers_until(), end) - cursor
-            if piece < MIN_SLICE_PIECE_SECONDS:
-                raise MediaError(
-                    f"segment {segment_id}: degenerate take slice "
-                    f"({piece:.6f}s at {cursor:.2f}s) — corrupt takes ledger"
-                )
-            slice_path = segment / f"slice_{index:02d}.wav"
-            slice_take(
-                # Shared 016 convention: run-relative ledger entries
-                # resolve under the current run dir; legacy absolute
-                # entries are used as-is while they exist.
-                serving.resolved_path(self._run_dir),
-                cursor - serving.covers_from,
-                piece,
-                slice_path,
-                audio_cfg.sample_rate,
-                audio_cfg.channels,
-            )
-            slices.append(slice_path)
-            if serving.take_id not in take_ids:
-                take_ids.append(serving.take_id)
-            cursor += piece
-            index += 1
-        audio_out = segment / "audio.wav"
-        slice_ms = (time.monotonic() - slice_started) * 1000.0
-        assemble_started = time.monotonic()
-        assemble_segment_audio(slices, audio_out, audio_cfg.crossfade_seconds)
-        assemble_ms = (time.monotonic() - assemble_started) * 1000.0
+                slices.append(slice_path)
+                if serving.take_id not in take_ids:
+                    take_ids.append(serving.take_id)
+                cursor += piece
+                index += 1
+            audio_out = segment / "audio.wav"
+            slice_ms = (time.monotonic() - slice_started) * 1000.0
+            assemble_started = time.monotonic()
+            assemble_segment_audio(slices, audio_out, audio_cfg.crossfade_seconds)
+            assemble_ms = (time.monotonic() - assemble_started) * 1000.0
         self._log_metric(
             {
                 "event": "audio_assemble",
@@ -1757,16 +1755,25 @@ class Supervisor:
             "amendments": amendments,
         }
         try:
-            existing = json.loads((prev_dir / "metrics.json").read_text(encoding="utf-8"))
-            if isinstance(existing, dict):
-                atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
-                try:
-                    recorded = json.loads((prev_dir / "sha256.json").read_text(encoding="utf-8"))
-                    if isinstance(recorded, dict) and "metrics.json" in recorded:
-                        recorded["metrics.json"] = sha256_file(prev_dir / "metrics.json")
-                        atomic_write_json(prev_dir / "sha256.json", recorded)
-                except (OSError, ValueError):
-                    pass
+            manifest_file = prev_dir / paths.SEGMENT_MANIFEST_FILENAME
+            if manifest_file.exists():
+                current = load_segment_manifest(prev_dir)
+                existing_metrics = current.get("metrics")
+                merged = dict(existing_metrics) if isinstance(existing_metrics, dict) else {}
+                merged["visual"] = visual
+                update_manifest_metrics(prev_dir, merged)
+            else:
+                existing = json.loads((prev_dir / "metrics.json").read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
+                    try:
+                        legacy = prev_dir / "sha256.json"
+                        recorded = json.loads(legacy.read_text(encoding="utf-8"))
+                        if isinstance(recorded, dict) and "metrics.json" in recorded:
+                            recorded["metrics.json"] = sha256_file(prev_dir / "metrics.json")
+                            atomic_write_json(legacy, recorded)
+                    except (OSError, ValueError):
+                        pass
         except OSError:
             pass
         self._log_metric({"event": "segment_inspected", "segment_id": prev_id, **summary})
@@ -2199,11 +2206,14 @@ class Supervisor:
         video_out = segment / "video.mp4"
         audio_out = segment / "audio.wav"
         try:
-            recorded = json.loads((segment / "sha256.json").read_text(encoding="utf-8"))
-            metrics_raw = json.loads((segment / "metrics.json").read_text(encoding="utf-8"))
-            world_state = SegmentWorldState.model_validate(
-                json.loads((segment / "world_state.json").read_text(encoding="utf-8"))
-            )
+            manifest = load_segment_manifest(segment)
+            recorded_any = manifest.get("checksums")
+            recorded = dict(recorded_any) if isinstance(recorded_any, dict) else {}
+            metrics_raw_any = manifest.get("metrics")
+            metrics_raw = dict(metrics_raw_any) if isinstance(metrics_raw_any, dict) else {}
+            world_any = manifest.get("world_state")
+            world_raw = dict(world_any) if isinstance(world_any, dict) else {}
+            world_state = SegmentWorldState.model_validate(world_raw)
         except (OSError, ValueError) as exc:
             raise MediaError(
                 f"segment {segment_id}: DONE exists but orphan metadata is unreadable "
@@ -2216,7 +2226,7 @@ class Supervisor:
             or not isinstance(recorded.get("audio.wav"), str)
         ):
             raise MediaError(
-                f"segment {segment_id}: DONE exists but sha256.json is malformed; "
+                f"segment {segment_id}: DONE exists but manifest checksums are malformed; "
                 f"refusing to re-render over it — inspect or remove {segment} manually"
             )
         for name, media_path in (("video.mp4", video_out), ("audio.wav", audio_out)):
@@ -2234,9 +2244,10 @@ class Supervisor:
                     "verification; refusing to re-render over it — inspect or "
                     f"remove {segment} manually"
                 )
-        for name in METADATA_CHECKSUM_ARTIFACTS:
-            recorded_entry = recorded.get(name)
-            if not isinstance(recorded_entry, str) or not recorded_entry:
+        for name, extra in sorted(recorded.items()):
+            if name in ("video.mp4", "audio.wav"):
+                continue  # already verified above
+            if not isinstance(extra, str) or not extra:
                 continue  # legacy manifest: media only means "not covered"
             try:
                 actual_entry = sha256_file(segment / name)
@@ -2246,7 +2257,7 @@ class Supervisor:
                     f"({exc}); refusing to re-render over it — inspect or remove "
                     f"{segment} manually"
                 ) from exc
-            if actual_entry != recorded_entry:
+            if actual_entry != extra:
                 raise MediaError(
                     f"segment {segment_id}: DONE exists but {name} fails checksum "
                     "verification; refusing to re-render over it — inspect or "
@@ -2255,7 +2266,7 @@ class Supervisor:
         frames = metrics_raw.get("frames") if isinstance(metrics_raw, dict) else None
         if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
             raise MediaError(
-                f"segment {segment_id}: DONE exists but metrics.json carries no "
+                f"segment {segment_id}: DONE exists but manifest metrics carries no "
                 f"usable frame count; refusing to re-render over it — inspect or "
                 f"remove {segment} manually"
             )
@@ -2359,42 +2370,43 @@ class Supervisor:
                 phase=decision.phase,
                 seed=config.seed,
             )
-            atomic_write_json(segment / "world_state.json", world.model_dump())
-            atomic_write_json(segment / "transition.json", decision.model_dump())
-            atomic_write_json(segment / "prompt_plan.json", proposed.prompt_plan.model_dump())
-            atomic_write_json(segment / "audio_state.json", covered.audio_plan.model_dump())
-            atomic_write_json(
-                segment / "metrics.json",
-                {
-                    "video": video_info,
-                    "audio": audio_info,
-                    "frames": frames,
-                    # §23: RoPE mode is a first-class record — never change it
-                    # silently across resume; compare on recovery.
-                    "use_relative_rope": config.video.backend == "longlive2",
-                    # Backend identity pins every segment to the renderer that
-                    # produced it (tapes never resume across backends — the
-                    # worker rejects foreign profiles loudly).
-                    "video_backend": config.video.backend,
-                    "blocks": proposed.num_blocks,
-                    # Run-relative on disk (issue 016); the wire stays
-                    # absolute (`recovery_tape` above) — resolved back via
-                    # `_resolve_stored_path` at use.
-                    "recovery_tape": (
-                        self._stored_relative(Path(rendered.recovery_tape))
-                        if rendered.recovery_tape is not None
-                        else None
-                    ),
-                },
+            metrics_payload: dict[str, Any] = {
+                "video": video_info,
+                "audio": audio_info,
+                "frames": frames,
+                # §23: RoPE mode is a first-class record — never change it
+                # silently across resume; compare on recovery.
+                "use_relative_rope": config.video.backend == "longlive2",
+                # Backend identity pins every segment to the renderer that
+                # produced it (tapes never resume across backends — the
+                # worker rejects foreign profiles loudly).
+                "video_backend": config.video.backend,
+                "blocks": proposed.num_blocks,
+                # Run-relative on disk (issue 016); the wire stays
+                # absolute (`recovery_tape` above) — resolved back via
+                # `_resolve_stored_path` at use.
+                "recovery_tape": (
+                    self._stored_relative(Path(rendered.recovery_tape))
+                    if rendered.recovery_tape is not None
+                    else None
+                ),
+            }
+            checksums: dict[str, str] = {
+                "video.mp4": sha256_file(video_out),
+                "audio.wav": sha256_file(audio_out),
+            }
+            tape_file = segment / "recovery.pt"
+            if tape_file.is_file():
+                checksums["recovery.pt"] = sha256_file(tape_file)
+            manifest = build_segment_manifest(
+                decision.model_dump(),
+                proposed.prompt_plan.model_dump(),
+                covered.audio_plan.model_dump(),
+                world.model_dump(),
+                metrics_payload,
+                checksums,
             )
-            atomic_write_json(
-                segment / "sha256.json",
-                {
-                    "video.mp4": sha256_file(video_out),
-                    "audio.wav": sha256_file(audio_out),
-                    **{name: sha256_file(segment / name) for name in METADATA_CHECKSUM_ARTIFACTS},
-                },
-            )
+            write_segment_manifest(segment, manifest)
             # Single-step DONE (issue 058): one atomic write straight to
             # DONE. The old two-step (write DONE.partial, then rename left
             # a visible DONE.partial window where a concurrent validate

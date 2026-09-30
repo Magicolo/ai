@@ -60,7 +60,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     software = {"python": sys.version.split()[0]}
     write_manifest(run_dir, build_manifest(config, digest, hardware, software))
     write_state(run_dir, initial_state(config))
-    (run_dir / paths.CONCEPTS_FILENAME).write_text("", encoding="utf-8")
     print(f"initialized voyage run at {run_dir}")
     return 0
 

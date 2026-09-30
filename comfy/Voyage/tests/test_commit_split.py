@@ -177,8 +177,9 @@ def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
         )
         assert committed == "000000"
         assert (segment / paths.DONE_MARKER).exists()
-        assert (segment / "sha256.json").exists()
-        assert (segment / "metrics.json").exists()
+        assert (segment / paths.SEGMENT_MANIFEST_FILENAME).exists()
+        assert not (segment / "sha256.json").exists()
+        assert not (segment / "metrics.json").exists()
         fresh = read_state(run_dir)
         assert fresh.committed_segments == 1
         assert fresh.timeline_frames == rendered.frames
