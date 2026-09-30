@@ -132,6 +132,23 @@ def validate_conditioning_start(start_frame: int, target_frames: int) -> None:
         raise ValueError(f"LTXV conditioning start {start_frame} must be a multiple of 8")
 
 
+def is_oom(failure: BaseException) -> bool:
+    """True when `failure` is a CUDA out-of-memory (issue 049).
+
+    Torch-free (no torch import — the slim gates image has none): matches
+    the OOM exception class by name (`torch.cuda.OutOfMemoryError` and the
+    `torch.OutOfMemoryError` alias both end there) plus the allocator's
+    `out of memory` message text, which is how OOMs surface when upstream
+    code re-raises them as plain RuntimeError (cuBLAS/cuDNN alloc sites).
+    Mirrors `voyage.audio.acestep.is_oom` and the `augment_worker`
+    string-match idiom; kept local so this fix touches only this worker
+    (a shared `video_common` predicate is a future merge, cf. issue 052).
+    """
+    if type(failure).__name__ == "OutOfMemoryError":
+        return True
+    return "out of memory" in str(failure).lower()
+
+
 def split_prefix_novel(generated_frames: int, conditioning_frames: int) -> tuple[int, int]:
     """Return (prefix_discarded, novel_committed) for one extension clip.
 
@@ -525,10 +542,31 @@ class LTXVSession:
                 fps,
                 frames,
             )
-        except torch.OutOfMemoryError:
+        except (torch.OutOfMemoryError, RuntimeError) as exc:
+            # Broad catch + string predicate (issue 049): CUDA OOMs often
+            # surface as plain RuntimeError ("CUDA out of memory ...") from
+            # cuBLAS/cuDNN alloc sites, which the old torch-only except let
+            # straight through to a full session rebuild. Non-OOM
+            # RuntimeErrors re-raise untouched.
+            if not is_oom(exc):
+                raise
             if self._fp8_fallback:
                 raise
+            # gc before empty_cache (the video_longlive-documented order):
+            # without it the cache release frees ~0 bytes under cycles.
+            gc.collect()
             torch.cuda.empty_cache()
+            detail = "cuda unavailable"
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                allocated_gib = torch.cuda.memory_allocated() / 1024**3
+                reserved_gib = torch.cuda.memory_reserved() / 1024**3
+                detail = f"allocated={allocated_gib:.2f} GiB reserved={reserved_gib:.2f} GiB"
+            print(
+                f"LTXV OOM ({exc}); cleared cache ({detail}), "
+                "quantizing to dynamic fp8 and retrying once ...",
+                file=sys.stderr,
+            )
             self._quantize_fp8_fallback()
             generator.manual_seed(seed)
             return self._run_multiscale(

@@ -549,6 +549,8 @@ true 16:9) — the worker is geometry-agnostic (`validate_spatial_size` + paddin
 Stream A code change was needed. All Stream A live evidence below is at 768x512; a
 1024x576 render (2.25x pixels) still needs its own VRAM/throughput probe on an idle GPU.
 
+> As-built (§5.3-ltxv-oom-fallback-2026-09-30, issue 049): OOM-fallback contract — `_generate_block` catches `(torch.OutOfMemoryError, RuntimeError)` filtered by `video_ltxv.is_oom()` (class-name + message substring), runs `gc.collect()` → `empty_cache()` → `synchronize()` and logs allocated/reserved GiB before the one-shot torchao dynamic-fp8 quant + retry; a second OOM re-raises to the supervisor rebuild path.
+
 ---
 
 ## 5.4 CausVid backend
@@ -917,6 +919,7 @@ The SFX provider abstraction must make future model replacement possible without
 > As-built (§7-stem-cache-2026-09-30, issue 153): fuzzy stem-cache reuse (0.6 s tolerance) + render-to-tmp + atomic-replace + prune-on-plan.
 > As-built (§7-sfx-workers-2026-09-30, issue 158): `--sfx-workers 2` fail-fasts via `augment_devices()` unless 2 GPUs are visible.
 > As-built (§7-vocoder-2026-09-30, issue 072): vocoder snapshot is data-only — verify rejects any `.py` (canonical note under §85).
+> As-built (§7-sfx-ledger-2026-09-30, issue 054): SFX ledger appended serially in plan order after pool joins (no lock by construction); validator dedupes last-wins + start-sorted walk.
 
 ---
 
@@ -1127,6 +1130,8 @@ Do not install LongLive dependencies into the supervisor virtual environment.
 Use the versions specified by ACE-Step 1.5, currently Python 3.11–3.12.
 
 Keep its environment independent as well.
+
+> As-built (§12-container-hygiene-2026-09-30, issues 069/075/076): `.dockerignore` 9 patterns + corrected COPY-graph header; apt all 8 packages `=`-pinned (jammy freeze); chmod 777 → 755 + rationale.
 
 ---
 
@@ -2152,6 +2157,7 @@ A partially written state file must not be able to destroy the previous valid st
 > completes the dance (flush + file-fsync + `fsync_dir`); concepts
 > jsonl/index, metrics `append_line`, and the SFX ledger stay open
 > follow-ups in their owners' scopes.
+> As-built (§31-concepts-sfx-sync-2026-09-30, issue 101): concepts append + `fsync_dir` after jsonl; `validate_concepts` missing-index-key detector; SFX ledger append + `fsync_dir`.
 
 ---
 
@@ -2986,6 +2992,7 @@ No shell interpolation.
 Capture stderr and include the relevant last lines in `MediaError`.
 
 > As-built (§55-ffmpeg-budget-2026-09-30, issue 019): local ffmpeg/ffprobe spawns carry the 600 s RPC-mirroring budget `FFMPEG_TIMEOUT_SECONDS`; expiry is `MediaError`.
+> As-built (§55-concat-ffmpeg-hygiene-2026-09-30, issue 053): all concat-demuxer lists go through `media.write_concat_list` (`'` → `'\''` quoting); all ffmpeg spawns carry `-hide_banner -nostdin` (incl. `audio_acestep._convert`).
 
 ---
 
@@ -3019,6 +3026,7 @@ Finalizer steps:
 > enforce the same 0.6 s A/V budget through the shared `av_drift_seconds`
 > helper — read-only error strings on the validate side.
 > As-built (§56-staging-2026-09-30, issue 102): staging uses `TemporaryDirectory(prefix="voyage-final-", dir=run_dir)` — preflighted filesystem, greppable names.
+> As-built (§56-single-pass-finalize-2026-09-30, issue 050): single concat-demuxer + vf libx264 pass over originals (`-preset`/`-crf` from FinalizeOptions, defaults veryfast/15); no intermediate parts; native runs stream-copy; every finalize appends `finalize_completed` (`parts_encode_ms` schema-stable 0.0 + `audio_blend_ms` + `final_encode_ms` + effective crf/preset/geometry) to `logs/metrics.jsonl`.
 
 Never mutate the source segment files during finalization.
 
@@ -3239,6 +3247,7 @@ Human-readable formatting can evolve without changing the machine-readable state
 
 > As-built (§59-scoreboard-2026-09-30, issue 062, folds 027): scoreboard degrades per-row — errors cell, `baseline_segment_id`, video/audio existence flags, `partial_segment_ids`, int-validated frames.
 > As-built (§59-console-2026-09-30, issue 063, folds 028): console stream rule — all output incl. `error()` via the injected stream; elapsed on both success+failure stage lines; validate-then-report tracker.
+> As-built (§59-status-detail-2026-09-30, issue 061): Config section (quantization, SFX, floors, inspector, beats/drift, take-ahead, director), recorded-vs-live hardware labels, restart/circuit counts, gauges trend, reserve WARN lines.
 
 ---
 
@@ -3284,6 +3293,8 @@ Do not let logs grow without bound during multi-day runs.
 > reads through the rotation-aware `iter_metric_files` helper (`N events
 > across K files`); it is a reader-list member with `status`, `scoreboard`,
 > and soak/benchmark — never a direct `metrics.jsonl` open.
+> As-built (§60-size-rotation-2026-09-30, issue 057): size-or-time rotation (`MAX_METRICS_BYTES` 10 MiB) + `fsync_dir` after rename; `append_line` flush+fsync+fsync_dir; `_prune_siblings` fsync_dir; gzip follow-up noted as open.
+> As-built (§60-metrics-schema-2026-09-30, issue 058): `METRICS_SCHEMA_VERSION=1`, `MAX_METRIC_LINE_BYTES=16KiB`, `format_metric_line` (base-wins stamps, longest-string halving + `truncated:true`), `parse_metric_lines` ((events, torn) + run_id filter).
 
 ---
 
@@ -3418,6 +3429,7 @@ As-built (§64-cuda-preflight-2026-09-30, issue 021): CUDA preflight sets
 are derived from `BACKEND_REGISTRY` device columns (video/audio/SFX
 vocabularies, union kept for the TUI warning); the SFX branch is checked,
 so `fake/fake/mmaudio` on a torch-less box fast-fails naming the backend.
+As-built (§64-doctor-depth-2026-09-30, issue 066): `disk_by_mount` + `meets_reserve()`, `models_ok_required`/`all` split, per-GPU VRAM/driver/compute-cap/temp + `cuda_runtime`, `health_alerts()` thresholds.
 
 ---
 
@@ -4251,6 +4263,7 @@ During active development, a branch may be used intentionally, but the run manif
 > pre-checks run before model build; `UnpicklingError` maps to
 > `ModelCompatibilityError`. Pinned RealESRGAN/FILM weights still await the
 > upstream port + SRVGG loader (issue 166 follow-up).
+> As-built (§84-manifest-repair-2026-09-30, issue 077): per-dir single atomic write under `_MANIFEST_LOCK` with 3 attempts; torn manifests never overwritten; ensure fails loud on unrepaired entries; absent-manifest carve-out documented.
 
 ---
 
@@ -5011,6 +5024,7 @@ Exclude first-run compiler/model-load startup from steady-state FPS measurements
 
 > As-built (§104-gauges-2026-09-30, issues 059/051): resource gauges now carry per-worker `vram_free_first/last/min_gib` + `vram_total_gib` + `vram_workers_reporting`; `timing_stats_ex` (p50/p95/std) is the percentile source, `timing_stats` frozen.
 > As-built (§104-bench-devices-2026-09-30, issue 156): SFX/audio bench peaks are session-device-indexed with an honest-null report shape off-GPU.
+> As-built (§104-benchmark-env-2026-09-30, issue 060): `report_document()` JSON artifact builder; rich `_benchmark_env` (driver/compute/CUDA-runtime/versions/registry revisions); reports persisted to `logs/benchmark-*`/`soak-*`.
 
 ---
 
@@ -5915,6 +5929,8 @@ Every benchmark record must contain:
 - output hashes.
 
 A backend may be considered operationally preferable only after the benchmark demonstrates that its **novel-frame throughput** is materially better than the LongLive baseline or that it offers a required quality/recovery property. No static ranking in this design document overrides empirical benchmark results.
+
+> As-built (§137A-qualify-gates-2026-09-30, issue 064): `qualify.sh` fail-closed gates (nvidia-smi exit 4, absolute-path exit 2, df preflight vs `QUALIFY_MIN_FREE_GIB` exit 5), tee `reports/qual-<run>-<date>.json`.
 
 # 137B. Cross-backend continuation semantics
 
@@ -7804,3 +7820,4 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   shared TOML escaper, caption-pin forwarding, validate-side AV budget
   via `av_drift_seconds` (020/022/003).
 - Batch 5 (2026-09-30): resolved 059/051/062(+027 fold)/063(+028 fold)/017/018/019/102/103/046/047/048/153/156/158/065(+146 fold)/144/139/178/025/026; real 024 (unbounded --output paths) stays OPEN (concurrent owner).
+- Batch 6 (2026-09-30): resolved 049/050/053/054/057/058/060/061/064/066/069/075/076/077/101.

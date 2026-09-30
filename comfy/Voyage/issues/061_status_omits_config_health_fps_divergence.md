@@ -23,3 +23,40 @@ fps = state.fps if isinstance(state.fps, int) and state.fps > 0 else 24
 - **Repro:** `./scripts/run.sh status --run <dir>` on a bf16+SFX+augment run — none of those words appear. Stop the run, upgrade the driver, re-run `status` — the `GPU:` line changes although the run never did. `RunState(run_id='x',fps=0,…)` validates; `status` math yields `0`, `validate` math yields `timeline_frames/24`.
 - **Fix candidates:** Add Config section (quantization, SFX, augment floors, inspector, beats/BPM/drift, take-seconds/ahead); replace live GPU with manifest-recorded hardware + live probe labeled as such; add `resource_gauges` trend + restart/circuit-breaker counts; warn when `free < min_free_space_gib`; route `inspect metrics` through `_read_all_metric_events` (see 055); add a `validate_run` error for `fps<=0` (fail-loud) while keeping the 24-fallback for SFX math only after reporting.
 - **Refs:** `docs/OPERATIONS.md:222-228`; `docs/STATE_AND_RECOVERY.md:40-42` (knobs `status` should echo); health-dashboard guidance (VRAM/disk-by-mount/service checks; alert >85% disk, VRAM pressure, temp).
+
+### Resolution log (2026-09-30, Rank-2 batch)
+
+- **Verdict: omissions LIVE and fixed; fps-divergence half already dead.**
+  Re-verified in-container CPU-only 2026-09-30: all 11 keywords
+  (sfx/augment/inspector/quantization/beats/drift/take/ahead/gauges/
+  restart/circuit) absent from `cmd_status`; live `status` on a fake run
+  showed none of them. The `validate` half of the fps divergence is
+  already fail-loud (`voyage/cli.py` `validate_run` appends
+  `state fps is corrupt` for `fps<=0`, probed live with `fps=0` → error);
+  only the `status` display guard (`if state.fps else 0`) remained.
+- **Fix (`voyage/cli.py:698` `cmd_status`, additive only — every
+  pre-existing line kept for the 049-status substring tests):**
+  - Video: `Quantization:` + `Device:`; corrupt-fps `WARN` line next to
+    the Timeline (points at `voyage validate`).
+  - `GPU (live probe):` label + `Hardware (recorded at init):` from the
+    manifest (labeled; `cmd_init` still records only a note — enriching
+    init-time hardware is a follow-up, not this issue).
+  - New `Config` section: SFX backend/device/size, augment fps +
+    resolution floors (or `disabled`), inspector on/off + model id,
+    beats/segment + take/ahead values with the invariant verdict,
+    drift cadence, director backend/device.
+  - Workers: `Restarts:` per-worker counts + `circuit-breakers open:`
+    from `_status_restart_counts()` (`:678`, over `_read_all_metric_events`).
+  - `Gauges (last N)` trend via `bench.summarize_gauges` (RSS + disk
+    first→last); Storage compares free space against
+    `min_free_space_gib` (`doctor.meets_reserve`) with a below-reserve WARN.
+- **Tests:** new rank-2 module (config section, recorded/live labels,
+  forced-reserve WARN via `min_free_space_gib = 999999.0`, gauges +
+  restarts after 1 committed segment); all related suites green
+  (150 passed incl. the 049-status tests).
+- **Residual/DESIGN proposal (text only):** `status` still cannot show
+  live worker health (workers only run under `voyage run` — the static
+  `idle` lines stay honest); `inspect metrics` reader unification stays
+  with 055; recording real probe facts into the manifest at `init`
+  (so `status` can diff recorded-vs-live hardware) is the natural next
+  slice and touches `cmd_init` (outside this batch's owned regions).

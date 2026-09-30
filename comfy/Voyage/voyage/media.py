@@ -11,6 +11,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -853,6 +854,91 @@ replaces the old `overlap_fraction=0` encoding, so call sites state the
 intent instead of smuggling it through a zero.
 """
 
+#: Default h264 quality for the finalize encode (issues 050). Matches the
+#: validated Comfy `video_export.json` recipe (crf 15) and the chunk
+#: encoder in `voyage.augment.ffmpeg_encode_chunk` (same default), so the
+#: shipped video never silently uses ffmpeg's default CRF 23.
+FINALIZE_CRF_DEFAULT = 15
+
+#: Lowest/highest h264 CRF (issues 050). Mirrors `voyage.augment`
+#: `CRF_MINIMUM`/`CRF_MAXIMUM` — the same codec bounds, stated here so
+#: `media` stays stdlib-only without importing the augment runner.
+FINALIZE_CRF_MINIMUM = 0
+FINALIZE_CRF_MAXIMUM = 51
+
+#: Default x264 speed/quality trade-off (issues 050). Keeps the validated
+#: `veryfast` recipe; slower presets are opt-in via `FinalizeOptions`.
+FINALIZE_PRESET_DEFAULT = "veryfast"
+
+#: Allowed x264 presets (issues 050). The full ffmpeg `-preset` vocabulary
+#: for libx264, so validation rejects typos before an ffmpeg spawn fails.
+FINALIZE_PRESETS = frozenset(
+    {
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+    }
+)
+
+
+def validate_crf(value: int) -> int:
+    """Validate a finalize CRF (issues 050).
+
+    Ints only (bools rejected — `True` is `1` but never a quality knob);
+    range is the h264 0..51 ladder. Returns the value for `__post_init__`
+    and scalar-override paths to share.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"crf must be an int (got {value!r})")
+    if value < FINALIZE_CRF_MINIMUM or value > FINALIZE_CRF_MAXIMUM:
+        raise ValueError(
+            f"crf must be within [{FINALIZE_CRF_MINIMUM}, {FINALIZE_CRF_MAXIMUM}] (got {value})"
+        )
+    return value
+
+
+def validate_preset(value: str) -> str:
+    """Validate a finalize x264 preset (issues 050)."""
+    if not isinstance(value, str):
+        raise TypeError(f"preset must be a str (got {value!r})")
+    if value not in FINALIZE_PRESETS:
+        raise ValueError(f"preset must be one of {sorted(FINALIZE_PRESETS)} (got {value!r})")
+    return value
+
+
+def escape_concat_path(path: Path | str) -> str:
+    """Escape a path for an ffmpeg concat-demuxer `file '...'` line (053).
+
+    A single quote inside the single-quoted value closes the quoting, so
+    it becomes `'\\''` (close, escaped literal, reopen) per the ffmpeg
+    concat-demuxer docs. Spaces/`$`/double quotes need no escaping inside
+    the single quotes with `-safe 0`; arg-lists already keep them safe on
+    the supervisor side.
+    """
+    return str(path).replace("'", "'\\''")
+
+
+def write_concat_list(entries: list[Path], dest: Path) -> Path:
+    """Write a concat-demuxer list with quoting-safe entries (053).
+
+    Every entry goes through `escape_concat_path`, so adversarial run
+    directories (`o'brien`, spaces) produce a parseable list instead of a
+    truncated `file '...'` line. Returns `dest` for call-site chaining.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(
+        "".join(f"file '{escape_concat_path(entry)}'\n" for entry in entries),
+        encoding="utf-8",
+    )
+    return dest
+
 
 @dataclass
 class FinalizeOptions:
@@ -869,6 +955,10 @@ class FinalizeOptions:
     presentation floors `finalize_run` enforces via `plan_augmentation`
     (defaults 32/1280/720 to match the coming config; 0 disables that
     axis — the 24fps `PRESENTATION_MIN_FPS` still applies).
+
+    Encode fields (`crf`/`preset`, issues 050): the single vf encode
+    quality (defaults crf 15 + veryfast match the validated Comfy
+    `video_export.json` recipe and `augment.ffmpeg_encode_chunk`).
     """
 
     skip_bad: bool = False
@@ -880,6 +970,8 @@ class FinalizeOptions:
     min_fps: int = 32
     min_width: int = 1280
     min_height: int = 720
+    crf: int = FINALIZE_CRF_DEFAULT
+    preset: str = FINALIZE_PRESET_DEFAULT
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -896,6 +988,8 @@ class FinalizeOptions:
             raise ValueError(f"min_width must be >= 0 (got {self.min_width})")
         if self.min_height < 0:
             raise ValueError(f"min_height must be >= 0 (got {self.min_height})")
+        validate_crf(self.crf)
+        validate_preset(self.preset)
 
     def effective_overlap_fraction(self) -> float:
         """Overlap the mixer actually uses: hard-splice forces zero."""
@@ -941,6 +1035,8 @@ def finalize_run(
     min_fps: int | None = None,
     min_width: int | None = None,
     min_height: int | None = None,
+    crf: int | None = None,
+    preset: str | None = None,
     options: FinalizeOptions | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
@@ -949,16 +1045,20 @@ def finalize_run(
     `max(requested, floors, 24fps)` for fps and `max(target, floors)`
     per axis for geometry, so backend-native segments (CausVid
     832x480@16, LTXV 768x512@24) ship at >= 1280x720@32 by default.
-    Explicit `min_*` scalars override `options` when both are given;
-    `None` means "use the options value" (which defaults to
-    32/1280/720); pass 0 to disable a floor axis (the 24fps
-    `PRESENTATION_MIN_FPS` still applies).
+    Explicit `min_*`/`crf`/`preset` scalars override `options` when both
+    are given; `None` means "use the options value" (which defaults to
+    32/1280/720 floors and crf 15 + veryfast); pass 0 to disable a floor
+    axis (the 24fps `PRESENTATION_MIN_FPS` still applies).
 
     Native-geometry runs (presentation already matches) stream-copy the
     committed videos with zero video re-encodes (issue 031 fast path);
-    anything the plan flags (`needs_reencode`) takes the
-    minterpolate-when-lifting + scale/pad/fps re-encode. Then mux audio,
-    validate against the presentation box/fps, atomically publish. With
+    anything the plan flags (`needs_reencode`) takes a single
+    concat-demuxer + vf encode (issues 050: minterpolate-when-lifting +
+    scale/pad/fps, one libx264 pass over the originals — no intermediate
+    per-segment parts). Then mux audio, validate against the presentation
+    box/fps, atomically publish, and append a `finalize_completed` event
+    (effective crf/preset + `parts_encode_ms`/`audio_blend_ms`/
+    `final_encode_ms`) to `logs/metrics.jsonl` for soak trending. With
     skip_bad, corrupt segments are skipped with a warning instead of
     aborting the whole finalize. A positive `min_free_space_gib` runs
     the §53 preflight first so a full disk fails fast instead of
@@ -983,11 +1083,15 @@ def finalize_run(
             min_fps=AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
             min_width=AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
             min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
+            crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
+            preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
         )
     )
     effective_min_fps = min_fps if min_fps is not None else settings.min_fps
     effective_min_width = min_width if min_width is not None else settings.min_width
     effective_min_height = min_height if min_height is not None else settings.min_height
+    effective_crf = validate_crf(crf if crf is not None else settings.crf)
+    effective_preset = validate_preset(preset if preset is not None else settings.preset)
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
@@ -1049,6 +1153,7 @@ def finalize_run(
     with tempfile.TemporaryDirectory(prefix="voyage-final-", dir=run_dir) as tmp:
         tmpdir = Path(tmp)
         # Blended final mix (overlap re-sliced from takes; previews untouched).
+        audio_start = time.monotonic()
         final_audio = build_final_audio(
             run_dir,
             usable,
@@ -1059,11 +1164,16 @@ def finalize_run(
             settings.effective_overlap_fraction(),
             settings.overlap_cap_seconds,
         )
+        audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
+        # Single-pass shape (issues 050): no intermediate per-segment
+        # libx264 parts — the concat demuxer feeds one vf encode over the
+        # originals. `parts_encode_ms` stays 0.0 so soak trending keeps a
+        # stable schema across the old double-encode and the new path.
+        parts_encode_ms = 0.0
         staged = tmpdir / "final.mp4"
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
         # stream copy and mux the final audio — zero video re-encodes. The
-        # per-part re-encode below is pure waste on native runs. The
         # augment plan gates it off whenever an upscale or fps lift is
         # required (needs_reencode covers both, plus any fps mismatch).
         native = (
@@ -1076,11 +1186,10 @@ def finalize_run(
             )
         )
         if native:
-            concat_list = tmpdir / "concat.txt"
-            concat_list.write_text(
-                "".join(f"file '{segment / 'video.mp4'}'\n" for segment in usable),
-                encoding="utf-8",
+            concat_list = write_concat_list(
+                [segment / "video.mp4" for segment in usable], tmpdir / "concat.txt"
             )
+            final_start = time.monotonic()
             proc = run_capture(
                 [
                     "ffmpeg",
@@ -1109,80 +1218,84 @@ def finalize_run(
                     str(staged),
                 ]
             )
+            final_encode_ms = (time.monotonic() - final_start) * 1000.0
             if proc.returncode != 0:
                 raise MediaError(f"final concat copy failed: {proc.stderr[-2000:]}")
-            validate_video(staged, out_w, out_h, out_fps)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_copy(staged, output_path)
-            return output_path
-        # Per-segment video-only parts, then concat the parts.
-        parts: list[Path] = []
-        for segment in usable:
-            part = tmpdir / f"{segment.name}.mp4"
+        else:
+            # Single vf encode over the concat demuxer (issues 050): the
+            # originals feed `scale/pad/fps/minterpolate` once — the old
+            # per-segment `libx264/veryfast/-an` parts were a wasted first
+            # pass with no vf. Concat entries go through the quoting-safe
+            # helper (issues 053) so adversarial paths stay parseable.
+            concat_list = write_concat_list(
+                [segment / "video.mp4" for segment in usable], tmpdir / "concat.txt"
+            )
+            vf = (
+                f"{lift}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
+            )
+            final_start = time.monotonic()
             proc = run_capture(
                 [
                     "ffmpeg",
                     "-hide_banner",
                     "-nostdin",
                     "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
                     "-i",
-                    str(segment / "video.mp4"),
+                    str(concat_list),
+                    "-i",
+                    str(final_audio),
+                    "-vf",
+                    vf,
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
                     "-c:v",
                     "libx264",
                     "-pix_fmt",
                     "yuv420p",
                     "-preset",
-                    "veryfast",
-                    "-an",
-                    str(part),
+                    effective_preset,
+                    "-crf",
+                    str(effective_crf),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "256k",
+                    "-shortest",
+                    str(staged),
                 ]
             )
+            final_encode_ms = (time.monotonic() - final_start) * 1000.0
             if proc.returncode != 0:
-                raise MediaError(f"segment mux failed for {segment.name}: {proc.stderr[-2000:]}")
-            parts.append(part)
-        concat_list = tmpdir / "concat.txt"
-        concat_list.write_text("".join(f"file '{part}'\n" for part in parts), encoding="utf-8")
-        vf = (
-            f"{lift}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
-            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
-        )
-        proc = run_capture(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-nostdin",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_list),
-                "-i",
-                str(final_audio),
-                "-vf",
-                vf,
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-preset",
-                "veryfast",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "256k",
-                "-shortest",
-                str(staged),
-            ]
-        )
-        if proc.returncode != 0:
-            raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
+                raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
         validate_video(staged, out_w, out_h, out_fps)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_copy(staged, output_path)
+        from voyage.logrotate import append_line
+
+        append_line(
+            run_dir / paths.LOGS_DIRNAME / "metrics.jsonl",
+            json.dumps(
+                {
+                    "ts": time.time(),
+                    "event": "finalize_completed",
+                    "segments": len(usable),
+                    "out_w": out_w,
+                    "out_h": out_h,
+                    "out_fps": out_fps,
+                    "crf": effective_crf,
+                    "preset": effective_preset,
+                    "parts_encode_ms": round(parts_encode_ms, 1),
+                    "audio_blend_ms": round(audio_blend_ms, 1),
+                    "final_encode_ms": round(final_encode_ms, 1),
+                    "fast_path": native,
+                }
+            ),
+        )
     return output_path

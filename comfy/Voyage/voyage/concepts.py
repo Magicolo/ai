@@ -304,6 +304,15 @@ class ConceptStore:
         vector: list[float] | None = None,
         segment: int = 0,
     ) -> ConceptRecord:
+        """Append one concept record across the three-file group (101).
+
+        Order is vector (.npy, fully atomic) → jsonl (file fsync +
+        `fsync_dir`) → index (atomic). The group is not a single atomic
+        rename, so crash windows exist — every window is fail-loud via
+        `validate_concepts`, which now covers both directions (missing
+        vector rows *and* missing index keys). A torn group never scores
+        silently; it errors on the next validate/load.
+        """
         embedding_index = self._append_vector(vector) if vector is not None else -1
         record = ConceptRecord(
             id=f"concept-{len(self._records):06d}",
@@ -319,6 +328,7 @@ class ConceptStore:
             handle.write(record.model_dump_json() + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        fsync_dir(self._concepts_path.parent)
         self._records.append(record)
         self._write_index()
         return record
@@ -347,11 +357,14 @@ class ConceptStore:
 
 
 def validate_concepts(directory: Path) -> list[str]:
-    """Read-only concept-state consistency check (issue 059, for validate).
+    """Read-only concept-state consistency check (issues 059/101, for validate).
 
     Covers what checksums/numbering never did: vectors row-count vs the
     highest accepted embedding_index, index keys ⊆ accepted record ids,
-    and index values matching the records. A directory with none of the
+    index values matching the records, *and* accepted ids ⊆ index keys
+    (101: a crash between the jsonl append and `_write_index` leaves a
+    record without an index entry — the reverse of the 059 dangling-row
+    direction, and equally fail-loud now). A directory with none of the
     three files is a fresh run — no errors. Token-only records
     (embedding_index == -1, e.g. legacy migrations) legitimately coexist
     with vector-backed ones, so mixed -1 is not an error.
@@ -413,4 +426,15 @@ def validate_concepts(directory: Path) -> list[str]:
                             f"novelty/concept_index.json row mismatch for "
                             f"{record_id}: index={row}, record={accepted[record_id]}"
                         )
+                for record_id in sorted(accepted):
+                    if record_id not in index:
+                        errors.append(
+                            f"novelty/concept_index.json missing key "
+                            f"for accepted record {record_id}"
+                        )
+    elif accepted:
+        errors.append(
+            f"novelty/concept_index.json missing but {len(accepted)} accepted "
+            "records exist (crash between jsonl append and index write?)"
+        )
     return errors

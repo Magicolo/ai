@@ -12,3 +12,37 @@
 - **Fix candidates:** `command -v nvidia-smi || exit 4` before the gate; `realpath`/absolute-path enforcement (`--run` must be absolute, matching the codebase invariant); `tee "reports/qual-$(date +%F)-$backend.json"`; `check_free_space` preflight mirroring `generate`.
 - **Refs:** `reports/video-backends.md:85-117`; `scripts/run.sh` (absolute-path invariant); `docs/BENCHMARKING.md:8-18`.
 - **Correction (second pass, 105):** leg (a) above is wrong on the idle-GPU case — when `nvidia-smi` prints nothing, `grep -oE` exits 1 and `pipefail`+`set -e` aborts silently (fail-closed, no message), not fail-open with `held_mib=0`. See 105 for the live probe. Legs (b)-(d) stand.
+
+### Resolution log (2026-09-30, Rank-2 batch)
+
+- **Verdict: legs (b)-(d) LIVE and fixed; leg (a) as-written superseded
+  by the 105 correction, fix direction unchanged.** Re-verified
+  CPU-only 2026-09-30: (a) with a stub `nvidia-smi` exiting 127/empty,
+  the bare pipeline aborts rc=1 with NO message under `pipefail`+`set -e`
+  (fail-closed-but-silent — the "passes with held_mib=0" reading is
+  wrong per 105; the fragility stands, the mechanism differs); (b) no
+  path validation before `"$run_dir"`; (c) `grep -c tee` = 0; (d) no
+  disk/`df` reference. `bash -n` passed throughout (syntax ≠ correctness).
+- **Fix (`scripts/qualify.sh`, stages otherwise untouched):**
+  - `command -v nvidia-smi || exit 4` with an explanatory message before
+    the gate (fail-closed, loudly).
+  - `case "$run_dir" in /*)` absolute-path enforcement → exit 2
+    (matches the `resolve_run_dir` codebase invariant).
+  - Disk preflight: `df -k` avail under the run dir vs
+    `${QUALIFY_MIN_FREE_GIB:-5}` (mirrors `DEV_MIN_FREE_SPACE_GIB`) →
+    exit 5; unknown space skips, never aborts.
+  - Final `summarize_run` JSON teed to
+    `reports/qual-<run-basename>-<date>.json` + stderr path line.
+- **Live-caught bug during verification:** the first preflight draft
+  (`avail_kib="$(df ...)"` on a nonexistent dir) tripped `set -e` via
+  the failing substitution and died rc=1 before the voyage.toml check.
+  Fixed with `|| true`; regression test pins exit 2 + the init hint.
+- **Tests:** `bash -n`; `test_ops_visibility_rank2.py` qualify tests —
+  no-`nvidia-smi` → exit 4 (restricted-PATH probe, no docker), relative
+  path → exit 2 + `absolute` message (stub `nvidia-smi` echoing 0, no
+  docker), missing absolute dir → exit 2 + init hint, plus static
+  `tee`/`df`/`absolute` assertions.
+- **Residual/DESIGN proposal (text only):** `reports/*.json` artifacts
+  are untracked by policy choice (gitignore covers media extensions
+  only) — decide commit-vs-gitignore per `reports/` policy; the GPU leg
+  itself still needs an idle-4060 Ti run (`qualify.sh` on real hardware).

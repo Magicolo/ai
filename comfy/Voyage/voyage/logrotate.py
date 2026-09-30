@@ -15,11 +15,18 @@ as `persistence.py`).
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import json
+import os
 import re
+import time
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from voyage import paths
+from voyage.atomic import fsync_dir
 
 DEFAULT_KEEP_DAYS = 30
 
@@ -51,6 +58,33 @@ MAX_WORKER_LOG_BYTES = 10 * 1024 * 1024
 infinite run that never restarts a worker still rolls each worker log
 after ~10 MiB instead of growing without bound. Time-based rotation
 (previous-day mtime) applies regardless of size, same as `rotate_log`.
+"""
+
+MAX_METRICS_BYTES = 10 * 1024 * 1024
+"""Size trigger for `rotate_log` on metrics/live logs (issue 057).
+
+Same 10 MiB default as the worker logs: a single-day flood (verbose
+loop, hot gauges) rolls the live file even without a day boundary, so
+rotation bounds disk use by size *or* time. `None` at call time reads
+this constant, so tests may shrink the trigger via monkeypatch. The
+copytruncate path (`rotate_open_log`, issue 056) keeps its own
+`MAX_WORKER_LOG_BYTES` trigger — this one covers rename-based
+`rotate_log` only.
+"""
+
+METRICS_SCHEMA_VERSION = 1
+"""Version stamp for new metric lines (issue 058).
+
+Readers accept unversioned legacy lines (schema missing → version 0
+assumed); writers stamp every new line via `format_metric_line`.
+"""
+
+MAX_METRIC_LINE_BYTES = 16 * 1024
+"""Cap for one serialized metric line (issue 058).
+
+One oversized entry (e.g. a huge stage dict) must not clog the
+pipeline — `format_metric_line` truncates string fields to fit and
+marks the line `truncated: true`.
 """
 
 _ROTATED_SUFFIX = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})$")
@@ -85,22 +119,40 @@ def _rotated_name(path: Path, day: datetime.date) -> Path:
     return path.with_name(f"{path.stem}-{day.isoformat()}{path.suffix}")
 
 
-def rotate_log(path: Path, keep_days: int = DEFAULT_KEEP_DAYS) -> Path | None:
-    """Roll `path` to a dated sibling when it holds a previous day's writes.
+def rotate_log(
+    path: Path,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+    max_bytes: int | None = None,
+) -> Path | None:
+    """Roll `path` to a dated sibling on day change *or* size overflow (057).
 
     Returns the rotated sibling, or None when no rotation was needed
-    (missing file, or already current). Never raises on best-effort
-    housekeeping: a failed rotate/prune leaves the live file appendable.
+    (missing file, or current day and within `max_bytes`). `max_bytes=None`
+    reads the current `MAX_METRICS_BYTES` at call time so tests may shrink
+    the trigger via monkeypatch (same seam as `rotate_open_log`). Never
+    raises on best-effort housekeeping: a failed rotate/prune leaves the
+    live file appendable.
+
+    Durability (101): the rename is followed by `fsync_dir` on the parent
+    so the directory entry survives power loss (in-tree contract in
+    `voyage/atomic.py`); failures stay best-effort here — the live file
+    remains appendable.
     """
+    if max_bytes is None:
+        max_bytes = MAX_METRICS_BYTES
     try:
         if not path.exists():
             return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
         written = datetime.datetime.fromtimestamp(
-            path.stat().st_mtime,
+            stat.st_mtime,
             tz=datetime.timezone.utc,  # noqa: UP017
         ).date()
         today = _today()
-        if written >= today:
+        if written >= today and stat.st_size <= max_bytes:
             return None
         rotated = _rotated_name(path, written)
         if rotated.exists():
@@ -109,18 +161,36 @@ def rotate_log(path: Path, keep_days: int = DEFAULT_KEEP_DAYS) -> Path | None:
                 f"{path.stem}-{written.isoformat()}-{today.isoformat()}{path.suffix}"
             )
         path.rename(rotated)
+        with contextlib.suppress(OSError):
+            fsync_dir(path.parent)
         _prune_siblings(path, keep_days)
         return rotated
     except OSError:
         return None
 
 
-def append_line(path: Path, line: str, keep_days: int = DEFAULT_KEEP_DAYS) -> None:
-    """Append one line, rotating to a fresh daily file when day changed."""
+def append_line(
+    path: Path,
+    line: str,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+    max_bytes: int | None = None,
+) -> None:
+    """Append one line, rotating on day change or size overflow (057/101).
+
+    Metrics are advisory (unlike takes), but the tail is still synced —
+    file `flush` + `os.fsync` + `fsync_dir` — so a crash cannot silently
+    eat buffered events the forensics surface (`status`/`scoreboard`/`soak`)
+    depends on. Rotation itself stays best-effort (`rotate_log` never
+    raises); a failed append/ sync raises — a failing disk should fail
+    loudly, not lose history silently.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_log(path, keep_days)
+    rotate_log(path, keep_days, max_bytes)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_dir(path.parent)
 
 
 def iter_metric_files(run_dir: Path) -> list[Path]:
@@ -155,8 +225,15 @@ def iter_metric_files(run_dir: Path) -> list[Path]:
 
 
 def _prune_siblings(path: Path, keep_days: int) -> None:
-    """Delete dated siblings of `path` older than `keep_days` (best-effort)."""
+    """Delete dated siblings of `path` older than `keep_days` (best-effort).
+
+    Durability (101): when at least one sibling is unlinked, the parent
+    directory is `fsync_dir`-synced so the deletions survive power loss.
+    Never raises — a failed prune or sync leaves the files for the next
+    rotation pass.
+    """
     today = _today()
+    pruned = 0
     for sibling in path.parent.glob(f"{path.stem}-*{path.suffix}"):
         match = _ROTATED_SUFFIX.match(sibling.stem)
         if match is None or match.group("stem") != path.stem:
@@ -170,6 +247,91 @@ def _prune_siblings(path: Path, keep_days: int) -> None:
                 sibling.unlink()
             except OSError:
                 continue
+            pruned += 1
+    if pruned:
+        with contextlib.suppress(OSError):
+            fsync_dir(path.parent)
+
+
+def format_metric_line(run_id: str, event: dict[str, object]) -> str:
+    """Serialize one metric event with the schema baseline (issue 058).
+
+    Every line carries `ts` (epoch float, compat), `ts_iso` (ISO-8601 UTC),
+    `run_id` (correlation id), and `schema` (METRICS_SCHEMA_VERSION). Base
+    fields win over same-named event keys so callers cannot spoof the
+    correlation/version stamps. Lines longer than `MAX_METRIC_LINE_BYTES`
+    have their longest string fields halved until they fit and gain
+    `truncated: true` — one oversized entry never clogs the pipeline.
+    """
+    now = time.time()
+    iso = datetime.datetime.fromtimestamp(now, tz=datetime.timezone.utc).isoformat()  # noqa: UP017
+    merged: dict[str, object] = {**event, "ts": now, "ts_iso": iso, "run_id": run_id}
+    merged["schema"] = METRICS_SCHEMA_VERSION
+    line = json.dumps(merged)
+    if len(line.encode("utf-8")) <= MAX_METRIC_LINE_BYTES:
+        return line
+    shortened: dict[str, object] = dict(event)
+    while True:
+        longest_key: str | None = None
+        longest_len = 0
+        for key, value in shortened.items():
+            if isinstance(value, str) and len(value) > longest_len:
+                longest_key = key
+                longest_len = len(value)
+        if longest_key is None or longest_len == 0:
+            break
+        shortened[longest_key] = str(shortened[longest_key])[: longest_len // 2]
+        candidate: dict[str, object] = {
+            **shortened,
+            "ts": now,
+            "ts_iso": iso,
+            "run_id": run_id,
+            "schema": METRICS_SCHEMA_VERSION,
+            "truncated": True,
+        }
+        line = json.dumps(candidate)
+        if len(line.encode("utf-8")) <= MAX_METRIC_LINE_BYTES:
+            return line
+    minimal: dict[str, object] = {
+        "event": str(event.get("event", "unknown")),
+        "ts": now,
+        "ts_iso": iso,
+        "run_id": run_id,
+        "schema": METRICS_SCHEMA_VERSION,
+        "truncated": True,
+    }
+    return json.dumps(minimal)
+
+
+def parse_metric_lines(
+    lines: Iterable[str], run_id: str | None = None
+) -> tuple[list[dict[str, object]], int]:
+    """Parse metric lines with loud torn-line accounting (issue 058).
+
+    Returns `(events, torn_count)`: `torn_count` is the number of lines
+    that were non-empty but not valid JSON objects (never silently
+    dropped — callers surface the count). When `run_id` is given, only
+    events carrying that correlation id are returned; mismatched ids are
+    skipped without counting as torn. Blank lines are ignored.
+    """
+    events: list[dict[str, object]] = []
+    torn = 0
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            parsed: Any = json.loads(stripped)
+        except ValueError:
+            torn += 1
+            continue
+        if not isinstance(parsed, dict):
+            torn += 1
+            continue
+        if run_id is not None and parsed.get("run_id") != run_id:
+            continue
+        events.append(parsed)
+    return (events, torn)
 
 
 def _unique_rotated(path: Path, day: datetime.date, today: datetime.date) -> Path:

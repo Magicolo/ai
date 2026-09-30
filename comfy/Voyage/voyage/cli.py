@@ -675,6 +675,26 @@ def _last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
     return None
 
 
+def _status_restart_counts(run_dir: Path) -> tuple[dict[str, int], int]:
+    """Worker restarts per worker + circuit-breaker opens (issue 061).
+
+    Counts `worker_restart` / `circuit_breaker_open` metric events so the
+    §59 monitor shows failure history, not just the last error string.
+    Torn lines never reach here (`_read_all_metric_events` skips them).
+    """
+    restarts: dict[str, int] = {}
+    breakers = 0
+    for event in _read_all_metric_events(run_dir):
+        name = event.get("event")
+        if name == "worker_restart":
+            worker = event.get("worker")
+            if isinstance(worker, str):
+                restarts[worker] = restarts.get(worker, 0) + 1
+        elif name == "circuit_breaker_open":
+            breakers += 1
+    return restarts, breakers
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     try:
@@ -701,16 +721,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     if config:
         print(f"  Render: {config.video.width}×{config.video.height} @ {config.video.fps}fps")
     print(f"  Timeline: {seconds:.2f}s ({state.timeline_frames} frames @ {state.fps}fps)")
+    if not isinstance(state.fps, int) or state.fps <= 0:
+        print("  WARN: state fps is corrupt (expected a positive integer; see `voyage validate`)")
     print(f"  Segments: {state.committed_segments}")
     if config:
         print(f"  Blocks per segment: {config.video.blocks_per_segment}")
-    gpus = probe().get("gpus")
+        print(f"  Quantization: {config.video.quantization}")
+        print(f"  Device: {config.video.device}")
+    live_probe = probe()
+    gpus = live_probe.get("gpus")
     if isinstance(gpus, list) and gpus:
-        print(f"  GPU: {gpus[0]}")
+        print(f"  GPU (live probe): {gpus[0]}")
         for extra in gpus[1:]:
             print(f"       {extra}")
     else:
-        print("  GPU: unavailable (no nvidia-smi)")
+        print("  GPU (live probe): unavailable (no nvidia-smi)")
+    hardware = manifest.get("hardware")
+    if isinstance(hardware, dict) and hardware:
+        print("  Hardware (recorded at init):")
+        for key, value in hardware.items():
+            print(f"    {key}: {value}")
+    else:
+        print("  Hardware (recorded at init): none recorded")
     print()
     print("World")
     print(f"  Current: {state.current_concept[:100]}")
@@ -724,6 +756,35 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  Music: {config.audio.music_style}")
         print(f"  Energy: {config.audio.energy}")
     print(f"  Buffered audio: {state.audio_buffer_seconds:.2f}s")
+    if config:
+        print()
+        print("Config")
+        print(f"  Quantization: {config.video.quantization}")
+        print(f"  SFX: {config.sfx.backend} on {config.sfx.device} ({config.sfx.model_size})")
+        if config.augment.min_fps:
+            print(f"  Augment fps floor: {config.augment.min_fps}")
+        else:
+            print("  Augment fps floor: disabled")
+        if config.augment.min_width:
+            print(
+                f"  Augment resolution floor: {config.augment.min_width}"
+                f"x{config.augment.min_height}"
+            )
+        else:
+            print("  Augment resolution floor: disabled")
+        inspector_state = "on" if config.experimental.visual_inspector else "off"
+        print(f"  Inspector: {inspector_state} ({config.director.inspector_model_id})")
+        print(
+            f"  Beats: {config.audio.beats_per_segment}/segment "
+            f"(take_seconds={config.audio.take_seconds}, "
+            f"ahead_seconds={config.audio.ahead_seconds})"
+        )
+        if config.audio.take_seconds > config.audio.ahead_seconds:
+            print("  Take/ahead invariant: OK (take_seconds > ahead_seconds)")
+        else:
+            print("  WARN: take_seconds <= ahead_seconds (audio re-renders every segment)")
+        print(f"  Drift: every {config.voyage.drift_every_n_segments} segment(s)")
+        print(f"  Director: {config.director.backend} on {config.director.device}")
     print()
     print("Workers")
     for name in ("video", "audio", "director"):
@@ -733,6 +794,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                 name, config.director.backend
             )
         print(f"  {name}: idle ({backend} backend; workers run during `voyage run`)")
+    restarts, breakers = _status_restart_counts(run_dir)
+    if restarts or breakers:
+        summary = ", ".join(f"{name}={count}" for name, count in sorted(restarts.items()))
+        print(f"  Restarts: {summary or 'none'}; circuit-breakers open: {breakers}")
+    else:
+        print("  Restarts: none; circuit-breakers open: 0")
     last_commit = _last_commit_stages(run_dir)
     if last_commit is not None:
         segment_id, stages = last_commit
@@ -743,16 +810,37 @@ def cmd_status(args: argparse.Namespace) -> int:
         slowest = _slowest_stage(stages)
         if slowest is not None:
             print(f"  Slowest stage: {slowest}")
+    from voyage.bench import summarize_gauges
+
+    gauge_events = [
+        event
+        for event in _read_all_metric_events(run_dir)
+        if event.get("event") == "resource_gauges"
+    ]
+    if gauge_events:
+        trend = summarize_gauges(gauge_events)
+        print()
+        print(f"Gauges (last {trend['segments']} segment(s))")
+        print(f"  RSS: {trend['rss_first_mb']} -> {trend['rss_last_mb']} MB")
+        print(f"  Disk: {trend['disk_first_gib']} -> {trend['disk_last_gib']} GiB")
     print()
     print("Storage")
     try:
         free_gib = shutil.disk_usage(run_dir).free / (1024**3)
         print(f"  Free: {free_gib:.1f} GiB")
+        if config is not None:
+            from voyage.doctor import meets_reserve
+
+            reserve = config.min_free_space_gib
+            verdict = meets_reserve(free_gib, reserve)
+            if verdict is True:
+                print(f"  Reserve: {reserve:.1f} GiB — OK")
+            elif verdict is False:
+                print(f"  WARN: free {free_gib:.1f} GiB below reserve {reserve:.1f} GiB")
     except OSError:
         print("  Free: unknown")
     if state.last_error:
         print(f"Last error: {state.last_error}")
-    _ = manifest
     return 0
 
 
@@ -1519,12 +1607,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 
 def _benchmark_env() -> dict[str, object]:
-    """§104 setup fields: GPU/driver/torch, honest unknowns off-GPU."""
+    """§104 setup fields: GPU/driver/runtime/torch/revisions (issue 060).
+
+    Honest unknowns off-GPU: absent facts read "unknown"/None, never raise.
+    Run-geometry fields (resolution/blocks/steps/quantization) ride the
+    per-target setup dicts in `cmd_benchmark`/`cmd_soak` — this helper is
+    machine facts only, so every target shares one schema.
+    """
+    import voyage as voyage_package
     from voyage.doctor import probe as doctor_probe
 
     facts = doctor_probe()
     gpus = facts.get("gpus")
     gpu = gpus[0] if isinstance(gpus, list) and gpus else "unknown"
+    driver = facts.get("driver")
+    compute_cap = facts.get("compute_cap")
+    cuda_runtime = facts.get("cuda_runtime")
     try:
         import torch
 
@@ -1533,7 +1631,94 @@ def _benchmark_env() -> dict[str, object]:
     except ImportError:
         torch_version = "unknown"
         cuda_available = "unknown"
-    return {"gpu": gpu, "torch": torch_version, "cuda_available": cuda_available}
+    return {
+        "gpu": gpu,
+        "driver": driver if isinstance(driver, str) else "unknown",
+        "compute_cap": compute_cap if compute_cap is not None else "unknown",
+        "cuda_runtime": cuda_runtime if isinstance(cuda_runtime, str) else "unknown",
+        "torch": torch_version,
+        "cuda_available": cuda_available,
+        "voyage_version": voyage_package.__version__,
+        "revisions": _benchmark_revisions(),
+    }
+
+
+def _benchmark_revisions() -> dict[str, object]:
+    """Pinned model/code revisions behind the benchmark (issue 060).
+
+    Quoted from `model_registry`, not measured — the image IDs in the
+    report tables come from the same constants. `None` marks the one
+    floating pin (Wan2.2 base, issue 070); a missing registry degrades to
+    "unknown" instead of breaking the benchmark path.
+    """
+    try:
+        from voyage import model_registry
+    except ImportError:
+        return {"registry": "unknown"}
+    names = (
+        "LONGLIVE_COMMIT",
+        "LONGLIVE_HF_REVISION",
+        "WAN_HF_REVISION",
+        "LTXV_HF_REVISION",
+        "LTXV_TE_REVISION",
+        "CAUSVID_HF_REVISION",
+        "WAN21_HF_REVISION",
+        "QWEN_HF_REVISION",
+        "QWEN4B_AWQ_HF_REVISION",
+        "QWEN35_HF_REVISION",
+        "ACE_MAIN_REVISION",
+        "MINILM_HF_REVISION",
+        "MMAUDIO_HF_REVISION",
+        "FILM_HF_REVISION",
+        "REALESRGAN_HF_REVISION",
+    )
+    revisions: dict[str, object] = {}
+    for name in names:
+        value = getattr(model_registry, name, "unknown")
+        revisions[name] = value if value is None or isinstance(value, str) else "unknown"
+    return revisions
+
+
+def _video_geometry_setup(config: ProjectConfig) -> dict[str, object]:
+    """Run-geometry half of a benchmark setup (issue 060).
+
+    Resolution/blocks/attention/quantization decide the 16 GB fit, so a
+    report without them is not reproducible. Read from the stored config —
+    never re-derive — so the artifact matches the run that produced it.
+    """
+    return {
+        "width": config.video.width,
+        "height": config.video.height,
+        "fps": config.video.fps,
+        "blocks_per_segment": config.video.blocks_per_segment,
+        "local_attn_size": config.video.local_attn_size,
+        "quantization": config.video.quantization,
+        "device": config.video.device,
+    }
+
+
+def _persist_benchmark_report(
+    run_dir: Path, stem: str, title: str, setup: dict[str, object], metrics: dict[str, object]
+) -> Path | None:
+    """Tee a benchmark/soak report JSON into the run logs (issue 060).
+
+    Stdout stays the human view; this sidecar is the machine artifact
+    (`logs/<stem>-<utc-ts>.json`) so reruns stay comparable without
+    hand-copying terminal output. Never raises: a failed persist warns on
+    stderr and the command still exits on its benchmark verdict.
+    """
+    from voyage.atomic import atomic_write_json
+    from voyage.bench import report_document
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    destination = run_dir / paths.LOGS_DIRNAME / f"{stem}-{stamp}.json"
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(destination, report_document(title, setup, metrics))
+    except OSError as exc:
+        print(f"warning: benchmark artifact not persisted ({exc})", file=sys.stderr)
+        return None
+    return destination
 
 
 def _check_benchmark_counts(warmup: int, measured: int) -> int:
@@ -1569,8 +1754,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         worker_name = target
         setup: dict[str, object] = {
             "backend": (config.video.backend if target == "video" else config.audio.backend),
+            "device": (config.video.device if target == "video" else config.audio.device),
             "warmup": warmup,
             "measured": measured,
+            **_video_geometry_setup(config),
             **_benchmark_env(),
         }
         supervisor = Supervisor(run_dir, config)
@@ -1581,6 +1768,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         finally:
             supervisor.stop_workers()
         print(format_report(worker_name, setup, metrics))
+        artifact = _persist_benchmark_report(
+            run_dir, f"benchmark-{worker_name}", worker_name, setup, metrics
+        )
+        if artifact is not None:
+            print(f"report: {artifact}")
         return 0
     # end-to-end: a throwaway run (never mutates the user's data) whose
     # per-stage means + gauge deltas are the steady-state report.
@@ -1610,7 +1802,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             "backend": "fake",
             "warmup": warmup,
             "measured": segments,
+            **_video_geometry_setup(config),
             **_benchmark_env(),
+            "note": "throwaway run (TemporaryDirectory): no logs/ artifact, stdout is the record",
         }
         metrics = {
             "segments": committed,
@@ -1660,7 +1854,13 @@ def cmd_soak(args: argparse.Namespace) -> int:
         segments
     )
     events = _read_all_metric_events(run_dir)
-    setup: dict[str, object] = {"run": str(run_dir), "segments_requested": segments}
+    setup: dict[str, object] = {
+        "run": str(run_dir),
+        "segments_requested": segments,
+        "backend": config.video.backend,
+        **_video_geometry_setup(config),
+        **_benchmark_env(),
+    }
     metrics: dict[str, object] = {
         "segments_committed": committed,
         "stages": _stage_means(events),
@@ -1669,6 +1869,9 @@ def cmd_soak(args: argparse.Namespace) -> int:
         "validate_errors": validate_run(run_dir),
     }
     print(format_report("soak", setup, metrics))
+    artifact = _persist_benchmark_report(run_dir, "soak", "soak", setup, metrics)
+    if artifact is not None:
+        print(f"report: {artifact}")
     return 0 if not metrics["validate_errors"] else 1
 
 

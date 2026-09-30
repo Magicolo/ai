@@ -83,3 +83,63 @@ Full live-read bodies: `planner.py:211-220`, `concepts.py:299-324`, `logrotate.p
   records exactly `[ledger.parent]`).
 - Evidence: 21/21 new tests pass; audio/planner/rhythm/accounting suites
   (62) green; ruff + format + mypy clean on touched files.
+
+## Progress log (remainders — 2026-09-30, owned files)
+
+- Planner leg: VERDICT already-resolved (no invented fix) — live
+  `planner.py::append_take` carries `fsync_dir(ledger.parent)` with
+  the namespace-durability docstring from the prior pass.
+- Concepts leg: CONFIRMED live — jsonl append `flush` + `os.fsync`
+  only, no `fsync_dir`; three-write group (vector → jsonl → index)
+  with the missing-index-key direction undetected
+  (`validate_concepts` covered index→records only).
+- Metrics leg: CONFIRMED live — `append_line` bare `write`, zero
+  sync calls; `rotate_log` rename without `fsync_dir`;
+  `_prune_siblings` unlink without dir sync.
+- SFX twin leg: CONFIRMED live — `append_sfx_window` flush + fsync
+  only, no `fsync_dir` (identical comment shape to the planner
+  twin).
+- `rotate_log`/`_prune_siblings` dir-sync leg: CONFIRMED live (see
+  057 evidence). Multi-writer `O_APPEND` single-syscall atomicity:
+  evaluated — supervisor is effectively the single metrics writer
+  per run today, so the risky rewrite is deferred (documented
+  below); the flush+fsync+dir-sync that matters for crash tails
+  lands now.
+- TDD: remainder tests in `tests/test_ledger_rotation_rank2.py`
+  watched fail (missing `fsync_dir` refs, missing index-key error,
+  missing sync calls), then fixed. `bench.py` untouched (concurrent
+  060 hunks present — avoided per contract).
+
+## Resolution (REMAINDERS FIXED — owned files only)
+
+- `voyage/sfx_finalize.py::append_sfx_window`: `fsync_dir`
+  after the file fsync (twin of `append_take`).
+- `voyage/concepts.py::ConceptStore.append`: `fsync_dir` after the
+  jsonl file fsync (both vector and jsonl sides now sync);
+  docstring states the non-atomic group + fail-loud contract.
+- `voyage/concepts.py::validate_concepts`: missing-index-key
+  detector added (accepted ids ⊆ index keys, plus missing-index
+  file with accepted records errors) — both crash directions now
+  fail loud; docstring cites 059/101.
+- `voyage/logrotate.py::append_line`: `flush` + `os.fsync` +
+  `fsync_dir` (metrics tail durable); `rotate_log`: `fsync_dir`
+  after rename; `_prune_siblings`: `fsync_dir` after any unlink
+  batch (both best-effort, never raise housekeeping).
+- Tests: `test_101_concepts_append_syncs_directory_entry` (≥2 dir
+  syncs: vector + jsonl),
+  `test_101_validate_concepts_reports_missing_index_key`,
+  `test_057_append_line_flushes_and_syncs`,
+  `test_057_rotate_syncs_directory_entry`,
+  `test_057_prune_syncs_directory_entry`,
+  `test_054_append_sfx_window_syncs_directory_entry`.
+- Evidence: new file 13/13 pass; related suites 99 passed, 1
+  skipped; `ruff check .` + `format --check .` (183 files) +
+  `mypy voyage` (53 files) clean.
+- DESIGN proposals (text only): (a) concept group atomicity —
+  keep the three-write order + two-direction validator (landed)
+  rather than a single temp+rename across two files (index is
+  already atomic via `atomic_write_json`; a cross-file atomic
+  group would need a journal); (b) metrics multi-writer
+  single-`os.write(O_APPEND)` per line — adopt only if a second
+  concurrent metrics writer ever lands (today single-writer, so
+  the landed flush+fsync+dir-sync suffices).

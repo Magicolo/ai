@@ -171,10 +171,15 @@ def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int)
     ffmpeg exit raises RuntimeError (not a VoyageError), so the worker loop
     maps it to retryable WORKER_ERROR — a convert failure after a good
     render smells transient (disk/memory/ffmpeg), worth one supervisor
-    restart rather than an instant Fatal.
+    restart rather than an instant Fatal. Carries the tree-standard
+    `-hide_banner -nostdin` daemon hygiene (issues 053): without `-nostdin`
+    an ffmpeg reading stdin in a pipelined supervisor can steal RPC bytes
+    or block, and the full banner pollutes worker logs.
     """
     command = [
         "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
         "-y",
         "-v",
         "error",

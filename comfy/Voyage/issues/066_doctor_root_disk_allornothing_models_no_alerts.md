@@ -23,3 +23,42 @@ models_ok = (
 ### Track-E scope note (structure-sweep items 7–12 triage)
 
 Structure-sweep items 8 (scoreboard), 9 (console), 10a (rotation-blind metrics) and 10b (fps divergence) are merged into 062/063/055/061 respectively. Item 7 (`voyage/prompts.py:27-35,64-80,158-199` — staged-prompt truncation/repetition + 7-substring style-override blocklist) and item 11 (`voyage/workers/loop.py:91-168` — fd-level stdout quarantine, `checked_request` extra-key blindness, all-`VoyageError`-fatal taxonomy) were reviewed and left out of Track E as out-of-scope: prompts/director belongs to the prompts track, worker RPC framing/taxonomy to the workers/RPC track (the stdout-quarantine half is cross-referenced in 056). No finding dropped silently — route those two to their owning tracks.
+
+### Resolution log (2026-09-30, Rank-2 batch)
+
+- **Verdict: LIVE, fixed.** Re-verified in-container CPU-only 2026-09-30:
+  `probe()` returned `disk_free_gib` from `/` only (279.5 GiB while
+  `/models` was absent entirely), `models_ok: false` from the single
+  conjunction, and no vram/temperature/capability/cuda-runtime keys
+  (only gap documentation). All three legs confirmed as-read.
+- **Fix (`voyage/doctor.py`, `models_ok`/`disk_free_gib` keys kept for
+  backward compatibility):**
+  - `disk_mount_facts()` + `probe()["disk_by_mount"]` = per-mount
+    `{free_gib, total_gib, used_fraction}` for root/models(`/models` via
+    `models_dir()` env mirror)/tmp; unknown mounts report None, never
+    healthy-zero. `meets_reserve(free, min)` returns True/False/None
+    (None = unknown, printed as unknown — consumed by `status` reserve).
+  - `models_ok_required` (all stacks except `inspector-qwen35`) vs
+    `models_ok_all` (= legacy conjunction, `models_ok` aliases it);
+    optional set is the named `_OPTIONAL_MODEL_STACKS` constant.
+  - `nvidia-smi` query extended to
+    `compute_cap,temperature.gpu`; `_parse_gpu_details()` yields per-GPU
+    VRAM total/free (MiB→GiB), driver, compute cap, temp (short rows
+    degrade per-field); `driver`, `compute_cap`, `cuda_runtime` (lazy
+    torch, None off-GPU) are top-level facts.
+  - `health_alerts(facts, *, min_free_gib)` pure function: CRIT ≥90% /
+    WARN ≥85% disk per mount, below-reserve WARN, VRAM free <15% WARN,
+    temp ≥84 C WARN, missing *required* stacks WARN. Unknown facts stay
+    silent. Slim-box live probe yields exactly the missing-stacks WARN.
+- **Tests:** rank-2 module (per-mount keys, reserve tri-state, required/
+  all split, fact presence off-GPU, synthetic-threshold alerts incl. the
+  empty-facts silence case, `voyage doctor` exit path); `test_doctor.py`
+  untouched and green; related suites 150 passed; ruff + format + mypy
+  strict clean.
+- **Residual/DESIGN proposal (text only):** `cmd_doctor` does not yet
+  print `health_alerts` lines (outside this batch's owned cli regions —
+  benchmark-env + status only); wiring `health_alerts(probe(),
+  min_free_gib=<run reserve or None>)` into `cmd_doctor` output with the
+  existing exit-0/1 ffmpeg semantics is the one-line follow-up.
+  Sustained-temp (≥84 C over time, needs sampling) and service
+  reachability stay future per TROUBLESHOOTING gaps.

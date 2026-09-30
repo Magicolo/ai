@@ -56,3 +56,29 @@ none literally named in .dockerignore
 1. Add `.coverage coverage.xml .pytest_cache/ .hypothesis/ .mypy_cache/ .ruff_cache/ .venv/ *.egg-info/ .env`.
 2. Correct the `:1-4` comment to "voyage/ only (tests/ bind-mounted, issue 054)".
 3. Consider `!`-exception audit in CI (`docker build --dry-run` context list where supported).
+
+## Resolution log 2026-09-30 (Rank-2 batch)
+
+Re-verified live 2026-09-30 — all three legs CONFIRMED as-read:
+(a) `.coverage` (53,248 bytes), `.hypothesis/`, `.mypy_cache/`,
+`.ruff_cache/` all present in `Voyage/`; `.pytest_cache/`, `.venv/`,
+`*.egg-info/`, `.env`, `coverage.xml` absent today but producible by
+gates/dev runs. Cross-check: `.gitignore` (issue 085) already lists
+`.coverage`, `coverage.xml`, `.pytest_cache/` — `.dockerignore` lagged it.
+(b) `*_cache/` does match dot-caches under Go `filepath.Match` (no
+shell-style dotfile exception), but that reliance was undocumented.
+(c) Header false on two counts: NEITHER image COPYs `tests/` (slim
+`Dockerfile:27-31` COPYs pyproject/README/requirements.lock + `voyage/`;
+video `Dockerfile.video:189-190` COPYs pyproject/README + `voyage/`), and
+the comment omits `requirements.lock`.
+
+Fix (`Voyage/.dockerignore` only): 9 patterns added
+(`.mypy_cache/ .ruff_cache/ .hypothesis/ .pytest_cache/ .coverage
+coverage.xml .venv/ *.egg-info/ .env`), header rewritten to the true COPY
+graph with the issue-054 bind-mount note. No dead legs.
+
+Tests: 3 scan tests in `Voyage/tests/test_containers_rank2.py`
+(pytest/coverage entries, dev-cache/env entries, scope-comment). Batch
+48 passed; full in-container suite 1388 passed, 5 skipped, 1 deselected.
+
+Residuals: none material. DESIGN proposals: none (patterns + comment only).

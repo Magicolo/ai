@@ -1,12 +1,27 @@
-# Build-context hygiene (issue 084): images only COPY pyproject.toml,
-# README.md, voyage/ and tests/ — everything below just inflates the
-# transferred context (output/ alone is ~400 MB of frames/videos) and
+# Build-context hygiene (issues 084/069): images only COPY pyproject.toml,
+# README.md, requirements.lock (slim) and voyage/ — tests/ are bind-mounted
+# at gate time, never baked in (issue 054). Everything below just inflates
+# the transferred context (output/ alone is ~400 MB of frames/videos) and
 # churns the layer cache on every render. Keep COPY sources unlisted here.
 output/
 .git
 *_cache/
+# Explicit dot-cache trio (069): the `*_cache/` glob above does match them
+# under Go filepath.Match semantics, but explicit entries survive builder
+# changes and document what the gates actually write into the tree.
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.pytest_cache/
 __pycache__/
 *.pyc
+# Gate/dev residue (069, mirrors .gitignore issue 085): coverage embeds
+# absolute paths and must never leak into build layers.
+.coverage
+coverage.xml
+.venv/
+*.egg-info/
+.env
 # Stray run artifacts at the Voyage root (mirrors .gitignore): a
 # misdirected --output or local probe must never inflate the build
 # context or churn the layer cache, esp. multi-hundred-MB media.

@@ -18,13 +18,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3-pip git gcc g++ ffmpeg \
+        python3.10=3.10.12-1~22.04.18 python3.10-venv=3.10.12-1~22.04.18 \
+        python3-pip=22.0.2+dfsg-1ubuntu0.7 git=1:2.34.1-1ubuntu1.17 \
+        gcc=4:11.2.0-1ubuntu1 g++=4:11.2.0-1ubuntu1 \
+        ffmpeg=7:4.4.2-0ubuntu0.22.04.1 \
     && rm -rf /var/lib/apt/lists/*
-# NOTE (issue 012 remainder): the apt set above stays unversioned on
-# purpose — exact Ubuntu/CUDA-repo versions were not frozen (resolving
-# them needs a full GPU-box build). The digest-pinned FROM above is the
-# stronger guarantee: the same snapshot always yields the same apt
-# versions. Next GPU build should freeze (`apt-cache policy ...`) and pin.
+# Apt pins frozen 2026-09-30 from the live image (`docker run --rm
+# voyage-video:latest dpkg-query -W ...`, image 63b8c37d — CPU-only probe,
+# no GPU needed for a version query). Jammy snapshot, hence older than the
+# slim trixie pins (ffmpeg 4.4.2 here vs 7.1.5 there). The digest-pinned
+# FROM above keeps the snapshot reproducible; bump procedure: rebuild,
+# re-query, update the pins, note in docs/INSTALL.md (same contract as
+# the slim header `Dockerfile:5-7`).
 
 # pip pinned exact (issue 012): 25.0.1 still supports python3.10.
 RUN pip install "pip==25.0.1" \
@@ -68,7 +73,7 @@ RUN git clone --depth 1 https://github.com/NVlabs/LongLive /opt/longlive \
 # on first use; gcc alone is not enough). Placed late so the heavy torch /
 # requirements layers above stay cached.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3.10-dev \
+    && apt-get install -y --no-install-recommends python3.10-dev=3.10.12-1~22.04.18 \
     && rm -rf /var/lib/apt/lists/*
 
 # Mandatory attention backend (see header note). Built for the host GPU
@@ -174,6 +179,8 @@ RUN pip install "safetensors==0.8.0" "Pillow==12.3.0"
 # user — a runtime mkdir/symlink there dies with Errno 13. Pre-creating
 # the default-`/models` links here (as root) plus the skip-when-correct
 # shim logic means the steady state performs zero writes under /opt.
+# The link-farm modes below stay 755 (issue 075): owner-write covers the
+# non-default-mount fallback, group/other stay read-execute.
 RUN mkdir -p /opt/causvid/wan_models \
     && ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B \
     && ln -sfn /models/wan_models /opt/longlive/wan_models
@@ -222,7 +229,15 @@ RUN set -eux; \
   getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
   chown -R "${UID}:${GID}" /opt/longlive /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs; \
-  chmod 777 /opt/longlive /opt/causvid/wan_models
+  chmod 755 /opt/longlive; \
+  chmod 755 /opt/causvid/wan_models
+# Least-privilege link farms (issue 075): the two shim targets above are
+# owner-writable (the chown line) so the pinned `--user` worker can still
+# re-point non-default mounts, but group/other get read-execute only —
+# the old `chmod 777` let any in-container process plant importable code
+# on PYTHONPATH (/opt/longlive). Cross-UID runs against a stale image
+# (no rebuild after a host-uid change) now fail loud with Errno 13 on the
+# shim write instead of silently succeeding world-writable — rebuild.
 ENV HOME=/home/voyager
 USER voyager
 

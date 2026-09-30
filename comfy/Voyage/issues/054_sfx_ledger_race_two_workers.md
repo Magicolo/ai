@@ -37,3 +37,46 @@ assert "Lock" not in src  # no ledger mutex
 **Refs:** `voyage/audio/planner.py:211-220` (`append_take` single-writer pattern); `voyage/rpc.py` shared-stream serialization precedent.
 
 **Overlaps with:** 164 (state recovery omits SFX ledger — sibling SFX-ledger defect, different half; not a duplicate).
+
+## Progress log
+
+- 2026-09-30: premise RE-VERIFIED live in-container (as-read 2026-09-30,
+  tree drifts): `ThreadPoolExecutor` + `append_sfx_window` inside
+  `_render_one` confirmed, `Lock` still absent, `append_sfx_window`
+  still file-fsync only (no `fsync_dir`). Second half already
+  RESOLVED before this pass: `validate_sfx_ledger` dedupes last-wins +
+  sorts by `start` (`sfx_finalize.py:230-231`), covered by existing
+  `test_153_validate_dedupes_duplicate_window_ids` — VERDICT recorded,
+  no invented fix. TDD: 13 new tests in
+  `tests/test_ledger_rotation_rank2.py` watched fail (11 failed, 2
+  passed — the 2 passes are the already-resolved validate leg +
+  the usually-atomic concurrent-append smoke), then fixed.
+
+## Resolution (FIXED)
+
+- `voyage/sfx_finalize.py::append_sfx_window` now calls
+  `fsync_dir(ledger.parent)` after the file fsync (101 twin leg;
+  imported from `voyage.atomic`).
+- `voyage/sfx_finalize.py::render_sfx_bed::_render_one` no longer
+  appends: it returns `(stem, logged|None, stored, size)` and the
+  caller appends serially in plan order after the pool joins (both
+  `num_workers=1` and `2` paths). Stems still land via parallel
+  atomic replace (distinct files); the ledger is deterministic by
+  construction — no `threading.Lock` needed. Docstring states the
+  contract.
+- Tests: `test_054_append_sfx_window_syncs_directory_entry`,
+  `test_054_two_workers_append_in_window_order` (sleep-inverted
+  workers: w0000 sleeps 0.3 s so w0001 finishes first — ledger still
+  `[w0000, w0001]`), `test_054_concurrent_appends_all_parse`,
+  `test_054_validate_is_order_insensitive` (regression for the
+  already-landed half).
+- Evidence: new file 13/13 pass; related suites
+  `test_ledger_rotation_rank2 + test_sfx_finalize +
+  test_observability + test_concept_integrity +
+  test_worker_perf_rank2 +
+  test_commit_side_integrity_095_101_104` = 99 passed, 1 skipped;
+  `ruff check .` + `ruff format --check .` clean (183 files);
+  `mypy voyage` clean (53 files).
+- Residuals: none in owned files. `existing` dict still read once
+  before the pool by design (each `window_id` rendered once per run;
+  re-finalize duplicates dedupe last-wins in validate) — not a race.

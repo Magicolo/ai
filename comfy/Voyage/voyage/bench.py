@@ -86,6 +86,22 @@ def format_report(
     return "\n".join(lines)
 
 
+def report_document(
+    title: str,
+    setup: dict[str, object],
+    metrics: dict[str, object],
+) -> dict[str, object]:
+    """JSON-serializable benchmark/soak report document (issue 060).
+
+    Why a second shape, not a format change: `format_report` output is
+    stdout prose (existing tests pin its lines). This dict is the machine
+    artifact the CLI tees to `logs/benchmark-<target>-<ts>.json` so reruns
+    stay comparable without hand-copying stdout. Callers must keep values
+    JSON-serializable (plain setup/metric dicts already are).
+    """
+    return {"title": title, "setup": dict(setup), "measured": dict(metrics)}
+
+
 def summarize_gauges(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Trend summary over per-segment `resource_gauges` events (§68).
 

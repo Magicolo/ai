@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
+from voyage.atomic import fsync_dir
 from voyage.augment import augment_devices
 from voyage.errors import MediaError
 from voyage.media import (
@@ -180,7 +181,14 @@ def segment_sfx_bounds(
 
 
 def append_sfx_window(ledger: Path, window: SfxWindow, path: str, model_size: str) -> None:
-    """Durably append one rendered window (flush + fsync, takes pattern)."""
+    """Durably append one rendered window (flush + fsync + fsync_dir, takes pattern).
+
+    File fsync persists content; the directory sync persists the namespace
+    entry (issue 101 twin of `append_take`, in-tree contract in
+    `voyage/atomic.py`). Callers must serialize appends: `render_sfx_bed`
+    collects worker results and appends in plan order after the pool joins,
+    so the ledger is deterministic and never interleaved (issue 054).
+    """
     ledger.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "window_id": window.window_id,
@@ -195,6 +203,7 @@ def append_sfx_window(ledger: Path, window: SfxWindow, path: str, model_size: st
         handle.write(json.dumps(record) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+    fsync_dir(ledger.parent)
 
 
 def load_sfx_ledger(ledger: Path) -> list[dict[str, Any]]:
@@ -372,7 +381,16 @@ def render_sfx_bed(
             worker.start()
             workers.append(worker)
 
-        def _render_one(index: int, window: SfxWindow) -> Path:
+        def _render_one(index: int, window: SfxWindow) -> tuple[Path, SfxWindow | None, str, str]:
+            """Render one window; ledger append is deferred to the serial join (054).
+
+            Returns `(stem, logged, stored, model_size)` where `logged` is the
+            window to ledger-append or None on a cache hit. Stems land via
+            atomic replace in the worker threads (distinct files, safe in
+            parallel); the ledger itself is appended serially in plan order
+            after the pool joins, so two workers can never interleave lines
+            or race the order. No threading.Lock needed by construction.
+            """
             stem = sfx_dir / f"{window.window_id}.wav"
             stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}.wav"
             slot = index % num_workers
@@ -382,7 +400,7 @@ def render_sfx_bed(
                 and _stem_cache_hit(record, window, sizes[slot])
                 and resolve_stored_path(run_dir, str(record.get("path", ""))).exists()
             ):
-                return resolve_stored_path(run_dir, str(record["path"]))
+                return (resolve_stored_path(run_dir, str(record["path"])), None, "", "")
             # Render-to-temp + atomic replace (153): a failed render leaves
             # the old stem and ledger line intact — validate never sees a
             # half-written window, and the old stem stays the valid fallback.
@@ -422,14 +440,18 @@ def render_sfx_bed(
                 window.caption,
                 window.seed,
             )
-            append_sfx_window(ledger, logged, stored, sizes[slot])
-            return stem
+            return (stem, logged, stored, sizes[slot])
 
         if num_workers == 1:
-            stems = [_render_one(index, window) for index, window in enumerate(windows)]
+            pending = [_render_one(index, window) for index, window in enumerate(windows)]
         else:
             with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                stems = list(pool.map(_render_one, range(len(windows)), windows))
+                pending = list(pool.map(_render_one, range(len(windows)), windows))
+        stems = []
+        for stem, logged, stored, size in pending:
+            if logged is not None:
+                append_sfx_window(ledger, logged, stored, size)
+            stems.append(stem)
     finally:
         for worker in workers:
             # Best-effort teardown: a stop failure must never mask the

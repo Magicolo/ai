@@ -36,3 +36,24 @@ python3 -c "print(\"file '/tmp/a'b/c.mp4'\")"
 **Refs:** ffmpeg concat-demuxer docs (`file` quoting + `-safe`); in-tree standard (`media.run_capture` arg-list discipline).
 
 **Overlaps with:** 102 (finalize concat escape/RAM/tmp — the quoting half is the same defect; recommend merging the quoting half, keeping the RAM/tmp half in 102).
+
+## Progress log (2026-09-30, Rank 2 track)
+
+- Re-read full issue + `voyage/media.py` + `voyage/workers/audio_acestep.py` as-read 2026-09-30 (tree drifts — cite as-read).
+- VERDICT: still-relevant. Live verification in-container (`voyage:latest`, CPU-only):
+  - `media.py` both concat sites used raw `f"file '{path}'"` with `-safe 0`, no `'\''` escaping.
+  - `audio_acestep._convert` argv was `["ffmpeg","-y","-v","error",...]` — `nostdin` count 0, `hide_banner` count 0 vs standard `["ffmpeg","-hide_banner","-nostdin","-y",...]` in `media.py` (11/12), `fake_backends.py` (3/3), `sfx_mmaudio` single-pass/benchmark (2/2).
+  - `sfx_mmaudio._convert` has the same gap (has `-y -v error` only) — noted but OUT OF OWNED SCOPE (owned files: `media.py`, `audio_acestep.py` only), left as residual.
+  - 102's quoting legs were explicitly deferred to 053 — 053 owns the quoting fix (no 102 edit made).
+- TDD: same `tests/test_finalize_encode_rank2.py` (8 tests) — pre-fix the adversarial `o'brien run` finalize failed with `Impossible to open '.../obrien'` (quote truncation) and `_convert` hygiene assertions failed.
+- Fix: shared `escape_concat_path` (`'` → `'\''`) + `write_concat_list` in `media.py`, used at both concat sites (native copy + single-pass encode, so both paths are safe); `audio_acestep._convert` now `["ffmpeg","-hide_banner","-nostdin","-y","-v","error",...]` with docstring noting the daemon hygiene. Adversarial test uses run dir `tmp_path / "o'brien run" / "run"` (quote + space in the concat-listed path) through the real fastpath finalize.
+- Gates: same as 050 (shared change) — `ruff check` + `format --check` + `mypy` clean on touched files; never formatted `issues/*.md`.
+- Related suites: same runs as 050 (fastpath/integrity/media-memory/audio legs all green — see 050 log).
+
+## Resolution (2026-09-30)
+
+RESOLVED (owned scope). Concat lists are quoting-safe via the shared helper (`escape_concat_path("/tmp/voyage o'brien/a.mp4")` → `"/tmp/voyage o'\\''brien/a.mp4"` verified live); `audio_acestep._convert` carries `-hide_banner -nostdin`. New tests: `test_escape_concat_path_handles_single_quote`, `test_write_concat_list_escapes_quote`, `test_audio_acestep_convert_uses_hygiene_flags` (mocked `subprocess.run` asserts both flags), `test_finalize_adversarial_path_with_quote` (real finalize under `o'brien run` succeeds, non-empty MP4).
+
+Files changed: `Voyage/voyage/media.py` (`escape_concat_path` + `write_concat_list` + both call sites), `Voyage/voyage/workers/audio_acestep.py` (`_convert` flags), `Voyage/tests/test_finalize_encode_rank2.py` (new).
+
+Residuals: `sfx_mmaudio._convert` (line ~312-331) still omits `-hide_banner`/`-nostdin` — same one-line fix, left for the owning track since `voyage/workers/sfx_mmaudio.py` was outside this change's owned files. Recommend the same `["ffmpeg","-hide_banner","-nostdin","-y","-v","error",...]` order + a hygiene test mirroring `test_audio_acestep_convert_uses_hygiene_flags`.

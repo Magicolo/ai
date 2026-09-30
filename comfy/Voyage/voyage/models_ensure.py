@@ -17,8 +17,13 @@ Manifest race note: `model_registry.download_model` bundles the hub fetch
 with a read-modify-write of `manifest.json`, so parallel calls can drop
 each other's manifest entries (last write wins). Fetches run unlocked for
 speed; afterwards `_repair_manifest` re-merges any missing entries under
-`_MANIFEST_LOCK` (record building only stats files, so it is cheap). The
-repair is best-effort — `verify_model` stays authoritative.
+`_MANIFEST_LOCK` (record building only stats files, so it is cheap) with
+one atomic write per models dir, retried on transient I/O. Repair is
+fail-loud, never best-effort: entries still missing afterwards fail the
+ensure (no hash-less `"models ready"`). Residual: the fetch+merge inside
+`download_model` itself is still unlocked, so a concurrent downloader can
+clobber the repair write — serializing that merge needs a registry-side
+lock around fetch+merge (model_registry.py, proposed in issue 077).
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from voyage.atomic import atomic_write_json, fsync_dir
 from voyage.config import ProjectConfig
 
 if TYPE_CHECKING:
@@ -37,6 +43,10 @@ if TYPE_CHECKING:
 
 _MANIFEST_LOCK = threading.Lock()
 """Serializes the manifest repair pass (never the hub fetches)."""
+
+_REPAIR_ATTEMPTS = 3
+"""Repair tries per models dir: transient I/O gets two retries; a torn
+manifest is never retried (it cannot heal by re-reading)."""
 
 _MAX_PARALLEL_DOWNLOADS = 4
 """Thread-pool cap: hub fetches are network-bound, four keeps the pulse
@@ -139,33 +149,76 @@ def required_specs(
     return required
 
 
-def _repair_manifest(entries: list[RequiredModel]) -> None:
-    """Re-merge manifest entries lost to parallel-download races (best-effort).
+def _read_manifest_keys(models_dir: Path) -> dict[str, Any] | None:
+    """Manifest mapping, `{}` when absent, `None` when torn (never overwrite).
 
-    Skips silently on any filesystem miss: `verify_model` already passed
-    for these entries, so the manifest entry is bookkeeping, never a gate.
+    A torn file is `validate_run`'s territory (it recomputes checksums and
+    reports); the repair must not blindly replace bytes it cannot parse.
+    """
+    manifest_path = models_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return {}
+    try:
+        raw: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
+    """Re-merge manifest entries lost to parallel-download races (fail-loud).
+
+    One atomic write per models dir (`atomic_write_json` + `fsync_dir`,
+    the §12 durability rule) under `_MANIFEST_LOCK`, retried
+    `_REPAIR_ATTEMPTS` times on transient I/O. Returns entries still
+    missing afterwards — `ensure_models` fails on them instead of
+    reporting hash-less success.
+
+    Only manifests that EXIST but lack keys count as race evidence (a
+    parallel merge demonstrably dropped a record). An absent manifest is
+    skipped, not repaired: real `download_model` merges on every success
+    (a merge error fails the download outright), so absent-after-success
+    cannot happen outside custom downloaders — and last-writer-wins
+    always leaves the final writer's record behind, never an empty file.
     """
     from voyage import model_registry
 
+    still_missing: list[RequiredModel] = []
     with _MANIFEST_LOCK:
+        by_dir: dict[Path, list[RequiredModel]] = {}
         for entry in entries:
-            try:
-                spec = model_registry.MODEL_SPECS[entry.spec]
-                manifest_path = entry.models_dir / "manifest.json"
-                present: dict[str, Any] = {}
-                if manifest_path.is_file():
-                    raw: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    if isinstance(raw, dict):
-                        present = raw
-                if spec.manifest_key in present:
-                    continue
-                model_registry._merge_manifest_record(
-                    entry.models_dir,
-                    spec.manifest_key,
-                    spec.record_builder(entry.models_dir),
-                )
-            except OSError:
+            by_dir.setdefault(entry.models_dir, []).append(entry)
+        for models_dir, dir_entries in by_dir.items():
+            if not (models_dir / "manifest.json").is_file():
                 continue
+            for _attempt in range(_REPAIR_ATTEMPTS):
+                present = _read_manifest_keys(models_dir)
+                if present is None:
+                    break
+                pending = [
+                    entry
+                    for entry in dir_entries
+                    if model_registry.MODEL_SPECS[entry.spec].manifest_key not in present
+                ]
+                if not pending:
+                    break
+                try:
+                    for entry in pending:
+                        spec = model_registry.MODEL_SPECS[entry.spec]
+                        present[spec.manifest_key] = spec.record_builder(models_dir)
+                    atomic_write_json(models_dir / "manifest.json", present)
+                    fsync_dir(models_dir)
+                except OSError:
+                    continue
+                break
+            verified = _read_manifest_keys(models_dir)
+            if verified is None:
+                still_missing.extend(dir_entries)
+                continue
+            for entry in dir_entries:
+                if model_registry.MODEL_SPECS[entry.spec].manifest_key not in verified:
+                    still_missing.append(entry)
+    return still_missing
 
 
 def ensure_models(
@@ -224,10 +277,16 @@ def ensure_models(
                 failures[entry.spec] = message
                 tracker.fail(entry.spec, message)
     if failures:
-        _repair_manifest([entry for entry, _ in missing if entry.spec not in failures])
+        unrepaired = _repair_manifest([entry for entry, _ in missing if entry.spec not in failures])
         for spec, detail in failures.items():
             console.error(f"model {spec} failed: {detail}")
+        for entry in unrepaired:
+            console.error(f"model {entry.spec} manifest record missing after repair")
         return 1
-    _repair_manifest([entry for entry, _ in missing])
+    unrepaired = _repair_manifest([entry for entry, _ in missing])
+    if unrepaired:
+        for entry in unrepaired:
+            console.error(f"model {entry.spec} manifest record missing after repair")
+        return 1
     console.ok(f"models ready: {', '.join(entry.spec for entry, _ in missing)}")
     return 0
