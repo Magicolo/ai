@@ -100,3 +100,39 @@ End-to-end: `voyage generate --music-caption "X" ...` then inspect the run-phase
 ## Refs (with links/quotes)
 
 - "The first source that supplies a value wins … Encode it once and log the winning source so drift is visible." A dropped layer violates the contract silently. — https://python-config-secrets-hub.com/core-configuration-patterns-file-formats/configuration-precedence-rules/
+
+## Progress log (2026-09-30, cli track — this change)
+
+- Premise re-verified against CURRENT live code (as-read, in-container):
+  still holds — `cmd_generate` builds `effective` with both pins
+  (`voyage/cli.py:1298-1299`) but the inner `cmd_run` namespace
+  (`voyage/cli.py:1366-1385`) forwarded every sibling override
+  (blocks/takes/quantization/beats/drift/floors) except
+  `music_caption`/`video_caption`. Source probe: `'music_caption' in
+  tail` → False, `'video_caption' in tail` → False. `cmd_run` itself
+  honors both pins (`voyage/cli.py:484-500`), so the bug is purely the
+  handoff. The forwarding fix (not TOML persistence) was chosen per the
+  issue contract — smaller, matches every sibling override.
+- TDD: new `Voyage/tests/test_cli_validate_handoff.py` ::
+  `test_generate_forwards_caption_pins_to_inner_run` (real `cmd_init`
+  + mocked `cmd_run`/`cmd_finalize`/`validate_run`/model-ensure; asserts
+  the captured inner namespace carries both pins) failed first with
+  `assert None == 'brass fanfare'`, passes after.
+- Fix: two lines in the inner namespace —
+  `music_caption=getattr(args, "music_caption", None)` and
+  `video_caption=getattr(args, "video_caption", None)` — mirroring
+  `cmd_run`'s own reads, so `generate --music-caption/--video-caption`
+  now reaches the supervisor config instead of dying in `effective`.
+- Evidence: `test_cli_validate_handoff.py` 6 passed; `test_generate`
+  (incl. the fake end-to-end) + `test_sfx_finalize` caption-pin tests
+  green. `ruff check` + `ruff format --check` + `mypy strict` clean on
+  `voyage/cli.py` and the new test file.
+
+## Resolution
+
+- Status: resolved. Inner `cmd_run` namespace forwards both caption pins;
+  the forwarding-contract test guards the next pin too. No `DESIGN.md`
+  edit made here — proposal: in the `generate` as-built, note that the
+  inner `cmd_run` call forwards every in-memory generation override
+  including `music_caption`/`video_caption`, so CLI pins reach the run
+  phase instead of stopping at plan display.

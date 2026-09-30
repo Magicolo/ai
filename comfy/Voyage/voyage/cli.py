@@ -38,6 +38,7 @@ from voyage.doctor import check_ffmpeg, probe
 from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.logrotate import iter_metric_files
 from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS, check_free_space, finalize_run
+from voyage.media import av_drift_seconds as _av_drift_seconds
 from voyage.media import probe as media_probe
 from voyage.model_registry import (
     download_audio_models,
@@ -838,7 +839,7 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
     video_duration = durations.get("video", 0.0)
     audio_duration = durations.get("audio", 0.0)
     if video_duration > 0 and audio_duration > 0:
-        drift = abs(video_duration - audio_duration)
+        drift = _av_drift_seconds(video_duration, audio_duration)
         if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
             errors.append(
                 f"{segment.name} A/V alignment drift {drift:.3f}s "
@@ -1375,6 +1376,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
             quantization=args.quantization,
             beats_per_segment=args.beats_per_segment,
             drift_every_n=args.drift_every_n,
+            music_caption=getattr(args, "music_caption", None),
+            video_caption=getattr(args, "video_caption", None),
             min_fps=getattr(args, "min_fps", None),
             min_resolution=getattr(args, "min_resolution", None),
             no_augment=bool(getattr(args, "no_augment", False)),

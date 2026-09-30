@@ -8,6 +8,7 @@ never from `voyage run`.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,20 @@ LONGLIVE_LICENSE_URL = (
 # Base Wan model providing T5 encoder, tokenizer, VAE and arch config.
 # Ungated. Downloaded as a subset (diffusion shards + VAE + T5 + tokenizer).
 WAN_HF_REPO = "Wan-AI/Wan2.2-TI2V-5B"
+# Still floating (issue 070): every sibling snapshot pins a full 40-hex
+# revision, but the Wan2.2 base downloads `main` at whatever it points to
+# on provision day, so two provisions can yield different base weights with
+# identical manifests. Pin procedure (needs network + provisioned bytes —
+# the volume was pruned 2026-09-24, so nothing below is resolvable CPU-only):
+#   1. resolve the verified main commit:
+#      python -c "from huggingface_hub import HfApi;
+#                 print(HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha)"
+#   2. re-provision the Wan subset at that revision, sha256 the shards to
+#      confirm they match the running volume, then set this constant to the
+#      40-hex revision (the SnapshotSpec + manifest record already read it).
+#   3. shrink tests/test_registry_pins.py's floating set to the empty set.
+# Do NOT invent a hash — a wrong pin fails every provision loudly.
+WAN_HF_REVISION: str | None = None
 WAN_SUBDIR = "Wan2.2-TI2V-5B"
 WAN_ALLOW = [
     "diffusion_pytorch_model-00001-of-00003.safetensors",
@@ -330,6 +345,23 @@ REALESRGAN_LICENSE = "BSD 3-Clause (c) 2021 Xintao Wang"
 REALESRGAN_LICENSE_URL = "https://huggingface.co/amd/realesrgan-x4plus-anime-6b/blob/main/LICENSE"
 
 
+# Expected ingest hashes (issue 071): `download_model` verifies these BEFORE
+# merging the manifest record, so a poisoned first fetch can never become the
+# attested baseline. Provenance per row: the LongLive generator hash is
+# manifest-attested (the pruned provisioned volume's manifest.json "video"
+# record, itself fetched at the pinned LONGLIVE_HF_REVISION via FileSpec, so
+# hub-side integrity held at fetch time); the LTXV/FILM/Real-ESRGAN hashes
+# were measured live 2026-09-30 from the provisioned volume (all FileSpec
+# pinned-revision fetches). No constant exists for the CausVid DMD checkpoint:
+# its manifest record carries no sha and the weight file was pruned
+# 2026-09-24 — re-provision, measure, and add it here (residual).
+EXPECTED_LONGLIVE_SHA256 = "ec9063a44ea3c91e8ff55edcdd58dba3f1bcf6ac9091249629cb57fcebe35fd8"
+EXPECTED_LTXV_DIT_SHA256 = "76aa8c4786af752fa6f951947129d5290c3c6c0b2fadcadea6b5e114ae2cad8f"
+EXPECTED_LTXV_UPSC_SHA256 = "5b076031c6f860db9037a54f3bb819f10bfb5532ea26a6d30062292428a0c208"
+EXPECTED_FILM_SHA256 = "f226e51375dc839d4b40e5c3d63da560dd1ea1c962364ec78f5adf2d05db05c0"
+EXPECTED_REALESRGAN_SHA256 = "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
+
+
 def _sha256(path: Path) -> str:
     """Legacy alias of :func:`voyage.hashing.sha256_file` (issue 021).
 
@@ -355,28 +387,50 @@ def verify_checkpoint_sha256(checkpoint: Path, expected_sha256: str) -> None:
         )
 
 
-def verify_checkpoint_against_manifest(models_dir: Path, key: str, checkpoint: Path) -> None:
-    """sha256-verify a checkpoint against the download manifest (005).
+def verify_checkpoint_against_manifest(
+    models_dir: Path,
+    key: str,
+    checkpoint: Path,
+    *,
+    allow_missing_manifest: bool = False,
+) -> None:
+    """sha256-verify a checkpoint against the download manifest (005, 071).
 
     Reads ``models_dir/manifest.json`` and, when it carries a
     ``checkpoint_sha256`` for ``key``, verifies ``checkpoint`` against it
-    before any ``torch.load``. No manifest (or no sha for this key — e.g.
-    volumes provisioned outside `voyage models download`) passes through
-    so fresh provisioned stacks still load; a present sha that disagrees
-    raises ``ValueError`` (fail closed).
+    before any ``torch.load``. A present sha that disagrees raises
+    ``ValueError`` (fail closed).
+
+    Unknown-manifest + known-key (no manifest, no entry, or no sha for this
+    key — e.g. volumes provisioned outside `voyage models download`) fails
+    closed by default (071): pass ``allow_missing_manifest=True`` or set
+    ``VOYAGE_ALLOW_MISSING_MANIFEST=1`` to keep the external-volume
+    pass-through explicitly. Provisioned workers never opt in.
     """
     manifest_path = models_dir / "manifest.json"
-    if not manifest_path.exists():
-        return
-    loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(loaded, dict):
-        return
-    entry = loaded.get(key)
-    if not isinstance(entry, dict):
-        return
-    recorded = entry.get("checkpoint_sha256")
-    if not isinstance(recorded, str) or not recorded:
-        return
+    recorded: str | None = None
+    if manifest_path.exists():
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            entry = loaded.get(key)
+            if isinstance(entry, dict):
+                maybe_sha = entry.get("checkpoint_sha256")
+                if isinstance(maybe_sha, str) and maybe_sha:
+                    recorded = maybe_sha
+    if recorded is None:
+        env_opt_in = os.environ.get("VOYAGE_ALLOW_MISSING_MANIFEST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if allow_missing_manifest or env_opt_in:
+            return
+        raise ValueError(
+            f"no recorded sha256 for {key} in {manifest_path} — refusing to load "
+            f"{checkpoint} (provision with `voyage models download`, or opt in explicitly "
+            "with allow_missing_manifest=True / VOYAGE_ALLOW_MISSING_MANIFEST=1 "
+            "for external volumes)"
+        )
     verify_checkpoint_sha256(checkpoint, recorded)
 
 
@@ -415,7 +469,7 @@ class SnapshotSpec:
     """One snapshot_download call: repo pinned at revision into relative_dir."""
 
     repo_id: str
-    revision: str | None  # None = floating (Wan2.2 has no pinned revision yet — see 011)
+    revision: str | None  # None = floating (Wan2.2 only — see 070)
     relative_dir: str  # relative to models_dir
     allow_patterns: tuple[str, ...]
 
@@ -437,6 +491,14 @@ class RequiredFile:
 
     relative_path: str  # relative to models_dir
     min_bytes: int  # 0 = presence only
+
+
+@dataclass(frozen=True)
+class ExpectedHash:
+    """One ingest-time hash pin: the file must match before first use (071)."""
+
+    relative_path: str  # relative to models_dir
+    expected_sha256: str  # 64-hex baseline (see EXPECTED_* provenance notes)
 
 
 @dataclass(frozen=True)
@@ -466,6 +528,8 @@ class ModelSpec:
     record_builder: Callable[[Path], dict[str, Any]]  # manifest value for the key
     checks: tuple[RequiredFile | RequiredGlob | ShardFloor, ...]  # in order
     success_message: Callable[[Path], str]  # exact OK string (byte-stable)
+    expected_hashes: tuple[ExpectedHash, ...] = ()  # ingest pins (071, checked pre-merge)
+    manifest_checkpoint: str | None = None  # checkpoint relpath carrying checkpoint_sha256
 
 
 _WAN22_RELATIVE = f"wan_models/{WAN_SUBDIR}"
@@ -487,6 +551,7 @@ def _record_longlive2(models_dir: Path) -> dict[str, Any]:
         "license_url": LONGLIVE_LICENSE_URL,
         "code_commit": LONGLIVE_COMMIT,
         "wan_repo": WAN_HF_REPO,
+        "wan_revision": WAN_HF_REVISION,  # None = still floating (issue 070)
         "wan_dir": str(wan_dir),
         "wan_license": WAN_LICENSE,
     }
@@ -553,6 +618,7 @@ def _record_ltxv(models_dir: Path) -> dict[str, Any]:
     """Manifest value for the Phase 7 LTXV stack."""
     ltxv_dir = models_dir / LTXV_SUBDIR
     dit_path = ltxv_dir / LTXV_DIT_FILE
+    upsc_path = ltxv_dir / LTXV_UPSC_FILE
     return {
         "repo": LTXV_HF_REPO,
         "revision": LTXV_HF_REVISION,
@@ -562,6 +628,12 @@ def _record_ltxv(models_dir: Path) -> dict[str, Any]:
         "code_commit": LTXV_COMMIT,
         "text_encoder_repo": LTXV_TE_REPO,
         "text_encoder_revision": LTXV_TE_REVISION,
+        # Per-file shas (071): verify_model checks each against these so a
+        # mutated weight fails ensure even though presence + floors pass.
+        "checkpoint_shas": {
+            f"{LTXV_SUBDIR}/{LTXV_DIT_FILE}": sha256_file(dit_path),
+            f"{LTXV_SUBDIR}/{LTXV_UPSC_FILE}": sha256_file(upsc_path),
+        },
     }
 
 
@@ -708,12 +780,16 @@ def _record_film(models_dir: Path) -> dict[str, Any]:
         "files": [FILM_REPO_PATH],
         "license": FILM_LICENSE,
         "license_url": FILM_LICENSE_URL,
+        # Recorded sha (071): verify_model checks the checkpoint against it.
+        "checkpoint_sha256": sha256_file(weights_path),
+        "checkpoint_file": FILM_REPO_PATH,
     }
 
 
 def _record_realesrgan(models_dir: Path) -> dict[str, Any]:
     """Manifest value for the Real-ESRGAN anime upscaler weights (Track C)."""
     weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
+    relative_path = f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}"
     return {
         "repo": REALESRGAN_HF_REPO,
         "revision": REALESRGAN_HF_REVISION,
@@ -723,6 +799,9 @@ def _record_realesrgan(models_dir: Path) -> dict[str, Any]:
         "upstream_url": REALESRGAN_UPSTREAM_URL,
         "license": REALESRGAN_LICENSE,
         "license_url": REALESRGAN_LICENSE_URL,
+        # Recorded sha (071): verify_model checks the checkpoint against it.
+        "checkpoint_sha256": sha256_file(weights_path),
+        "checkpoint_file": relative_path,
     }
 
 
@@ -743,7 +822,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
     "longlive2-bf16": ModelSpec(
         name="longlive2-bf16",
         manifest_key="video",
-        snapshots=(SnapshotSpec(WAN_HF_REPO, None, _WAN22_RELATIVE, tuple(WAN_ALLOW)),),
+        snapshots=(SnapshotSpec(WAN_HF_REPO, WAN_HF_REVISION, _WAN22_RELATIVE, tuple(WAN_ALLOW)),),
         files=(
             FileSpec(LONGLIVE_HF_REPO, LONGLIVE_HF_REVISION, LONGLIVE_HF_FILE, "", "longlive2"),
         ),
@@ -767,6 +846,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             RequiredGlob(f"{_WAN22_RELATIVE}/google/umt5-xxl/*"),
         ),
         success_message=_describe_longlive2,
+        expected_hashes=(ExpectedHash(f"longlive2/{LONGLIVE_HF_FILE}", EXPECTED_LONGLIVE_SHA256),),
+        manifest_checkpoint=f"longlive2/{LONGLIVE_HF_FILE}",
     ),
     "director-qwen8b": ModelSpec(
         name="director-qwen8b",
@@ -995,6 +1076,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             RequiredGlob(f"{LTXV_TE_SUBDIR}/text_encoder/*"),
         ),
         success_message=_describe_ltxv,
+        expected_hashes=(
+            ExpectedHash(f"{LTXV_SUBDIR}/{LTXV_DIT_FILE}", EXPECTED_LTXV_DIT_SHA256),
+            ExpectedHash(f"{LTXV_SUBDIR}/{LTXV_UPSC_FILE}", EXPECTED_LTXV_UPSC_SHA256),
+        ),
     ),
     "causvid": ModelSpec(
         name="causvid",
@@ -1026,6 +1111,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             RequiredFile(f"{WAN21_SUBDIR}/models_t5_umt5-xxl-enc-bf16.pth", WAN21_T5_MIN_BYTES),
         ),
         success_message=_describe_causvid,
+        manifest_checkpoint=f"{CAUSVID_SUBDIR}/{CAUSVID_CHECKPOINT_FILE}",
     ),
     "film": ModelSpec(
         name="film",
@@ -1035,6 +1121,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         record_builder=_record_film,
         checks=(RequiredFile(FILM_REPO_PATH, FILM_MIN_BYTES),),
         success_message=_describe_film,
+        expected_hashes=(ExpectedHash(FILM_REPO_PATH, EXPECTED_FILM_SHA256),),
+        manifest_checkpoint=FILM_REPO_PATH,
     ),
     "realesrgan-anime": ModelSpec(
         name="realesrgan-anime",
@@ -1056,6 +1144,13 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             ),
         ),
         success_message=_describe_realesrgan,
+        expected_hashes=(
+            ExpectedHash(
+                f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}",
+                EXPECTED_REALESRGAN_SHA256,
+            ),
+        ),
+        manifest_checkpoint=f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}",
     ),
 }
 
@@ -1151,9 +1246,16 @@ def _run_spec_downloads(models_dir: Path, spec: ModelSpec) -> None:
 
 
 def download_model(models_dir: Path, spec_name: str) -> dict[str, Any]:
-    """Table-driven download: fetch a spec's files, merge its manifest record."""
+    """Table-driven download: fetch, pre-verify expected hashes, merge record.
+
+    The hash check runs BEFORE the manifest merge (071): whatever the hub
+    returned must match the pinned baseline, otherwise the poisoned bytes
+    are rejected and never become the attested-good record.
+    """
     spec = _require_spec(spec_name)
     _run_spec_downloads(models_dir, spec)
+    for expected in spec.expected_hashes:
+        verify_checkpoint_sha256(models_dir / expected.relative_path, expected.expected_sha256)
     return _merge_manifest_record(models_dir, spec.manifest_key, spec.record_builder(models_dir))
 
 
@@ -1189,12 +1291,57 @@ def _collect_missing(
     return missing
 
 
+def _manifest_hash_mismatches(models_dir: Path, spec: ModelSpec) -> list[str]:
+    """Files whose bytes disagree with a sha the manifest records (071).
+
+    Covers every shape the record builders write: per-file ``checkpoint_shas``
+    dicts (ltxv) and single ``checkpoint_sha256`` + ``manifest_checkpoint``
+    rows (longlive2/causvid/film/realesrgan). No manifest, no entry, or no
+    sha for this key means no baseline exists — nothing to check (the
+    ingest-time constants in ``download_model`` and the load-time
+    ``verify_checkpoint_against_manifest`` are the closed gates; torn or
+    unreadable manifests are validate_run's territory, not verify's).
+    """
+    manifest_path = models_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return []
+    try:
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(loaded, dict):
+        return []
+    entry = loaded.get(spec.manifest_key)
+    if not isinstance(entry, dict):
+        return []
+    mismatches: list[str] = []
+
+    def _check(relative_path: str, expected: str) -> None:
+        candidate = models_dir / relative_path
+        if not candidate.is_file() or sha256_file(candidate).lower() != expected.lower():
+            mismatches.append(str(candidate))
+
+    shas = entry.get("checkpoint_shas")
+    if isinstance(shas, dict):
+        for relative_path, expected in shas.items():
+            if isinstance(relative_path, str) and isinstance(expected, str) and expected:
+                _check(relative_path, expected)
+        return mismatches
+    recorded = entry.get("checkpoint_sha256")
+    if isinstance(recorded, str) and recorded and spec.manifest_checkpoint is not None:
+        _check(spec.manifest_checkpoint, recorded)
+    return mismatches
+
+
 def verify_model(models_dir: Path, spec_name: str) -> tuple[bool, str]:
-    """Table-driven verify: checklist first, then the spec's exact OK string."""
+    """Table-driven verify: checklist, then recorded hashes, then OK string."""
     spec = _require_spec(spec_name)
     missing = _collect_missing(models_dir, spec)
     if missing:
         return False, f"missing {len(missing)} files: {missing[:5]}"
+    mismatched = _manifest_hash_mismatches(models_dir, spec)
+    if mismatched:
+        return False, f"hash mismatch {len(mismatched)} files: {mismatched[:5]}"
     return True, spec.success_message(models_dir)
 
 

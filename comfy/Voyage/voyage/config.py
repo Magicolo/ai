@@ -586,13 +586,16 @@ def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int
 
 
 def _toml_basic_string(raw_value: str) -> str:
-    """Quote free-text as a TOML basic string.
+    """Quote free-text as a TOML basic string (single shared escaper).
 
-    Why a local escaper: style/run_id are creator free-text persisted into
+    Why one escaper: style/run_id are creator free-text persisted into
     the run charter, so a quote or newline would otherwise break the
-    generated TOML or inject live tables (issue 009). Mirrors the TUI
-    escaper; kept here (not imported) because the TUI helper belongs to a
-    later batch.
+    generated TOML or inject live tables (issue 009). Short escapes
+    cover backslash/quote/newline/return/tab; every other C0 control
+    plus DEL becomes ``\\uXXXX`` so one stray byte can never emit a
+    file our own reader rejects (issue 020). The TUI helper delegates
+    here (lazy import, same single source) to preserve its stdlib-only
+    import time.
     """
     escaped_value = (
         raw_value.replace("\\", "\\\\")
@@ -601,6 +604,12 @@ def _toml_basic_string(raw_value: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
+    for code in range(0x20):
+        control = chr(code)
+        if control in ("\n", "\r", "\t"):
+            continue
+        escaped_value = escaped_value.replace(control, f"\\u{code:04X}")
+    escaped_value = escaped_value.replace("\x7f", "\\u007F")
     return f'"{escaped_value}"'
 
 

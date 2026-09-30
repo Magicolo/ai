@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -56,6 +57,41 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+
+
+COPY_CHUNK_BYTES = 1024 * 1024
+"""Chunk size for `atomic_copy`: 1 MiB streams multi-GB finals in constant memory."""
+
+
+def atomic_copy(source: Path, destination: Path, *, chunk_bytes: int = COPY_CHUNK_BYTES) -> Path:
+    """Publish a file atomically without loading it into RAM (issue 043).
+
+    `atomic_write_bytes` takes `bytes`, so publishing a staged final MP4
+    through it materializes the whole file in the heap (plus the temp
+    copy) — 2-3x transient RAM on hundred-MB finals. This streams
+    `source` to a sibling `.partial` temp in `chunk_bytes` pieces, then
+    the same flush/fsync/replace/fsync_dir commit, so crash semantics
+    match `atomic_write_bytes` at constant memory. Returns `destination`.
+    """
+    if chunk_bytes <= 0:
+        raise ValueError(f"chunk_bytes must be positive (got {chunk_bytes})")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(destination.parent), prefix=destination.name + ".", suffix=".partial"
+    )
+    try:
+        with os.fdopen(fd, "wb") as out:
+            with open(source, "rb") as incoming:
+                shutil.copyfileobj(incoming, out, chunk_bytes)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_name, destination)
+        fsync_dir(destination.parent)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+    return destination
 
 
 def atomic_write_json(destination: Path, payload: Any) -> None:

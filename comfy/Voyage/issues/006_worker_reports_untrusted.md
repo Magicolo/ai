@@ -104,3 +104,37 @@ any-positive-int / any-string acceptance quoted above.
 - Resolution batch 3: frame ceiling + `_checked_tape_path` landed.
 - 2026-09-30: re-verified live (slack, ceiling, containment all present);
   reconstructed from archived pass-1 text (commit `b5d7dda`). Status → resolved.
+
+## Progress log (2026-09-30, supervisor-track resolution)
+
+- Premise re-verified against current live code (in-container):
+  `Supervisor._render_video` re-gates the raw worker report with the
+  `REPORTED_FRAMES_SLACK = 10` ceiling (`1..10*segment_frames`, bool and
+  non-int rejected, `MediaError` on violation) and re-resolves every
+  non-empty string tape through `_checked_tape_path` (run-dir containment
+  + `resolve()` + `is_file()`); `Voyage/voyage/backends.py`
+  `generate_segment` normalizes leniently but the supervisor re-gates
+  before trusting `returned_frames` — main path already resolved. Gap
+  found: `Supervisor._adopt_unaccounted_segment` checked `frames` only
+  for int/`> 0` with no ceiling, so a DONE orphan carrying
+  `frames=10**9` in `metrics.json` adopted and corrupted `timeline_frames`.
+- TDD: new `Voyage/tests/test_supervisor_av_align.py` —
+  `test_adopt_rejects_absurd_frames` (crafted orphan, `frames=10**9`,
+  valid checksums) failed first with `DID NOT RAISE MediaError`, passes
+  after the fix. Characterization pins for the live clamps:
+  `test_worker_reported_negative_frames_rejected`,
+  `test_worker_reported_bool_frames_rejected`,
+  `test_foreign_tape_directory_rejected` (all pass before and after).
+- Fix: adoption path now enforces the same
+  `1..REPORTED_FRAMES_SLACK*segment_frames` ceiling with the identical
+  `implausible` `MediaError` before advancing state. Live-report and
+  tape gates untouched (already correct).
+- Evidence: new suite 8 passed; related suites as in 003 (38 + 40
+  passed). `ruff check` + `ruff format --check` + `mypy strict` clean on
+  touched files.
+
+## Resolution
+
+- Status: resolved (main path was already resolved; adoption-path ceiling
+  gap closed this pass). No `DESIGN.md` edit made here — as-built proposal
+  is in the agent report.

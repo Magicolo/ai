@@ -80,6 +80,9 @@ def test_longlive_download_preserves_foreign_manifest_keys(
 ) -> None:
     """Issue 006a: video download merges instead of clobbering siblings."""
     _install_hub_stub(monkeypatch)
+    # Issue 071: the ingest gate verifies stub bytes against the pinned hash;
+    # this test pins merge behavior, not hashing, so bypass the gate.
+    monkeypatch.setattr(model_registry, "verify_checkpoint_sha256", lambda *a, **k: None)
     (tmp_path / "manifest.json").write_text(
         json.dumps({"director": {"repo": "Qwen/Qwen3-8B"}}), encoding="utf-8"
     )
@@ -122,7 +125,10 @@ def test_verify_checkpoint_sha256_rejects_mismatch_and_empty(tmp_path: Path) -> 
 def test_verify_against_manifest_passes_through_without_manifest(tmp_path: Path) -> None:
     target = tmp_path / "model.pt"
     target.write_bytes(b"anything")
-    model_registry.verify_checkpoint_against_manifest(tmp_path, "video", target)
+    # Issue 071: fail-closed by default; the escape hatch needs explicit opt-in.
+    model_registry.verify_checkpoint_against_manifest(
+        tmp_path, "video", target, allow_missing_manifest=True
+    )
 
 
 def test_verify_against_manifest_fails_closed_on_mismatch(tmp_path: Path) -> None:

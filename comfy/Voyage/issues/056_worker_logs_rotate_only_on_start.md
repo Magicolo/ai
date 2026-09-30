@@ -19,3 +19,36 @@ def start(self) -> None:
 - **Refs:** `voyage/logrotate.py:1-14`; K8s logging best practices (kubelet `containerLogMaxSize 10Mi / MaxFiles 5` defaults); `voyage/workers/loop.py:91-96` (stdout-quarantine note, structure sweep item 11a).
 
 **Overlaps with:** 057 (rotation mtime/size/fsync — sibling rotation defect, different half; not a duplicate).
+
+## Progress log (2026-09-30, supervisor-track resolution)
+
+- Premise re-verified against current live code (in-container):
+  `rotate_log` called only in `SubprocessWorker.start`
+  (`Voyage/voyage/rpc.py`) plus `append_line` internals; no mid-run worker-log
+  rotation; the stderr handle stays open for the worker lifetime — premise
+  holds, unbounded growth on the infinite path confirmed.
+- TDD: new `Voyage/tests/test_supervisor_av_align.py` —
+  `test_rotate_open_log_truncates_in_place` failed first with `ImportError`
+  (helper absent); `test_worker_logs_rotate_mid_run_keeps_bounded`
+  (pre-bloated 4 KiB worker logs, 1 KiB trigger via monkeypatch, 2-segment
+  fake run) failed first (live logs stayed 4096, no siblings), both pass
+  after the fix.
+- Fix (owned files only; `rpc.py` untouched): new `logrotate.py`
+  `WORKER_LOG_FILENAMES` / `MAX_WORKER_LOG_BYTES` (10 MiB, K8s
+  `containerLogMaxSize` parity) / `rotate_open_log` (copytruncate: archive
+  to a dated sibling via `_unique_rotated`, then truncate live in place so
+  the open `O_APPEND` writer continues at offset 0 — never rename under an
+  open handle) / `rotate_worker_logs` (per-dir tick, never raises;
+  `max_bytes=None` reads the current constant at call time as the
+  monkeypatch seam); `Supervisor._rotate_worker_logs` wired once per
+  committed segment in `_commit_segment` and `_adopt_unaccounted_segment`.
+  `metrics.jsonl` path unchanged (per-append open/close, rename-safe).
+- Evidence: new suite 8 passed; related suites as in 003 (38 + 40
+  passed). `ruff check` + `ruff format --check` + `mypy strict` clean on
+  touched files.
+
+## Resolution
+
+- Status: resolved this pass (mid-run copytruncate rotation per committed
+  segment; retention via existing `_prune_siblings`). No `DESIGN.md` edit
+  made here — as-built proposal is in the agent report.

@@ -103,3 +103,74 @@ still reported `[]` (both durations > 0).
   enforcement landed.
 - 2026-09-30: re-verified live (gate present at all three call sites);
   reconstructed from archived pass-1 text (commit `b5d7dda`). Status → resolved.
+
+## Progress log (2026-09-30, supervisor-track resolution)
+
+- Premise re-verified against current live code (in-container):
+  `Supervisor._commit_segment` enforces the 0.6 s budget
+  (`Voyage/voyage/supervisor.py` video-vs-expected check plus
+  `check_av_alignment(video_info, audio_info)` returning `av_drift_seconds`
+  into the `segment_committed` metric) — main commit path already resolved.
+  Gap found: `Supervisor._adopt_unaccounted_segment`
+  (`Voyage/voyage/supervisor.py`) verified checksums + `frames > 0` only —
+  no `validate_video`/`validate_audio`/`check_av_alignment`, so a DONE
+  orphan with drifted audio adopted silently.
+- TDD: new `Voyage/tests/test_supervisor_av_align.py` —
+  `test_adopt_rejects_av_drifted_orphan` (crafted orphan: real fake-backend
+  media, audio replaced with a 10 s synth via `FakeAudioBackend`, checksums
+  rewritten) failed first with `DID NOT RAISE MediaError`, passes after the
+  fix. `test_commit_rejects_av_drifted_audio` (fake commit, drifted probed
+  audio) pins the existing main-path gate.
+- Fix (commit side only; `cli validate` owned by another group):
+  adoption path now probes via the existing `validate_video`/`validate_audio`
+  media APIs and enforces `check_av_alignment` (`MediaError` past 0.6 s),
+  mirroring `_commit_segment`. Misalignment never commits silently.
+- Evidence: new suite 8 passed; related
+  `test_av_alignment_consumer` + `test_commit_hardening` +
+  `test_observability` 38 passed; `test_state_integrity` +
+  `test_supervisor_hardening` + `test_supervisor_lifecycle` +
+  `test_integration` 40 passed. `ruff check` + `ruff format --check` +
+  `mypy strict` clean on touched files.
+
+## Resolution
+
+- Status: resolved (main path was already resolved; adoption-path gap closed
+  this pass). No `DESIGN.md` edit made here — as-built proposal is in the
+  agent report.
+
+## Progress log (2026-09-30, cli-validate track — this change)
+
+- Premise re-verified against CURRENT live code (as-read, in-container):
+  `voyage/cli.py:840-848` (`_check_segment_metrics`) already enforced
+  `abs(video-audio) <= 0.6 s` over stored `metrics.video/audio.duration`
+  with error strings (read-only, never raises) — the validate-side premise
+  no longer holds (resolved by an earlier pass; sibling supervisor track
+  owns the commit/adopt side in `voyage/supervisor.py`, untouched here).
+  Residual drift risk: the check used inline `abs()` rather than the
+  shared `voyage.media.av_drift_seconds` helper, so a future budget
+  redefinition could silently diverge the two call sites.
+- TDD: new `Voyage/tests/test_cli_validate_handoff.py` (owned file) —
+  `test_validate_rejects_misaligned_stored_durations` (crafted 2 s vs
+  10 s stored durations → INVALID with the drift error) and
+  `test_validate_passes_aligned_segment` (aligned → clean) both passed
+  pre-fix, confirming the gate; they now pin it.
+- Fix (validate side only): `_check_segment_metrics` computes the drift
+  via the existing `voyage.media.av_drift_seconds` API (imported as
+  `_av_drift_seconds`; no new cross-file contract — same module the
+  tolerance already comes from). Error string, 0.6 s budget, and
+  read-only/never-raises contract unchanged.
+- Evidence: `test_cli_validate_handoff.py` 6 passed; related
+  `test_av_alignment_consumer` + `test_generate` + `test_config_resolution`
+  + `test_tui_state` + `test_sfx_finalize` 139 passed; broader cli/config
+  surface 207 passed. `ruff check` + `ruff format --check` + `mypy strict`
+  clean on `voyage/cli.py` + the new test file.
+
+## Resolution (cli-validate track)
+
+- Status: resolved (validate side was already enforced; this pass binds it
+  to the shared `av_drift_seconds` helper and pins it with handoff tests).
+  Commit/adopt side is the sibling supervisor group's scope (see their log
+  above) — not touched here. No `DESIGN.md` edit made here — proposal:
+  in the §56/§70 as-built, note that `validate` enforces the same 0.6 s
+  A/V budget as the finalizer via stored metrics durations (read-only,
+  error strings), computed with the shared `av_drift_seconds` helper.

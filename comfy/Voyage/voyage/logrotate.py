@@ -34,6 +34,25 @@ instead of every commit.
 METRICS_FILENAME = "metrics.jsonl"
 """Live metrics filename; rotated siblings are `metrics-YYYY-MM-DD.jsonl`."""
 
+WORKER_LOG_FILENAMES = ("video-worker.log", "audio-worker.log", "director-worker.log")
+"""Worker stderr logs held open for the whole worker lifetime (issue 056).
+
+`rotate_log` renames the path, which orphans an open writer on the
+renamed inode — so these three logs must rotate copytruncate-style
+(`rotate_open_log`) while workers run, never via `rotate_log` mid-run
+(`SubprocessWorker.start` keeps the start-time rename; the handle is
+fresh there).
+"""
+
+MAX_WORKER_LOG_BYTES = 10 * 1024 * 1024
+"""Size trigger for open-handle worker-log rotation (issue 056).
+
+10 MiB mirrors the Kubernetes `containerLogMaxSize` default: a healthy
+infinite run that never restarts a worker still rolls each worker log
+after ~10 MiB instead of growing without bound. Time-based rotation
+(previous-day mtime) applies regardless of size, same as `rotate_log`.
+"""
+
 _ROTATED_SUFFIX = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})$")
 
 
@@ -151,3 +170,111 @@ def _prune_siblings(path: Path, keep_days: int) -> None:
                 sibling.unlink()
             except OSError:
                 continue
+
+
+def _unique_rotated(path: Path, day: datetime.date, today: datetime.date) -> Path:
+    """Dated sibling that never overwrites an existing archive (issue 056)."""
+    rotated = _rotated_name(path, day)
+    if not rotated.exists():
+        return rotated
+    # Clock skew / double rotate / repeated same-day size rolls: keep
+    # both, never overwrite (mirrors `rotate_log`).
+    candidate = path.with_name(f"{path.stem}-{day.isoformat()}-{today.isoformat()}{path.suffix}")
+    if not candidate.exists():
+        return candidate
+    counter = 2
+    while True:
+        numbered = path.with_name(
+            f"{path.stem}-{day.isoformat()}-{today.isoformat()}-{counter}{path.suffix}"
+        )
+        if not numbered.exists():
+            return numbered
+        counter += 1
+
+
+def rotate_open_log(
+    path: Path,
+    max_bytes: int | None = None,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+) -> Path | None:
+    """Copytruncate-rotate a log that a live worker holds open (issue 056).
+
+    Rename-based `rotate_log` is unsafe mid-run: the worker's stderr
+    handle keeps writing to the renamed inode, so the live path stays
+    empty while the archive grows without bound. This copies the
+    content to a dated sibling, then truncates the live file in place
+    (same inode), so open `O_APPEND` writers continue into the live
+    file at offset 0 with no reopen handshake.
+
+    Rotates when the mtime day is stale (same policy as `rotate_log`)
+    or when the size exceeds `max_bytes` (`None` reads the current
+    `MAX_WORKER_LOG_BYTES` at call time so tests may shrink the
+    trigger via monkeypatch). Returns the archived sibling,
+    or None when no rotation was needed. Never raises: a failed
+    rotate leaves the live file appendable.
+    """
+    if max_bytes is None:
+        max_bytes = MAX_WORKER_LOG_BYTES
+    try:
+        if not path.is_file():
+            return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        try:
+            written = datetime.datetime.fromtimestamp(
+                stat.st_mtime,
+                tz=datetime.timezone.utc,  # noqa: UP017
+            ).date()
+        except (OSError, ValueError, OverflowError):
+            return None
+        today = _today()
+        if written >= today and stat.st_size <= max_bytes:
+            return None
+        rotated = _unique_rotated(path, written, today)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return None
+        try:
+            rotated.write_bytes(data)
+        except OSError:
+            return None
+        try:
+            with path.open("r+b") as handle:
+                handle.truncate(0)
+        except OSError:
+            return None
+        _prune_siblings(path, keep_days)
+        return rotated
+    except OSError:
+        return None
+
+
+def rotate_worker_logs(
+    logs_dir: Path,
+    max_bytes: int | None = None,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+) -> list[Path]:
+    """Copytruncate-rotate the three worker logs in `logs_dir` (issue 056).
+
+    Per-committed-segment cadence hook for the supervisor: cheap
+    (`stat` × 3 when quiet), best-effort, never raises — a missing
+    logs dir or an unreadable file yields whatever subset rotated.
+    `max_bytes=None` reads the current `MAX_WORKER_LOG_BYTES` at call
+    time (same monkeypatch seam as `rotate_open_log`).
+    """
+    if max_bytes is None:
+        max_bytes = MAX_WORKER_LOG_BYTES
+    rotated: list[Path] = []
+    try:
+        if not logs_dir.is_dir():
+            return rotated
+    except OSError:
+        return rotated
+    for name in WORKER_LOG_FILENAMES:
+        sibling = rotate_open_log(logs_dir / name, max_bytes, keep_days)
+        if sibling is not None:
+            rotated.append(sibling)
+    return rotated

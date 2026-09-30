@@ -44,3 +44,41 @@ Voyage/voyage/model_registry.py:~455-471 (_record_longlive2): records repo/revis
 ## Refs
 
 - HF transformers SECURITY.md — "please **always** verify the content… We recommend setting a revision" — https://github.com/huggingface/transformers/blob/main/SECURITY.md
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live `Voyage/voyage/model_registry.py`:
+  `WAN_HF_REPO` at `:33`, `SnapshotSpec(WAN_HF_REPO, None, …)` at `:746`,
+  revision-kwarg skip at `:1137-1138`, `_record_longlive2` (`:476-492`) with no
+  `wan_revision`, and zero `WAN_HF_REVISION` hits — holds verbatim.
+- 2026-09-30: resolution source checked — unresolvable CPU-only by design: the
+  provisioned volume (`~/.cache/voyage-models/`) was pruned 2026-09-24
+  (`wan_models/` + `longlive2/` absent; `ls` confirms), so no verified bytes
+  exist to pin against. Per the contract, NO hash was invented.
+- 2026-09-30: TDD — `test_wan_revision_constant_exists_and_is_used` and
+  `test_wan_revision_is_recorded_in_manifest` (both in
+  `tests/test_registry_pins.py`) failed pre-fix (no constant, no record key),
+  green post-fix. `test_floating_snapshot_set_is_exactly_wan22` is labeled
+  characterization (passes pre/post) — the regression gate against new floats.
+- 2026-09-30: gates — ruff + format + mypy strict clean on
+  `voyage/model_registry.py`; full suite shows no new failures from this issue.
+
+## Resolution
+
+- Honest placeholder, not a pin: new `WAN_HF_REVISION: str | None = None`
+  constant with the exact pin procedure in its comment (resolve the verified
+  main commit via `HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha`,
+  re-provision the subset at that revision, sha256 the shards, set the 40-hex,
+  shrink the floating-set test to empty). The `longlive2-bf16` SnapshotSpec
+  now reads the constant (no more inline `None`), and `_record_longlive2`
+  records `"wan_revision": WAN_HF_REVISION` (null until pinned) so the
+  provenance gap is visible in every manifest instead of absent.
+- Fix candidates 1+2 are therefore half-done (plumbing, no value); candidate 3
+  is done as the floating-set gate, which encodes the still-open state
+  honestly: it asserts the floating set is EXACTLY `{('longlive2-bf16',
+  WAN_HF_REPO)}` — a new floating row fails, and pinning Wan forces the test
+  to shrink to empty.
+- Residual (GPU box + network required): the actual 40-hex pin. Do NOT pick it
+  from the Hub API alone — the pinned bytes must be verified against a
+  provisioned volume (re-provision first: the current volume has no Wan
+  subset to compare against).

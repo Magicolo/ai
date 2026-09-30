@@ -28,6 +28,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from voyage.hashing import sha256_file as shared_sha256_file
-from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION
+from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION, LTXV_TE_REPO, LTXV_TE_REVISION
 from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
@@ -45,7 +46,6 @@ from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
 DIT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
 UPSC_FILENAME = "ltxv-spatial-upscaler-0.9.8.safetensors"
 LTXV_SUBDIR = "ltxv-2b"
-TE_REPO_ID = "PixArt-alpha/PixArt-XL-2-1024-MS"
 NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
 RECOVERY_PROFILE = "ltxv"
 
@@ -302,6 +302,38 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
     return tape
 
 
+def _resolve_te_source(models_dir: Path) -> str:
+    """Map the PixArt TE repo to its single /models snapshot, fetching when absent.
+
+    Mirrors ``workers/director._resolve_model_source`` (073): a present
+    snapshot resolves to ``<models_dir>/<LTXV_TE_SUBDIR>``; a missing one is
+    fetched into /models (the HF_HUB_OFFLINE guard is lifted for that fetch —
+    it protects the ephemeral cache, not the persistent volume) and
+    re-checked. Download failure raises so init fails loudly instead of
+    serving hub-drifted weights. An id outside the registry keeps hub
+    behavior (unreachable today — the TE repo is registered).
+    """
+    from voyage import model_registry  # lazy: attribute access stays monkeypatchable (§12)
+
+    ref = model_registry.resolve_snapshot(LTXV_TE_REPO)
+    if ref is None:
+        return LTXV_TE_REPO
+    if model_registry.snapshot_present(models_dir, ref):
+        return str(models_dir / ref.relative_dir)
+    previous_offline = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    try:
+        model_registry.download_model(models_dir, ref.spec_name)
+    finally:
+        if previous_offline is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous_offline
+    if not model_registry.snapshot_present(models_dir, ref):
+        raise RuntimeError(f"snapshot {ref.relative_dir} still incomplete after download")
+    return str(models_dir / ref.relative_dir)
+
+
 class LTXVSession:
     """Resident LTXV stack: bf16 DiT + VAE on CUDA, T5 on CPU, embed cache."""
 
@@ -338,10 +370,25 @@ class LTXVSession:
         vae = CausalVideoAutoencoder.from_pretrained(str(dit_path)).to(device, dtype=torch.bfloat16)
         scheduler = RectifiedFlowScheduler.from_pretrained(str(dit_path))
         print("loading T5 text encoder (CPU, bf16) ...", file=sys.stderr)
-        tokenizer = T5Tokenizer.from_pretrained(TE_REPO_ID, subfolder="tokenizer")
-        text_encoder = T5EncoderModel.from_pretrained(TE_REPO_ID, subfolder="text_encoder").to(
-            torch.bfloat16
+        # Pinned-snapshot load (073): the tokenizer/encoder come from the
+        # registry's PixArt snapshot at the pinned revision, never from a
+        # bare hub id — `local_files_only` keeps every session init
+        # offline-first, and `revision` (supported by the pinned
+        # transformers 4.57.6, probe-verified) documents the pin for any
+        # hub-shaped input.
+        te_source = _resolve_te_source(models_dir)
+        tokenizer = T5Tokenizer.from_pretrained(
+            te_source,
+            subfolder="tokenizer",
+            local_files_only=True,
+            revision=LTXV_TE_REVISION,
         )
+        text_encoder = T5EncoderModel.from_pretrained(
+            te_source,
+            subfolder="text_encoder",
+            local_files_only=True,
+            revision=LTXV_TE_REVISION,
+        ).to(torch.bfloat16)
         # text_encoder=None: embeds are precomputed on CPU (see module
         # docstring). Positional order mirrors the probe — the pipeline
         # takes (tokenizer, text_encoder, vae, transformer, scheduler,

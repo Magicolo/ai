@@ -102,3 +102,43 @@ grep -rn "_toml_basic_string\|def _toml_string" voyage/config.py voyage/tui_stat
 - TOML v1.1.0: "Basic strings … Any Unicode character may be used except those that must be escaped: quotation mark, backslash, and the control characters other than tab (U+0000 to U+0008, U+000A to U+001F, U+007F)." — https://toml.io/en/v1.1.0
 - Same bug class upstream: "TOML forbids raw control characters … in every string form … so a description … containing e.g. a NUL or escape byte produced a TOML file that `tomllib` rejects … route such strings through a shared `toml_escape_basic` helper." — https://github.com/github/spec-kit/pull/3402
 - Precedence/single-source discipline (applies to helpers as much as values): "Encode that order in one place … with no `if ENV == …` branching anywhere." — https://python-config-secrets-hub.com/core-configuration-patterns-file-formats/configuration-precedence-rules/
+
+## Progress log (2026-09-30, cli/config/tui_state track — this change)
+
+- Premise re-verified against CURRENT live code (as-read, in-container):
+  duality still holds — `voyage/config.py:588-604` (`_toml_basic_string`,
+  escapes only backslash/quote/newline/return/tab) vs
+  `voyage/tui_state.py:419-438` (`_toml_string`, plus the full C0 loop),
+  with `default_config_toml` (`voyage/config.py:634-635`) consuming the
+  weak one. Live probe: `default_config_toml('r', 'style\x07bell', 0)` →
+  `tomllib.TOMLDecodeError: Illegal character '\x07'`. Import-direction
+  check: `tui_state` already imports `config` lazily in four places
+  (`tui_state.py:235,255,327,365`) and `cli` lazily, while `config`
+  imports only `errors` at top level — so the single home must be
+  `config.py` (`config` importing `tui_state` would add a reverse edge;
+  a new `toml_util.py` is disallowed by this task's file scope, which
+  restricts new helpers to `cli.py`/`config.py`).
+- TDD: new `Voyage/tests/test_cli_validate_handoff.py` — BEL/ESC pins,
+  DEL/NUL pins, and a Hypothesis round-trip property (any sub-ASCII text
+  with controls through `default_config_toml` → `tomllib.loads` parses +
+  style survives) all failed first with `TOMLDecodeError`, pass after.
+- Fix: `config._toml_basic_string` upgraded to the full-C0 version (short
+  escapes + `\uXXXX` for every other C0 control + `\u007F` for DEL, per
+  the TOML v1.1 control rule cited above); `tui_state._toml_string`
+  is now a thin alias delegating via lazy import (preserves its
+  stdlib-only import time). One implementation, two names (back-compat).
+- Evidence: `test_cli_validate_handoff.py` 6 passed; related suites
+  (`test_config_resolution`, `test_tui_state`, `test_generate`,
+  `test_av_alignment_consumer`, `test_sfx_finalize`) green. `ruff check`
+  + `ruff format --check` + `mypy strict` clean on `voyage/config.py`,
+  `voyage/tui_state.py`, and the new test file.
+
+## Resolution
+
+- Status: resolved. Single shared escaper lives in `voyage/config.py`
+  (`_toml_basic_string`, full-C0 + DEL); `voyage/tui_state.py`
+  (`_toml_string`) delegates to it. No `DESIGN.md` edit made here —
+  proposal: in the config/TUI as-built, note that all TOML basic-string
+  quoting flows through the one `config._toml_basic_string` helper (C0 +
+  DEL escaped), so creator free-text (`--style`, `--run-id`, TUI fields)
+  can never emit a file the reader rejects.

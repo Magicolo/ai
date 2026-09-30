@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from voyage import paths
-from voyage.atomic import atomic_write_bytes
+from voyage.atomic import atomic_copy
 from voyage.errors import DiskSpaceError, MediaError
 from voyage.hashing import sha256_file
 
@@ -1041,7 +1041,7 @@ def finalize_run(
                 raise MediaError(f"final concat copy failed: {proc.stderr[-2000:]}")
             validate_video(staged, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(output_path, staged.read_bytes())
+            atomic_copy(staged, output_path)
             return output_path
         # Per-segment video-only parts, then concat the parts.
         parts: list[Path] = []
@@ -1112,5 +1112,5 @@ def finalize_run(
             raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
         validate_video(staged, out_w, out_h, out_fps)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(output_path, staged.read_bytes())
+        atomic_copy(staged, output_path)
     return output_path

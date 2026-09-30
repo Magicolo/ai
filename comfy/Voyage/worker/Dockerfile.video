@@ -31,7 +31,16 @@ RUN pip install "pip==25.0.1" \
     && pip install torch==2.8.0 torchvision==0.23.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
-RUN pip install torchao==0.13.0 "huggingface_hub[cli]" "pydantic>=2.7,<2.11"
+# Python pins frozen 2026-09-30 from the live image
+# (`docker run --rm voyage-video:latest pip freeze`, image 63b8c37d).
+# Every direct row below is `==`-pinned to that freeze — floors (`>=`) are
+# not pins. Re-freeze procedure on the next GPU build: rebuild, run
+# `pip freeze`, update the pins below, note in docs/INSTALL.md. Residuals:
+# the LongLive `-r requirements.txt` row still floats (vendoring a hashed
+# copy needs the same GPU-box freeze — see the note there), and transitive
+# deps ride the direct rows (a full `--require-hashes` lockfile is the
+# follow-up, same as issue 011 for the slim image).
+RUN pip install torchao==0.13.0 "huggingface_hub[cli]==0.36.2" "pydantic==2.10.6"
 
 # Verified-fetch clones (issue 055): `--depth 1` keeps the build context
 # small; `fetch <commit>` + `checkout <commit>` + `rev-parse --verify`
@@ -44,9 +53,11 @@ RUN pip install torchao==0.13.0 "huggingface_hub[cli]" "pydantic>=2.7,<2.11"
 #
 # LongLive at the pinned commit (DESIGN §140). Full requirements (matches
 # upstream env; heavy but reproducible). The upstream requirements.txt
-# itself floats (issue 011 remainder): hashing it (`--require-hashes`)
-# needs a GPU-box freeze first — never `pip install -r` a second
-# requirements file here (see the CausVid note below for why).
+# itself still floats (issue 067 residual): hashing it (`--require-hashes`)
+# or vendoring a hashed copy needs the same GPU-box freeze as the pins
+# above — never `pip install -r` a second requirements file here (see the
+# CausVid note below for why). tests/test_registry_pins.py allowlists this
+# single `-r` row and fails on any other floating spec.
 RUN git clone --depth 1 https://github.com/NVlabs/LongLive /opt/longlive \
     && git -C /opt/longlive fetch --depth 1 origin 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
     && git -C /opt/longlive checkout 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
@@ -62,10 +73,10 @@ RUN apt-get update \
 
 # Mandatory attention backend (see header note). Built for the host GPU
 # family at image build time; sm89 (Ada) is covered by the default arch list.
-# NOTE (issue 011 remainder): flash-attn floats with no version — it must be
+# NOTE (issue 067): frozen exact at the 2026-09-30 freeze — it must still be
 # built against the host GPU family at image build time, so the pin can only
-# be frozen on a GPU box (`pip freeze` after a good build, then pin exact).
-RUN pip install flash-attn --no-build-isolation
+# be re-frozen on a GPU box (`pip freeze` after a good build, then pin exact).
+RUN pip install flash-attn==2.8.3.post1 --no-build-isolation
 
 # ACE-Step 1.5 music stack (Phase 4, DESIGN §140): same pinned clone the
 # zoomy GPU image carries, plus the audio-only pip deps the video image
@@ -77,7 +88,7 @@ RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-St
     && git -C /opt/ACE-Step-1.5 fetch --depth 1 origin ca1e85fe9430179831e6bc6be790c332190a3866 \
     && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
     && git -C /opt/ACE-Step-1.5 rev-parse --verify HEAD \
-    && pip install soundfile loguru numba vector_quantize_pytorch sentence-transformers \
+    && pip install soundfile==0.14.0 loguru==0.7.3 numba==0.67.0 vector-quantize-pytorch==1.31.6 "sentence-transformers==6.1.0" \
     && pip install torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
@@ -104,7 +115,7 @@ RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
     && git -C /opt/mmaudio checkout 974010a026c731054592d8f777218bd9d85a6c24 \
     && git -C /opt/mmaudio rev-parse --verify HEAD \
     && pip install --no-deps -e /opt/mmaudio \
-    && pip install "open_clip_torch>=2.29.0" "librosa>=0.10.1" "torchdiffeq>=0.2.5" accelerate colorlog
+    && pip install "open_clip_torch==3.3.0" "librosa==0.11.0" "torchdiffeq==0.2.5" "accelerate==1.15.0" "colorlog==6.12.0"
 
 # Re-assert the transformers floor after the SFX requirements (same pin,
 # same reason as above — idempotent when already satisfied).
@@ -122,7 +133,7 @@ RUN pip install transformers==4.57.6
 # is expressible in a PEP 508 URL) — accepted: the rev is pinned and the
 # tree is small; vendor a tarball with sha256 if this ever moves to prod.
 RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightricks/LTX-Video@4b2d053057623ddd4d0a1d3e9cd28890e9ef487f" \
-    && pip install "imageio[ffmpeg]" av sentencepiece einops timm
+    && pip install "imageio[ffmpeg]==2.38.0" "imageio-ffmpeg==0.6.0" "av==13.1.0" "sentencepiece==0.2.2" "einops==0.8.2" "timm==1.0.30"
 
 # CausVid DMD causal generator (Stream D prep, DESIGN §5.4): upstream code
 # at the pinned commit; the worker will strict-load the DMD checkpoint's
@@ -141,7 +152,7 @@ RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
     && git -C /opt/causvid fetch --depth 1 origin adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
     && git -C /opt/causvid checkout adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
     && git -C /opt/causvid rev-parse --verify HEAD \
-    && pip install omegaconf easydict ftfy diffusers
+    && pip install "omegaconf==2.3.1" "easydict==1.13" "ftfy==6.3.1" "diffusers==0.31.0"
 
 # Finalize-stage augmentation weights (Track C): FILM interpolation
 # (Comfy-Org fp16 .safetensors) + Real-ESRGAN anime 6B upscaler (xinntao
@@ -154,7 +165,7 @@ RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
 # only: safetensors (.safetensors decode; floor matches transformers'
 # requirement so the 4.57.6 pin above always wins) + Pillow (frame PNG
 # I/O; torchvision already needs it, so this is explicit, never a bump).
-RUN pip install "safetensors>=0.4.3" "Pillow>=10.0.0"
+RUN pip install "safetensors==0.8.0" "Pillow==12.3.0"
 
 # Pre-created wan_models links (causvid-perms fix): the worker shims
 # (`_enter_causvid_tree` / `_enter_longlive_tree`) must satisfy upstream's
@@ -193,8 +204,8 @@ RUN python3.10 -m venv /opt/venvs/director \
     && /opt/venvs/director/bin/pip install "pip==25.0.1" \
     && /opt/venvs/director/bin/pip install torch==2.11.0 \
         --index-url https://download.pytorch.org/whl/cu128 \
-    && /opt/venvs/director/bin/pip install "GPTQModel==7.5.0" sentence-transformers \
-        "safetensors>=0.4.3" "huggingface_hub[cli]" "pydantic>=2.7,<2.11" \
+    && /opt/venvs/director/bin/pip install "GPTQModel==7.5.0" "sentence-transformers==6.1.0" \
+        "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
     && /opt/venvs/director/bin/pip install transformers==5.17.0
 
 # Run as the invoking host user (issue 053 follow-up): the supervisor and

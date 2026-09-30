@@ -87,45 +87,106 @@ def _to_gray(frame: Frame) -> NDArray[np.float64]:
     return 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
 
 
-def _decode_frames(video_path: Path, width: int, height: int, video_filter: str) -> list[Frame]:
-    """Run ffmpeg with `video_filter`, return decoded RGB frames (no copy)."""
+#: Hard ceiling on frames the estimate-drift fallback decodes (issue 044).
+#: Real segments are < 200 frames; only a pathological clip (or a wildly
+#: wrong probe estimate) ever reaches this — instead of full-decoding a
+#: multi-GB file to pick 3 frames, the fallback serves evenly spaced
+#: picks from the capped prefix.
+FALLBACK_MAX_FRAMES = 2048
+
+
+def _read_frame_bytes(stdout: Any, stride: int) -> bytes | None:
+    """Read exactly one frame (`stride` bytes); None on clean EOF.
+
+    Raises MediaError on a truncated tail (some bytes, then EOF) — a
+    corrupt stream must fail loud, never serve a short frame silently.
+    """
+    chunks: list[bytes] = []
+    remaining = stride
+    while remaining > 0:
+        piece = stdout.read(remaining)
+        if not piece:
+            if chunks:
+                raise MediaError(
+                    f"frame sampling hit a truncated stream "
+                    f"({stride - remaining} of {stride} bytes)"
+                )
+            return None
+        chunks.append(piece)
+        remaining -= len(piece)
+    return b"".join(chunks)
+
+
+def _decode_frames(
+    video_path: Path,
+    width: int,
+    height: int,
+    video_filter: str,
+    *,
+    frame_limit: int | None = None,
+) -> list[Frame]:
+    """Stream ffmpeg rawvideo frames with constant memory (issue 044).
+
+    The old `subprocess.run(..., capture_output=True)` held the entire
+    decoded byte stream in `proc.stdout` plus per-frame views plus the
+    callers' `.copy()` fan-out (~2-3x transient RAM). This reads one
+    frame at a time from `Popen.stdout` and returns owned arrays (one
+    copy at decode, none after) — peak is the retained frames, never
+    the whole stream. `frame_limit` caps emitted frames server-side
+    (`-frames:v`) and stops the read early (the process is killed once
+    the cap is reached), so a drifted select estimate cannot emit the
+    whole clip. Kills are not errors: only EOF-before-limit checks the
+    exit status.
+    """
     import subprocess
 
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-v",
-            "error",
-            "-i",
-            str(video_path),
-            "-vf",
-            video_filter,
-            "-vsync",
-            "0",
-            "-pix_fmt",
-            "rgb24",
-            "-f",
-            "rawvideo",
-            "-",
-        ],
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise MediaError(f"frame sampling failed for {video_path}: {proc.stderr[-2000:]!r}")
-    raw = proc.stdout if isinstance(proc.stdout, bytes) else b""
-    stride = width * height * 3
-    total, leftover = divmod(len(raw), stride)
-    if total == 0 or leftover:
-        raise MediaError(f"frame sampling yielded no whole frames for {video_path}")
-    return [
-        np.frombuffer(raw[index * stride : (index + 1) * stride], dtype=np.uint8).reshape(
-            height, width, 3
-        )
-        for index in range(total)
+    if frame_limit is not None and frame_limit < 1:
+        raise MediaError(f"frame decode needs frame_limit >= 1 (got {frame_limit})")
+    argv = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        str(video_path),
+        "-vf",
+        video_filter,
+        "-vsync",
+        "0",
+        "-pix_fmt",
+        "rgb24",
     ]
+    if frame_limit is not None:
+        argv += ["-frames:v", str(frame_limit)]
+    argv += ["-f", "rawvideo", "-"]
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.stdout is None or proc.stderr is None:
+        proc.kill()
+        proc.wait()
+        raise MediaError(f"frame sampling could not capture ffmpeg pipes for {video_path}")
+    stride = width * height * 3
+    frames: list[Frame] = []
+    truncated = False
+    try:
+        while frame_limit is None or len(frames) < int(frame_limit):
+            try:
+                chunk = _read_frame_bytes(proc.stdout, stride)
+            except MediaError:
+                truncated = True
+                raise
+            if chunk is None:
+                break
+            frames.append(np.frombuffer(chunk, dtype=np.uint8).reshape(height, width, 3).copy())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        _, stderr = proc.communicate()
+    if truncated or not frames:
+        raise MediaError(f"frame sampling yielded no whole frames for {video_path}")
+    if proc.returncode != 0 and (frame_limit is None or len(frames) < int(frame_limit)):
+        raise MediaError(f"frame sampling failed for {video_path}: {stderr.decode()[-2000:]!r}")
+    return frames
 
 
 def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Frame]:
@@ -138,8 +199,13 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
 
     Issue 032: decodes only the needed frames via a `select` filter
     when the probe yields a frame total (the common mp4 case) — the
-    full-stream decode stays as the fallback when the estimate is
-    missing or drifts, so the contract never changes.
+    capped-prefix decode below stays as the fallback when the estimate
+    is missing or drifts, so the contract never changes.
+
+    Issue 044: the decode streams (`_decode_frames` reads one frame at
+    a time and stops at the cap), each returned frame already owns its
+    bytes, and the fallback decodes at most `FALLBACK_MAX_FRAMES`
+    instead of the whole clip.
     """
     if count < 1:
         raise MediaError(f"sample_frames needs count >= 1 (got {count})")
@@ -163,16 +229,20 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
             width,
             height,
             f"{select_filter_expression(picks)},scale={width}:{height}",
+            frame_limit=len(picks),
         )
         if len(selected) == len(picks):
-            return [frame.copy() for frame in selected]
-        # Estimate drifted (VFR / wrong nb_frames): fall through to full decode.
-    frames = _decode_frames(video_path, width, height, f"scale={width}:{height}")
+            return selected
+        # Estimate drifted (VFR / wrong nb_frames): fall through to the
+        # capped-prefix decode.
+    frames = _decode_frames(
+        video_path, width, height, f"scale={width}:{height}", frame_limit=FALLBACK_MAX_FRAMES
+    )
     total = len(frames)
     if count == 1:
-        return [frames[total // 2].copy()]
+        return [frames[total // 2]]
     picks = select_frame_indices(total, count)
-    return [frames[pick].copy() for pick in picks]
+    return [frames[pick] for pick in picks]
 
 
 class SegmentZeroAnchor:

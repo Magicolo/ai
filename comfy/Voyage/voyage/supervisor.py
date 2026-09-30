@@ -49,7 +49,7 @@ from voyage.errors import (
     VoyageError,
 )
 from voyage.hashing import sha256_file as sha256_file  # re-export (issue 021, cf. cli.py)
-from voyage.logrotate import append_line
+from voyage.logrotate import append_line, rotate_worker_logs
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     assemble_segment_audio,
@@ -545,6 +545,18 @@ class Supervisor:
     def _log_metric(self, event: dict[str, object]) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._config.run_id, **event})
         append_line(self._logs / "metrics.jsonl", line)
+
+    def _rotate_worker_logs(self) -> None:
+        """Mid-run worker-log rotation, one cadence tick (issue 056).
+
+        Called once per committed segment (both the render path and the
+        orphan-adoption path): copytruncate-rolls any worker log past
+        `MAX_WORKER_LOG_BYTES` or a day boundary, in place, so the live
+        stderr handles keep writing to the live file. Best-effort by
+        design — the helper never raises, and rotation must never fail
+        a commit.
+        """
+        rotate_worker_logs(self._logs)
 
     def _call_with_restart(
         self,
@@ -1927,6 +1939,30 @@ class Supervisor:
                 f"usable frame count; refusing to re-render over it — inspect or "
                 f"remove {segment} manually"
             )
+        # Issue 006 (adoption-side mirror of the `_render_video` ceiling):
+        # the orphan's frame count drives `timeline_frames` directly, so an
+        # absurd stored count corrupts the timeline exactly like an absurd
+        # live worker report.
+        ceiling = REPORTED_FRAMES_SLACK * self._config.video.segment_frames
+        if not 1 <= frames <= ceiling:
+            raise MediaError(
+                f"segment {segment_id}: worker reported implausible "
+                f"frames {frames!r} (expected an int within 1..{ceiling})"
+            )
+        # Issue 003 (adoption-side mirror of the `_commit_segment` gate):
+        # a DONE orphan whose media drifted past the A/V budget must not
+        # adopt silently — it would commit unfinalizable media exactly
+        # like the pre-fix commit path did.
+        video_info = validate_video(
+            video_out,
+            self._config.video.width,
+            self._config.video.height,
+            self._config.video.fps,
+        )
+        audio_info = validate_audio(
+            audio_out, self._config.audio.sample_rate, self._config.audio.channels
+        )
+        check_av_alignment(float(video_info["duration"]), float(audio_info["duration"]), segment_id)
         # The takes ledger stays the truth for audio planning (see
         # `_ensure_audio_coverage`); the buffer gauge keeps its pre-crash
         # value — the next commit plans from the ledger, so worst case is
@@ -1949,6 +1985,7 @@ class Supervisor:
                 "reason": "done_before_state",
             }
         )
+        self._rotate_worker_logs()
         return segment_id
 
     def _commit_segment(
@@ -2068,6 +2105,7 @@ class Supervisor:
             }
         )
         self._sample_gauges(segment_id)
+        self._rotate_worker_logs()
         if self._progress is not None:
             from voyage.audio.beat import beats_for_segment
 

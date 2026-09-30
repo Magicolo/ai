@@ -47,3 +47,52 @@ With a fully provisioned volume, `HF_HUB_OFFLINE=1 python -m voyage.workers.vide
 
 - Overlaps with 070 (same floating-pin class, one-time provision fetch — Wan2.2 `revision=None`) — this issue owns the per-session hot-path leg.
 - HF transformers SECURITY.md ("setting a revision… protect yourself from updates") — https://github.com/huggingface/transformers/blob/main/SECURITY.md
+
+## Progress log
+
+- 2026-09-30: premise re-verified against live code: `TE_REPO_ID` at
+  `Voyage/voyage/workers/video_ltxv.py:48`, bare-hub loads at `:341-342`,
+  registry pin `LTXV_TE_REVISION = b89adade…` (`model_registry.py:185-187`)
+  never passed to any `from_pretrained` (rg confirms), while
+  `workers/director.py:128-162` honors the offline-first contract via
+  `_resolve_model_source` — holds verbatim.
+- 2026-09-30: `revision=` support probe-verified CPU-only in the video image
+  (`docker run --rm voyage-video:latest python3 -c inspect…` on transformers
+  4.57.6): both `T5Tokenizer.from_pretrained` and
+  `T5EncoderModel.from_pretrained` accept `revision` (default `'main'`) and
+  `local_files_only` (default `False`) — the contract's "if supported"
+  condition holds, both flags are passed.
+- 2026-09-30: TDD — `test_ltxv_session_loads_te_from_local_snapshot`
+  (stubbed torch/ltx_video/transformers; asserts local source +
+  `local_files_only=True` + pinned revision), the two `_resolve_te_source`
+  tests (present → no download; absent → fetch-then-local), and the AST
+  grep-gate all failed pre-fix (hub-id loads at old `:341-342`), all green
+  post-fix. Mid-pass fix: the absent-snapshot test briefly hit the REAL hub
+  (5.5 min download) because `video_ltxv` used a `from`-import binding the
+  test's `monkeypatch.setattr(model_registry, "download_model", …)` could not
+  reach — the resolver now uses module-attribute access (director idiom),
+  keeping the seam patchable; no tree pollution (tmp dir only).
+- 2026-09-30: gates — ruff + format + mypy strict clean on
+  `voyage/workers/video_ltxv.py`; full suite shows no new failures from this
+  issue.
+
+## Resolution
+
+- Fix candidate 1 applied: new `LTXVSession`-adjacent `_resolve_te_source`
+  (mirrors `director._resolve_model_source`, parameterized by `models_dir` —
+  present snapshot → `<models_dir>/PixArt-XL-2-1024-MS`, absent → download the
+  owning `ltxv-2b` spec with the `HF_HUB_OFFLINE` guard lifted, re-check, raise
+  on still-incomplete) and `__init__` loads both classes from the resolved
+  source with `local_files_only=True, revision=LTXV_TE_REVISION`. The
+  `TE_REPO_ID` constant is deleted (single source: `LTXV_TE_REPO`); nothing
+  else imported it (rg-verified).
+- Fix candidate 2 applied: `test_no_bare_hub_id_from_pretrained_in_workers`
+  AST-scans `voyage/workers/*.py` (docstrings ignored by construction) and
+  fails on any `from_pretrained` rooted at a `/`-literal or `*_REPO_ID` /
+  `*_HF_REPO` / `*_REPO` name — director's `source`-variable loads and the
+  local-path DiT/VAE/scheduler loads pass.
+- Residuals (GPU box required): a live `HF_HUB_OFFLINE=1` session-init probe
+  against a provisioned volume (stub tests prove the wiring; only a real init
+  proves end-to-end offline-first); the absent-snapshot download path is
+  covered by a stubbed test only — a live re-provision of the TE snapshot
+  would exercise the real fetch + re-check.

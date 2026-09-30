@@ -37,3 +37,19 @@ python3 -c "print((768*512*3*96)/1024**2)"  # → 108.0 MiB raw held in stdout f
 **Refs:** `voyage/vision/metrics.py:178-217` anchor (proves per-commit re-decode was already a cost center); ffmpeg filter docs (avoid full-stream materialization).
 
 **Overlaps with:** 043/045/048 (all-at-once RAM cluster — same streaming/chunking fix pattern; not duplicates).
+
+## Progress log
+
+- 2026-09-30: re-verified every premise against live code — all hold as-read: `metrics.py:94` `subprocess.run(capture_output=True)`, `:118` full-stdout hold, `:123-128` `frombuffer` views, `:168`/`:173` caller `.copy()` fan-out, `:170` uncapped full-decode fallback, and the `:91` "no copy" docstring is indeed false (callers copy every frame).
+- 2026-09-30 (TDD red): the 044 tests in `Voyage/tests/test_media_memory.py` failed first in-container (missing `FALLBACK_MAX_FRAMES` + `subprocess.run` still capturing rawvideo).
+- 2026-09-30 (implement): rewrote `_decode_frames` around `Popen` + incremental exact-`stride` reads (`_read_frame_bytes`: clean-EOF → stop, short tail → loud `MediaError`); each frame is one owned array at decode (`.copy()` once, `bytes` chunk released) — peak is retained frames, never the stream. New keyword-only `frame_limit` appends `-frames:v` server-side and kills the process at the cap (kills are not errors; only EOF-before-limit checks the exit status). `sample_frames` passes `frame_limit=len(picks)` on the select path (a drifted estimate can emit at most `count` frames), drops the entire `.copy()` fan-out, and the fallback decodes at most `FALLBACK_MAX_FRAMES = 2048` (10x the largest known segment — real segments are < 200 frames) serving evenly spaced picks from the capped prefix.
+- 2026-09-30 (TDD green): identity vs the inline old algorithm (`array_equal` on all 3 picks), two mock-gates proving no `subprocess.run` rawvideo capture (ffprobe still allowed through), drifted-estimate (100 000) still serves 3 frames, `None`-estimate fallback is frame-identical to the select path, RSS smoke (< 120 MiB growth), cap-constant pin. One test-side fix (mock-gate initially forbade the legitimate ffprobe `subprocess.run` — narrowed to rawvideo argv).
+- 2026-09-30 (gates): ruff + format-check + mypy strict clean; `test_vision_metrics` + `test_issue_032_commit_fanout` (incl. the select-path tests) all pass unmodified — public signatures backward-compatible.
+
+## Resolution
+
+- Verdict: fixed. Peak decode memory is now the retained frames (~3 scaled frames on the select path, ≤ cap only on the rare drift path) instead of ~2-3x the whole rawvideo stream.
+- Files changed: `Voyage/voyage/vision/metrics.py` (+`FALLBACK_MAX_FRAMES`, +`_read_frame_bytes`, rewrote `_decode_frames`, rewired `sample_frames`), `Voyage/tests/test_media_memory.py` (new: 7 tests listed above).
+- Test evidence: `test_sample_frames_matches_reference_decode` (exact-pixel identity vs pre-044 algorithm on synthetic testsrc), `test_sample_frames_drifted_estimate_still_serves_count`, `test_sample_frames_missing_estimate_serves_identical_frames`, `test_sample_frames_bounded_rss`, `test_sample_frames_never_uses_capture_run` (+ single-frame variant).
+- DESIGN.md as-built proposal (not applied): in §§43-44/100, after the sampling description, add "frame sampling streams the rawvideo decode (`Popen`, one owned array per frame, `-frames:v` early stop); the select path caps emitted frames at the pick count and the estimate-drift fallback decodes at most 2048 frames (capped prefix picks) — sampling never holds the whole stream."
+- Residuals: on a > 2048-frame clip with a missing/drifted estimate, fallback picks come from the capped prefix, not the whole clip (no real segment is near this — segments are < 200 frames; deliberate bound, not a bug). No per-stage RSS gauge around `sample_frames` (that is issue 051's scope, overlapped not duplicated).

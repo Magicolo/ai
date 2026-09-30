@@ -909,6 +909,12 @@ V1 audio requirement:
 
 The SFX provider abstraction must make future model replacement possible without touching the supervisor or timeline code.
 
+> As-built (§7-sfx-conditioning-2026-09-30, issue 045): SFX conditioning is
+> one ffmpeg spawn per window (25 fps @ 384 px, streamed into a single
+> `torch.stack`; CLIP = even temporal subsample, sync = CPU downscale
+> 384→224) with a 2 GiB pre-stack byte budget and pad-to-16-sync-frames
+> tails. Evict drops the extra device-to-host copy.
+
 ---
 
 # 8. Director model
@@ -1259,6 +1265,11 @@ Reasoning:
 - backend-specific configuration may remain in native formats if required.
 
 The supervisor should not attempt to normalize every generator-specific field. Define explicit backend profiles (`LongLiveProfile`, `LTXVideoProfile`, `CausVidProfile`) and translate each profile into the exact upstream configuration contract. The common supervisor-visible fields should remain limited to resolution, timeline, segment duration, continuation semantics, randomness policy, and resource limits.
+
+> As-built (§14-toml-2026-09-30, issue 020): all TOML basic-string quoting
+> flows through the one `config._toml_basic_string` helper (full C0 + DEL
+> escaped; `tui_state._toml_string` is a back-compat alias), so creator
+> free-text can never emit an unparseable charter.
 
 Example:
 
@@ -1993,6 +2004,12 @@ Real GPU inference need not be byte-for-byte deterministic across hardware, driv
 > tapes are resolve-contained + `is_file()`-gated (`MediaError`); discovery
 > skips non-conforming tapes with `recovery_tape_skipped`. Residual:
 > check-then-use TOCTOU at the consumer.
+> As-built (§27-trust-2026-09-30, issues 003/006): the adoption path probes
+> orphan media with the existing `validate_video`/`validate_audio` APIs and
+> enforces the shared 0.6 s `check_av_alignment` gate before checksums
+> advance state, and clamps stored `frames` to the same
+> `1..REPORTED_FRAMES_SLACK × segment_frames` ceiling as the live-report
+> gate — drifted or absurd orphans raise `MediaError` instead of adopting.
 
 ---
 
@@ -2081,6 +2098,11 @@ The precise order can be simplified, but the invariant must remain:
 
 > No state file may claim a segment is committed until the segment's required artifacts are valid and durably present.
 
+> As-built (§30-av-gate-2026-09-30, issue 003): step 3/5 (validate media)
+> enforces `|video−audio| ≤ 0.6 s` via probed durations and the shared
+> `check_av_alignment` helper (`av_drift_seconds` recorded); misalignment
+> raises recoverable `MediaError`, never a silent commit.
+
 ---
 
 # 31. Atomic file handling
@@ -2106,6 +2128,11 @@ json.dump(...)
 as the only persistence mechanism for critical state.
 
 A partially written state file must not be able to destroy the previous valid state.
+
+> As-built (§31-atomic-copy-2026-09-30, issue 043): large-file publish uses
+> `atomic.atomic_copy` (sibling `.partial` + chunked ~1 MiB copy +
+> flush/fsync/replace/fsync_dir) — staged finals are never `read_bytes()`'d
+> into RAM. Same durability, constant memory.
 
 ---
 
@@ -2521,6 +2548,13 @@ if style_similarity < target_min:
 ```
 
 Do not make the first version depend on a VLM for basic operation.
+
+> As-built (§43-streamed-sampling-2026-09-30, issue 044): frame sampling
+> streams the rawvideo decode (`Popen` + exact-stride reads, one owned array
+> per frame) instead of capturing the whole stream; the select path is
+> capped at the pick count and the estimate-drift fallback at
+> `FALLBACK_MAX_FRAMES = 2048`. Sampled frames are pixel-identical to the
+> old algorithm.
 
 ---
 
@@ -2942,6 +2976,12 @@ Finalizer steps:
 12. validate final media;
 13. atomically publish final path.
 
+> As-built (§56-publish-2026-09-30, issue 043): step 13 publishes via
+> `atomic_copy` (chunked, fsynced, constant memory).
+> As-built (§56-align-2026-09-30, issue 003): step 6 and `voyage validate`
+> enforce the same 0.6 s A/V budget through the shared `av_drift_seconds`
+> helper — read-only error strings on the validate side.
+
 Never mutate the source segment files during finalization.
 
 ---
@@ -2995,6 +3035,11 @@ voyage validate
 voyage finalize
 voyage inspect
 ```
+
+> As-built (§58-handoff-2026-09-30, issue 022): the `generate` → inner
+> `run` handoff forwards every in-memory generation override including
+> both caption pins (`music_caption`/`video_caption`) — no flag parses
+> yet silently does nothing.
 
 ## `voyage init`
 
@@ -3187,6 +3232,13 @@ logs/director-worker.log
 Use log rotation.
 
 Do not let logs grow without bound during multi-day runs.
+
+> As-built (§60-worker-rotation-2026-09-30, issue 056): worker logs rotate
+> mid-run copytruncate-style once per committed segment (`rotate_worker_logs`
+> tick: previous-day mtime or `> MAX_WORKER_LOG_BYTES` 10 MiB →
+> archive to dated sibling, truncate live in place so the open stderr
+> handle continues at offset 0). Rename-based `rotate_log` stays
+> start-time only; retention via existing dated-sibling pruning.
 
 ---
 
@@ -3582,6 +3634,11 @@ This prevents an LLM from directly mutating the persistent run state.
 > propagate raw); holder-pid reads are liveness-checked
 > (`kill(pid,0)`); `state.json.lock` is pid-guarded-unlinked after close.
 > Residual: unlink/check TOCTOU (fd-passing future work).
+> As-built (§73-report-gate-2026-09-30, issue 006): worker-reported `frames`
+> are clamped to `1..REPORTED_FRAMES_SLACK × segment_frames` with an
+> `implausible` `MediaError` on violation, and every non-empty string
+> `recovery_path` is re-resolved through `_checked_tape_path` — at both the
+> live-report gate and the orphan-adoption path.
 
 ---
 
@@ -4120,6 +4177,14 @@ checksum if practical
 Pin Git repositories to commits, not floating branches, for production runs.
 
 During active development, a branch may be used intentionally, but the run manifest must record the exact resolved commit.
+
+> As-built (§84-hashes-2026-09-30, issue 071): registry rows carry
+> `expected_hashes`, verified pre-merge at ingest (poisoned bytes never
+> attest); `verify_model` runs a manifest-conditional hash leg; unknown
+> manifests fail closed by default (`allow_missing_manifest` /
+> `VOYAGE_ALLOW_MISSING_MANIFEST=1` opt-in for external volumes).
+> `wan_revision` stays nullable until issue 070 pins the 40-hex revision
+> (wire + record + pin procedure landed; value awaits a provisioned box).
 
 ---
 
@@ -7644,3 +7709,19 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   substitution-cache regression) + `doctor.probe` director-venv fact +
   2 `test_doctor.py` tests; full gates 1089 passed + 1 TUI Pilot flake
   (passes in isolation — shared-box load, known class).
+
+- Batch 3 Rank-1 resolutions (2026-09-30, issues
+  003/006/020/022/043/044/045/056/067/071/073; 070 procedure-only):
+  `worker/Dockerfile.video` pip rows frozen to the 2026-09-30 live-image
+  freeze (067; rebuild + `--require-hashes` still open); LTXV TE resolves
+  via `_resolve_te_source` offline-first (`local_files_only` + pinned
+  revision, 073 — needs a `HF_HUB_OFFLINE=1` GPU-box probe);
+  `WAN_HF_REVISION` wire + record + pin procedure landed, value still
+  `None` (070 — pin from a provisioned box, never the API alone);
+  registry ingest/ensure/load hash gates + fail-closed manifests (071,
+  CausVid DMD baseline still open); `atomic_copy` publish, streamed
+  frame sampling, single-pass SFX conditioning (043/044/045 —
+  `sfx_finalize.py:563` read_bytes left as noted follow-up, torch
+  execution needs a GPU box); mid-run worker-log rotation (056);
+  shared TOML escaper, caption-pin forwarding, validate-side AV budget
+  via `av_drift_seconds` (020/022/003).

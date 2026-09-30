@@ -26,6 +26,7 @@ from voyage.audio.mmaudio_sfx import (
     SYNC_FPS,
     SYNC_SIZE,
     SfxStack,
+    check_stacked_bytes,
     evict,
     initialize,
     render_window,
@@ -107,16 +108,98 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "READY", "backend": "mmaudio", "loaded": _stack is not None}
 
 
+#: Single-pass conditioning geometry (issue 045): decode once at the top
+#: of each branch (sync rate 25 fps, clip size 384 px), then derive both
+#: branches in-process — temporal subsample for CLIP, CPU downscale for
+#: sync. One ffmpeg spawn per window instead of two.
+SINGLE_PASS_FPS = SYNC_FPS
+SINGLE_PASS_SIZE = CLIP_SIZE
+
+
+def sfx_single_pass_argv(
+    video_path: str, start_seconds: float, duration_seconds: float, frame_count: int
+) -> list[str]:
+    """ffmpeg argv for the single conditioning decode (issue 045, pure).
+
+    Arg-lists only (never shell). Emits `frame_count` rawvideo rgb24
+    frames at the single-pass geometry; the caller derives the CLIP
+    (temporal subsample) and sync (CPU downscale) branches from them.
+    """
+    if frame_count < 1:
+        raise ValueError(f"frame_count must be >= 1 (got {frame_count})")
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-ss",
+        f"{start_seconds:.6f}",
+        "-i",
+        video_path,
+        "-t",
+        f"{duration_seconds:.6f}",
+        "-vf",
+        f"fps={SINGLE_PASS_FPS:g},scale={SINGLE_PASS_SIZE}:{SINGLE_PASS_SIZE}",
+        "-frames:v",
+        str(frame_count),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-",
+    ]
+
+
+def derive_clip_indices(frame_total: int, wanted_clip: int) -> list[int]:
+    """Evenly spaced single-pass indices for the CLIP branch (issue 045).
+
+    The single pass runs at the sync rate, so CLIP keeps its native 8 fps
+    cadence by subsampling (`wanted == 1` takes the middle frame — the
+    same choice the vision sampler documents).
+    """
+    if frame_total < 1:
+        raise ValueError(f"frame_total must be >= 1 (got {frame_total})")
+    if wanted_clip < 1:
+        raise ValueError(f"wanted_clip must be >= 1 (got {wanted_clip})")
+    if wanted_clip == 1:
+        return [frame_total // 2]
+    return [round(index * (frame_total - 1) / (wanted_clip - 1)) for index in range(wanted_clip)]
+
+
+def _read_frame_bytes(stdout: Any, stride: int) -> bytes | None:
+    """Read exactly one frame; None on clean EOF, loud on a short tail."""
+    chunks: list[bytes] = []
+    remaining = stride
+    while remaining > 0:
+        piece: bytes = stdout.read(remaining)
+        if not piece:
+            if chunks:
+                raise RuntimeError(
+                    f"sfx frame extract hit a truncated stream "
+                    f"({stride - remaining} of {stride} bytes)"
+                )
+            return None
+        chunks.append(piece)
+        remaining -= len(piece)
+    return b"".join(chunks)
+
+
 def _extract_frames(
     video_path: str, start_seconds: float, duration_seconds: float
 ) -> tuple[Any, Any, float]:
-    """ffmpeg two-pass conditioning extract: 8 fps @ 384 px (CLIP) + 25 fps @ 224 px (sync).
+    """ffmpeg single-pass conditioning extract (issue 045).
 
-    Returns `(clip_batch, sync_batch, resolved_seconds)` — CPU float32
-    tensors (T,3,H,W), sync normalized to [-1, 1]. Counts are exact
-    (int(rate × resolved)); when the source yields fewer frames than
-    requested (short tail), the duration truncates to reality like the
-    canonical loader and the caller fails loud past 0.05 s of drift.
+    One rawvideo decode at 25 fps @ 384 px, streamed frame-by-frame
+    into a single `torch.stack` — no `capture_output` byte hold, no
+    per-branch spawns, no numpy-copy fan-out. The CLIP branch
+    subsamples the stream temporally (already 384 px, no resize); the
+    sync branch downscales 384 → 224 CPU-side and normalizes to
+    [-1, 1]. Counts are exact (int(rate × resolved)); when the source
+    yields fewer frames than requested (short tail), the duration
+    truncates to reality like the canonical loader and the caller
+    fails loud past 0.05 s of drift (padded to the sync floor inside
+    `render_window` instead — see `pad_to_sync_floor`).
     Arg-lists only (never shell); a non-zero exit raises RuntimeError →
     retryable WORKER_ERROR (transient disk/ffmpeg smell, worth one
     supervisor restart).
@@ -124,46 +207,42 @@ def _extract_frames(
     import numpy as np
     import torch
 
-    def _grab(rate: float, size: int, count: int) -> Any:
-        command = [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-v",
-            "error",
-            "-ss",
-            f"{start_seconds:.6f}",
-            "-i",
-            video_path,
-            "-t",
-            f"{duration_seconds:.6f}",
-            "-vf",
-            f"fps={rate},scale={size}:{size}",
-            "-frames:v",
-            str(count),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-",
-        ]
-        completed = subprocess.run(command, capture_output=True, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"sfx frame extract failed: {completed.stderr.decode().strip()}")
-        pixels = len(completed.stdout) // (size * size * 3)
-        if pixels == 0:
-            raise RuntimeError(f"sfx frame extract yielded no frames ({video_path})")
-        array = np.frombuffer(completed.stdout, dtype=np.uint8)
-        frames = array[: pixels * size * size * 3].reshape(pixels, size, size, 3)
-        tensor = torch.from_numpy(frames.copy()).float().div_(255.0).permute(0, 3, 1, 2)
-        return tensor
-
     wanted_clip = int(CLIP_FPS * duration_seconds)
     wanted_sync = int(SYNC_FPS * duration_seconds)
-    clip = _grab(CLIP_FPS, CLIP_SIZE, wanted_clip)
-    sync = _grab(SYNC_FPS, SYNC_SIZE, wanted_sync)
+    argv = sfx_single_pass_argv(video_path, start_seconds, duration_seconds, wanted_sync)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.stdout is None or proc.stderr is None:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(f"sfx frame extract could not capture ffmpeg pipes ({video_path})")
+    stride = SINGLE_PASS_SIZE * SINGLE_PASS_SIZE * 3
+    raw_frames: list[Any] = []
+    try:
+        while len(raw_frames) < wanted_sync:
+            chunk = _read_frame_bytes(proc.stdout, stride)
+            if chunk is None:
+                break
+            raw_frames.append(
+                torch.from_numpy(np.frombuffer(chunk, dtype=np.uint8)).reshape(
+                    SINGLE_PASS_SIZE, SINGLE_PASS_SIZE, 3
+                )
+            )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        _, stderr = proc.communicate()
+    if not raw_frames:
+        raise RuntimeError(f"sfx frame extract yielded no frames ({video_path})")
+    if proc.returncode != 0 and len(raw_frames) < wanted_sync:
+        raise RuntimeError(f"sfx frame extract failed: {stderr.decode().strip()}")
+    stream = torch.stack(raw_frames).permute(0, 3, 1, 2).float().div_(255.0)
+    indices = derive_clip_indices(len(raw_frames), min(wanted_clip, len(raw_frames)))
+    clip = stream[indices]
+    sync = torch.nn.functional.interpolate(
+        stream, size=(SYNC_SIZE, SYNC_SIZE), mode="bilinear", align_corners=False
+    ).mul_(2.0)
+    sync = sync.sub_(1.0)
     resolved = min(len(clip) / CLIP_FPS, len(sync) / SYNC_FPS)
-    sync = sync.mul_(2.0).sub_(1.0)
     return clip, sync, resolved
 
 
@@ -205,6 +284,7 @@ def handle_generate_sfx(payload: dict[str, Any]) -> dict[str, Any]:
     )
     duration = float(payload["duration_seconds"])
     validate_duration_seconds(duration)
+    check_stacked_bytes(duration)
     start = float(payload["start_seconds"])
     if start < 0.0:
         raise ValueError(f"start_seconds must be >= 0 (got {start})")
