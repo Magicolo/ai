@@ -225,3 +225,44 @@ is folded as their tracker (not deleted) until the remaining splits land.
   workers/media surface (open since batch 4), registry per-family
   tables (082 residual), video-worker splits, then test-file
   clusters per 088 — each a future single-group pass.
+
+## Progress log (2026-09-30, batch 12)
+
+- Re-measured host `wc -l` (this pass, after both extractions):
+  `supervisor.py` 2654, `media.py` 1631, `model_registry.py` 1264,
+  `registry_records.py` 770, new `registry_film.py` 65,
+  new `supervisor_commit_types.py` 63, `cli.py` 745 (seam, stable).
+- Tree discipline per §9: `git diff --name-only` on owned targets was
+  empty before every edit; concurrent tracks hold uncommitted foreign
+  hunks in `TASK.md`, `BENCHMARKING.md`, `issues/031/035/070/079/093/
+  127/152`, `cli_observe.py`, `scoreboard.py`, plus 2 untracked test
+  files — all left intact, none inside either extraction region.
+- Max TWO extractions reached via the 082 + 081 preference order; the
+  036 remainder (cli_observe, media surface, video workers, test files)
+  proves movable but stays recorded, not taken.
+- 023 check: `backends._STREAMING_BACKENDS` is derived from
+  `BACKEND_REGISTRY` but `supervisor.STREAMING_VIDEO_BACKENDS` is still
+  a hand literal (`supervisor.py:120`, "mirrors" comment intact) — the
+  unification has NOT landed, so routing maps were deliberately
+  untouched per the batch brief.
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: TRACKED — no 036-owned extraction this pass (quota filled by
+  the 082 film family + 081 commit-types splits); signal table above
+  stays current.
+- Files changed: none under this tracker.
+  Gate evidence: n/a (see 081/082 batch-12 entries for the two landed
+  extractions: ruff + format + mypy strict clean on all 6 split files;
+  18 split/neighbor tests green).
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: this pass
+  makes no 036-seam change; the split index, when created, should list
+  `registry_film.py` (082 family pattern) and
+  `supervisor_commit_types.py` (081 type pattern) alongside
+  `registry_records.py` / `supervisor_proposal.py` /
+  `supervisor_prefetch.py`."
+  Residuals: `cli_observe.py` 734, `media.py` workers/media surface
+  (open since batch 4), registry remaining 9 families, video-worker
+  splits, then test-file clusters per 088 — each a future single-group
+  pass with the same move-verbatim + facade + agreement-test discipline.

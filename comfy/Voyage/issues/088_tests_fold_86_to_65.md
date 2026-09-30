@@ -146,3 +146,48 @@ wc -l tests/*.py | sort -rn | head -n 15
   ordering). Remaining clusters per the issue (adapter, augment quad,
   audio validators, TUI trio, video-worker quartet, finalize/commit
   merges, leftover singletons) stay open — one per pass.
+
+## Progress log (2026-09-30, batch 12)
+
+- Premise re-verified live: 167 `test_*.py` files (growth vs 144 as-left
+  — concurrent agents still adding files); singleton
+  `test_stage_timings.py` (1 test, mtime 2026-09-30, last commit
+  b5cc82f batch 7) present, no helper collisions (`_committed_events`
+  only in the source file; `_gauge_events`/`_init_run` only in the
+  target — verified via rg), zero importers outside self (`rg
+  test_stage_timings` clean except a comment ref in
+  `test_stage_a_telemetry.py:10` + the gates.sh mypy entry), target
+  `test_benchmark.py` imports are a superset (json/Path/
+  initialize_run_directory/paths/load_config/read_state/Supervisor all
+  present — no import churn needed).
+- Fold landed per the issue's explicit singleton recipe
+  (`test_stage_timings` → `test_benchmark`, both timing-area):
+  `_committed_events` helper + 1 test moved verbatim (fn name/body
+  identical, original module docstring kept as a banner per the
+  batch-8 quintet precedent); the source file deleted. As-left: 166
+  files (fold −1, new +1 = net 0 with the 2 split suites), test count
+  net-zero at 1 preserved. `scripts/gates.sh` mypy entry removed in
+  the same edit (batch-9 lesson — verified `bash -n` clean); new
+  split suites stay OUT of the list per the "untracked until
+  committed" rule (verified: prior split suites
+  `test_registry_split`/`test_supervisor_*` are also unlisted).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_benchmark.py` (+44L fold banner/helper/
+  test), deleted `tests/test_stage_timings.py`,
+  `scripts/gates.sh` (mypy-list line: `test_stage_timings.py` entry
+  removed).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 10/10 post-delete (`test_benchmark.py`: 9 original + 1 moved);
+  `ruff check` + `ruff format --check` + `mypy strict` clean on the
+  merged file; `bash -n` clean on `gates.sh`.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple, augment
+  quad, audio validators, TUI trio, video-worker quartet,
+  finalize/commit merges, leftover singletons incl.
+  `test_sfx_parser_parity` 2 tests) — one per pass with the same
+  discipline (re-read live, check mtime/`git log`, keep assertion
+  counts identical, move the gates.sh mypy entry with any fold that
+  deletes a listed file).

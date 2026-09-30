@@ -42,3 +42,29 @@ voyage_build_image() {
   docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
     -f "$dockerfile" -t "$tag" "$@" .
 }
+
+voyage_assert_no_cache_residue() {
+  # Fail loud when gate caches leak into the bind-mounted tree (issue 089).
+  # Container runs must keep caches in /tmp via VOYAGE_CACHE_ENV (or the
+  # gates.sh inline -e flags); residue here is root-owned on the host and
+  # churns build context. Usage: voyage_assert_no_cache_residue [root].
+  local root="${1:-.}"
+  local leaked=()
+  local candidate
+  for candidate in \
+    "$root/.coverage" \
+    "$root/.hypothesis" \
+    "$root/.mypy_cache" \
+    "$root/.ruff_cache" \
+    "$root/coverage.xml"; do
+    if [ -e "$candidate" ]; then
+      leaked+=("$candidate")
+    fi
+  done
+  if [ "${#leaked[@]}" -gt 0 ]; then
+    echo "cache residue leaked into the tree: ${leaked[*]}" >&2
+    echo "container runs must export VOYAGE_CACHE_ENV (see issue 042)" >&2
+    return 1
+  fi
+  return 0
+}

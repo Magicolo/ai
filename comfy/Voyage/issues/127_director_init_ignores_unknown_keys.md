@@ -77,3 +77,46 @@ print({k: payload[k] for k in INIT_STR_KEYS if k in payload})  # {} — everythi
 - Test evidence: live reads 2026-09-30 (cites above: `:591-594` loop shape, `:595` unconditional READY, empty-diff disjointness proof); no test added here — the pins from fix candidate 3 (`init` with `{"model_is": ...}` → `TypeError`; each documented key still accepted) belong to the director owner with the patch.
 - Patch proposal (quoted text only, for the director owner — mirrors the landed `sfx_mmaudio`/`audio_acestep` guards verbatim): "In `handle_init`, after the per-key type loop and before `_CONFIG.update`, insert `unknown = sorted(set(payload) - set(INIT_STR_KEYS))` followed by `if unknown: raise TypeError(f\"init got unknown field(s) {unknown} (known: {sorted(INIT_STR_KEYS)})\")`."
 - Residuals (director owner, precise): `voyage/workers/director.py:45-52` (`INIT_STR_KEYS`) + `:591-595` (`handle_init`) — apply the quoted patch + add the candidate-3 tests; shared-helper home (`_validators.py strict_init_update`, fix candidate 2) still belongs to the 084 owner.
+
+## Progress log (2026-09-30, batch 12)
+
+- Re-read `voyage/workers/director.py:45-52` (`INIT_STR_KEYS`: backend,
+  model_id, device, embedding_model_id, inspector_model_id, models_dir)
+  and `:582-595` (`handle_init`) immediately before editing; `git diff
+  HEAD --` on the file was EMPTY (no concurrent hunk — the video-workers
+  track's deferral left it clean), so the leg proceeded.
+- TDD: new `tests/test_director_init_strict_127.py` (6 tests: unknown
+  single key, unknown among known, `model_dir` typo, all six documented
+  keys accepted, mistyped known key, empty payload) — 3 failed pre-fix
+  (`DID NOT RAISE TypeError` on the unknown-key cases), 6/6 green
+  post-fix. `_CONFIG` restored via `monkeypatch.setattr` copy fixture.
+- Patch applied (mirrors the landed `sfx_mmaudio`/`audio_acestep` guards
+  verbatim, adapted to the public `INIT_STR_KEYS` name): in `handle_init`,
+  after the per-key type loop and before `_CONFIG.update`, inserted
+  `unknown = sorted(set(payload) - set(INIT_STR_KEYS))` followed by
+  `if unknown: raise TypeError(f"init got unknown field(s) {unknown}
+  (known: {sorted(INIT_STR_KEYS)})")` (3 lines, `:594-596`).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: FIXED — the director leg is landed; no residual remains on
+  this issue except the shared-helper home below.
+- Files changed: `voyage/workers/director.py` (+3-line unknown-key guard
+  in `handle_init`) + new `tests/test_director_init_strict_127.py`
+  (candidate-3 pins). Production files outside the patch region
+  untouched; `Voyage/issues/000_INDEX.md`, `Voyage/DESIGN.md` untouched.
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 6/6
+  green; related suites green — `test_director_init_strict_127` +
+  `test_director_request_validation` + `test_director_default` +
+  `test_director_device` + `test_e2_worker_init_strict_127` = 38 passed.
+- Per-file gates: `ruff check` + `ruff format --check` clean on both
+  files; `mypy voyage/workers/director.py` strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — worker
+  discipline §12): "Every worker `init` rejects unknown fields as
+  `TypeError` (INVALID_PAYLOAD, fatal) naming the key and the known set
+  — a mistyped model id fails at startup instead of booting defaults."
+- Residuals (precise): fix candidate 2's shared `strict_init_update`
+  helper (084's `_validators.py` home) still belongs to the 084 owner —
+  the per-worker pattern now landed identically in all three workers
+  (`sfx_mmaudio`, `audio_acestep`, `director`), so the collapse is
+  mechanical when that track runs.

@@ -149,6 +149,7 @@ def _commit_two(run_dir: Path) -> None:
         supervisor.stop_workers()
 
 
+@pytest.mark.slow
 def test_finalize_blend_is_timeline_exact(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -160,6 +161,7 @@ def test_finalize_blend_is_timeline_exact(tmp_path: Path) -> None:
     assert duration == pytest.approx(4.0, abs=0.15)
 
 
+@pytest.mark.slow
 def test_finalize_overlap_zero_keeps_legacy_splice(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -183,6 +185,7 @@ def test_probe_video_fps_returns_zero_on_unparseable() -> None:
     )
 
 
+@pytest.mark.slow
 def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
     """Sub-24fps sources (CausVid native 16fps) finalize at 24fps via
     motion-interpolated resampling, not frame duplication."""
@@ -224,6 +227,7 @@ def test_build_final_audio_falls_back_without_takes(tmp_path: Path) -> None:
     assert dest.exists() and dest.stat().st_size > 0
 
 
+@pytest.mark.slow
 def test_generate_defaults_to_qwen_director_with_offline_fallback(tmp_path: Path) -> None:
     """`generate` without --director resolves qwen; missing weights (this
     CPU-only image) degrade to the deterministic fallback via the

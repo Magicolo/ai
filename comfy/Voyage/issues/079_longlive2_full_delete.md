@@ -144,6 +144,169 @@ grep -rln "longlive" tests/ docs/ reports/
 
 - Verdict: blocked (hot tree — ready-to-execute plan recorded, not run).
   Files changed: none. DESIGN proposals: none.
+
+## Progress log (2026-09-30, batch 12 — full-delete owning pass)
+
+- Quiet-tree check FIRST per the contract: `git rev-parse HEAD` →
+  `447353e`, `git status --porcelain` clean except submodule untracked
+  content at `../../tango/Tango` (outside the Voyage tree, unrelated —
+  `git submodule status` shows no mapping; the Voyage tree itself has
+  zero uncommitted hunks). Precondition (a) MET: no concurrent hunks on
+  the deletion surface (`supervisor.py`/`config.py`/`director.py`/
+  `video_ltxv.py` all clean, unlike batches 7/9).
+- Deletion surface re-verified read-only (as-read lines, 2026-09-30):
+  `voyage/workers/video_longlive.py` (1264L) present;
+  `voyage/config.py:26` Literal, `:31` `DEPRECATED_VIDEO_BACKENDS`,
+  `:44-60` `warn_if_deprecated_backend`, `:182-196` registry row,
+  `:250-253` models_dir comment, `:727` TOML comment;
+  `voyage/supervisor.py:112-120` module map + streaming tuple,
+  `:277-284` longlive2 init branch, `:790`/`:2199`/`:2499` comments +
+  `use_relative_rope`; `voyage/cli.py` re-exports `:62-63`/`:143-144`,
+  imports `:110`/`:120`, `__all__` `:227`/`:245`, choices `:292`/`:511`,
+  models-target default `:331`; `voyage/cli_models.py` imports
+  `:176`/`:184`, list `:192`, verify `:208`, download branch
+  `:232`/`:273-302`, info `:306`; `voyage/cli_planning.py:85-87`
+  `_LONGLIVE_*` + `:101-103` frames branch; `voyage/cli_observe.py:82-83`
+  revision-name tuple; `voyage/cli_paths.py:18` comment;
+  `voyage/tui_state.py:36` BACKENDS, `:88-90` help;
+  `voyage/model_registry.py` imports `:48`/`:60-66`/`:161`/`:171`,
+  `__all__` rows, wrappers `:447-454`, `MODEL_SPECS` row `:548-577`,
+  comments `:1025`/`:1244`/`:1251`;
+  `voyage/registry_records.py:18-31` `LONGLIVE_*`, `:464-472` expected
+  hash, `:489-506` `_record_longlive2`, `:633-636` `_describe_longlive2`
+  (`WAN_*`/`_WAN22_RELATIVE` have no other consumer — causvid uses
+  Wan2.1, not Wan2.2); `voyage/models_ensure.py:58-63` spec map;
+  `voyage/doctor.py:293` verifier row; `voyage/backends.py:7`/`:380`
+  docstrings; `worker/Dockerfile.video` clone `:66-70`, shims `:184-186`,
+  PYTHONPATH/ENV `:244`/`:246`, chown `:231-232`, comments
+  `:10`/`:44`/`:56`/`:59-65`/`:100-103`/`:115`/`:132`/`:201`/`:250-253`;
+  `scripts/run.sh` sniff `:66` + case `:71` + comments `:7`/`:14`/
+  `:21`/`:75`; `scripts/qualify.sh` choices `:36`/`:52`/`:66`/`:70-72`;
+  `scripts/build-video.sh` smoke `:17`/`:19`/`:24` (3→2 workers);
+  `scripts/test.sh` clean (no refs); `voyage/fake_backends.py` clean
+  (the old `:194` cite is stale — no longlive refs in the file).
+  Owned tests: `test_longlive.py`, `test_longlive_stages.py`,
+  `test_longlive_init_validation.py`, `test_longlive_offload_fusion.py`,
+  `test_longlive2_deprecation_079.py`, `test_e2_longlive_clip_125.py`
+  (all match `test_*longlive*`), `test_backend_registry.py:54,82,92`.
+- Stored-run TOML migration DECISION (explicit, per the task): HARD
+  ERROR with migration hint, NOT silent remap. Rationale: a silent
+  remap to ltxv changes geometry mid-run (1280×704/29f →
+  768×512/96f), invalidating committed segment durations, while
+  longlive `.pt` tapes can never resume on the ltxv JSON-tape path
+  (the supervisor already rejects cross-backend tapes loudly) — a
+  remap would corrupt the timeline silently instead of failing fast.
+  Stored `backend = "longlive2"` runs must fail at load with: unknown
+  backend + known list + "re-init with --backend ltxv (tapes do not
+  transfer; existing segments stay valid media, only continuation
+  stops)". Proposed patch (text only, NOT applied — see verdict):
+  `video_worker_module` gains a longlive2-specific branch before the
+  generic KeyError, and `load_config` callers (`_load_run`,
+  `cmd_run`/`cmd_generate` resolve paths) surface it unchanged;
+  `with_video_backend`/`resolve_config(backend="longlive2")` already
+  raise unknown-backend ValueError once the registry row is gone
+  (no extra code — covered by test). TDD test plan (not run — no
+  behavior changed this pass): `test_backend_registry.py` gains
+  `test_longlive2_stored_run_fails_with_migration_hint` (write
+  voyage.toml with `backend = "longlive2"`, assert ConfigurationError
+  names ltxv + tapes) + `test_no_silent_remap` (resolve_config rejects
+  the name; no fallback row).
+- SCOPE VERDICT: deletion NOT executed although the tree is quiet.
+  The batch-9 plan's step (2) ("six longlive test modules +
+  precision/qual legs") already exceeds this pass's owned test scope
+  (`tests/test_*longlive*` + `test_backend_registry*`), and full
+  deletion additionally breaks ~24 non-owned follower files plus
+  unowned gates/docs (enumerated in the Resolution residuals with
+  file:line handoffs). The read-only contract forbids touching them,
+  and landing a red tree for other groups violates §9/§12. The batch-7
+  deprecation layer remains the maximal safe subset: the warn stays
+  (the name is still accepted everywhere), nothing deleted.
+- Baseline evidence (unmodified tree, in-container `voyage:latest`,
+  CPU-only): owned suites green —
+  `test_backend_registry` + all six `test_*longlive*` modules:
+  51 passed, 3 skipped, 0 failed.
+- Mid-session concurrent-activity re-check (same pass, before writing
+  this log): the tree now shows other agents' in-flight work —
+  `voyage/cli_observe.py` (+23 PERF203 helper, issue 031 track),
+  `voyage/scoreboard.py` (+16 JsonValue narrowing, issue 035 track),
+  `voyage/workers/director.py` (+3 init-strict, issue 127 track),
+  `issues/031`/`issues/035` logs, untracked
+  `tests/test_director_init_strict_127.py`. Disjointness verified via
+  `git diff`: the cli_observe hunk sits at `:689-739` (my surface is
+  `:82-83`); scoreboard/director files carry no longlive2 surface at
+  all. So the deletion surface itself is still hunk-free — the BLOCKED
+  verdict below rests on the scope contract (non-owned followers),
+  not on concurrent-hunk conflict. My four files are the only ones I
+  touched (`TASK.md` + `docs/BENCHMARKING.md` belong to the 093 pass).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: BLOCKED (scope-contract, tree quiet). Precondition (a)
+  MET (HEAD `447353e`, zero Voyage hunks); precondition (b) DECIDED
+  (hard error with migration hint, rationale + patch/test plan above).
+  Files changed: none (no source, test, script, doc, or Dockerfile
+  edits — any owned-scope fragment would break non-owned followers).
+- DESIGN proposals (text only, no DESIGN.md write per contract): none
+  needed — no spec change; the deletion is mechanical once unblocked.
+- Residuals — owning pass handoffs (exact, as-read 2026-09-30):
+  OWNED-SCOPE (delete when unblocked): worker file
+  `voyage/workers/video_longlive.py`; `voyage/config.py:26,31,44-60,
+  182-196,250-253,727` (remove Literal member + deprecated tuple +
+  helper + row + comments; keep-or-tombstone `:31` decided as REMOVE —
+  nothing still accepts the name, so the warn is dead); `voyage/
+  supervisor.py:112-120,277-284,790,2199,2499` (+ migration-hint branch
+  in `video_worker_module` `:245-251`); `voyage/cli.py:62-63,110,120,
+  143-144,227,245,292,331,511`; `voyage/cli_models.py:176,184,192,208,
+  232,273-302,306`; `voyage/cli_planning.py:85-87,101-103`;
+  `voyage/cli_observe.py:82-83`; `voyage/cli_paths.py:18`;
+  `voyage/tui_state.py:36,81,88-90`; `voyage/model_registry.py:48,
+  60-66,161,171,208,222-228,334,346,359,375,447-454,548-577,1025,1244,
+  1251`; `voyage/registry_records.py:18-31,464-472,482,489-506,633-636`
+  (incl. `WAN_*` — last consumer gone; closes issue 070's floating pin
+  by deletion); `voyage/models_ensure.py:58-63`; `voyage/doctor.py:293`;
+  `voyage/backends.py:7,380`; `worker/Dockerfile.video:10,44,56,59-70,
+  91,100-103,115,117,132,155,176,184-186,201,224,231-232,238,244,246,
+  250-253`; `scripts/run.sh:7,14,21,66,71,75`; `scripts/qualify.sh:4,10,
+  36,52,66,70-72`; `scripts/build-video.sh:2,17,19,24`; owned tests
+  (delete six modules, re-pin `test_backend_registry.py:54,82,92`);
+  `reports/video-backends.md:30-83` mark historical (keep
+  `reports/longlive-audit.md` as dated evidence);
+  `docs/BACKENDS.md:42,54,71,76,101`, `docs/MODELS.md:7,11,14`,
+  `docs/INSTALL.md:20,23-24,35,84`, `docs/ARCHITECTURE.md:52`,
+  `docs/OPERATIONS.md:92,152,177-178,183`,
+  `docs/TROUBLESHOOTING.md:23`, `docs/SFX.md:127`,
+  `docs/UPSTREAM_LONG_LIVE_PATCHES.md` (recommend keep + historical
+  header, same class as the audit report).
+  NON-OWNED followers (other groups own the fixups — gate lands only
+  jointly): `tests/test_generate.py:108-135,224`,
+  `tests/test_backends_adapter.py:135-159`,
+  `tests/test_tui.py:134-138`, `tests/test_tui_state.py:134,180,210,228`,
+  `tests/test_precision.py:17,41-42`,
+  `tests/test_qualification.py` (longlive2-first harness),
+  `tests/test_registry_pins.py:31,111-140`,
+  `tests/test_registry_split.py:15,28,41,112-114`,
+  `tests/test_cli_split.py:116,158`,
+  `tests/test_cli_hardening.py:442`,
+  `tests/test_generate_ensure.py:44-47,108`, incidental refs in
+  `test_129_tape_atomic`, `test_audio_acestep_cwd`,
+  `test_augment_models`, `test_benchmark_counts`,
+  `test_causvid_worker`, `test_checkpoint_safety`,
+  `test_containers_rank2`, `test_enter_repo_trees`,
+  `test_perf_regressions`, `test_recovery`,
+  `test_stage_a_telemetry`, `test_tape_trust_123_171`,
+  `test_worker_perf_rank2`; `scripts/gates.sh:50` (test list);
+  `README.md:10,27,40,65,88,135`; comment staleness in
+  `voyage/workers/__init__.py:8`, `voyage/workers/video_common.py:3,13,
+  280`, `voyage/rpc.py:152`, `voyage/audio/acestep.py:14`,
+  `voyage/workers/audio_acestep.py:69`,
+  `voyage/workers/video_causvid.py:109`,
+  `voyage/workers/video_ltxv.py:23,584,1024`.
+  Gate for the owning pass: full `Voyage/scripts/gates.sh` green +
+  `grep -rni longlive voyage/ worker/ scripts/ tests/` empty except
+  historical report/doc markers.
+- Per-file gates this pass: N/A (no files touched). Related-suite
+  evidence: owned longlive suites green on the unmodified tree
+  (51 passed, 3 skipped — baseline for the owning pass).
 - Ready-to-execute deletion plan (for the owning pass, once the tree is
   quiet — no uncommitted `supervisor.py`/`config.py`/`director.py`/
   `video_ltxv.py` hunks): (1) delete `voyage/workers/video_longlive.py`

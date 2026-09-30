@@ -26,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NamedTuple
+from typing import Any
 
 from voyage import paths
 from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
@@ -67,7 +67,6 @@ from voyage.media import (
 from voyage.models import (
     AudioPlan,
     EvolutionDecision,
-    PromptPlan,
     RunState,
     SegmentWorldState,
     StyleSpec,
@@ -86,6 +85,15 @@ from voyage.segment_manifest import (
     load_segment_manifest,
     update_manifest_metrics,
     write_segment_manifest,
+)
+from voyage.supervisor_commit_types import (
+    CoveredAudio as CoveredAudio,
+)
+from voyage.supervisor_commit_types import (
+    ProposedSegment as ProposedSegment,
+)
+from voyage.supervisor_commit_types import (
+    RenderedVideo as RenderedVideo,
 )
 from voyage.supervisor_prefetch import (
     summarize_prefetch_outcome as summarize_prefetch_outcome,
@@ -183,50 +191,8 @@ MIN_SLICE_PIECE_SECONDS = 0.05
 MAX_SLICES_PER_SEGMENT = 128
 
 
-class ProposedSegment(NamedTuple):
-    """Director proposal + staged prompt plan for one commit (issue 020).
-
-    Pure proposal: no media rendered, no state advanced. Built by
-    `_propose_segment`, consumed by `_render_video` / `_commit_segment`.
-    """
-
-    decision: EvolutionDecision
-    prompt_plan: PromptPlan
-    block_prompts: list[str]
-    num_blocks: int
-    prefetch_hit: bool
-    drift_hold: bool
-    director_tokens: dict[str, int]
-
-
-class RenderedVideo(NamedTuple):
-    """Video outcome of one commit (issue 020).
-
-    `frames` is the worker-reported count after the issue-006 ceiling
-    gate (never the raw report); `video_time` is the timeline offset the
-    audio coverage starts from; `recovery_tape` is the validated absolute
-    wire path (None when the worker reported none).
-    """
-
-    frames: int
-    duration: float
-    video_time: float
-    recovery_tape: str | None
-    video_stage_ms: dict[str, float]
-
-
-class CoveredAudio(NamedTuple):
-    """Audio outcome of one commit (issue 020).
-
-    The segment's AudioPlan plus the seconds of music coverage remaining
-    ahead of the new segment end (drives audio_buffer_seconds) and the
-    planner action/reason (surfaced in console summaries).
-    """
-
-    audio_plan: AudioPlan
-    audio_ahead: float
-    take_action: str
-    take_reason: str
+# Commit-pipeline types live in `voyage.supervisor_commit_types`
+# (issue 081; re-exported at the top so existing importers keep working).
 
 
 # Prefetch-outcome aggregation lives in `voyage.supervisor_prefetch`

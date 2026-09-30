@@ -255,3 +255,81 @@ enforcing.
   foreign-hunk-free AND the supervisor/worker/test sites clear under
   their owners (extract the loop body to a helper to preserve per-file
   probe-error semantics; do NOT hoist the try outside the loop).
+
+## Progress log (2026-09-30, batch 12)
+
+- Pre-flight: `git diff --name-only` showed a clean Voyage tree at
+  pass start (only the 035 `scoreboard.py` hunk of this same pass was
+  dirty when the 031 leg began). The batch-11 concurrent
+  `cli_observe.py` hunk (metrics block → `cli_inspect_metrics.py`)
+  has landed upstream — the file is foreign-hunk-free, so the owned
+  handoff was actionable. `supervisor.py` (banned) and
+  `video_longlive.py` (hot — concurrent `director.py` hunk from
+  another agent landed mid-pass, same worker-track family) were never
+  touched.
+- Retry order PERF → N → PT, all re-probed live in-container
+  (`voyage:latest`, CPU-only, no host pip):
+  `ruff check --select PERF --output-format concise .` → **12 hits**
+  at pass start (7 PERF401 + 5 PERF203), same shape as batch 11
+  (only line numbers drifted: `cli_observe.py:727`,
+  `supervisor.py:539,611`).
+- Owned handoff LANDED: `cli_observe.py:722-728` media-probe
+  try/except extracted to `_probe_media_line(name: Path) -> str`
+  (`:692`; try lives in the helper, the loop is call+print —
+  try was never hoisted outward, per-file `MediaError` report
+  preserved verbatim). First shape tripped scoped TRY300
+  (return-in-try) — reworked to try/except-then-compute so
+  `ruff check` on the scoped select stays green. Behavior probe
+  in-container (mocked `media_probe` success + `MediaError`
+  branches): success line `000001/video.mp4: duration=7.5` and
+  failure line `<path>: PROBE FAILED (no ffprobe)` both identical
+  to the inline version.
+- PERF after the handoff: **11 hits** (7 PERF401 + 4 PERF203) —
+  every remaining site sits in a foreign/dirty/banned file, so
+  family adoption stays blocked (no `select` change, no
+  per-file-ignores — ignoring our way to green would be the scope
+  artifact this issue tracks):
+  `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748` (both PERF401, test-track owned),
+  `voyage/cli_validate.py:223,229` (conditional appends, not clean
+  comprehension targets — needs its owner),
+  `voyage/concepts.py:437` (foreign),
+  `voyage/models_ensure.py:227` (foreign),
+  `voyage/supervisor.py:539,611` (banned file),
+  `voyage/workers/director.py:390,517` (foreign),
+  `voyage/workers/video_longlive.py:389` (hot track).
+- N → **60** (`N806 38 + N801 16 + N802 5 + N818 1`, unchanged):
+  38 N806 are `VoyageApp` locals across the Pilot suites, N801/N802
+  intentional test-double names, N818 `ProposalRejected` is a
+  public-exception rename (API break, other groups). Mass churn —
+  not attempted, recorded.
+- PT → **111** (`PT011 63 + PT018 45 + PT017/PT013/PT012 1 each`,
+  unchanged): test-style track owns it. Not attempted, recorded.
+- `Voyage/pyproject.toml:70` select confirmed unchanged (16
+  families).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: PARTIALLY RESOLVED — one owned PERF site cleared
+  (12 → 11); family adoption stays DOCUMENTED (no `select`
+  change); N/PT record-only.
+- Files changed: `voyage/cli_observe.py` only (`_probe_media_line`
+  helper + 6-line loop-body replacement). No test files changed
+  (behavior-preserving refactor; mocked-branch probe above instead
+  of TDD — no behavior to drive). Concurrent
+  `workers/director.py:594-596` hunk left intact (disjoint region).
+- Gate evidence (in-container `voyage:latest`, CPU-only):
+  `ruff check voyage/cli_observe.py voyage/scoreboard.py
+  voyage/model_registry.py voyage/rpc.py` — All checks passed;
+  `ruff format --check voyage/cli_observe.py voyage/scoreboard.py`
+  — 2 files already formatted; `mypy voyage/cli_observe.py
+  voyage/scoreboard.py` + `mypy voyage` — clean (67 files);
+  `pytest -p no:cacheprovider -q tests/test_scoreboard.py
+  tests/test_cli_split.py tests/test_cli_inspect_metrics.py` —
+  22 passed (covers the `cmd_inspect` seam +
+  `cli.cmd_inspect is cli_observe.cmd_inspect`).
+  DESIGN proposals: none.
+- Residuals: PERF 11 (list above); N 60; PT 111; full adoption
+  list (ANN, D, PLR2004-full, PT, S, PERF, N) still dark.
+  PERF unblocks when the supervisor sites + worker/test sites
+  clear under their owners.

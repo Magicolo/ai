@@ -689,6 +689,22 @@ def cmd_soak(args: argparse.Namespace) -> int:
     return 0 if not metrics["validate_errors"] else 1
 
 
+def _probe_media_line(name: Path) -> str:
+    """One `inspect media` line for a segment mp4 (issue 031 PERF203).
+
+    The try/except lives here — not in the calling loop — so the loop
+    stays a straight call+print while per-file probe failures still
+    report per file instead of failing loud (same messages, same order
+    as the inline version).
+    """
+    try:
+        info = media_probe(name)
+    except MediaError as exc:
+        return f"{name}: PROBE FAILED ({exc})"
+    duration = info.get("format", {}).get("duration")
+    return f"{name.parent.name}/video.mp4: duration={duration}"
+
+
 def cmd_inspect(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     if args.inspect_target == "scoreboard":
@@ -720,12 +736,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 0
     if args.inspect_target == "media":
         for name in sorted((run_dir / paths.SEGMENTS_DIRNAME).glob("*/*.mp4")):
-            try:
-                info = media_probe(name)
-                duration = info.get("format", {}).get("duration")
-                print(f"{name.parent.name}/video.mp4: duration={duration}")
-            except MediaError as exc:
-                print(f"{name}: PROBE FAILED ({exc})")
+            print(_probe_media_line(name))
         return 0
     if args.inspect_target == "metrics":
         from voyage.cli_inspect_metrics import render_inspect_metrics

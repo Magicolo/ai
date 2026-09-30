@@ -356,3 +356,115 @@ own plan.
   (`scoreboard_rows` return + `rows`); `voyage/model_registry.py:953,963`
   (`snapshot_kwargs`/`file_kwargs`); `voyage/atomic.py:97,110,118`
   (write/read sides, by design).
+
+## Progress log (2026-09-30, batch 12)
+
+- Pre-flight: `git diff --name-only` (from repo root `ai/`, paths
+  `Voyage/...`) showed a clean Voyage tree at pass start — no
+  concurrent hunks in `rpc.py`/`scoreboard.py`/`model_registry.py`.
+  `supervisor.py` was never touched (forbidden this batch — its sites
+  are remainder only, read for evidence, never edited). Mid-pass a
+  concurrent agent landed an uncommitted 3-line hunk in
+  `voyage/workers/director.py:594-596` (`handle_init` unknown-field
+  guard) — unrelated region, left intact; all gate evidence below was
+  re-run with it present (tree still green).
+- Leg 1, `rpc.py:327-329 call()` → `RpcPayload`/`RpcResult`: BLOCKED,
+  probed live then reverted (no edit landed). The probe (signature
+  only, docstring untouched) reddens foreign sites — `mypy voyage`
+  (67 files) reported 11 errors in 2 files:
+  `supervisor.py:610` (`dict(payload)` with `dict[str, object]` →
+  `SupportsKeysAndGetItem` mismatch AND `dict[str, JsonValue]`
+  return vs `dict[str, object]`), `supervisor.py:1161`
+  (`{"texts": texts}` — `list[str]` vs `list[JsonValue]` invariance),
+  `supervisor.py:1172` (`float(value)` — return-narrowing propagates
+  the `JsonValue` union into an arithmetic site that previously took
+  `Any`), plus `cli_observe.py:245,247,572,574,619`
+  (`dict[str, JsonValue]` vs `dict[str, object]` invariance at the
+  `format_report`/`_persist_benchmark_report` seams) and
+  `cli_observe.py:613,614` (`list[str]`/`dict[str, float]` literals
+  vs `JsonValue`). Every call site would need an explicit
+  `RpcPayload` annotation or cast, incl. forbidden/foreign lines —
+  same invariance class as batch 11. Return stays `dict[str, Any]`
+  (`response.result` is `dict[str, Any]` via `WorkerRequest`/
+  `WorkerResponse` in `voyage/models.py`, out of scope).
+  `raw_stdout`/`readable: Any` (`rpc.py:281,284`) stay by
+  construction (fd juggling) — untouched.
+- Leg 2, supervisor `dict[str, object]` chain: SKIPPED entirely
+  (forbidden this batch — read-only evidence: `_call_with_restart`
+  `:596/:598`, call site `:610`, `_log_metric` `:574`, `gauges`
+  `:850`, `extra` `:1238`, `_with_audio_gpu` `:1473/:1475`,
+  `payload` `:1694`, `dict[str, Any]` `:271`/`video_init`,
+  `:293`/`audio_init`, `:330`, `:1045`, `:1071`, `:1189`, `:1273`,
+  `:1325`, `:1933`, `:1937`, `:2163`, `:2172`, `:2493` — same
+  invariant chain as batch 11, still standing).
+- Leg 3, `scoreboard.py:114,118 scoreboard_rows` return: LANDED with
+  coordinated re-annotation inside the owned file (annotation-only,
+  no behavior change). The bare return+`rows` narrowing reddened only
+  the owned file — `scoreboard.py:187: error: Argument 1 to "append"
+  of "list" has incompatible type "dict[str, list[str] | int |
+  dict[str, float] | str | Any | None]"; expected "dict[str,
+  JsonValue]" [arg-type]` (no foreign errors — callers in
+  `cli_scoreboard.py`/tests accept the narrower return). Fix:
+  `from typing import Any` → `from typing import cast` (`:21`),
+  `row: dict[str, JsonValue]` + `cast(JsonValue, …)` on the four
+  invariant-blocked members (`stages.get(...)`/`current`/`deltas`/
+  `errors` — `dict[str, float]`/`list[str]` are never assignable to
+  `JsonValue` nesting by invariance). Locals stay `dict[str, float]`
+  so the delta arithmetic is untouched; `cast` erases at runtime.
+  `metrics`/`transition`/`audio_state` loaders stay `dict[str, Any]`
+  (`segment_manifest.py`, out of scope — their `.get()` is `Any`,
+  compatible both ways).
+- Leg 4, hub `**kwargs` (`model_registry.py:953,963`): BLOCKED,
+  probed live then reverted (no edit landed). `dict[str, JsonValue]`
+  reddens `:960` (11 errors) + `:971` (9 errors) — the `JsonValue`
+  union is too wide for the hub signatures, e.g.
+  `Argument 1 to "snapshot_download" has incompatible type
+  "**dict[str, JsonValue]"; expected "str" [arg-type]` (× `str`/
+  `str | None`/`str | Path | None`/`dict[Any, Any] | str | None`/
+  `float`/`bool`/`bool | str | None`/`list[str] | str | None`/`int`/
+  `type[Any] | None`/`dict[str, str] | None`), same class at `:971`
+  for `hf_hub_download`. `allow_patterns list[str]` already fails
+  `list[JsonValue]` invariance on its own. This dict is hub-typed,
+  not JSON-shaped — `JsonValue` would be less precise, not more.
+  Stays `dict[str, Any]` (Any defeats both checks by design).
+- `atomic.py:97,110,118` + `rpc.py:281,284` fd idioms: stay by
+  design, untouched (no probe — documented in prior passes).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: PARTIALLY RESOLVED — leg 3 landed (`scoreboard_rows` →
+  `JsonValue`-valued); legs 1/4 probed-blocked with live mypy
+  evidence above (reverted, no edit); leg 2 remainder (forbidden).
+- Files changed: `voyage/scoreboard.py` only (`cast` import,
+  return + `rows` + `row` annotations, 4 `cast(JsonValue, …)`).
+  `voyage/rpc.py` + `voyage/model_registry.py` probed but reverted
+  — no change. No test files changed (annotation-only; TDD n/a —
+  gate evidence below instead, per contract). Concurrent
+  `workers/director.py` hunk left intact (disjoint region).
+- Gate evidence (in-container `voyage:latest`, CPU-only, no host
+  pip): `ruff check voyage/cli_observe.py voyage/scoreboard.py
+  voyage/model_registry.py voyage/rpc.py` — All checks passed;
+  `ruff format --check voyage/cli_observe.py voyage/scoreboard.py`
+  — 2 files already formatted; `mypy voyage/scoreboard.py` +
+  `mypy voyage` — clean (67 source files, incl. the concurrent
+  director hunk); `pytest -p no:cacheprovider -q
+  tests/test_scoreboard.py tests/test_cli_split.py
+  tests/test_cli_inspect_metrics.py` — 22 passed;
+  `tests/test_observability_rank2.py tests/test_cli_scoreboard.py
+  tests/test_registry_pins.py tests/test_generate_ensure.py
+  tests/test_backend_registry.py` — 68 passed.
+  DESIGN proposals: none (annotation-only, no behavior change).
+- Residuals (exact, post-edit line numbers): `voyage/rpc.py:327-329`
+  (`call()` payload/return) + `:281,:284` (`raw_stdout`/`readable`,
+  by design); `voyage/supervisor.py:596/:598` (`_call_with_restart`),
+  `:610` (call site), `:1161` (embed dict), `:1172` (float
+  knock-on), `:1473/:1475` (`_with_audio_gpu`), `:1694`
+  (`payload`), `:574` (`_log_metric`), `:850` (`gauges`), `:1238`
+  (`extra`), plus `dict[str, Any]` `:271`, `:293`, `:330`, `:1045`,
+  `:1071`, `:1189`, `:1273`, `:1325`, `:1933`, `:1937`, `:2163`,
+  `:2172`, `:2493`; `voyage/cli_observe.py:245,247,572,574,613,614,
+  619` (call()-narrowing knock-ons — they unblock only with leg 1);
+  `voyage/model_registry.py:953,963` (`snapshot_kwargs`/
+  `file_kwargs`, probe errors at `:960`/`:971`); `voyage/atomic.py:
+  97,110,118` (write/read sides, by design). Scoreboard leg: none
+  (landed at `scoreboard.py:114,118,172-176`).

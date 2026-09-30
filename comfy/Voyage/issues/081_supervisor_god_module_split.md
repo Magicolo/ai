@@ -181,3 +181,54 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   concurrent collision met (supervisor region quiet at both
   edits); foreign `model_registry.py`/audio/rhythm hunks coexist
   untouched.
+
+## Progress log (2026-09-30, batch 12)
+
+- Pre-checks live: `wc -l voyage/supervisor.py` → 2688 at pass start;
+  `git diff --name-only -- voyage/supervisor.py` empty before BOTH
+  edits (facade import, then block deletion + unused-import cleanup),
+  so the quiet-region rule held. 023 derivation verified NOT landed
+  (`supervisor.STREAMING_VIDEO_BACKENDS` still hand literal) — routing
+  maps deliberately untouched.
+- TDD failing-first: wrote `tests/test_supervisor_commit_types.py`
+  (2 agreement tests: facade identity + field-name stability) BEFORE
+  the new module — in-container collection failed with
+  `ModuleNotFoundError: No module named
+  'voyage.supervisor_commit_types'` (red), then created the module +
+  re-export until green.
+- Extraction: new `voyage/supervisor_commit_types.py` (63L, DESIGN
+  §73) owns `ProposedSegment` / `RenderedVideo` / `CoveredAudio`
+  verbatim (ex-`supervisor.py:195-238`, docstrings intact);
+  `supervisor.py` (2688→2654L) imports and re-exports via the
+  explicit-`as` self-alias pattern and carries a move comment at the
+  old site. Cleanup: removed now-unused `NamedTuple` +
+  `PromptPlan` imports (ruff F401, verified still unused via rg —
+  `EvolutionDecision`/`AudioPlan` stay, used at 8+ sites).
+- Gate evidence (in-container `voyage:latest`, CPU-only): new suite
+  2 passed; neighbors `test_commit_split` +
+  `test_supervisor_proposal_helpers` +
+  `test_supervisor_prefetch_helpers` + `test_generation_stack`
+  30 passed. Per-file gates: `ruff check` + `ruff format --check` +
+  `mypy strict` clean on all 3 files (`supervisor.py`,
+  `supervisor_commit_types.py`, `test_supervisor_commit_types.py`).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: third single-group split landed; full god-module
+  decomposition remains open. Files changed:
+  `voyage/supervisor_commit_types.py` (new, 63L),
+  `voyage/supervisor.py` (facade re-export + block → move comment +
+  2 unused imports dropped, net −34L),
+  `tests/test_supervisor_commit_types.py` (new, 2 agreement tests).
+- DESIGN proposals: "No DESIGN text change proposed: the new module
+  follows the existing DESIGN §73 contract (supervisor lifecycle and
+  commit state) and the issue-081 move-verbatim + re-export +
+  agreement-test pattern; a future split index should list
+  `supervisor_commit_types.py` alongside `supervisor_proposal.py` /
+  `supervisor_prefetch.py`."
+- Residuals: full decomposition minus proposal/prefetch/commit-types
+  (commit pipeline methods vs lifecycle vs audio-coverage per fix
+  candidate 1; `sha256_file` re-export shim; streaming-set derivation
+  per 023/083 — still open, verified this pass; worker-module map
+  merge; deterministic-payload compat block; legacy-migration
+  threading; `run_id` legacy) — each a future single-group pass.

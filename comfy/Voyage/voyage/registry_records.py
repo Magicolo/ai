@@ -14,6 +14,39 @@ from pathlib import Path
 
 from voyage.atomic import JsonValue
 from voyage.hashing import sha256_file
+from voyage.registry_film import (
+    EXPECTED_FILM_SHA256 as EXPECTED_FILM_SHA256,
+)
+from voyage.registry_film import (
+    FILM_FILE as FILM_FILE,
+)
+from voyage.registry_film import (
+    FILM_HF_REPO as FILM_HF_REPO,
+)
+from voyage.registry_film import (
+    FILM_HF_REVISION as FILM_HF_REVISION,
+)
+from voyage.registry_film import (
+    FILM_LICENSE as FILM_LICENSE,
+)
+from voyage.registry_film import (
+    FILM_LICENSE_URL as FILM_LICENSE_URL,
+)
+from voyage.registry_film import (
+    FILM_MIN_BYTES as FILM_MIN_BYTES,
+)
+from voyage.registry_film import (
+    FILM_REPO_PATH as FILM_REPO_PATH,
+)
+from voyage.registry_film import (
+    FILM_SUBDIR as FILM_SUBDIR,
+)
+from voyage.registry_film import (
+    _describe_film as _describe_film,
+)
+from voyage.registry_film import (
+    _record_film as _record_film,
+)
 
 LONGLIVE_COMMIT = "6b36d20ec6f7958d29d11a704dfa64611a9f2572"
 
@@ -414,26 +447,10 @@ MMAUDIO_CLIP_LICENSE = "Apple AMLR (research, see repo LICENSE)"
 # the torch-native loaders (safetensors/Pillow leaf deps in
 # worker/Dockerfile.video), never retraining code.
 #
-# FILM: Comfy-Org repack of google-research/frame-interpolation (Apache 2.0)
-# + hzwer/Practical-RIFE (MIT) — hence the repack's mit-and-apache-2.0 tag.
-# fp16 weights (~66 MB); floor holds ~10% headroom below measured.
-FILM_HF_REPO = "Comfy-Org/frame_interpolation"
-
-FILM_HF_REVISION = "219da3c9d8c357ceaf457fc1d5932c6e861b8dee"
-
-FILM_SUBDIR = "frame_interpolation"
-
-FILM_FILE = "film_net_fp16.safetensors"
-
-FILM_REPO_PATH = f"{FILM_SUBDIR}/{FILM_FILE}"
-
-FILM_MIN_BYTES = 60_000_000
-
-FILM_LICENSE = "MIT + Apache 2.0 (Comfy-Org repack tag mit-and-apache-2.0)"
-
-FILM_LICENSE_URL = "https://huggingface.co/Comfy-Org/frame_interpolation"
-
+# FILM pins live in `voyage.registry_film` (issue 082; re-exported at the
+# top so existing importers keep working).
 #
+
 # Real-ESRGAN anime 6B: xinntao/Real-ESRGAN v0.2.2.4 release asset (RRDBNet
 # 6-block, 4x, 17,938,799 bytes, BSD-3-Clause (c) 2021 Xintao Wang),
 # re-hosted 1:1 on the Hub — xinntao ships no HF repo, so the registry pins
@@ -475,7 +492,8 @@ EXPECTED_LTXV_DIT_SHA256 = "76aa8c4786af752fa6f951947129d5290c3c6c0b2fadcadea6b5
 
 EXPECTED_LTXV_UPSC_SHA256 = "5b076031c6f860db9037a54f3bb819f10bfb5532ea26a6d30062292428a0c208"
 
-EXPECTED_FILM_SHA256 = "f226e51375dc839d4b40e5c3d63da560dd1ea1c962364ec78f5adf2d05db05c0"
+# EXPECTED_FILM_SHA256 lives in `voyage.registry_film` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 EXPECTED_REALESRGAN_SHA256 = "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
 
@@ -718,21 +736,8 @@ def _describe_causvid(models_dir: Path) -> str:
     return f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
 
 
-def _record_film(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the FILM interpolation weights (Track C)."""
-    weights_path = models_dir / FILM_REPO_PATH
-    return {
-        "repo": FILM_HF_REPO,
-        "revision": FILM_HF_REVISION,
-        "model_dir": str(models_dir / FILM_SUBDIR),
-        "checkpoint_bytes": weights_path.stat().st_size,
-        "files": [FILM_REPO_PATH],
-        "license": FILM_LICENSE,
-        "license_url": FILM_LICENSE_URL,
-        # Recorded sha (071): verify_model checks the checkpoint against it.
-        "checkpoint_sha256": sha256_file(weights_path),
-        "checkpoint_file": FILM_REPO_PATH,
-    }
+# FILM builders live in `voyage.registry_film` (issue 082; re-exported
+# at the top so existing importers keep working).
 
 
 def _record_realesrgan(models_dir: Path) -> dict[str, JsonValue]:
@@ -754,10 +759,8 @@ def _record_realesrgan(models_dir: Path) -> dict[str, JsonValue]:
     }
 
 
-def _describe_film(models_dir: Path) -> str:
-    """Exact OK string for the FILM weights (byte-stable)."""
-    size_mib = (models_dir / FILM_REPO_PATH).stat().st_size / 1024**2
-    return f"film OK (FILM fp16 {size_mib:.0f} MiB)"
+# FILM describe helper lives in `voyage.registry_film` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 
 def _describe_realesrgan(models_dir: Path) -> str:

@@ -6,6 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import cast
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
@@ -39,18 +40,19 @@ def test_scoreboard_two_segments_with_deltas(tmp_path: Path) -> None:
     assert [row["segment_id"] for row in rows] == ["000000", "000001", "000002"]
     assert all(row["done"] for row in rows)
     assert all(row["frames"] == 48 for row in rows)
-    assert set(rows[0]["stages"]) == {"inspect", "director", "video", "audio", "validate", "commit"}
-    assert set(rows[0]["metrics"]) == set(METRIC_KEYS)
+    stages = cast(dict[str, object], rows[0]["stages"])
+    assert set(stages) == {"inspect", "director", "video", "audio", "validate", "commit"}
+    assert set(cast(dict[str, object], rows[0]["metrics"])) == set(METRIC_KEYS)
     assert rows[0]["deltas"] == dict.fromkeys(METRIC_KEYS, 0.0)
-    expected = {
-        key: round(rows[1]["metrics"][key] - rows[0]["metrics"][key], 3) for key in METRIC_KEYS
-    }
+    metrics1 = cast(dict[str, float], rows[1]["metrics"])
+    metrics0 = cast(dict[str, float], rows[0]["metrics"])
+    expected = {key: round(float(metrics1[key]) - float(metrics0[key]), 3) for key in METRIC_KEYS}
     assert rows[1]["deltas"] == expected
     assert rows[0]["destination"]
     assert rows[0]["phase"]
     assert rows[0]["take_ids"]
-    assert rows[0]["video_path"].endswith("000000/video.mp4")
-    assert rows[0]["audio_path"].endswith("000000/audio.wav")
+    assert cast(str, rows[0]["video_path"]).endswith("000000/video.mp4")
+    assert cast(str, rows[0]["audio_path"]).endswith("000000/audio.wav")
 
 
 def test_scoreboard_missing_visual(tmp_path: Path) -> None:

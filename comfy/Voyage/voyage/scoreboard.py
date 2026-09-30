@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from voyage import paths
 from voyage.atomic import JsonValue
@@ -111,11 +111,11 @@ def partial_segment_ids(run_dir: Path) -> list[str]:
     )
 
 
-def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
+def scoreboard_rows(run_dir: Path) -> list[dict[str, JsonValue]]:
     """One scoreboard row per committed segment (DESIGN fast-iteration §140)."""
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     stages = _stages_by_segment(run_dir)
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, JsonValue]] = []
     previous: dict[str, float] | None = None
     previous_id: str | None = None
     if not segments_root.is_dir():
@@ -165,15 +165,15 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, Any]]:
         destination = transition.get("destination")
         video_path = segment / "video.mp4"
         audio_path = segment / "audio.wav"
-        row = {
+        row: dict[str, JsonValue] = {
             "segment_id": segment.name,
             "done": True,
             "frames": frames,
-            "stages": stages.get(segment.name, {}),
-            "metrics": current,
-            "deltas": deltas,
+            "stages": cast(JsonValue, stages.get(segment.name, {})),
+            "metrics": cast(JsonValue, current),
+            "deltas": cast(JsonValue, deltas),
             "baseline_segment_id": baseline_segment_id,
-            "errors": errors,
+            "errors": cast(JsonValue, errors),
             "destination": destination.get("canonical_name")
             if isinstance(destination, dict)
             else None,

@@ -99,6 +99,7 @@ def _committed_run(tmp_path: Path, segment_count: int) -> Path:
     return run_dir
 
 
+@pytest.mark.slow
 def test_finalize_end_to_end_after_commit(tmp_path: Path) -> None:
     """Commit → finalize → valid presentation MP4 (issue 038 contract path)."""
     run_dir = _committed_run(tmp_path, 2)
@@ -109,6 +110,7 @@ def test_finalize_end_to_end_after_commit(tmp_path: Path) -> None:
     assert info["duration"] > 0
 
 
+@pytest.mark.slow
 def test_finalize_options_explicit_joint_style(tmp_path: Path) -> None:
     """The `FinalizeOptions` path (issue 045) finalizes identically."""
     run_dir = _committed_run(tmp_path, 2)

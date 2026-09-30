@@ -93,6 +93,54 @@ grep -n "_sha256\|_MANIFEST_LOCK\|_repair_manifest" voyage/model_registry.py voy
 - DESIGN proposal (not applied, see return report): per-family modules +
   manifest-race fix shape.
 
+## Progress log (2026-09-30, batch 12)
+
+- Pre-checks live: `wc -l voyage/registry_records.py` → 767 at pass
+  start; `git diff --name-only -- voyage/registry_records.py` empty
+  before all four edits (facade import, FILM block deletion,
+  EXPECTED line deletion, 2 builder deletions), so the quiet-region
+  rule held. Smallest row set confirmed: FILM (8 pins + 1 hash + 2
+  builders, zero cross-family deps — `FILM_REPO_PATH` derives only
+  from `FILM_SUBDIR`/`FILM_FILE`).
+- TDD failing-first: wrote `tests/test_registry_film_split.py`
+  (3 agreement tests: pins single-sourced, builders single-sourced,
+  MODEL_SPECS row points at family builders) BEFORE the new module —
+  in-container collection failed with `ModuleNotFoundError: No module
+  named 'voyage.registry_film'` (red), then created the module +
+  re-export until green.
+- Extraction: new `voyage/registry_film.py` (65L, DESIGN §§84-85)
+  owns all FILM pins + `EXPECTED_FILM_SHA256` + `_record_film` +
+  `_describe_film` verbatim; `registry_records.py` (767→770L)
+  re-exports all 11 names via explicit-`as` self-aliases and carries
+  move comments at the three old sites; `model_registry.py` untouched
+  (its `from voyage.registry_records import ... FILM_*` chain holds
+  through the facade). `sha256_file`/`Path`/`JsonValue` imports stay
+  (used by 4+ remaining families, verified via rg).
+- Gate evidence (in-container `voyage:latest`, CPU-only): new suite
+  3 passed; neighbors `test_registry_split` + `test_registry_pins` +
+  `test_augment_models` + `test_checkpoint_safety` 52 passed.
+  Per-file gates: `ruff check` + `ruff format --check` + `mypy
+  strict` clean on all 3 files (`registry_film.py`,
+  `registry_records.py`, `test_registry_film_split.py`).
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: **partial** — first per-family split landed;
+  `registry_records.py` 767→770L (facade imports outweigh the moved
+  block; the payoff compounds as the remaining 9 families follow).
+- Files changed: `voyage/registry_film.py` (new, 65L),
+  `voyage/registry_records.py` (facade re-export + 3 move comments,
+  net +3L), `tests/test_registry_film_split.py` (new, 3 tests).
+- Residual (open, ordered): (1) remaining 9 per-family
+  `registry_{realesrgan,ltxv,causvid,qwen,audio,sfx,...}.py` splits
+  (realesrgan is the next-smallest single-file row — same recipe);
+  (2) in-core manifest read-modify-write race fix (unchanged).
+- DESIGN proposal (not applied, see return report): per-family
+  modules continue the `registry_film.py` pattern (one family per
+  pass, facade chain `registry_<family>` → `registry_records` →
+  `model_registry`, agreement test per family); manifest-race fix
+  shape unchanged from the batch-7 entry.
+
 ## Refs
 
 - Issues 065 (stale install lists), 021-analog hashing canonical (`voyage/hashing.py:30`); `voyage/hashing.py`, `voyage/models_ensure.py`

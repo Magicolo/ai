@@ -134,3 +134,59 @@ grep -rn "pytest.mark" tests/ | head -n 20
   track with timing evidence); (c) `scripts/mypy-scope.sh` collapse →
   scripts track; (d) post-gate cache guard → gates track. None of (a)–(d)
   is actionable from `tests/` alone beyond what landed here.
+
+## Progress log (2026-09-30, batch 12)
+
+- Premises re-verified live: `slow` marker still registered; 33
+  `test_tui_app.py` tests still file-marked; lock typo + tomli absence
+  untouched (forbidden — lock track owns `requirements.lock`).
+- (a) Per-test slow marking LANDED with timing evidence (in-container
+  `voyage:latest`, CPU-only, `-p no:cacheprovider --durations`):
+  `test_media_robustness_rank2.py` 18 tests in 5.93s (slowest 1.24s
+  publish / 1.21s staging; 12 tests <0.005s — mixed, so per-test);
+  `test_generation_stack.py` 13 tests in 33.95s (8.41/8.29/8.19s
+  finalize trio + 4.70s generate fallback; 8 tests <0.005s — mixed);
+  `test_integration.py` 6 tests in 25.75s (15.56s + 8.47s finalize
+  pair; 3 tests <1s — mixed); `test_finalize_fastpath.py` 6 tests in
+  7.00s (slowest 1.99s — measured, below the marking threshold,
+  left unmarked). Marked 8 tests with `@pytest.mark.slow`
+  (marker lines only): media_robustness 2 (publish/staging),
+  generation_stack 4 (blend/overlap/lifts/generate-fallback),
+  integration 2 (finalize e2e + joint-style). File-level marking
+  rejected for all four (none uniformly slow).
+- (b) Cache guard → gates LANDED: `scripts/lib/common.sh` gains
+  `voyage_assert_no_cache_residue` (fails loud naming leaked paths +
+  the VOYAGE_CACHE_ENV contract); `scripts/gates.sh` sources it and
+  calls the guard post-gate. Verified: `bash -n` clean on both;
+  guard fires exit 1 on a planted `.coverage`, passes exit 0 clean.
+- (c) mypy-scope collapse NOT taken: verified live in-container —
+  `mypy tests/test_integration.py` reports 1 error
+  (`test_integration.py:119` unused-ignore, pre-existing on a foreign
+  line untouched by this pass — own diff is 2 marker lines only).
+  Per the brief (collapse ONLY if all green), no list edit made.
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: partial (two of three actionable legs landed; collapse
+  blocked on a foreign mypy error).
+  Files changed: `tests/test_media_robustness_rank2.py` /
+  `tests/test_generation_stack.py` / `tests/test_integration.py`
+  (8 `@pytest.mark.slow` lines only); `scripts/lib/common.sh`
+  (new `voyage_assert_no_cache_residue`); `scripts/gates.sh`
+  (mypy-list line minus `test_stage_timings.py` per 088 + post-gate
+  guard call).
+  Gate evidence: `-m "not slow"` deselects exactly the 8 marked
+  (29/37 collected); `-m slow` collects 8/37 and all 8 pass (56.67s);
+  `ruff check` + `ruff format --check` clean on all 4 test files;
+  `mypy strict` clean on benchmark/media_robustness/generation_stack
+  (integration carries the 1 foreign unused-ignore); `bash -n` clean
+  on both scripts.
+  DESIGN proposals: none.
+- Residuals (exact handoff): (a) lock typo (`requirements.lock:25-26`)
+  → lock track w/068 (forbidden here); `test_finalize_fastpath.py`
+  4 ffmpeg legs (1.27–1.99s, measured, below threshold — mark when the
+  slow budget tightens); `test_media_robustness_rank2.py` 4 validate
+  legs (0.85–0.97s, measured, borderline); (c) mypy-scope collapse →
+  scripts track once `test_integration.py:119` unused-ignore is fixed
+  by its owner (remove the stale ignore or retype the
+  `FinalizeOptions` call — NOT this pass: `media.py` is foreign).

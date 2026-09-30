@@ -82,3 +82,65 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
   nothing deleted.
 - Test evidence: docs-only; gate is `rg TASK.md` (zero hits outside
   `issues/`) + full `gates.sh` by the committer at delete time.
+
+## Progress log (2026-09-30, batch 12 — merge owning pass)
+
+- Re-verified live: `TASK.md` was 1746 lines (§§1-29 frozen brief +
+  §30 checklist); `DESIGN.md` 8010+ lines with the batch-9 §140 093
+  entry intact (`DESIGN.md:8052-8054`, read-only check — DESIGN.md not
+  touched per contract). Every §30 live item confirmed homed (read-only
+  greps): §30.1 opens (overlap sweep, resume A/B, 24 fps finalize,
+  eyeball) in §§137D/128 (`DESIGN.md:7274`); §30.2 opens (81/97/121
+  matrix, TeaCache/Q8/FP8, extension-throughput, eyeball) in §5.3
+  deferred (`DESIGN.md:554,487`) + §137A harness (`DESIGN.md:5984`,
+  `scripts/qualify.sh`); §30.3 adapter resolved
+  (`voyage/backends.py:VideoBackendAdapter`, §140 Stream C entry);
+  §30.4 artifacts produced (`reports/longlive-audit.md`,
+  `reports/video-backends.md`); §30.5 pointers only. §§1-29 are
+  one-shot audit history (phases A–M ran, reports exist) — no live
+  normative content; nothing there belongs in `docs/` (the §87 docs
+  tree + `docs/BENCHMARKING.md` already carry the durable protocol).
+- Dangling refs re-verified: `rg TASK.md` outside `Voyage/issues/`
+  shows only the stub's own self-rows (history pointer + git-rm
+  note — retired, not live) and the
+  historical DESIGN §140 entries (`DESIGN.md:6924,8052-8054`) — no ref
+  repair owed. (Full inventory for the record: `DESIGN.md:527,554,7169`
+  cite TASK §§4.2/4.3 as executed-methodology history, `:6924`
+  chronicles the §30 checklist merge, `:8052-8062` chronicle this
+  issue's DESIGN write — all historical, zero live-spec refs.)
+- Merge executed (owned files only): (1) TASK §30.4's procedural
+  "run the §137A qualification" instruction had no `docs/` home, so
+  `docs/BENCHMARKING.md` gains a "Backend qualification" section
+  (driver usage, absolute-path rule, manual recovery/eyeball, report
+  locations, contention rule — all restated from
+  `scripts/qualify.sh:1-20`, no new claims); (2) `TASK.md` replaced
+  by a pointer stub (title + git-history pointer + §30.x→DESIGN §y
+  mapping + zero-dangling-refs note + deletion-approval note) —
+  the file stays (no `git rm`), history keeps every line, and the
+  dual-authority drift hazard ("two authorities drift by
+  construction") is gone. No test reads `TASK.md` content (verified:
+  only `tests/test_causvid_prep.py:1` docstring mentions TASK §30.1 —
+  historical, left intact), so the stub is test-safe. No behavior
+  change → no TDD failing test (docs-only, same gate as batch 9).
+- Gates: `docs/BENCHMARKING.md` prose-only (no python → ruff/mypy
+  N/A); related evidence — owned longlive suites green in-container
+  (51 passed, 3 skipped, shared baseline run); `rg TASK.md` outside
+  `issues/` shows only the retired self-pointer + historical DESIGN
+  entries as predicted.
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: FIXED (merge complete) + DELETION PENDING (user approval).
+  Files changed: `Voyage/TASK.md` (1746L brief → pointer stub, no live
+  content left), `Voyage/docs/BENCHMARKING.md` (+"Backend
+  qualification" section — the §30.4 procedural home).
+- DESIGN proposals (text only, no DESIGN.md write per contract): none
+  outstanding — the batch-9 §140 entry already homes every §30 item;
+  no further DESIGN edit is owed by this merge. (If a future pass
+  wants it: append one §140 line noting `TASK.md` is a retired stub
+  pending `git rm` approval — optional, cosmetic.)
+- Residuals: exactly one — `git rm Voyage/TASK.md` needs explicit
+  user approval per AGENTS.md §9 (recorded in the stub itself, so the
+  approval can land without re-reading this issue). Nothing else is
+  open: no live content unhomed, no dangling refs, no follower
+  edits.

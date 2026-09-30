@@ -65,3 +65,23 @@ GPU runs. Worker `benchmark` ops live in each `voyage/workers/*.py`
 Flat RSS/VRAM peaks (±100 MB class), stage means stable, `validate`
 clean at the end, no `circuit_breaker_open` events. The endurance pytest
 marker (`pytest -m endurance`) runs the multi-segment flatness test.
+
+## Backend qualification
+
+Before calling any backend profile production-ready, run the DESIGN
+§137A qualification (smoke → resolution/FPS → VRAM/RAM → steady state →
+crash recovery → 3-segment visual review) via the backend-agnostic
+driver:
+
+```bash
+./scripts/qualify.sh [--backend ltxv|longlive2|causvid] [--segments N] <absolute-run-dir>
+```
+
+`<run-dir>` must be absolute (workers spawn with CWD=run_dir, so a
+relative dir doubles up inside payload paths). The driver benchmarks,
+runs, validates, and tees the JSON summary to `reports/`; crash
+recovery (kill -9 the video worker mid-segment, then resume) and the
+eyeball visual review stay manual. Past qualification evidence lives in
+`reports/video-backends.md` and `reports/longlive-audit.md`. Never run
+under contention: the driver aborts when >2 GiB on GPU 0 is held by
+another process.

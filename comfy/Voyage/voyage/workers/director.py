@@ -591,6 +591,9 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     for key in INIT_STR_KEYS:
         if key in payload and not isinstance(payload[key], str):
             raise TypeError(f"init field {key!r} must be str, got {type(payload[key]).__name__}")
+    unknown = sorted(set(payload) - set(INIT_STR_KEYS))
+    if unknown:
+        raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(INIT_STR_KEYS)})")
     _CONFIG.update({key: payload[key] for key in INIT_STR_KEYS if key in payload})
     return {"status": "READY", "backend": _CONFIG["backend"]}
 

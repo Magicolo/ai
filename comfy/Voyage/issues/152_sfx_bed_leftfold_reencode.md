@@ -133,3 +133,69 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
   deadlock-class proof for wide MANUAL-fade graphs (the incident was
   acrossfade-specific) — owner: that file's track + a GPU long-run;
   do not attempt from the sfx/media side alone.
+
+## Progress log (2026-09-30, batch 12)
+
+- Re-read `voyage/sfx_finalize.py:513-529` (probe-memo fold intact) and
+  `voyage/media.py:600-684` (`_blend_fade_seconds` + `_blend_pair` with
+  `first_seconds`/`second_seconds`/`timing_ms`) before testing; `git diff
+  HEAD --` on both files was EMPTY (no concurrent hunks), and both stay
+  UNCHANGED by this leg (proof ran in a new test file only).
+- Deadlock-class proof executed live (in-container `voyage:latest`, CPU
+  ffmpeg, new `tests/test_issue_152_wide_manual_join_proof.py`): one
+  `-filter_complex` over N inputs with chained manual fades only
+  (`afade` out/in + `adelay` + `amix inputs=N … normalize=0`, NEVER
+  acrossfade), fold arithmetic mirrored exactly (same
+  `_blend_fade_seconds` per pair, same `%.3f` fades, same integer-ms
+  delays):
+  - No-hang: PASSED — N=8 × 4 s sine stems complete in ~1 s under the
+    180 s `subprocess` timeout guard, output non-empty, duration exact
+    (25.0 s ≈ 8×4 − 7×1 within 0.15).
+  - Bit-parity: FAILED — N=4 sizes (4992102 B) and durations exact, but
+    first byte diff at index 2304110. PCM diagnosis (stdlib
+    wave+array): 624000 frames each, max 65536 s32 units (= 1 s16 LSB,
+    ~−69 dBFS peak against signal peak 189792256), mean ~5041
+    (~−91 dBFS), 95860/624000 samples differ, confined to
+    second-and-later overlap regions (sec6/sec9 full-second diffs,
+    all other seconds zero). N=2 wide vs `_blend_pair` IS byte-identical
+    (336000 frames, 0 diffs), so the recipe matches and the gap is
+    generational ordering across chained blends (pairwise re-quantizes
+    the accum through s32le files per blend; wide holds one float
+    chain). A forced-`aformat=s32` diagnostic did NOT rescue parity
+    (max 129600, 143720 diffs — worse), so no format-pin recipe exists
+    from this pass; exact filter-rounding mechanism undetermined.
+- TDD shape: the parity test was written strict (byte-equal) first and
+  failed as above; the committed file pins the measured outcome instead
+  (durations + sizes + closeness bounds ~2x headroom, labeled
+  characterization) plus the passing no-hang and N=2-identity tests.
+
+## Resolution (2026-09-30, batch 12)
+
+- Verdict: BLOCKED (proof split: hang PASS, parity FAIL) — probe-memo
+  path kept, NO behavior change to `voyage/sfx_finalize.py` or
+  `voyage/media.py` (both files untouched; `git diff` clean on them).
+- Files changed: new `tests/test_issue_152_wide_manual_join_proof.py`
+  only (3 tests: N=8 no-hang, N=4 closeness characterization, N=2
+  byte-identity recipe check). `tests/test_final_blend_scale.py`
+  untouched (foreign file — the ≤2-input pin still holds and still
+  passes).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 3/3
+  green; related suites green — proof + probe-memo + scale +
+  `test_sfx_finalize` = 31 passed.
+- Per-file gates: `ruff check` + `ruff format --check` clean on the new
+  file (B905 `strict=True` + I001 import order fixed during the pass);
+  no mypy scope change (untracked test files stay out of `gates.sh`
+  mypy list until committed, per the script's contract).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Blend folds stay pairwise: a wide MANUAL-fade single graph completes
+  > without hanging but is not bit-identical to the fold (generational
+  > ordering, ≤1 s16 LSB in post-first overlaps), so the O(N) probe-memo
+  > fold remains until parity is proven. Soak trends per-blend wall
+  > milliseconds vs timeline length."
+- Residuals (exact handoff): landing the join needs BOTH (1) a parity
+  rescue (exact rounding mechanism + a graph that reproduces fold bytes
+  — the `aformat=s32` attempt failed, so this is research, not wiring)
+  AND (2) the owner of `tests/test_final_blend_scale.py:107-136` to
+  relax the ≤2-input pin with a 31-input-scale proof (this pass proved
+  N=8 CPU-only; incident scale + GPU long-run remain open) — owner:
+  that file's track; do not attempt from the sfx/media side alone.

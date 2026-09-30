@@ -208,6 +208,7 @@ def test_run_capture_threads_timeout_to_subprocess(monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_finalize_staging_uses_run_dir_with_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -235,6 +236,7 @@ def test_finalize_staging_uses_run_dir_with_prefix(
     assert Path(str(staged)).resolve() == real_dir.resolve()
 
 
+@pytest.mark.slow
 def test_finalize_publish_streams_without_read_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

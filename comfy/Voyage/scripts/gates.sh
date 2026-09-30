@@ -51,8 +51,14 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_media_robustness_rank2.py tests/test_observability_rank2.py tests/test_paths.py tests/test_phase3.py tests/test_prefetch_shutdown.py \
     tests/test_prefetch_summary.py tests/test_recovery.py tests/test_registry_pins.py tests/test_rhythm.py tests/test_rpc_deadline_finite.py \
     tests/test_rpc_paths_hardening.py tests/test_rpc_start.py tests/test_rpc_timeout.py tests/test_run_relative_consumer.py tests/test_run_sh.py \
-    tests/test_scoreboard.py tests/test_sfx_contract.py tests/test_sfx_finalize.py tests/test_sfx_parser_parity.py tests/test_stage_timings.py \
+    tests/test_scoreboard.py tests/test_sfx_contract.py tests/test_sfx_finalize.py tests/test_sfx_parser_parity.py \
     tests/test_state_integrity.py tests/test_supervisor_av_align.py tests/test_supervisor_lifecycle.py tests/test_surface_rank2.py tests/test_three_captions.py \
     tests/test_tui.py tests/test_tui_absent_defaults_023.py tests/test_unit.py tests/test_vision_metrics.py \
     tests/test_vocoder_allowlist.py tests/test_wire_contract.py tests/test_worker_perf_rank2.py \
     && coverage run -m pytest -q -m 'not gpu' && coverage report"
+# Cache guard (issue 089): fail loud when gate caches leak into the
+# bind-mounted tree. Sourced from lib/common.sh (owned) so the check and
+# the VOYAGE_CACHE_ENV contract cannot drift apart.
+# shellcheck disable=SC1091
+source "$(dirname "$0")/lib/common.sh"
+voyage_assert_no_cache_residue "$(dirname "$0")/.."
