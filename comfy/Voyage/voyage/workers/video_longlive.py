@@ -32,6 +32,7 @@ VOYAGE_MODELS_DIR = Path(os.environ.get("VOYAGE_MODELS_DIR", "/models"))
 if str(VOYAGE_LONGLIVE_DIR) not in sys.path:
     sys.path.insert(0, str(VOYAGE_LONGLIVE_DIR))
 
+from voyage.atomic import fsync_dir  # noqa: E402
 from voyage.model_registry import verify_checkpoint_against_manifest  # noqa: E402
 from voyage.workers import video_common  # noqa: E402
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts  # noqa: E402
@@ -145,6 +146,28 @@ def clamp_to_uint8(scaled: Any, uint8_dtype: Any) -> Any:
     if clamp is not None:
         clamp(0, 255)
     return scaled.to(uint8_dtype)
+
+
+def save_recovery_tape_atomic(torch_module: Any, tape: dict[str, Any], recovery_path: Path) -> Path:
+    """Atomically + durably write a LongLive recovery.pt tape (issue 129).
+
+    ``torch.save`` writes a zip pickle with no atomicity promise: a crash
+    mid-write onto the live path clobbers the previous good tape and the
+    next restart cannot resume. Save into a ``.tmp`` sibling through one
+    open handle (``torch.save`` accepts a binary file object), flush +
+    fsync that handle, rename over the live path, then fsync the directory
+    — mirroring ``video_common.write_tape_atomic`` (issue 122) for the JSON
+    tapes. A failed save raises before the rename, so the previous tape
+    survives. Returns ``recovery_path``.
+    """
+    tape_tmp = recovery_path.with_suffix(".tmp")
+    with open(tape_tmp, "wb") as handle:
+        torch_module.save(tape, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    tape_tmp.replace(recovery_path)
+    fsync_dir(recovery_path.parent)
+    return recovery_path
 
 
 _STAGE_NAMES: tuple[str, ...] = (
@@ -961,7 +984,7 @@ class LongLiveSession:
             "latent_shape": list(self._latent_shape),
         }
         recovery_path = output_path.with_name("recovery.pt")
-        torch.save(tape, str(recovery_path))
+        save_recovery_tape_atomic(torch, tape, recovery_path)
         # Streaming causal decode (93f per 3-block segment): the VAE transient
         # at 1280x704 is ~10 GB regardless of chunk size (full-frame spatial
         # intermediates), so chunking alone cannot fit it alongside the

@@ -15,15 +15,17 @@ import tempfile
 from pathlib import Path
 
 from voyage import paths
+from voyage.augment import DEFAULT_CHUNK_FRAMES
 from voyage.cli_core import _load_run, get_console
 from voyage.cli_paths import _run_dir_arg
 from voyage.cli_planning import _require_cuda_stack
 from voyage.cli_status import _read_all_metric_events
 from voyage.concepts import ConceptStore
-from voyage.config import ProjectConfig
+from voyage.config import ProjectConfig, SfxConfig
 from voyage.console import RichSegmentProgress
 from voyage.errors import MediaError
 from voyage.logrotate import iter_metric_files
+from voyage.media import plan_augmentation, presentation_setup_facts
 from voyage.media import probe as media_probe
 from voyage.supervisor import Supervisor
 
@@ -119,6 +121,34 @@ def _video_geometry_setup(config: ProjectConfig) -> dict[str, object]:
     }
 
 
+def _presentation_setup(config: ProjectConfig) -> dict[str, object]:
+    """Floor triple + resolved presentation plan for §104 setup blocks (163/194).
+
+    The run's own geometry doubles as finalize source and target (segments
+    finalize at native geometry), so the plan is pure math over stored
+    config — no probing, no renders. Every benchmark/soak setup spreads
+    this so re-encode and stream-copy reports are never silently compared
+    (the 091 BENCHMARKING floors note names the cost; this records it).
+    """
+    plan = plan_augmentation(
+        config.video.width,
+        config.video.height,
+        float(config.video.fps),
+        config.video.width,
+        config.video.height,
+        int(config.video.fps),
+        config.augment.min_fps,
+        config.augment.min_width,
+        config.augment.min_height,
+    )
+    return presentation_setup_facts(
+        plan,
+        min_fps=config.augment.min_fps,
+        min_width=config.augment.min_width,
+        min_height=config.augment.min_height,
+    )
+
+
 def _persist_benchmark_report(
     run_dir: Path, stem: str, title: str, setup: dict[str, object], metrics: dict[str, object]
 ) -> Path | None:
@@ -159,6 +189,346 @@ def _check_benchmark_counts(warmup: int, measured: int) -> int:
     return 0
 
 
+def _sfx_probe(
+    *,
+    workdir: Path,
+    backend: str,
+    device: str,
+    model_size: str,
+    models_dir: str,
+    extra_setup: dict[str, object],
+    persist_dir: Path | None,
+    warmup: int,
+    measured: int,
+) -> int:
+    """Spawn one SFX worker and run its `benchmark` op (154/163 shared core).
+
+    Direct spawn via `SFX_WORKER_MODULES` — the supervisor exposes no SFX
+    handle, and the finalize path (`sfx_finalize.render_sfx_bed`) spawns
+    the same way. `persist_dir=None` means stdout is the record (the
+    no-run fake probe, mirroring the end-to-end throwaway note).
+    """
+    from voyage.bench import format_report, sfx_benchmark_setup
+    from voyage.rpc import SubprocessWorker
+    from voyage.sfx_finalize import SFX_WORKER_MODULES
+
+    try:
+        module = SFX_WORKER_MODULES[backend]
+    except KeyError:
+        known = ", ".join(sorted(SFX_WORKER_MODULES))
+        print(f"error: unknown sfx backend {backend!r} (known: {known})", file=sys.stderr)
+        return 2
+    (workdir / paths.LOGS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    setup: dict[str, object] = {
+        **sfx_benchmark_setup(
+            model_size=model_size,
+            sfx_workers=1,
+            device=device,
+            warmup=warmup,
+            measured=measured,
+        ),
+        "backend": backend,
+        **_benchmark_env(),
+        **extra_setup,
+    }
+    worker = SubprocessWorker(
+        module,
+        workdir,
+        workdir / paths.LOGS_DIRNAME / "sfx-benchmark.log",
+        init_op="init",
+        init_payload={"models_dir": models_dir, "device": device, "model_size": model_size},
+    )
+    worker.start()
+    try:
+        metrics = worker.call("benchmark", {"warmup": warmup, "measured": measured})
+    finally:
+        worker.stop()
+    print(format_report("sfx", setup, metrics))
+    if persist_dir is not None:
+        artifact = _persist_benchmark_report(persist_dir, "benchmark-sfx", "sfx", setup, metrics)
+        if artifact is not None:
+            print(f"report: {artifact}")
+    return 0
+
+
+def _benchmark_sfx(args: argparse.Namespace, warmup: int, measured: int) -> int:
+    """`benchmark sfx` dispatch (154/163): the run's `[sfx]` backend when
+    `--run` is given, else the torch-free fake probe with no run dir."""
+    if _check_benchmark_counts(warmup, measured) != 0:
+        return 2
+    if args.run:
+        run_dir = _run_dir_arg(args.run)
+        config, _digest = _load_run(run_dir)
+        if not _require_cuda_stack(config):
+            return 1
+        return _sfx_probe(
+            workdir=run_dir,
+            backend=config.sfx.backend,
+            device=config.sfx.device,
+            model_size=config.sfx.model_size,
+            models_dir=config.sfx.models_dir,
+            extra_setup=_presentation_setup(config),
+            persist_dir=run_dir,
+            warmup=warmup,
+            measured=measured,
+        )
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-sfx-") as tmp:
+        workdir = Path(tmp)
+        return _sfx_probe(
+            workdir=workdir,
+            backend="fake",
+            device="cpu",
+            model_size=SfxConfig().model_size,
+            models_dir="/models",
+            extra_setup={
+                **_presentation_setup(ProjectConfig()),
+                "note": "no --run: torch-free fake probe, stdout is the record",
+            },
+            persist_dir=None,
+            warmup=warmup,
+            measured=measured,
+        )
+
+
+def _augment_probe(
+    *,
+    chunk_frames: int,
+    crf: int,
+    preset: str,
+    device: str,
+    warmup: int,
+    measured: int,
+) -> dict[str, object]:
+    """Stage + time the ffmpeg chunk-encode orchestration (154 CPU-safe core).
+
+    Staging (testsrc PNGs) sits outside the measured region; each measured
+    iteration runs the real `augment_plan` + `run_augment_chunks` +
+    `ffmpeg_encode_chunk` path and records its wall. The GPU
+    upscale/interpolate leg is a recorded skip until the FILM port lands
+    (the worker is a quarantined stand-in that cannot load official
+    weights) — with torch presence noted so GPU runs stay comparable.
+    A missing ffmpeg binary degrades to a skip note, never a traceback.
+    """
+    import importlib.util
+    import os
+    import subprocess
+    import time
+
+    from voyage.augment import AugmentChunk, augment_plan, ffmpeg_encode_chunk, run_augment_chunks
+
+    torch_present = importlib.util.find_spec("torch") is not None
+    model_note = (
+        "skipped (spike stand-in quarantine: augment_worker cannot load official "
+        "weights until the FILM port lands; torch "
+        f"{'present' if torch_present else 'absent'} on this box)"
+    )
+    skip_metrics = {"model_upscale": model_note}
+    total_frames = chunk_frames * 2
+    fps = 8
+    with tempfile.TemporaryDirectory(prefix="voyage-bench-augment-") as tmp:
+        staging = Path(tmp)
+        source = staging / "src"
+        source.mkdir(parents=True, exist_ok=True)
+        try:
+            staged = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-nostdin",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"testsrc=size=320x180:rate={fps}:duration={total_frames / fps}",
+                    "-vsync",
+                    "0",
+                    "-start_number",
+                    "0",
+                    str(source / "frame_%06d.png"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            return {"chunk_encode": f"skipped (ffmpeg unavailable: {exc})", **skip_metrics}
+        if staged.returncode != 0:
+            return {
+                "chunk_encode": f"skipped (testsrc staging failed: {staged.stderr[-500:]})",
+                **skip_metrics,
+            }
+        plan = augment_plan(total_frames, chunk=chunk_frames, devices=(device,))
+        chunk_dirs: dict[int, Path] = {}
+        for chunk in plan:
+            chunk_dir = staging / f"chunk_{chunk.index:02d}"
+            chunk_dir.mkdir(parents=True, exist_ok=True)
+            for offset in range(chunk.source_frames):
+                os.replace(
+                    source / f"frame_{chunk.start_frame + offset:06d}.png",
+                    chunk_dir / f"frame_{offset:06d}.png",
+                )
+            chunk_dirs[chunk.index] = chunk_dir
+        outputs = staging / "out"
+        outputs.mkdir(parents=True, exist_ok=True)
+        current: dict[str, Path] = {}
+
+        def _encode(chunk: AugmentChunk, chunk_device: str) -> str:
+            del chunk_device
+            return str(
+                ffmpeg_encode_chunk(
+                    chunk_dirs[chunk.index] / "frame_%06d.png",
+                    current["dir"] / f"chunk_{chunk.index:02d}.mp4",
+                    fps,
+                    crf=crf,
+                    preset=preset,
+                )
+            )
+
+        walls: list[float] = []
+        for iteration in range(warmup + measured):
+            current["dir"] = outputs / f"iter_{iteration:02d}"
+            current["dir"].mkdir(parents=True, exist_ok=True)
+            started = time.monotonic()
+            run_augment_chunks(plan, _encode)
+            elapsed = time.monotonic() - started
+            if iteration >= warmup:
+                walls.append(elapsed)
+    mean = sum(walls) / len(walls)
+    return {
+        "chunks": len(plan),
+        "chunk_encode_wall_seconds": [round(wall, 3) for wall in walls],
+        "chunk_encode_mean_seconds": round(mean, 3),
+        **skip_metrics,
+    }
+
+
+def _benchmark_augment(args: argparse.Namespace, warmup: int, measured: int) -> int:
+    """`benchmark augment` dispatch (154): ffmpeg orchestration probe with
+    the run's floors + geometry when `--run` is given, defaults otherwise."""
+    from voyage.augment import (
+        CHUNK_CRF_DEFAULT,
+        CHUNK_PRESET_DEFAULT,
+        DEFAULT_UPSCALE_FACTOR,
+        augment_devices,
+    )
+    from voyage.bench import augment_benchmark_setup, format_report
+
+    if _check_benchmark_counts(warmup, measured) != 0:
+        return 2
+    if args.run:
+        run_dir = _run_dir_arg(args.run)
+        config, _digest = _load_run(run_dir)
+        persist_dir: Path | None = run_dir
+    else:
+        config = ProjectConfig()
+        persist_dir = None
+    devices = augment_devices()
+    device = devices[0] if devices else "cpu"
+    chunk_frames = DEFAULT_CHUNK_FRAMES
+    setup: dict[str, object] = {
+        **augment_benchmark_setup(
+            chunk_frames=chunk_frames,
+            upscale_factor=DEFAULT_UPSCALE_FACTOR,
+            crf=CHUNK_CRF_DEFAULT,
+            preset=CHUNK_PRESET_DEFAULT,
+            device=device,
+            warmup=warmup,
+            measured=measured,
+        ),
+        **_benchmark_env(),
+        **_presentation_setup(config),
+    }
+    if persist_dir is None:
+        setup["note"] = "no --run: default-config ffmpeg probe, stdout is the record"
+    metrics = _augment_probe(
+        chunk_frames=chunk_frames,
+        crf=CHUNK_CRF_DEFAULT,
+        preset=CHUNK_PRESET_DEFAULT,
+        device=device,
+        warmup=warmup,
+        measured=measured,
+    )
+    print(format_report("augment", setup, metrics))
+    if persist_dir is not None:
+        artifact = _persist_benchmark_report(
+            persist_dir, "benchmark-augment", "augment", setup, metrics
+        )
+        if artifact is not None:
+            print(f"report: {artifact}")
+    return 0
+
+
+def _soak_sfx_timeline(run_dir: Path) -> float | None:
+    """Sum of committed segment video durations; None when unprobable.
+
+    The tiling verdict needs a timeline; segment videos are the SFX
+    pass's own source of truth (same walk the window planner uses), so
+    any probe gap degrades to a skipped verdict, never a crash.
+    """
+    videos = sorted((run_dir / paths.SEGMENTS_DIRNAME).glob("*/video.mp4"))
+    if not videos:
+        return None
+    total = 0.0
+    for video in videos:
+        try:
+            info = media_probe(video)
+            duration = float(info.get("format", {}).get("duration", 0.0) or 0.0)
+        except (MediaError, TypeError, ValueError):
+            return None
+        if duration <= 0.0:
+            return None
+        total += duration
+    return total
+
+
+def _soak_sfx_section(run_dir: Path) -> dict[str, object]:
+    """Post-run SFX rollup over stems + ledger (issue 163): no extra renders.
+
+    Ledger durations feed the shared `summarize_sfx_windows` aggregation
+    (walls are unrecorded post-run, so the mean rests at zero while counts
+    and audio totals stay genuine); stems are counted excluding crashed
+    `*.partial.wav` leftovers; the tiling verdict runs only when a ledger
+    exists and the timeline probes cleanly — an SFX-less soak reports
+    zeros with no errors.
+    """
+    from voyage.bench import summarize_sfx_windows
+    from voyage.sfx_finalize import (
+        SFX_LEDGER_NAME,
+        SFX_STEMS_DIRNAME,
+        load_sfx_ledger,
+        validate_sfx_ledger,
+    )
+
+    sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
+    try:
+        records = load_sfx_ledger(sfx_dir / SFX_LEDGER_NAME)
+    except (OSError, ValueError) as exc:
+        return {
+            **summarize_sfx_windows([]),
+            "stems": 0,
+            "ledger_errors": [f"sfx ledger unreadable: {exc}"],
+        }
+    windows: list[dict[str, object]] = [
+        {"audio_seconds": record.get("duration")} for record in records
+    ]
+    section = summarize_sfx_windows(windows)
+    stems = sum(
+        1
+        for stem in sfx_dir.glob("*.wav")
+        if stem.is_file() and not stem.name.endswith(".partial.wav")
+    )
+    if not records:
+        errors: list[str] = []
+    else:
+        timeline = _soak_sfx_timeline(run_dir)
+        errors = (
+            validate_sfx_ledger(run_dir, timeline)
+            if timeline is not None
+            else ["sfx timeline unprobable — tiling verdict skipped"]
+        )
+    return {**section, "stems": stems, "ledger_errors": errors}
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     from voyage.bench import format_report, summarize_gauges
     from voyage.cli import cmd_init  # seam dispatch (issue 080)
@@ -166,6 +536,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     target = args.benchmark_target
     warmup = int(args.warmup)
     measured = int(args.measured)
+    if target == "sfx":
+        return _benchmark_sfx(args, warmup, measured)
+    if target == "augment":
+        return _benchmark_augment(args, warmup, measured)
     if target in ("video", "audio"):
         if _check_benchmark_counts(warmup, measured) != 0:
             return 2
@@ -186,6 +560,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             "warmup": warmup,
             "measured": measured,
             **_video_geometry_setup(config),
+            **_presentation_setup(config),
             **_benchmark_env(),
         }
         supervisor = Supervisor(run_dir, config)
@@ -231,6 +606,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             "warmup": warmup,
             "measured": segments,
             **_video_geometry_setup(config),
+            **_presentation_setup(config),
             **_benchmark_env(),
             "note": "throwaway run (TemporaryDirectory): no logs/ artifact, stdout is the record",
         }
@@ -292,6 +668,11 @@ def cmd_soak(args: argparse.Namespace) -> int:
         "segments_requested": segments,
         "backend": config.video.backend,
         **_video_geometry_setup(config),
+        **_presentation_setup(config),
+        "sfx_backend": config.sfx.backend,
+        "sfx_device": config.sfx.device,
+        "sfx_model_size": config.sfx.model_size,
+        "augment_chunk_frames": DEFAULT_CHUNK_FRAMES,
         **_benchmark_env(),
     }
     metrics: dict[str, object] = {
@@ -299,6 +680,7 @@ def cmd_soak(args: argparse.Namespace) -> int:
         "stages": _stage_means(events),
         **summarize_gauges([event for event in events if event.get("event") == "resource_gauges"]),
         "prefetch": summarize_prefetch_outcome(events),
+        "sfx": _soak_sfx_section(run_dir),
         "validate_errors": validate_run(run_dir),
     }
     print(format_report("soak", setup, metrics))
@@ -329,7 +711,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             metrics = row["metrics"]
             deltas = row["deltas"]
             if isinstance(metrics, dict) and isinstance(deltas, dict):
-                cells = [f"{metrics[key]:.3f}({deltas[key]:+.3f})" for key in METRIC_KEYS]
+                try:
+                    cells = [f"{metrics[key]:.3f}({deltas[key]:+.3f})" for key in METRIC_KEYS]
+                except (KeyError, TypeError, ValueError):
+                    cells = ["no-visual"] * len(METRIC_KEYS)
             else:
                 cells = ["no-visual"] * len(METRIC_KEYS)
             print("  ".join([str(row["segment_id"]), str(row["frames"]), stage_cells, *cells]))
@@ -340,8 +725,17 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             print(f"final: {final}")
         return 0
     if args.inspect_target == "concepts":
-        store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
-        records = store.records()
+        try:
+            store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
+            records = store.records()
+        except (OSError, ValueError) as exc:
+            # Lock-free best-effort view (issue 142): a concurrent commit
+            # can leave a torn tail that fails validation — degrade to
+            # `unknown` (exit 0, like `_latest_novelty`) instead of
+            # tracing on a read-only verb.
+            print(f"concepts: unknown ({exc})", file=sys.stderr)
+            print("unknown")
+            return 0
         for record in records:
             flag = "+" if record.accepted else "-"
             print(f"[{flag}] #{record.id}: {record.canonical_name[:120]}")

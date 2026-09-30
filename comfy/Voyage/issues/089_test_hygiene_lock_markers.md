@@ -93,3 +93,44 @@ grep -rn "pytest.mark" tests/ | head -n 20
   pairwise/concat incl. dirty `test_media_robustness_rank2.py`,
   multi-commit runs) → pyproject+tests track; (c) mypy-scope collapse →
   scripts track; (d) cache guard → gates track.
+
+## Progress log (2026-09-30, tests-only pass)
+
+- Premises re-verified live: `slow` marker still registered
+  (`pyproject.toml:186`, comment pins tail marking as residual); zero tests
+  carried `slow` before this pass (`rg pytest.mark.slow` clean); `gpu` (1)
+  + `endurance` (1) unchanged; lock typo + tomli absence + cache presence
+  + mypy-scope split all still hold per the Group D log — all outside
+  `tests/` scope, untouched.
+- Owned remainder landed (tests/ scope only): file-level `pytestmark =
+  pytest.mark.slow` added to `tests/test_tui_app.py` (the cited 33-test /
+  ~34 s Pilot tail — every test in the file drives `VoyageApp` via
+  `run_test()` pilot, load-sensitive per the file's own 093 budgets).
+  Deliberately scoped to this one file: ffmpeg pairwise/concat and
+  multi-commit candidates (`test_media_robustness_rank2.py`,
+  `test_generation_stack.py`, `test_integration.py`) mix fast unit tests
+  with slow integration legs in the same file — file-level marking would
+  over-deselect; per-test marking needs timing evidence this pass did not
+  collect. No `pyproject.toml` / `scripts/` / lockfile edits (frozen).
+- Gate evidence (in-container, `voyage:latest`, CPU-only):
+  `--markers` lists `slow`; `tests/test_tui_app.py --collect-only` → 33
+  collected; `-m "not slow"` → 33 deselected, zero collected; 2 spot tests
+  pass (`test_auto_focus_targets_style_field`,
+  `test_style_field_has_focus_on_mount`); `ruff check` + `ruff format
+  --check` clean on the touched file. Full gates left to orchestrator
+  (concurrent `supervisor.py`/`config.py` hunks hot).
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: partial (one unambiguous slow suite marked; remainder recorded).
+  Files changed: `tests/test_tui_app.py` (`pytestmark` + docstring only).
+  DESIGN proposals: none.
+- Residuals (exact handoff): (a) lock typo (`requirements.lock:25-26`
+  `httpcore2/httpx2`) + tomli-freeze note → lock track w/068 (forbidden
+  here); (b) per-test `slow` marking for the ffmpeg/multi-commit tail —
+  needs timing runs to separate slow legs from fast unit tests in
+  `test_media_robustness_rank2.py` / `test_generation_stack.py` /
+  `test_integration.py` / `test_finalize_fastpath.py` (pyproject+tests
+  track with timing evidence); (c) `scripts/mypy-scope.sh` collapse →
+  scripts track; (d) post-gate cache guard → gates track. None of (a)–(d)
+  is actionable from `tests/` alone beyond what landed here.

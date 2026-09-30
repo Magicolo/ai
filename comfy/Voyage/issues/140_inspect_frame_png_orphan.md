@@ -134,3 +134,39 @@ $ sed -n '817,825p' voyage/cli.py
   > single-frame VLM view goes to `logs/inspect/<segment>.png` (or a temp
   > dir), so segment dirs stay exactly the checksummed artifacts."
 - Files changed: this issue file only (log appended; original above intact).
+
+## Progress log (2026-09-30, this pass — supervisor.py single hunk under HOT exception)
+
+- Re-verified live FIRST: `_inspect_frame_view` still extracts
+  `prev_dir / "inspect_frame.png"` with no cleanup. CONFIRMED.
+- Disjointness (contract exception): `git diff` at edit time showed the
+  concurrent hunks ending ~line 1500 (`_sample_gauges` skip + prefetch +
+  novelty-leniency) while `_inspect_frame_view` sits at 1951+ — zero
+  overlapping hunks in the function. Single hunk applied; final diff
+  confirms only `@@ -1893` is mine (5 concurrent hunks untouched).
+- Landed the issue's preferred candidate 1 (logs/inspect/, path derivable
+  per segment) — no second hunk: the `segment_inspected` metric line stays
+  as-is (that would be a neighboring function, out of scope).
+- TDD: new `tests/test_issue_140_inspect_frame_logs.py` (2 tests) failed
+  first in-container (PNG landed in the segment dir), green after the fix.
+
+## Resolution (this pass)
+
+- Verdict: FIXED.
+- Files changed: `voyage/supervisor.py` ONLY (`_inspect_frame_view`:
+  frame goes to `self._run_dir/logs/inspect/<segment>.png` with
+  best-effort mkdir, OSError → `""`; docstring notes the transient-view
+  contract), new tests only.
+- Test evidence: new file 2/2 green (view returns the scene summary, PNG
+  under `logs/inspect/`, segment dir clean; missing-video path still
+  returns `""` litter-free); `test_inspector.py`,
+  `test_inspector_wiring.py`, `test_inspect_metrics_fps_029.py` green.
+  Gates on touched files green (see 152 log).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> The visual inspector never writes inside committed segment dirs: the
+  > single-frame VLM view goes to `logs/inspect/<segment>.png`, so segment
+  > dirs stay exactly the checksummed artifacts."
+- Residuals: none on this issue. Coordination note for the 098 owner: the
+  new `logs/inspect/*.png` files live under `logs/` alongside worker logs
+  and metrics — cover or explicitly exclude that subtree in the same way
+  as the existing log files, not as segment artifacts.

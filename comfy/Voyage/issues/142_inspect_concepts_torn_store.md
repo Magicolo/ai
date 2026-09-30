@@ -143,3 +143,40 @@ $ sed -n '550,556p;2069,2074p' voyage/cli.py
   with `logrotate.iter_metric_files`) + the truncated-tail regression
   tests from the issue. Note: the OPERATIONS sentence now promises exit-0
   degradation — the code must be brought to meet it.
+
+## Progress log (2026-09-30, this pass — owned file: cli_observe.py, fail-soft only)
+
+- Re-verified live FIRST: concepts path (`cli_observe.py:342-348` at read
+  time) constructs `ConceptStore` + `records()` with no guard; scoreboard
+  per-row formatting assumes numeric cells. CONFIRMED (code has since moved
+  under a concurrent benchmark/soak hunk in the same file — regions are
+  disjoint, both verified in the final diff).
+- Landed the fail-soft half only (`concepts.py` torn-tail tolerance stays
+  with its owner): verb-level guards, no store changes.
+- TDD: new `tests/test_issue_142_inspect_failsoft.py` (3 tests: torn tail,
+  garbage store, unformattable scoreboard row) failed first in-container
+  (ValidationError/TypeError tracebacks), green after the fix.
+
+## Resolution (this pass)
+
+- Verdict: FIXED (verb-level fail-soft; the OPERATIONS contract sentence is
+  now met by the code).
+- Files changed: `voyage/cli_observe.py` only (concepts branch wraps
+  store load in `try/except (OSError, ValueError)` → stderr note +
+  `unknown` on stdout, exit 0, mirroring `_latest_novelty`; scoreboard
+  per-row formatting falls back to `no-visual` cells on
+  KeyError/TypeError/ValueError), new tests only.
+- Test evidence: new file 3/3 green; `test_scoreboard.py`,
+  `test_inspect_metrics_fps_029.py`, `test_benchmark.py`,
+  `test_benchmark_counts.py` (concurrent neighbor in the same file) all
+  green. Gates on touched files green (see 152 log).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Read-only verbs never traceback: inspect/scoreboard degrade to
+  > `unknown`/`--`/`no-visual` cells (exit 0) on torn tails — they are
+  > best-effort views of a mutating run, not transactions."
+- Residuals (exact handoff for the concepts owner): torn-tail tolerance
+  *inside* `ConceptStore` construction (`voyage/concepts.py:141-144` —
+  skip-and-warn on a final failing line instead of raising, shared helper
+  with `logrotate.iter_metric_files`) would let readers see N-1 good
+  records instead of `unknown`; needs the concepts-file owner, not the
+  verb layer.

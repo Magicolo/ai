@@ -100,6 +100,22 @@ FIELD_WIDGET_IDS = {
 }
 WIDGET_FIELD_NAMES = {widget_id: field for field, widget_id in FIELD_WIDGET_IDS.items()}
 
+# Checkbox widget id -> FIELD_HELP key (issue 114): checkboxes are not
+# text/select fields, so they stay out of FIELD_WIDGET_IDS (which drives
+# error styling for text/select only), but the focus-driven help panel
+# resolves them here instead of falling back to the overview. Batch-8
+# boxes (flag-no-download/flag-no-sfx) already carry tooltips — they are
+# mapped too so focusing them shows the same text.
+FLAG_HELP_FIELDS = {
+    "flag-draft": "draft",
+    "flag-force": "force",
+    "flag-skip-bad": "skip_bad",
+    "flag-no-download": "no_download",
+    "flag-no-sfx": "no_sfx",
+    "flag-verbose": "verbose",
+    "flag-no-color": "no_color",
+}
+
 _BUTTON_HELP = {
     "button-generate": "Generate: validate the form and start the run (same as ctrl+g).",
     "button-quit": "Quit the TUI (same as ctrl+q).",
@@ -213,9 +229,13 @@ def _buffer_tail(buffer: io.StringIO) -> str:
 class TuiProgress(SegmentProgress):
     """Supervisor progress sink that posts into the TUI run view.
 
-    Plain-text lines mirror the console wording (SEGMENT headers, full
-    video prompts, music caption with the beat grid, commit summaries)
-    so behavior stays recognizable across both displays.
+    Plain-text lines mirror the console wording (SEGMENT headers, drift
+    line with backend + hold flag, video-geometry line, full video
+    prompts, audio line with backend + energy, music + SFX captions,
+    commit summaries with take ids + action, prefetch, elapsed totals)
+    so behavior stays recognizable across both displays. Verbose-gated
+    console detail (seeds, transitions, texture/environment, notes, take
+    reasons, finalize blend) stays console-only.
     """
 
     def __init__(self, app: VoyageApp, total_segments: int) -> None:
@@ -246,7 +266,20 @@ class TuiProgress(SegmentProgress):
         destination = str(info.get("destination", ""))
         phase = str(info.get("phase", ""))
         novel = "novel ✓" if info.get("novelty_accepted") else "hold"
-        self._post(f"◆ drift → {destination} · {phase} · {novel}")
+        drift = " · drift hold" if info.get("drift_hold") else ""
+        backend = str(info.get("director_backend", ""))
+        self._post(f"◆ drift → {destination} · {phase} · {novel}{drift} ({backend})")
+        geometry = str(info.get("geometry", ""))
+        fps = info.get("fps", 0)
+        frames = info.get("planned_frames", 0)
+        duration = info.get("planned_duration", 0.0)
+        blocks = info.get("blocks", 1)
+        cuts = info.get("scene_cuts", [])
+        cut_flag = " · scene-cut" if any(bool(cut) for cut in cuts) else ""
+        self._post(
+            f"🎬 video · {info.get('video_backend')} · {geometry} @{fps}fps · "
+            f"{frames}f ≈ {duration:.2f}s · {blocks} block(s){cut_flag}"
+        )
         prompts = info.get("video_prompts", [])
         if isinstance(prompts, list):
             for index, prompt in enumerate(prompts):
@@ -254,23 +287,38 @@ class TuiProgress(SegmentProgress):
                 self._post(f"  🎬 {tag}: {prompt}")
         beats = info.get("audio_beats", 0)
         bpm = info.get("audio_bpm", 0.0)
+        energy = info.get("audio_energy", 0.0)
         caption = str(info.get("audio_caption", ""))
-        self._post(f"  🎵 music: {caption} ({beats} beats @ {bpm:.0f} BPM)")
+        self._post(
+            f"🎵 audio · {info.get('audio_backend')} · {beats} beats @ {bpm:.0f} BPM · "
+            f"energy {energy:.2f}"
+        )
+        self._post(f"  🎵 music: {caption}")
+        # Third caption family (issue 161): bell emoji distinguishes the
+        # SFX line from the music line; "-" marks a missing caption.
+        sfx_caption = str(info.get("audio_sfx_caption", "") or "-")
+        self._post(f"  🔔 sfx: {sfx_caption}")
 
     def segment_done(self, info: dict[str, Any]) -> None:
         segment_id = str(info.get("segment_id", ""))
         frames = info.get("frames", 0)
         duration = info.get("duration", 0.0)
+        takes = info.get("take_ids", [])
+        take_action = str(info.get("take_action", "keep"))
+        takes_text = ", ".join(str(take) for take in takes) if takes else "no take"
         beats = info.get("beats", 0)
         bpm = info.get("bpm", 0.0)
         self._post(
             f"✓ SEGMENT {segment_id} committed · {frames}f ≈ {duration:.2f}s · "
-            f"{beats} beats @ {bpm:.0f} BPM"
+            f"{takes_text} ({take_action}) · {beats} beats @ {bpm:.0f} BPM"
         )
         stages = info.get("stage_seconds", {})
+        prefetch = " · prefetch hit" if info.get("prefetch_hit") else ""
         if isinstance(stages, dict) and stages:
             cells = " · ".join(f"{name} {seconds:.1f}s" for name, seconds in stages.items())
-            self._post(f"  ⏱ {cells}")
+            self._post(f"  ⏱ {cells}{prefetch} · total {info.get('elapsed', 0.0):.1f}s")
+        elif prefetch:
+            self._post(f"  ⏱{prefetch}")
         self._done += 1
         done = self._done
         total = self._total
@@ -670,16 +718,19 @@ class VoyageApp(App[None]):
             "Draft profile (fast low-res iteration)",
             value=self.initial_state.draft,
             id="flag-draft",
+            tooltip=FIELD_HELP["draft"],
         )
         yield Checkbox(
             "Force (init into a non-empty directory)",
             value=self.initial_state.force,
             id="flag-force",
+            tooltip=FIELD_HELP["force"],
         )
         yield Checkbox(
             "Skip bad segments at finalize",
             value=self.initial_state.skip_bad,
             id="flag-skip-bad",
+            tooltip=FIELD_HELP["skip_bad"],
         )
         yield Checkbox(
             "Verify only (fail instead of downloading models)",
@@ -697,11 +748,13 @@ class VoyageApp(App[None]):
             "Verbose console lines behind the TUI",
             value=self.initial_state.verbose,
             id="flag-verbose",
+            tooltip=FIELD_HELP["verbose"],
         )
         yield Checkbox(
             "No color (plain output)",
             value=self.initial_state.no_color,
             id="flag-no-color",
+            tooltip=FIELD_HELP["no_color"],
         )
         yield Static("", id="plan-line")
         yield Static("", id="errors-line")
@@ -827,6 +880,8 @@ class VoyageApp(App[None]):
             body.update(_BUTTON_HELP[widget_id])
             return
         field = WIDGET_FIELD_NAMES.get(widget_id or "")
+        if field is None:
+            field = FLAG_HELP_FIELDS.get(widget_id or "")
         if field is None or field not in FIELD_HELP:
             body.update(_HELP_OVERVIEW)
             return

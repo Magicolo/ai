@@ -117,3 +117,54 @@ grep -rln "longlive" tests/ docs/ reports/
   `supervisor.py`/`director.py`/`video_ltxv.py` hunks), stored-run
   migration decision for existing longlive2 TOMLs, and generate/run-time
   warn wiring (this pass warns at `init` only).
+
+## Progress log (2026-09-30, tests-only pass — quiet-tree check)
+
+- Precondition evaluated live per the task contract: tree is HOT, not
+  quiet. `git status --porcelain` shows uncommitted `voyage/supervisor.py`
+  (+71 Stage-A telemetry hunks), `voyage/config.py` (+14), and
+  `tests/test_stage_a_telemetry.py` (+25) — all overlapping the deletion
+  surface (`supervisor.py:98,106` `VIDEO_WORKER_MODULES` /
+  `STREAMING_VIDEO_BACKENDS`, `config.py:31,182` deprecated row +
+  registry). Plus untracked `tests/test_novelty_leniency.py` (concurrent
+  agent). Full deletion requires `supervisor.py:88-108` hunks → direct
+  conflict with the in-flight telemetry change.
+- Longlive2 presence re-verified (read-only): `voyage/workers/
+  video_longlive.py` still present; `BACKEND_REGISTRY["longlive2"]` row
+  (`config.py:182`, 1280×704/29f) + `DEPRECATED_VIDEO_BACKENDS`
+  (`config.py:31`) both live; `VIDEO_WORKER_MODULES` +
+  `STREAMING_VIDEO_BACKENDS` (`supervisor.py:98,106`) still include
+  `longlive2`; `TUI BACKENDS` (`tui_state.py:33`) still lists it; six
+  longlive test modules + precision/qual legs still present.
+- Verdict: BLOCKED-with-evidence (hot tree). No deletion executed, no
+  hot-file hunks touched, no unilateral delete per the contract. No files
+  changed in this pass.
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: blocked (hot tree — ready-to-execute plan recorded, not run).
+  Files changed: none. DESIGN proposals: none.
+- Ready-to-execute deletion plan (for the owning pass, once the tree is
+  quiet — no uncommitted `supervisor.py`/`config.py`/`director.py`/
+  `video_ltxv.py` hunks): (1) delete `voyage/workers/video_longlive.py`
+  (1264L) + `voyage/config.py:182-19x` `longlive2` row + `:31`
+  `DEPRECATED_VIDEO_BACKENDS` (or keep as tombstone — decide) +
+  `voyage/supervisor.py:98,106` longlive2 entries (derive remainder from
+  registry per 083) + `worker/Dockerfile.video:66-70,176-253` LongLive
+  clone/`wan_models` shims + `scripts/run.sh:67` sniff +
+  `scripts/qualify.sh` longlive2-first driver +
+  `scripts/build-video.sh:14-16` import + `voyage/registry_records.py`
+  WAN/LONGLIVE pins + `voyage/cli_*` `_LONGLIVE_*`/`_CUDA_BACKENDS` refs +
+  `voyage/tui_state.py:33` BACKENDS entry + `voyage/fake_backends.py:194`
+  fake + `voyage/models_ensure.py:57` mapping + `voyage/doctor.py:276`
+  leg; (2) delete/repoint `tests/test_longlive.py`,
+  `test_longlive_stages.py`, `test_longlive_init_validation.py`,
+  `test_longlive_offload_fusion.py`, `test_longlive2_deprecation_079.py`,
+  precision fp8/bf16 longlive legs, qual longlive2 leg; mark
+  `reports/video-backends.md:85-117` longlive leg historical (keep
+  `reports/longlive-audit.md` as dated evidence); (3) reorder
+  INSTALL/BACKENDS/MODELS/README ltxv-first; (4) gate `gates.sh` green +
+  `grep -rni longlive voyage/ worker/ scripts/ tests/` empty except
+  historical markers. Preconditions: stored-run migration decision for
+  existing longlive2 TOMLs + generate/run-time warn wiring (currently
+  `init`-only).

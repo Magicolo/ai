@@ -29,9 +29,12 @@
 
 Provenance note: `manifest.timeline` records the source hint
 (backend-native fps/geometry, e.g. `final_width 768` / `final_height 432`)
-— not the shipped presentation, which finalize lifts to the
-`[augment]` floors (≥32 fps, ≥1280×720) unless disabled. Read shipped
-geometry off the artifact (or `docs/AUGMENT.md`), never the manifest.
+— not the shipped presentation. `manifest.presentation` records the run's
+`[augment]` floors at init, and the first finalize overwrites it with the
+effective floors plus `manifest.final_geometry` (the validated output box),
+so post-finalize readers take shipped geometry off the manifest
+(`final_geometry`, falling back to the artifact / `docs/AUGMENT.md` on
+pre-finalize or pre-SFX runs where it is still null).
 
 ## Crash scenarios
 

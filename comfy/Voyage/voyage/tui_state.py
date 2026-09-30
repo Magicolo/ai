@@ -111,6 +111,14 @@ FIELD_HELP = {
     "Off by default — checked runs never touch the network for weights.",
     "no_sfx": "Skip the finalize-time SFX pass even when [sfx] is configured. "
     "Off by default — SFX backend/device overrides stay CLI-only.",
+    "draft": "Draft profile (fast low-res iteration): renders at 640x352 "
+    "with 45s takes — iteration only, never finals.",
+    "force": "Force: allow init into a non-empty directory (risks overwriting existing run files).",
+    "skip_bad": "Skip bad: salvage a finalize around corrupt segments with "
+    "warnings instead of aborting.",
+    "verbose": "Verbose: print verbose console lines (seeds, transitions, "
+    "take reasons) behind the TUI.",
+    "no_color": "No color: plain output without colors or animation (also honors NO_COLOR).",
 }
 
 

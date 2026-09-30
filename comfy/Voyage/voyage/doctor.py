@@ -294,7 +294,11 @@ def check_models(present_dir: Path | None = None) -> dict[str, Any]:
         ("ltxv-2b", model_registry.verify_ltxv_models),
         ("causvid", model_registry.verify_causvid_models),
         ("director-qwen8b", model_registry.verify_director_models),
+        ("director-qwen4b-awq", model_registry.verify_director_awq_models),
         ("audio-acestep", model_registry.verify_audio_models),
+        ("sfx-mmaudio", model_registry.verify_sfx_models),
+        ("film", model_registry.verify_film_models),
+        ("realesrgan-anime", model_registry.verify_realesrgan_models),
         ("inspector-qwen35", model_registry.verify_inspector_models),
     )
     for name, verify in verifiers:

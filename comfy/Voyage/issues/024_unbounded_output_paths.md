@@ -73,3 +73,42 @@ grep -n "resolve()" voyage/cli.py   # every unbounded sink
 ## Refs
 
 - Issue 008's class (traversal guards must cover the write path, not the display name) — `is_flat_folder_name` docstring at `voyage/cli.py:99-113` states the intent; this issue is the uncovered remainder.
+
+## Progress log (2026-09-30, tests-only pass — VERIFY)
+
+- Concurrent-owner work checked live (read-only; post-split anchors):
+  `voyage/cli_paths.py:24` `resolve_run_dir` still bare
+  `Path(value).resolve()` (no containment predicate, no `relative_to`,
+  no `--force` gate); `voyage/cli_run_ops.py:36-65` `cmd_init` still
+  guards `--run-id`/`--name` via `_check_run_id` then `mkdir(parents=True)`
+  on the unbounded `resolve_run_dir(output)` with no output check between;
+  `voyage/cli_generate.py:104,257-259` (`resolve_run_dir` + `final_video`
+  `Path.resolve()` + `mkdir`) and `voyage/cli_finalize.py:125`
+  (`output.parent.mkdir`) likewise unbounded. `rg
+  relative_to|outside.*output|warn.*output voyage/cli_paths.py
+  voyage/cli_run_ops.py voyage/cli_generate.py voyage/cli_finalize.py` →
+  zero hits (no predicate landed anywhere on the write path).
+- Behavioral cross-check (in-container, `voyage:latest`, CPU-only):
+  `tests/test_cli_hardening.py` 45/45 green — the existing `--run-id`
+  traversal guards hold, but no `--output`/`--final-video`/`--video`
+  containment test exists (none found by name/grep), consistent with the
+  fix not landing. The issue's sweep probe semantics still hold:
+  `--run-id ../../evil` rejected, `--output /tmp/evil-run` /
+  `../../tmp/evil` resolved + used for `mkdir+write` unguarded.
+- Verdict: NOT fixed in-tree. No code change here (all fix candidates
+  write `voyage/cli_paths.py` + verb modules — frozen `voyage/` scope and
+  the concurrent owner's regions; touching them would collide).
+  Leave OPEN with this status note.
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: verified-open (still reproduces, owner regions untouched).
+  Files changed: none. DESIGN proposals: none.
+- Residuals (exact handoff, CLI-paths owner): single `resolve_run_dir`
+  containment rule (`voyage/cli_paths.py:24` — warn/error on escape from
+  `output/`, `Path.relative_to`, `--force` for absolute escapes) applied
+  to `--output` (`cli_run_ops.py:48`, `cli_generate.py:104`) +
+  `--final-video`/`--video`/`--output` in `finalize`/`sfx`/`generate`
+  (`cli_generate.py:257-259`, `cli_finalize.py:125`, sfx `Path.resolve()`
+  sites) + traversal tests mirroring the `--run-id` tests
+  (`tests/test_cli_hardening.py` pattern, 45 tests green as base).

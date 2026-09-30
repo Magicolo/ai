@@ -20,6 +20,9 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.slow
+"""Slow tail (issue 089): 33 Pilot tests (~34 s) — deselect with `-m "not slow"`."""
+
 
 @pytest.fixture(autouse=True)
 def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

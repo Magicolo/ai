@@ -148,3 +148,33 @@ scanned roots: segments/, novelty/ only -> both MISSED
   > 'no orphans' means no crashed-commit residue anywhere, including the
   > state file's own staging."
 - Files changed: this issue file only (log appended; original above intact).
+
+## Progress log — 2026-09-30 (this pass, cli_validate owner)
+
+- Re-verified live: roots still `segments_root` + `run_dir / "novelty"`
+  only (`cli_validate.py:238-239`); `audio/` + run root unscanned;
+  premise HOLDS (not drifted). `cli_validate.py` clean in `git diff`
+  (hunks disjoint — no concurrent edit at the scan site).
+- TDD red-first in-container (`voyage:latest`, `scripts/test.sh`):
+  `tests/test_issue098_orphan_audio_root.py` 2 failed pre-fix
+  (audio + root orphans missed), logs-sibling passed (no false
+  positive). Green post-fix (3/3).
+- Fix applied (exact 2-line patch, scoped per the issue): added
+  `orphans.extend(_collect_transient_orphans(run_dir / "audio",
+  run_dir))` + a top-level-only `run_dir.glob("*.partial")` pass
+  (non-recursive, so `segments/` + `novelty/` + `audio/` hits never
+  double-count; `logs/` rotation siblings never match `*.partial`).
+- Files changed: `Voyage/voyage/cli_validate.py` (2 added lines),
+  `Voyage/tests/test_issue098_orphan_audio_root.py` (new, 3 tests).
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: FIXED. `validate_run` now scans `segments/` + `novelty/` +
+  `audio/` + top-level run-root `*.partial`; "no orphans" covers every
+  `atomic_write_*` staging location.
+- Test evidence: new 3 tests green + related suites green
+  (`test_doctor` + `test_run_relative_consumer` +
+  `test_cli_validate_handoff` + `test_generate_ensure` +
+  `test_containers_rank2` = 59 passed in-container); gates on touched
+  files green (ruff check + format-check + mypy strict).
+- Residual: none in this file's scope.

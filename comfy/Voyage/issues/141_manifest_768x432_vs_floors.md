@@ -131,3 +131,38 @@ $ sed -n '676,678p;808,810p' voyage/media.py
   at init (`min_fps/min_width/min_height` + `final_geometry` slot filled by
   finalize) or reword the keys to `native_hint_*`, plus the
   `build_manifest`-reflects-floors regression test from the issue.
+
+## Progress log (2026-09-30, this pass — owned files: persistence.py + media.py)
+
+- Re-verified live FIRST: `FINAL_VIDEO_WIDTH/HEIGHT = 768/432` still stamped
+  at `build_manifest`; floors still 32/1280/720. CONFIRMED.
+- Landed the issue's preferred candidate 1 additively (no key renamed, no
+  reader touched): `presentation` (run floors) + `final_geometry` (null at
+  init, validated box after first finalize).
+- TDD: new `tests/test_issue_141_manifest_presentation.py` (3 tests) failed
+  first in-container (KeyError on the new keys), green after the fix.
+
+## Resolution (this pass)
+
+- Verdict: FIXED (code contract; the batch-8 docs note updated to match).
+- Files changed: `voyage/persistence.py` (`build_manifest` records
+  `presentation: {min_fps, min_width, min_height}` from `config.augment`
+  — no new import edge — plus `final_geometry: None`; header comment now
+  names the source-hint vs shipping-contract split), `voyage/media.py`
+  (`_record_final_geometry` best-effort write-back + hook in `finalize_run`
+  after publish: overwrites `presentation` with the effective floors and
+  sets `final_geometry` to the validated box; returns False instead of
+  raising on manifest-less dirs), `docs/STATE_AND_RECOVERY.md`
+  (provenance note rewritten to the new contract), new tests only.
+- Test evidence: new file 3/3 green (incl. a real 2-segment fake-commit +
+  zero-floor finalize asserting geometry 768x432@24 and effective floors
+  0/0/0); `test_finalize_fastpath` + `test_state_integrity` green. Gates
+  on touched files green (see 152 log).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> The run manifest records the presentation contract, not just the
+  > source hint: `presentation` carries the effective floors and
+  > `final_geometry` the validated shipped box, written by finalize —
+  > provenance readers never infer output geometry from source constants."
+- Residuals: none. Handoff note: pre-finalize and legacy runs keep
+  `final_geometry: null` — readers must fall back to the artifact (the
+  updated STATE_AND_RECOVERY note says so).

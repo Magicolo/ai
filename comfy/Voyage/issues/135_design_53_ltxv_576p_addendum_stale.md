@@ -66,3 +66,27 @@ grep -n -A4 '"ltxv": BackendRecord' Voyage/voyage/config.py  # live: 768x512 ltx
   untouched. Gate: `rg -n '576p|1024x576' DESIGN.md` shows only
   historical/log contexts after the fix."
 - Residual: none in this file's scope.
+
+## Progress log — 2026-09-30 (this pass, DESIGN owner)
+
+- Re-verified live: addendum at `DESIGN.md:559-563` still claims the
+  768x512 to 1024x576 (`ltxv-576p`) move as fact; revert at
+  `:6952-6960` ("stays 768x512", "~15.6 GB") + probe verdict at `:7110`
+  (OOM 3/3) unchanged; live registry `config.py:197-204` is
+  `ltxv-512p` 768x512; `video_ltxv.py:811,858-859` defaults 768/512.
+  Premise HOLDS (not drifted, not already fixed).
+- Files changed: `Voyage/DESIGN.md` append-only (new `## 2026-09-30 —
+  Issue 135` §140 entry with the one-line history + normative 768x512
+  pointer; the §5.3 addendum itself untouched — zero deletions per
+  shared-append-only rule, strike-in-place left to a future approved
+  edit).
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: FIXED (docs, append-only correction). History kept
+  ("1024x576 tried 2026-09-24, reverted — forward ~15.6 GB, see §140
+  rhythm-cut note"); normative geometry points at 768x512 (`ltxv-512p`).
+- Test evidence: docs-only, no code change — live cites above
+  (`DESIGN.md:559-563` vs `:6952-6960` vs `config.py:197-204`).
+- Residual: none. A future in-place strike of the §5.3 addendum needs
+  its own approval (deletion-class edit); not attempted here.

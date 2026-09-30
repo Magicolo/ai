@@ -124,3 +124,33 @@ whose dominant variable is unrecorded.
   > (`min_fps/min_width/min_height`) plus the resolved
   > (`out_w/out_h/out_fps`, `needs_reencode/needs_minterpolate`), so
   > re-encode and stream-copy reports are never silently compared."
+
+## Progress log (2026-09-30, CLI track — this pass)
+
+- Re-verified live first: `presentation_setup_facts` present in
+  `voyage/media.py:891` (pure, unchanged); the three setup sites in
+  `voyage/cli_observe.py` (video/audio branch, end-to-end, soak) still
+  carried no floor keys. `ProjectConfig()` zero-arg construction verified
+  live in-container (defaults: 768x512@24, floors 32/1280/720) for the
+  no-run probe paths. Premise CONFIRMED.
+- 091 pairing verified live: `docs/BENCHMARKING.md:48-54` already carries the
+  floors comparability warning ("e2e numbers predate the augmentation
+  floors... Compare GPU runs to GPU runs at the same floor settings") — the
+  re-baseline note exists, so no docs edit (docs out of scope regardless).
+
+## Resolution (2026-09-30, CLI track — this pass)
+
+- Verdict: FIXED in owned files (the E1 media half + this spread = whole issue).
+- Changes (`voyage/cli_observe.py` only): new `_presentation_setup(config)`
+  (run geometry as finalize source + target through `plan_augmentation` into
+  `presentation_setup_facts` — pure math over stored config, no probing)
+  spread into all three setup sites (video/audio branch, end-to-end, soak)
+  plus the new `benchmark sfx` / `benchmark augment` setups (uniform schema;
+  no-run probes use `ProjectConfig()` defaults with a recorded note).
+- Test evidence: `test_benchmark_video_setup_records_presentation_floors` +
+  soak/augment floor assertions in the new file (10 passed); E1's
+  `test_e1_media_augment.py` 194 section still green. Gates on touched files:
+  ruff check + format-check + mypy strict clean.
+- DESIGN proposal: stands as previously quoted (floors + resolved plan in
+  every §104 setup block) — implementation landed, no new text.
+- Residuals: none.

@@ -1949,11 +1949,21 @@ class Supervisor:
         return format_measured_context(style_spec, summary), amendments
 
     def _inspect_frame_view(self, prev_dir: Path, prev_video: Path) -> str:
-        """Single middle-frame VLM read; '' when the inspector is unavailable."""
+        """Single middle-frame VLM read; '' when the inspector is unavailable.
+
+        The frame is a transient VLM view, not a committed artifact (issue
+        140): it lives under `logs/inspect/<segment>.png` so segment dirs
+        stay exactly the checksummed artifacts.
+        """
         try:
             info = probe(prev_video).get("format", {})
             duration = float(info.get("duration", 0.0) or 0.0) if isinstance(info, dict) else 0.0
-            frame_path = prev_dir / "inspect_frame.png"
+            try:
+                inspect_dir = self._run_dir / paths.LOGS_DIRNAME / "inspect"
+                inspect_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return ""
+            frame_path = inspect_dir / f"{prev_dir.name}.png"
             proc = run_capture(
                 [
                     "ffmpeg",

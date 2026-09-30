@@ -19,7 +19,11 @@ from voyage.models import RunState
 #: Timeline geometry recorded in the run manifest. Informational only —
 #: no reader scales media from it (the supervisor's frame counts are the
 #: timeline truth); kept as named constants so a future geometry change
-#: updates the manifest in exactly one place.
+#: updates the manifest in exactly one place. This is the *source* hint,
+#: not the shipped presentation: finalize lifts backend-native segments to
+#: the `[augment]` floors by default, so `presentation` (floors, recorded
+#: at init) + `final_geometry` (the validated output box, filled by the
+#: first finalize — issue 141) carry the shipping contract instead.
 FINAL_VIDEO_WIDTH = 768
 FINAL_VIDEO_HEIGHT = 432
 
@@ -55,6 +59,12 @@ def build_manifest(
             "final_width": FINAL_VIDEO_WIDTH,
             "final_height": FINAL_VIDEO_HEIGHT,
         },
+        "presentation": {
+            "min_fps": config.augment.min_fps,
+            "min_width": config.augment.min_width,
+            "min_height": config.augment.min_height,
+        },
+        "final_geometry": None,
         "committed_segments": 0,
     }
 

@@ -1,8 +1,10 @@
-"""GenerateBlocksRequest + BoundaryKind contract (issue 045).
+"""Wire contract: Unset absent-encoding + GenerateBlocksRequest (issue 088 fold).
 
-All cross-process `generate_blocks` construction goes through
-`from_payload`: multi/single forms, validated equal-length tuples, no
-asserts (strippable under -O), no positional construction. CPU-only.
+Fold of `tests/test_unset.py` (5 tests) + `tests/test_generate_blocks_request.py`
+(7 tests) = 12 tests, same assertions, test fn names unchanged. Each cluster
+keeps its original module docstring as a banner so the issue ID stays
+greppable (batch-8 quintet precedent). No helper collisions (`_multi` only
+in the request cluster).
 """
 
 from __future__ import annotations
@@ -11,11 +13,67 @@ from pathlib import Path
 
 import pytest
 
+from voyage.config import ProjectConfig, Unset, UnsetType, is_provided, resolve_config
 from voyage.workers.video_common import (
     BoundaryKind,
     GenerateBlocksRequest,
     boundary_from_scene_cut,
 )
+
+# ---------------------------------------------------------------------------
+# Cluster 1: Unset absent-encoding (issue 045) — from tests/test_unset.py
+# Original docstring: "Unset absent-encoding (issue 045).
+#
+# The CLI spells absence as None, the TUI form as "": one sentinel (Unset)
+# plus one conversion point (provided_or_none) so consumers only ever
+# check `is not None`. CPU-only."
+# ---------------------------------------------------------------------------
+
+
+def test_unset_is_falsy_singleton() -> None:
+    assert not Unset
+    assert repr(Unset) == "Unset"
+    assert isinstance(Unset, UnsetType)
+
+
+def test_is_provided_treats_both_absences_as_absent() -> None:
+    assert not is_provided(Unset)
+    assert not is_provided(None)
+    assert is_provided(0)
+    assert is_provided("")
+    assert is_provided(False)
+    assert is_provided("qwen")
+
+
+def test_resolve_config_accepts_unset_like_none() -> None:
+    base = ProjectConfig(style="probe")
+    via_none = resolve_config(base, blocks=None, take_seconds=None)
+    via_unset = resolve_config(base, blocks=Unset, take_seconds=Unset)
+    assert via_none == via_unset == base
+
+
+def test_resolve_config_explicit_value_still_wins() -> None:
+    base = ProjectConfig(style="probe")
+    assert resolve_config(base, blocks=2).video.blocks_per_segment == 2
+
+
+def test_tui_optional_int_emits_unset() -> None:
+    from voyage.tui_state import GenerateFormState, to_generate_namespace
+
+    namespace = to_generate_namespace(
+        GenerateFormState(style="x", name="v", duration="5s", blocks="", take_seconds="")
+    )
+    assert namespace.blocks is Unset
+    assert namespace.take_seconds is Unset
+
+
+# ---------------------------------------------------------------------------
+# Cluster 2: GenerateBlocksRequest + BoundaryKind contract (issue 045)
+# Original docstring: "GenerateBlocksRequest + BoundaryKind contract (issue
+# 045). All cross-process `generate_blocks` construction goes through
+# `from_payload`: multi/single forms, validated equal-length tuples, no
+# asserts (strippable under -O), no positional construction. CPU-only."
+# ---------------------------------------------------------------------------
 
 
 def _multi(**overrides: object) -> dict[str, object]:

@@ -82,3 +82,33 @@ Voyage/voyage/model_registry.py:~455-471 (_record_longlive2): records repo/revis
   from the Hub API alone — the pinned bytes must be verified against a
   provisioned volume (re-provision first: the current volume has no Wan
   subset to compare against).
+
+## Progress log (2026-09-30, tests-only pass — CHECK)
+
+- Probe executed live (no GPU needed, no host pip): `$VOYAGE_MODELS` unset;
+  `~/.cache/voyage-models/` contains 12 entries (`PixArt-XL-2-1024-MS`,
+  `Qwen3-4B-AWQ`, `Qwen3-8B`, `Qwen3.5-9B`, `acestep`, `all-MiniLM-L6-v2`,
+  `frame_interpolation`, `ltx25-gguf`, `ltxv-2b`, `manifest.json`,
+  `mmaudio`, `realesrgan`) — `wan_models/` ABSENT, `longlive2/` ABSENT
+  (both `ls` → "No such file or directory"). Prune date 2026-09-24
+  confirmed still in effect; no Wan bytes were re-provisioned since.
+- Pin state re-verified (read-only): `WAN_HF_REVISION: str | None = None`
+  (`voyage/registry_records.py`, honest placeholder with pin procedure in
+  its comment); `SnapshotSpec(WAN_HF_REPO, WAN_HF_REVISION, …)` reads the
+  constant (no inline `None`); manifest records `wan_revision: null`
+  (visible gap, not absent). Floating-set gate still encodes exactly
+  `{('longlive2-bf16', WAN_HF_REPO)}`.
+- Verdict: STILL-BLOCKED — no verified bytes exist to measure a revision
+  against. Per the contract NO hash was invented (a wrong pin fails every
+  provision loudly). No files changed in this pass.
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: blocked (still-blocked with exact probe output above). Files
+  changed: none. DESIGN proposals: none.
+- Residuals (exact handoff, GPU+network owner): re-provision the Wan2.2
+  subset at the verified main commit
+  (`HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha`), sha256 the shards
+  against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
+  `tests/test_registry_pins.py` floating-set to empty. Do NOT pick the
+  revision from the Hub API alone without byte verification.

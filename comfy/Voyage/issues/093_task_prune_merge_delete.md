@@ -59,3 +59,26 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
   normatives, record the §30.x → §y mapping in the migration commit
   message, delete `Voyage/TASK.md`, then run the issue's gate (`TASK.md`
   mentions only historical + `gates.sh` green).
+
+## Progress log — 2026-09-30 (this pass, DESIGN owner)
+
+- Re-verified live: `TASK.md` 1746 lines (§§1-30 intact);
+  `DESIGN.md` 8010 lines; §30.4 heading already corrected (batch 7);
+  `rg TASK.md` outside `issues/` shows zero non-historical refs (no ref
+  repair owed). Premise HOLDS — DESIGN-side write still open, TASK-only
+  slice already landed.
+- Files changed: `Voyage/DESIGN.md` append-only (new `## 2026-09-30 —
+  Issue 093` §140 entry recording the §30.x to DESIGN §y mapping;
+  zero deletions).
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: DESIGN-PART FIXED, DELETION DEFERRED. Mapping recorded in
+  the DESIGN entry (§30.1 to §§137D/128 + worker slice; §30.2 to §5.3
+  deferred + §137A harness; §30.3 to Stream C adapter entry; §30.4 open
+  breadth; §30.5 pointers only).
+- Deletion approval stays PENDING — `Voyage/TASK.md` NOT deleted by
+  this pass (per-commit approval per AGENTS §9); recorded explicitly,
+  nothing deleted.
+- Test evidence: docs-only; gate is `rg TASK.md` (zero hits outside
+  `issues/`) + full `gates.sh` by the committer at delete time.

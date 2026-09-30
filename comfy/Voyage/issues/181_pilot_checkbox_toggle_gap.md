@@ -58,3 +58,15 @@ sed -n '760,780p' Voyage/voyage/tui.py  # the five untested flag reads
 
 - `voyage/tui.py:667-691,760-780,288-290`; `tests/test_tui_app.py:160-167` (the lone `_read_form` assertion); `tests/test_tui_state.py:35-45` (state→namespace half, widget half missing).
 - Not-a-duplicate: 131 (backend-Select overlay operation — different widget family, different interaction); 130 (Pilot sleep budgets — timing, not coverage); 114 (checkbox HELP — explicitly scopes out handlers/wiring: "help coverage only").
+
+## Progress log
+
+- 2026-09-30 (console/TUI track): re-verified live first — premise HOLDS as-read (`voyage/tui.py` 7 `Checkbox` constructions; `_read_form` reads 7 flags via `_read_flag_field`; `rg "Checkbox|flag-" tests/test_tui_app.py` → zero hits; the only `_read_form` assertion in the suite is the backend Select). TDD red-first: `tests/test_tui_checkbox_toggle_181.py` failed 1/2 in-container before the fix (id-set pin passed — 7 ids exist; toggle test failed) — no source change needed for this issue (wiring was already correct), the gap was test-only. Live probe quirk (verified in-container, do not regress): at viewport (120, 40) the last flag scrolls under the fold and a 5-flag click-check-click sequence leaves `#flag-no-color` unclickable (`pilot.click` returns False 100/100 — the click lands on another widget after repeated `scroll_visible`); at (120, 60) all 10 toggles land first try, so the test mounts tall. No concurrent hunks in owned files.
+
+## Resolution
+
+- Verdict: FIXED (test-only; no source change — `_read_form` wiring verified correct by the new interaction tests).
+- Files changed: new `tests/test_tui_checkbox_toggle_181.py` only (id-set pin: exactly the 7 known flag ids — a deleted/renamed flag fails; toggle test: real `pilot.click` per flag, honoring the False return + `OutOfBounds` retry per the 093 pattern, asserting `_read_form` follows True then False — the 131 real-interaction precedent, zero programmatic `.value` sets).
+- Test evidence: new file 2 passed; `tests/test_tui_app.py` full file (33 passed); full suite 1690 passed / 8 failed, all foreign (see issue 113 log). Gates on touched files: `ruff check` + `ruff format --check` + `mypy` clean (test file included in the ruff passes).
+- DESIGN proposal (quoted text only, for the DESIGN owner — launcher-TUI test contract): "Flag checkboxes carry Pilot widget-to-state coverage: each flag is toggled through the real click path and `_read_form` is asserted both ways, plus an exact checkbox id-set pin — the same real-interaction bar as the issue-131 backend-Select overlay test."
+- Residuals: none — mutation proof (swapped flag ids in `_read_form`) now fails the toggle test by construction (each flag is asserted independently True/False).

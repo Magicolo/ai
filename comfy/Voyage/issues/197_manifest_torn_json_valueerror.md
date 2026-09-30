@@ -87,3 +87,43 @@ readers must never trust a file writers can tear.
   heal (a completeness gap where repair fails too noisily). Fixing 077's
   fail-loud rule does not add the missing exception class; fixing this class
   does not add 077's outcome verification. Land both.
+
+## Progress log — 2026-09-30 (this pass, models_ensure owner)
+
+- Re-verified live: the `models_ensure.py` half NO LONGER HOLDS —
+  already fixed (077-era rework). `_read_manifest_keys`
+  (`models_ensure.py:154-172`) catches `(OSError, ValueError)` and
+  returns `None` for torn; `_repair_manifest` (`:175-228`) treats
+  `None` as unrepairable and returns `still_missing` (clean fail-loud
+  via "manifest record missing after repair", never a traceback);
+  `test_containers_rank2.py:181-188`
+  (`test_repair_treats_torn_manifest_as_unrepairable`) already pins it.
+  No `json.loads` inside a bare-`OSError` handler remains in this
+  module (single `json.loads` at `:167`, guarded). Per contract, no
+  fix invented for an already-fixed premise.
+- The `_merge_manifest_record` half (`model_registry.py:465-476`) still
+  HOLDS — bare `json.loads` with no handler, torn crashes
+  `download_model` before any fetch — but `model_registry.py` is
+  outside this group's file scope (AVOID list), so NOT touched here.
+- Characterization tests added (prove the owned half stays loud-clean):
+  `tests/test_issue197_torn_manifest.py` 2/2 green pre- and
+  post-pass (torn to `None`, torn to `still_missing` — no raise).
+- Files changed: `Voyage/tests/test_issue197_torn_manifest.py` (new,
+  2 tests); `Voyage/voyage/models_ensure.py` untouched.
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: ALREADY-FIXED (owned half) + DEFERRED (registry half).
+  Owned `models_ensure.py` maps torn to the loud clean error the issue
+  asks for (`still_missing` to `ensure_models` return 1 with console
+  errors, contrasted with 077's silent-repair half which stays resolved
+  and pinned by `test_containers_rank2`).
+- Test evidence: new 2 characterization tests green (would have failed
+  red on the as-filed code, pass on live code — premise drift proven);
+  related `test_containers_rank2` repair tests green.
+- Residual with handoff: `Voyage/voyage/model_registry.py:465-476`
+  `_merge_manifest_record` needs `except (OSError, ValueError)` to
+  `record = {}` (or torn-aside + start empty) + the atomic-write
+  promotion (`voyage/atomic.py`) per fix candidates 1-2 — owner:
+  registry track. Repro: `echo '{torn' > <models>/manifest.json`
+  then `download_model(...)` raises `JSONDecodeError` before fetching.

@@ -93,3 +93,34 @@ sed -n '670p;736p' Voyage/voyage/media.py  # 24 floor + max() formula
   wording)."
 - Residual: CLI help overclaim (`cli*.py` augment-flag help) belongs to
   the CLI-owning track.
+
+## Progress log — 2026-09-30 (this pass, DESIGN owner)
+
+- Re-verified all 17 claims live (host grep + source read 2026-09-30;
+  concurrent agents active, cites re-anchored): 4 drifts CONFIRMED with
+  one correction — live console verbs are SIX (`run`, `generate`,
+  `stop`, `finalize`, `sfx`, `soak` via `cli.py:499,560,601,624,643,678`;
+  `status`/`validate`/`benchmark`/`inspect` zero hits), not the four/five
+  earlier notes claimed (`stop` parses too — `stop` gained the flags after
+  the Group C probe). Verb set is 15 (`cli.py:279-684` subparsers);
+  `PRESENTATION_MIN_FPS = 24` (`media.py:807`) + `out_fps = max(...)`
+  (`:873`) proves the `0` disables gap for CausVid-16 sources; fake
+  768x432@24 vs default 1280x720@32 proves the pass-through gap. The 13
+  holds re-verified (augment helper `cli.py:449-473`, `AugmentConfig`
+  32/1280/720 `config.py:438-440`, fake `[]` + CUDA pair
+  `models_ensure.py:79-117`, TUI fields `tui_state.py:107-108,152-153`).
+- Files changed: `Voyage/DESIGN.md` append-only (new `## 2026-09-30 —
+  Issue 133` §140 entry; zero deletions, original stale lines untouched
+  per shared-append-only rule).
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: FIXED (docs). The §140 entry records the six-verb console
+  list, the 15-verb count, the qualified `0` disables wording, and the
+  annotated fake pass-through, with live file:line cites.
+- Test evidence: docs-only, no code change — no TDD test owed; live
+  grep evidence above (verb parsers, `media.py:807,873`, fake preset vs
+  floors).
+- Residual: CLI help overclaim (`cli.py:449-473` "0 disables" /
+  "floors to 0") stays with the CLI owner (out of scope per file list);
+  handoff at `Voyage/voyage/cli.py:449-473`.

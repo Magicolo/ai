@@ -38,3 +38,48 @@ grep -rn "LEGACY_MIGRATION\|hard-splice\|fps=0\|tomli" voyage/ tests/ pyproject.
 ## Refs
 
 - `voyage/concepts.py`, `voyage/media.py:774-914`, `voyage/models.py:211-214`, `pyproject.toml:168-180`
+
+## Progress log (2026-09-30, tests-only pass — EVALUATE)
+
+- All 6 premises re-verified live (read-only): (1)
+  `LEGACY_MIGRATION_REMOVE_AFTER = "2026-12-31"` (`concepts.py:34`) +
+  `_migrate_legacy` (`:162`) still threaded (expiry 3 months out — not
+  actionable today); (2) `tui_state.py` run_id→name migration prose still
+  live; (3) flat deterministic-backend payload compat
+  (`supervisor.py:852-856` region) still live (deterministic is the
+  explicit CPU/offline opt-out); (4) `JointStyle hard-splice`
+  (`media.py:940`, `effective_overlap_fraction`, `finalize_run` map) still
+  live with `blend` default — needs product sign-off; (5) `RunState.fps`
+  legacy-0 tolerance (`models.py:211-214`) still live (needs stored-run
+  scan first); (6) stale `tomli` ignores (`config.py:20`,
+  `tui_state.py:31`, `pyproject.toml:132-138` override) still present but
+  the `try/except ImportError` fallback must stay until the py310 floor
+  rises (worker image is py3.10).
+- Tests-scope triage: NOTHING closable from `tests/` alone. Items 1–5 are
+  calendar/product/scan-gated by definition (deleting early breaks
+  compat); item 6 needs `pyproject.toml` + `voyage/` ownership (frozen)
+  and the floor decision. A tests-only "ban new call sites" lint without
+  the owner-enforced gate is advisory text, not a fix. No files changed —
+  timeboxed shims need the owner, not a shim.
+- Gate evidence: n/a.
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: accepted (formal accept-residual with rationale — expiry
+  conditions, not neglect). Files changed: none. DESIGN proposals: none.
+- Rationale: each shim is load-bearing until its stated condition
+  (calendar date / install age-out / product decision / stored-run scan /
+  py310 floor raise); extending nothing and deleting nothing today IS the
+  correct action. Pretending a tests-pass "closed" a calendar gate would
+  be dishonest.
+- Residuals (exact handoff, per-item owners): (1) concepts owner —
+  calendar-delete after 2026-12-31 (constant + param + method + 3 call
+  args); (2) tui owner — delete once pre-merge installs age out; (3)
+  supervisor/director owner — goes with `deterministic` if ever retired;
+  (4) product + media owner — sign-off then remove literal branch + map +
+  fn + `tests/test_integration.py:103-116` + `test_generation_stack.py`
+  pins in the same commit; (5) models owner — stored-run `fps=0` scan
+  then tighten to `Field(24, ge=1)`; (6) toolchain owner — delete 2
+  comments + override block when the py310 floor rises (fallback stays).
+  Until then: ban new `legacy_path` threads + new `overlap_fraction<=0`
+  producers (owner-enforced).

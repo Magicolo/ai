@@ -104,3 +104,45 @@ wc -l tests/*.py | sort -rn | head -n 15
   video-worker quartet, finalize/commit merges, singletons) — one per
   pass; `gates.sh` mypy-list entries must move with any fold that deletes
   a listed file (scripts-owned, not this pass).
+
+## Progress log (2026-09-30, tests-only pass)
+
+- Premise re-verified live: 145 `test_*.py` files (growth vs 139 as-left —
+  concurrent agents still adding files); singletons `test_unset.py` (5
+  tests, mtime 2026-09-29) + `test_generate_blocks_request.py` (7 tests,
+  mtime 2026-09-29) both present, no helper collisions (`_multi` only in
+  the request file, zero `Fake*` overlap), zero importers outside self
+  (`rg from tests.test_unset|test_generate_blocks_request` clean), both in
+  the `gates.sh` mypy list (80 entries). `scripts/gates.sh` itself is
+  clean at runtime (`git diff --name-only -- scripts/gates.sh` empty) but
+  frozen per this pass's scope contract — list-move recorded as residual.
+- Fold landed per the issue's explicit singleton recipe (`test_unset` +
+  `test_generate_blocks_request` → `test_wire_contract`): new
+  `tests/test_wire_contract.py` (12 tests, fn names/bodies identical, each
+  cluster's original module docstring kept as a banner per the batch-8
+  quintet precedent); the 2 source files deleted. As-left: 144 files
+  (fold −2, new +1 = net −1), 1513 `def test_` total (fold net-zero at 12
+  preserved).
+- Gate evidence (in-container, `voyage:latest`, CPU-only): merged + sources
+  together 24/24 pre-delete; merged solo 12/12 post-delete
+  (`./scripts/test.sh -q tests/test_wire_contract.py`); `ruff check` +
+  `ruff format --check` clean on the new file; `mypy
+  tests/test_wire_contract.py` clean (standalone — not yet in the gates
+  list, see residual).
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_wire_contract.py` (new), deleted
+  `tests/test_unset.py`, `tests/test_generate_blocks_request.py`.
+  DESIGN proposals: none.
+- Residuals (exact handoff, scripts owner): `scripts/gates.sh` mypy list
+  still references the 2 deleted paths and omits the new one — until moved,
+  the full `gates.sh` mypy invocation fails fast with `mypy: error:
+  Cannot read file 'tests/test_unset.py'` (verified live). Move: delete
+  `tests/test_unset.py` + `tests/test_generate_blocks_request.py` entries,
+  add `tests/test_wire_contract.py` (alphabetical slot between
+  `test_vision_metrics.py` and `test_vocoder_allowlist.py` per current
+  ordering). Remaining clusters per the issue (adapter, augment quad,
+  audio validators, TUI trio, video-worker quartet, finalize/commit
+  merges, leftover singletons) stay open — one per pass.

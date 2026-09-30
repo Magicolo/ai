@@ -99,3 +99,57 @@ grep -n "_sha256\|getattr(tui_state" voyage/model_registry.py voyage/tui.py test
   pins), 3+4 (tui passes after the concurrent feature work lands), 5
   (cli pass, cites need re-anchoring post-split), 7 (`__init__`/bench
   disposition).
+
+## Progress log (2026-09-30, tests-only pass)
+
+- All 7 premises re-verified live (read-only): (1)
+  `LongLiveBackend`/`AceStepBackend` still `NotImplementedError`
+  placeholders at `voyage/fake_backends.py:186/200` — holds. (2) `_sha256`
+  still at `voyage/model_registry.py:383` (+ `__all__` `:351`), pinned by
+  `tests/test_hashing.py:47` (`test_registry_alias_delegates`) — holds.
+  (3) `getattr` shims still at `voyage/tui.py:165,186,198`
+  (`_load_initial_state` / `_backend_gpu_warning` / `_save_last_settings`)
+  — holds. (4) `LAST_SETTINGS_PATH` still at
+  `voyage/tui_state.py:66` + docstring `:9`, pinned by
+  `tests/test_tui_state.py:50` — holds. (5) `_check_run_id` now lives in
+  `voyage/cli_paths.py:59` (post-split anchor; the issue's
+  `cli.py:118-122/:1249` cites are stale but the wrapper still exists with
+  2+ call sites via re-export) — holds in substance. (6) Still refuted:
+  the only `1e-9` in `voyage/` is the `FLOAT_DUST_EPSILON` def itself
+  (`voyage/backends.py:94`) + use (`:115`) + docstring — no cli re-literal
+  remains. (7) `voyage/workers/__init__.py` still docstring-only (stale
+  Phase-0 backend list in prose), `audio`/`vision` `__init__.py` still
+  1-line pointers, `voyage/bench.py` now 232L (growth vs 150L as-read) —
+  disposition still open.
+- Tests-scope triage: ZERO items are fixable from `tests/` alone. Every
+  fix candidate deletes or edits a `voyage/` file (frozen scope): (1)
+  needs `fake_backends.py`; (2) needs a `model_registry.py` deletion (test
+  pin `test_hashing.py:47` pins shipped behavior — cannot move first);
+  (3) needs `tui.py`; (4) needs `tui_state.py` (+ docstring + 1 test move
+  together); (5) needs `cli_paths.py`; (7) needs `__init__`s/`bench.py`.
+  No code change made — inventing a tests-only "fix" (e.g. deleting the
+  pins while the source still ships the aliases) would break gates, not
+  fix dead code.
+- Gate evidence: n/a (no files changed).
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: blocked (no tests-scope item; all voyage-owned — recorded per
+  item, not pretended). Files changed: none. DESIGN proposals: none.
+- Residuals mapped per item with exact file:line + owner handoffs: (1)
+  fake-backends pass — delete `voyage/fake_backends.py:186-206` classes
+  (zero importers outside file, verified) + confirm `voyage/supervisor.py`
+  dispatch untouched; (2) registry pass — delete
+  `voyage/model_registry.py:383` `_sha256` + `:351` `__all__` entry AND
+  update `tests/test_hashing.py:47` in the same commit (pin cannot move
+  first); (3) tui pass (after concurrent feature work lands) — replace
+  `voyage/tui.py:165,186,198` `getattr` shims with direct imports/calls +
+  `importlib.util.find_spec` probe; (4) tui-state pass — delete
+  `voyage/tui_state.py:66` constant, fix docstring `:9`, update
+  `tests/test_tui_state.py:15,50` in the same commit; (5) cli-paths pass —
+  inline `voyage/cli_paths.py:59` `_check_run_id` at its call sites
+  (`cli_run_ops.py`, `cli_generate.py` via re-export) with re-anchored
+  cites; (6) already fixed — no action; (7) `__init__`/bench disposition
+  pass — real exports or delete pointers (`voyage/audio/__init__.py`,
+  `voyage/vision/__init__.py`), refresh `voyage/workers/__init__.py`
+  prose, fold-or-keep decision for 232L `voyage/bench.py`.

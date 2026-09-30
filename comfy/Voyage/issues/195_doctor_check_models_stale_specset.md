@@ -88,3 +88,36 @@ the ensure set) removes the skew class permanently.
   film/realesrgan (different verb, and it never names sfx/awq/doctor);
   065 is INSTALL/README download lists (docs, different files). Extend 065's
   mirror test to cover doctor if convenient.
+
+## Progress log — 2026-09-30 (this pass, doctor owner)
+
+- Re-verified live: `doctor.py:292-299` still six verifiers; `rg
+  film|realesrgan-anime|sfx-mmaudio|director-qwen4b-awq voyage/doctor.py`
+  zero hits; `MODEL_SPECS` has all 10; `cli_models.py:207-230`
+  verifies all 10 (incl. `verify_director_awq_models`,
+  `verify_sfx_models`, `verify_film_models`,
+  `verify_realesrgan_models`). Premise HOLDS.
+- TDD red-first in-container: `tests/test_issue195_doctor_coverage.py`
+  2 failed pre-fix (`film` missing from `check_models`). Green post-fix.
+- Fix applied (existing 6-verifier pattern + registry pins): added
+  `("director-qwen4b-awq", verify_director_awq_models)`,
+  `("sfx-mmaudio", verify_sfx_models)`, `("film",
+  verify_film_models)`, `("realesrgan-anime",
+  verify_realesrgan_models)` to the tuple (now 10/10, one-to-one with
+  the `models verify` verb). `models_ok` semantics unchanged
+  (conjunction over checks; fake path out of scope per fix candidate 3
+  — fake needs no weights, `required_specs` early-returns `[]`).
+- Files changed: `Voyage/voyage/doctor.py` (4 added tuple rows),
+  `Voyage/tests/test_issue195_doctor_coverage.py` (new, 2 tests).
+
+## Resolution — 2026-09-30 (this pass)
+
+- Verdict: FIXED. `doctor.check_models` covers 10/10 registry specs;
+  the two preflight surfaces (`doctor` vs `models verify`) agree on
+  what "ready" means.
+- Test evidence: new 2 tests green + `tests/test_doctor.py` still
+  green (in the 59-test related sweep); gates on touched files green
+  (ruff check + format-check + mypy strict).
+- Residual: none in this file's scope (fake-path `models_ok`
+  semantics + table-driving off `MODEL_SPECS` stay future work per
+  fix candidates 1/3).

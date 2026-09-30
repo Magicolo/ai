@@ -149,3 +149,37 @@ own plan.
   --check` clean; `mypy voyage` clean (63 files); `test_generate_ensure.py`
   22 passed in-container. DESIGN proposals: none. Residuals: `call()`
   signature, scoreboard dicts, registry builders/kwargs.
+
+## Progress log (2026-09-30, CLI track — re-verification only, this pass)
+
+- Re-verified every leg live (host reads, 2026-09-30): `call()` still
+  `payload: dict[str, Any] -> dict[str, Any]` (`voyage/rpc.py:327-329`,
+  deferral comment intact); `scoreboard.py` legs still present (`:21`
+  `Any` import, `:41` `_finite_float`, `:111/:115` `scoreboard_rows`
+  dicts); `model_registry.py` legs still present (8+ `download_*` returns
+  `:455/:980/:1080/:1095/:1109/:1125/:1144/:1184/:1200/:1217/:1232`,
+  `_merge_manifest_record` `:465/:468`, `record_builder` `:546`,
+  `snapshot_kwargs` `:959`, `file_kwargs` `:969`); `models_ensure.py`
+  batch-8 hunk present (`:40` `JsonValue` import, `:154`
+  `_read_manifest_keys -> dict[str, JsonValue] | None`) with one remaining
+  `dict[str, Any]` at `:268` (`future_to_entry` — typeshed-driven, worker
+  futures return untyped dicts).
+- Cleanliness at runtime (`git diff --name-only`): `scoreboard.py`,
+  `model_registry.py`, `rpc.py`, `models_ensure.py` all clean — but the
+  pass brief bans editing `scoreboard.py`/`model_registry.py` ("record,
+  don't touch") and `rpc.py` ("concurrent-adjacent, do NOT touch"), so no
+  leg was attempted. No test (record-only, no behavior change).
+
+## Resolution (2026-09-30, CLI track — this pass)
+
+- Verdict: DEFERRED (record-only) — premises all hold, all legs residual.
+- Files changed: none. Gate evidence: n/a (no change). DESIGN proposals: none.
+- Residuals (exact handoffs for the owning pass): `voyage/rpc.py:327-329`
+  (`call()` → `RpcPayload` first, then supervisor `dict[str, object]` call
+  sites `supervisor.py:648/:1383/:1599` per the Group-D finding);
+  `voyage/scoreboard.py:21,41,111,115` (JsonValue-valued aliases);
+  `voyage/model_registry.py:455,465,468,546,959,969,980,1080,1095,1109,1125,
+  1144,1184,1200,1217,1232` (builders/kwargs/returns);
+  `voyage/models_ensure.py:268` (`future_to_entry` — narrow only with the
+  worker-result type). Order stands: `call()` → scoreboard → models_ensure →
+  registry.

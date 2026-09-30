@@ -21,10 +21,12 @@ After `stop`, status rests at STOP_REQUESTED until `resume`.
 ## Console output
 
 `run` / `generate` / `soak` render per-segment progress: a header with
-the destination + phase, the full video prompt(s) and the music caption
-with the beat grid (beats @ BPM), animated spinners with live elapsed
+the destination + phase, the video-geometry line (backend, geometry, fps,
+blocks, scene-cut flag), the full video prompt(s), the music caption with
+the beat grid (beats @ BPM) plus the SFX caption the finalize-time pass
+will condition on, animated spinners with live elapsed
 timers per stage (inspect/director/video/audio/validate/commit), and a
-commit summary with per-stage seconds. Two verbosity levels, console
+commit summary with take ids + take action, prefetch state, and per-stage seconds. Two verbosity levels, console
 only (logs/metrics stay plain):
 
 ```bash

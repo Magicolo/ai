@@ -120,3 +120,35 @@ time it by hand — no harness reproduces the number.
 - Test evidence: shared with 154 (same test file); `test_benchmark.py` green; ruff + format + mypy strict clean.
 - DESIGN proposal (quoted text only, for the DESIGN owner — §104/§68): "Soak reports carry an SFX section (window render mean, join/mix rollup via `summarize_sfx_windows`, ledger verdict) collected as a post-run pass over stems + ledger — no extra renders; the end-to-end throwaway stays music-only behind the existing `no_sfx` gate unless the SFX pass is explicitly included."
 - Residuals (out of scope, precise — for the CLI owner): (1) `voyage/cli_observe.py:259-298` (`cmd_soak`): add the SFX section (window render mean via `summarize_sfx_windows` over `audio/sfx/` stems + `sfx.jsonl`, plus a `validate_sfx_ledger` verdict); (2) e2e SFX inclusion decision behind `no_sfx`; (3) `choices`-pin test covering the full target list (154 residual 4). No supervisor SFX handle exists yet (see 154) — both residuals block on that seam.
+
+## Progress log (2026-09-30, CLI track — this pass)
+
+- Re-verified live first jointly with 154: `cmd_soak` metrics were stages +
+  gauges + prefetch + validate only; `validate_sfx_ledger` is read-only and
+  returns [] on a ledger-less run ("No ledger ... is clean"), so the section
+  is safe to add unconditionally. Premise CONFIRMED.
+- TDD: soak + section tests in `tests/test_cli_benchmark_sfx_augment.py`
+  (incl. fabricated-ledger missing-stem and torn-ledger paths calling
+  `_soak_sfx_section` directly) — failed pre-fix, green post-fix.
+
+## Resolution (2026-09-30, CLI track — this pass)
+
+- Verdict: FIXED in owned files (no residual in this file's scope).
+- Changes (`voyage/cli_observe.py` only): soak setup gains `sfx_backend` /
+  `sfx_device` / `sfx_model_size` + `augment_chunk_frames`
+  (`DEFAULT_CHUNK_FRAMES`) + `_presentation_setup` floors (shared with 194);
+  metrics gains `"sfx": _soak_sfx_section(run_dir)` — ledger durations feed
+  `summarize_sfx_windows` (walls unrecorded post-run, counts/totals genuine),
+  stems counted excluding `*.partial.wav` leftovers, `validate_sfx_ledger`
+  verdict only when a ledger exists and `_soak_sfx_timeline` (summed
+  `segments/*/video.mp4` probe durations) resolves, else a recorded skip.
+- Test evidence: shared new file (10 passed); neighbors green (see 154 log).
+  Gates on touched files: ruff check + format-check + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §104/§68): "Soak
+  reports carry an SFX section (window counts and audio totals aggregated
+  post-run via `summarize_sfx_windows`, stem count, ledger verdict) collected
+  with no extra renders, and the soak setup records the sfx/augment axes
+  (backend, device, model size, chunk frames) alongside the presentation
+  floors."
+- Residuals: none in this file's scope. The e2e throwaway stays music-only
+  (deliberate — 163 fix candidate 3 kept behind `no_sfx` by default).

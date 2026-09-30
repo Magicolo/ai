@@ -139,3 +139,35 @@ enforcing.
 - Files changed: none for 031. Gate evidence: `select` untouched.
   DESIGN proposals: none. Residuals: full adoption list (ANN, D,
   PLR2004-full, PT, S, PERF, N) still dark.
+
+## Progress log (2026-09-30, CLI track — PERF retry, this pass)
+
+- Re-verified live in-container (`voyage:latest`): `ruff check --select
+  PERF .` → 12 hits (was 11): `tests/test_issue_citation_gate.py:55`
+  (PERF401), `tests/test_tui_app.py:748` (PERF401),
+  `voyage/cli_observe.py:756` (PERF203 — the pre-existing `cmd_inspect`
+  media-probe try/except, shifted from :362 by this pass's additions),
+  `voyage/cli_validate.py:223,229` (PERF401 — file concurrently dirty),
+  `voyage/concepts.py:437` (PERF203 — foreign), `voyage/models_ensure.py:227`
+  (PERF401 — foreign), `voyage/supervisor.py:613,685` (dirty + out of scope),
+  `voyage/workers/director.py:390,517` (foreign),
+  `voyage/workers/video_longlive.py:389` (concurrently dirty).
+- Retry rule applied: adoption needs EVERY site in clean owned files — three
+  sites sit in concurrently-dirty files (`cli_validate.py`,
+  `supervisor.py`, `video_longlive.py`, all with uncommitted concurrent
+  edits as-read) and seven more in foreign files. Adoption EXCLUDED
+  (record, don't force). The one owned-clean site (`cli_observe.py:756`)
+  is left untouched: fixing it without the `select` adoption is a bare
+  drive-by that would also change per-file probe-error semantics
+  (fail-loud vs per-file report). `pyproject.toml:70` select unchanged.
+
+## Resolution (2026-09-30, CLI track — this pass)
+
+- Verdict: DEFERRED (record-only) — PERF 11→12, whole adoption excluded.
+- Files changed: none for 031. Gate evidence: `select` untouched.
+  DESIGN proposals: none. Residuals: full adoption list still dark; PERF
+  unblocks when `supervisor.py` + `cli_validate.py` +
+  `video_longlive.py` settle AND the foreign owners (concepts,
+  models_ensure, director ×2, tests ×2) clear their sites — the
+  `cli_observe.py:756` handoff is this track's only owned site for that
+  future pass.

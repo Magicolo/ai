@@ -68,7 +68,7 @@ class SegmentProgress(Protocol):
         blocks, video_prompts, video_seeds, scene_cuts,
         transition_mechanism, transition_stages, audio_caption,
         audio_energy, audio_bpm, audio_beats, audio_texture,
-        audio_environment, notes.
+        audio_environment, audio_sfx_caption, notes.
         """
         ...
 
@@ -252,6 +252,12 @@ class VoyageConsole:
             "yellow",
         )
         self.line(f"     music: {caption}")
+        # Third caption family (issue 161): the SFX caption the director
+        # computed is the only pre-finalize signal for what the MMAudio
+        # pass will condition on. Always printed (non-verbose) so a
+        # missing caption on pre-SFX runs is itself visible as "-".
+        sfx_caption = str(info.get("audio_sfx_caption", "") or "-")
+        self.line(f"     sfx: {sfx_caption}")
         if self._verbose:
             texture = str(info.get("audio_texture", ""))
             environment = info.get("audio_environment", [])

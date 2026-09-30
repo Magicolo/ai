@@ -52,3 +52,15 @@ Pilot (headless): mount `VoyageApp`, `set_focus` on `#flag-draft`, assert `#help
 ## Refs
 
 - `tests/test_tui_app.py:172-194` (help-panel test — text fields only); `voyage/config.py:494-516` (`DraftConfig` semantics the draft line should summarize).
+
+## Progress log
+
+- 2026-09-30 (console/TUI track): re-verified live first — premise HOLDS as-read (`voyage/tui.py:669-705` pre-fix: 5 of 7 `Checkbox` constructions with no `tooltip=`; `voyage/tui_state.py:87-114` `FIELD_HELP` with 15 keys — `draft`/`force`/`skip_bad`/`verbose`/`no_color` absent; `_refresh_help` maps only `WIDGET_FIELD_NAMES`, so focused checkboxes fell back to `_HELP_OVERVIEW`). Batch-8 boxes (`no_download`/`no_sfx`) already carry tooltips + `FIELD_HELP` keys — new keys chosen disjoint (`draft`/`force`/`skip_bad`/`verbose`/`no_color`), no collision. TDD red-first: `tests/test_tui_checkbox_help_114.py` (3 tests) failed 3/3 in-container before the fix, green after. No concurrent hunks in owned files.
+
+## Resolution
+
+- Verdict: FIXED.
+- Files changed: `voyage/tui_state.py` (5 new `FIELD_HELP` entries — draft states 640×352 + 45s takes + iteration-only per `DraftConfig`; force/skip_bad/verbose/no_color one line each); `voyage/tui.py` (`tooltip=FIELD_HELP[...]` on the 5 flag `Checkbox` constructors + new `FLAG_HELP_FIELDS` id→key table consulted by `_refresh_help` before the overview fallback; batch-8 `flag-no-download`/`flag-no-sfx` mapped too since they had tooltips but the same overview fallback on focus — same gap class, 2 extra dict entries, no behavior change elsewhere).
+- Test evidence: new `tests/test_tui_checkbox_help_114.py` (3 passed — FIELD_HELP keys + tooltip args + focused-checkbox help-panel content, batch-8 keys pinned intact); `tests/test_tui_app.py` full file (33 passed); full suite 1690 passed / 8 failed, all foreign (see issue 113 log). Gates on touched files: `ruff check` + `ruff format --check` + `mypy` clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — launcher-TUI help panel): "Every focusable form input — text, dropdown, and flag checkbox — resolves to a FIELD_HELP entry in the side help panel; checkbox ids live in tui.py FLAG_HELP_FIELDS (kept out of FIELD_WIDGET_IDS, which drives text/select error styling only)."
+- Residuals: none — the deliberately-out-of-scope `on_checkbox_changed` handler stays out (plan/errors still depend only on text/select fields, verified live; toggling flags needs no refresh).

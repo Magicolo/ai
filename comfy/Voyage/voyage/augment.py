@@ -20,7 +20,9 @@ MMAudio SFX stack (when present) renders on cuda:1 — the two stages share
 nothing but chunk boundaries, so a 2-GPU box runs them side by side and a
 1-GPU box runs chunks serially on cuda:0. `augment_plan` stamps each chunk
 with its device round-robin so the pairing is visible in the plan;
-`run_augment_chunks` owns the serial-vs-ThreadPoolExecutor(2) switch.
+`run_augment_chunks` owns the serial-vs-ThreadPoolExecutor(2) switch,
+warming the first chunk serially so resident model caches populate
+before threads spawn (issue 157).
 """
 
 from __future__ import annotations
@@ -59,6 +61,37 @@ CRF_MINIMUM = 0
 
 CRF_MAXIMUM = 51
 """Worst-quality h264 CRF bound for chunk encodes."""
+
+CHUNK_CRF_DEFAULT = 15
+"""Default chunk-encode quality: the 2x video-export recipe's CRF."""
+
+CHUNK_PRESET_DEFAULT = "veryfast"
+"""Default x264 preset for chunk encodes (issue 157): matches the
+intermediates' recipe (`media.FINALIZE_PRESET_DEFAULT`). Every chunk
+encodes at this preset unless overridden."""
+
+CHUNK_PRESETS = frozenset(
+    {
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+    }
+)
+"""Allowed x264 presets for chunk encodes (issue 157).
+
+Mirrors `media.FINALIZE_PRESETS` entry-for-entry (pinned by
+`test_chunk_preset_vocabulary_mirrors_finalize`) — one vocabulary, two
+homes, kept apart only because `media` already imports this module
+(`CRF_*`, `interpolated_frame_count`), so reusing
+`media.validate_preset` here would cycle the import.
+"""
 
 T = TypeVar("T")
 """Outcome type of the per-chunk worker passed to `run_augment_chunks`."""
@@ -136,6 +169,20 @@ def augment_plan(
 def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Run an ffmpeg-style argv (arg-list, never shell); mirrors `media.run_capture`."""
     return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
+def validate_chunk_preset(value: str) -> str:
+    """Validate a chunk-encode x264 preset (issue 157).
+
+    Same contract as `media.validate_preset` (str in the shared
+    vocabulary); a local copy because `media` imports this module.
+    Returns the value so call sites read `preset=validate_chunk_preset(preset)`.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"preset must be a str (got {value!r})")
+    if value not in CHUNK_PRESETS:
+        raise ValueError(f"preset must be one of {sorted(CHUNK_PRESETS)} (got {value!r})")
+    return value
 
 
 def _require_fps(name: str, value: float | None) -> float | None:
@@ -235,13 +282,20 @@ def ffmpeg_encode_chunk(
     dest: Path,
     fps: int,
     *,
-    crf: int = 15,
+    crf: int = CHUNK_CRF_DEFAULT,
+    preset: str = CHUNK_PRESET_DEFAULT,
 ) -> Path:
-    """Encode a chunk's PNG sequence (`frame_%06d.png` pattern) to h264."""
+    """Encode a chunk's PNG sequence (`frame_%06d.png` pattern) to h264.
+
+    `preset` threads the x264 speed/quality trade-off per chunk (issue
+    157, default `veryfast` to match the intermediates); it rides the
+    argv as `-preset` and is recorded in the chunk metric by callers.
+    """
     rate = _require_count("fps", fps, 1)
     quality = _require_count("crf", crf, CRF_MINIMUM)
     if quality > CRF_MAXIMUM:
         raise ValueError(f"crf must be <= {CRF_MAXIMUM} (got {quality})")
+    speed = validate_chunk_preset(preset)
     dest.parent.mkdir(parents=True, exist_ok=True)
     argv = [
         "ffmpeg",
@@ -258,6 +312,8 @@ def ffmpeg_encode_chunk(
         "yuv420p",
         "-crf",
         str(quality),
+        "-preset",
+        speed,
         str(dest),
     ]
     proc = run_capture(argv)
@@ -324,13 +380,19 @@ def run_augment_chunks(
 ) -> list[T]:
     """Run chunks on their planned devices, preserving chunk order in the outcomes.
 
-    One unique device → serial loop; two → ThreadPoolExecutor(2), one
-    thread per device (the SFX pairing's cuda:0/cuda:1 split). Executor.map
-    keeps outcome order identical to chunk order either way, so callers can
-    concatenate chunk outputs directly.
+    One unique device → serial loop; two → the first chunk runs serially
+    (warming any resident model cache keyed by weights+device), then the
+    remainder fans out over ThreadPoolExecutor(2), one thread per device
+    (the SFX pairing's cuda:0/cuda:1 split). Without the warm-first gate
+    every thread misses the cache at once and each pays a full load peak
+    (issue 157); a lone failing first chunk fails fast before threads
+    spawn. Executor.map keeps outcome order identical to chunk order
+    either way, so callers can concatenate chunk outputs directly.
     """
     devices = list(dict.fromkeys(chunk.device for chunk in chunks))
     if len(devices) <= 1:
         return [worker(chunk, chunk.device) for chunk in chunks]
+    first = worker(chunks[0], chunks[0].device)
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_DEVICES, len(devices))) as pool:
-        return list(pool.map(lambda chunk: worker(chunk, chunk.device), chunks))
+        rest = list(pool.map(lambda chunk: worker(chunk, chunk.device), chunks[1:]))
+    return [first, *rest]

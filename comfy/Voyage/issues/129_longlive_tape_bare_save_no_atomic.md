@@ -41,6 +41,18 @@ Static (deterministic): read `:907-920` — the tape dict is built, then saved d
 
 ## Refs
 
-- `Voyage/voyage/workers/video_longlive.py:907-920,1173-1192,1195-1245`; `Voyage/voyage/workers/video_common.py:239-249`; `Voyage/voyage/atomic.py:23-58`; DESIGN §27.1.
-- Adjacent, not overlapping: 122 (JSON tape *durability* — this file is the pt tape's missing *atomicity + durability*); 123 (tape *read* verification — this file is the *write* that destroys the fallback); 101 (ledger/metrics append durability — never mentions `recovery.pt`); 013 (DONE-before-state — segment-level, not tape-level).
+ - `Voyage/voyage/workers/video_longlive.py:907-920,1173-1192,1195-1245`; `Voyage/voyage/workers/video_common.py:239-249`; `Voyage/voyage/atomic.py:23-58`; DESIGN §27.1.
+ - Adjacent, not overlapping: 122 (JSON tape *durability* — this file is the pt tape's missing *atomicity + durability*); 123 (tape *read* verification — this file is the *write* that destroys the fallback); 101 (ledger/metrics append durability — never mentions `recovery.pt`); 013 (DONE-before-state — segment-level, not tape-level).
+
+## Progress log
+
+- 2026-09-30 (video-workers track): re-verified premise live first — CONFIRMED as-filed: `voyage/workers/video_longlive.py:963-964` was the single bare `torch.save(tape, str(recovery_path))` onto the live path (one `torch.save` hit repo-wide in the file, zero tmp/fsync/atomic/replace hits on the write path). TDD: new `tests/test_129_tape_atomic.py` (3 tests) failed pre-fix in-container (`voyage:latest`, CPU-only: `save_recovery_tape_atomic` missing), then green post-fix. Existing longlive suites initially caught a contract gap in the first helper shape (recording-double `save` fakes in `test_longlive_stages.py:76-77`, `test_longlive_offload_fusion.py:68-69`, `test_longlive_init_validation.py:106-107` never materialize a file — reopen-for-fsync raised `FileNotFoundError`); reworked the helper to save through one open `wb` handle (`torch.save` accepts file objects) + flush + fsync on that handle, which both the real writer and the recording doubles satisfy without touching their files. Full related set green post-fix (163 passed: 11 new + 152 existing incl. `test_longlive_stages`, `test_longlive_offload_fusion`, `test_longlive_init_validation`, `test_stage_a_telemetry`). Gates on touched files green in-container: `ruff check` + `ruff format --check` + `mypy` strict on `voyage/workers/video_longlive.py` + the new test (one `E402 noqa` added for the post-`sys.path` `voyage.atomic` import; `fsync_dir` imported directly because `video_common` does not explicitly re-export it for mypy).
+
+## Resolution
+
+- Verdict: FIXED (worker-side, issue scope only).
+- Files changed: `voyage/workers/video_longlive.py` (new `save_recovery_tape_atomic` at `:151-170`: tmp sibling + single-handle save + flush + `os.fsync` + `os.replace` + `fsync_dir`; write site at `:987` routes through it) + new `tests/test_129_tape_atomic.py` (atomic write + fsync_dir call + crash-preserves-previous + write-site regression pin). No other files touched (122's JSON-tape gap kept separate as filed — `video_common.write_tape_atomic` untouched).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 3 passed; related suites 163 passed total (see Progress log). Torn-tape reader behavior unchanged by design (fail-closed `_load_recovery_tape` inherits the atomic write with no edits).
+- DESIGN proposal (quoted text only, for the DESIGN owner — §27.1): "LongLive `recovery.pt` commits via tmp-file + flush + fsync + atomic rename + directory fsync (`save_recovery_tape_atomic`), so a crash mid-save never clobbers the previous good tape — same contract as the JSON tapes (`write_tape_atomic`, issue 122)."
+- Residuals: none in worker scope. Supervisor/reader halves need no handoff (readers inherit the fix with no edits, per fix candidate 2).
 - Web rationale: PyTorch `torch.save` docs (zip write to the given path, no atomicity promise); AI Engineering checkpoint lesson ("atomic save with write-to-temp then rename so a crash never leaves a half-written file").

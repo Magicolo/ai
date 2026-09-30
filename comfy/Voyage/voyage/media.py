@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from voyage import paths
-from voyage.atomic import atomic_copy
+from voyage.atomic import atomic_copy, atomic_write_json, read_json
 from voyage.augment import CRF_MAXIMUM as _AUGMENT_CRF_MAXIMUM
 from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
 from voyage.augment import interpolated_frame_count as interpolated_frame_count
@@ -329,6 +329,8 @@ def assemble_segment_audio(
     dest: Path,
     crossfade_seconds: float,
     joint_fade: float | None = None,
+    *,
+    blend_timings: list[float] | None = None,
 ) -> Path:
     """Join take slices into one segment audio.wav (§35).
 
@@ -389,11 +391,25 @@ def assemble_segment_audio(
     # Left-fold pairwise blends through _blend_pair: the old inline
     # N-input acrossfade chain shared both acrossfade failure modes
     # (scheduler deadlock at scale, long-first collapse at take joints).
+    # Slice durations were probed above for the fade derivation — thread
+    # them through (issue 152) so the fold adds zero re-probes, and track
+    # the accum length with the same fade formula `_blend_pair` uses.
     with tempfile.TemporaryDirectory(prefix="voyage-assemble-") as staging:
         accum = slices[0]
+        accum_seconds = durations[0]
         for index, following in enumerate(slices[1:]):
             step = Path(staging) / f"blend_{index:02d}.wav"
-            _blend_pair(accum, following, step, fade)
+            pair_fade = _blend_fade_seconds(accum_seconds, durations[index + 1], fade)
+            _blend_pair(
+                accum,
+                following,
+                step,
+                fade,
+                first_seconds=accum_seconds,
+                second_seconds=durations[index + 1],
+                timing_ms=blend_timings,
+            )
+            accum_seconds = accum_seconds + durations[index + 1] - pair_fade
             accum = step
         proc = run_capture(
             [
@@ -495,6 +511,8 @@ def _segment_timeline(usable: list[Path], fps: int) -> tuple[list[float], list[f
     accounting), not container durations, so the blended audio matches
     the concatenated video sample-exactly.
     """
+    if fps <= 0:
+        raise MediaError(f"segment timeline needs positive fps (got {fps})")
     starts: list[float] = []
     ends: list[float] = []
     cursor = 0.0
@@ -579,7 +597,32 @@ def _audio_duration_seconds(path: Path) -> float:
     return duration
 
 
-def _blend_pair(first: Path, second: Path, dest: Path, overlap: float) -> Path:
+def _blend_fade_seconds(first_seconds: float, second_seconds: float, overlap: float) -> float:
+    """One crossfade length both blends agree on (issue 152: single source).
+
+    `_blend_pair` clamps each pair to half the shortest input; fold callers
+    (`assemble_segment_audio`, `build_final_audio`, `render_sfx_bed`) use the
+    same formula to track the growing accum length arithmetically, so each
+    stem/window is probed once instead of twice per blend.
+    """
+    fade = min(float(overlap), first_seconds / 2.0, second_seconds / 2.0)
+    if fade <= 0:
+        raise MediaError(
+            f"cannot blend with non-positive overlap ({first_seconds:.3f}s + {second_seconds:.3f}s)"
+        )
+    return fade
+
+
+def _blend_pair(
+    first: Path,
+    second: Path,
+    dest: Path,
+    overlap: float,
+    *,
+    first_seconds: float | None = None,
+    second_seconds: float | None = None,
+    timing_ms: list[float] | None = None,
+) -> Path:
     """Crossfade-blend two audio files with manual fades (never acrossfade).
 
     acrossfade is unusable here in two independent ways (live incidents on
@@ -593,40 +636,51 @@ def _blend_pair(first: Path, second: Path, dest: Path, overlap: float) -> Path:
     pathology — the recipe the codebase already prescribes for short
     tails. Intermediates stay s32le (no generational 16-bit loss); the
     caller converts to s16le at the end.
+
+    `first_seconds`/`second_seconds` thread already-known durations (issue
+    152): fold callers probe each stem/window once and pass the values, so
+    the N-1 re-probes of the growing accum disappear; absent (None) probes
+    as before. `timing_ms` collects one wall-millisecond entry per call so
+    soak can trend fold cost vs timeline length.
     """
-    first_seconds = _audio_duration_seconds(first)
-    second_seconds = _audio_duration_seconds(second)
-    fade = min(float(overlap), first_seconds / 2.0, second_seconds / 2.0)
-    if fade <= 0:
-        raise MediaError(f"cannot blend with non-positive overlap for {first} + {second}")
-    fade_start = first_seconds - fade
-    delay_ms = int(round(fade_start * 1000))
-    filter_graph = (
-        f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade:.3f}[a0];"
-        f"[1:a]afade=t=in:st=0:d={fade:.3f},adelay={delay_ms}:all=1[a1];"
-        "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]"
-    )
-    argv: list[str] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-nostdin",
-        "-y",
-        "-i",
-        str(first),
-        "-i",
-        str(second),
-        "-filter_complex",
-        filter_graph,
-        "-map",
-        "[aout]",
-        "-c:a",
-        "pcm_s32le",
-        str(dest),
-    ]
-    proc = run_capture(argv)
-    if proc.returncode != 0:
-        raise MediaError(f"final audio pairwise blend failed: {proc.stderr[-2000:]}")
-    return dest
+    start = time.monotonic()
+    try:
+        if first_seconds is None:
+            first_seconds = _audio_duration_seconds(first)
+        if second_seconds is None:
+            second_seconds = _audio_duration_seconds(second)
+        fade = _blend_fade_seconds(first_seconds, second_seconds, overlap)
+        fade_start = first_seconds - fade
+        delay_ms = int(round(fade_start * 1000))
+        filter_graph = (
+            f"[0:a]afade=t=out:st={fade_start:.3f}:d={fade:.3f}[a0];"
+            f"[1:a]afade=t=in:st=0:d={fade:.3f},adelay={delay_ms}:all=1[a1];"
+            "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]"
+        )
+        argv: list[str] = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(first),
+            "-i",
+            str(second),
+            "-filter_complex",
+            filter_graph,
+            "-map",
+            "[aout]",
+            "-c:a",
+            "pcm_s32le",
+            str(dest),
+        ]
+        proc = run_capture(argv)
+        if proc.returncode != 0:
+            raise MediaError(f"final audio pairwise blend failed: {proc.stderr[-2000:]}")
+        return dest
+    finally:
+        if timing_ms is not None:
+            timing_ms.append((time.monotonic() - start) * 1000.0)
 
 
 def build_final_audio(
@@ -638,6 +692,8 @@ def build_final_audio(
     channels: int,
     overlap_fraction: float = 0.10,
     overlap_cap_seconds: float = 0.5,
+    *,
+    blend_timings: list[float] | None = None,
 ) -> Path:
     """Blend committed segments into one timeline-exact final mix (§56).
 
@@ -777,10 +833,25 @@ def build_final_audio(
     # Pairwise reduction through 2-input manual-fade graphs only (see
     # _blend_pair: a single N-input acrossfade chain deadlocks the ffmpeg
     # scheduler on long runs, and acrossfade collapses long-first pairs).
+    # Each window is probed once here and threaded through (issue 152) —
+    # the accum length tracks arithmetically with the shared fade formula,
+    # so the fold adds zero re-probes.
+    window_seconds = [_audio_duration_seconds(window) for window in windows]
     accum = windows[0]
+    accum_seconds = window_seconds[0]
     for index in range(1, len(windows)):
         step = tmpdir / f"final_blend_{index:02d}.wav"
-        _blend_pair(accum, windows[index], step, overlap)
+        pair_fade = _blend_fade_seconds(accum_seconds, window_seconds[index], overlap)
+        _blend_pair(
+            accum,
+            windows[index],
+            step,
+            overlap,
+            first_seconds=accum_seconds,
+            second_seconds=window_seconds[index],
+            timing_ms=blend_timings,
+        )
+        accum_seconds = accum_seconds + window_seconds[index] - pair_fade
         accum = step
     proc = run_capture(
         [
@@ -1202,6 +1273,41 @@ def resolve_finalize_settings(
     )
 
 
+def _record_final_geometry(
+    run_dir: Path,
+    width: int,
+    height: int,
+    fps: int,
+    min_fps: int,
+    min_width: int,
+    min_height: int,
+) -> bool:
+    """Best-effort provenance write-back (issue 141): stamp the shipped box.
+
+    `build_manifest` records the run's `[augment]` floors plus a null
+    `final_geometry` at init; the first finalize overwrites both with the
+    effective floors and the validated output box, so the manifest never
+    claims the stale 768x432 source hint as shipped geometry. Returns False
+    (never raises — a provenance write must not fail a finalize) when the
+    run has no manifest, e.g. throwaway/legacy dirs.
+    """
+    try:
+        manifest_path = run_dir / paths.MANIFEST_FILENAME
+        manifest = read_json(manifest_path)
+        if not isinstance(manifest, dict):
+            return False
+        manifest["presentation"] = {
+            "min_fps": min_fps,
+            "min_width": min_width,
+            "min_height": min_height,
+        }
+        manifest["final_geometry"] = {"width": width, "height": height, "fps": fps}
+        atomic_write_json(manifest_path, manifest)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -1492,6 +1598,15 @@ def finalize_run(
         validate_video(staged, out_w, out_h, out_fps)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_copy(staged, output_path)
+        _record_final_geometry(
+            run_dir,
+            out_w,
+            out_h,
+            out_fps,
+            effective_min_fps,
+            effective_min_width,
+            effective_min_height,
+        )
         from voyage.logrotate import append_line
 
         append_line(

@@ -52,3 +52,45 @@ Static + measurement: (1) `rg -n "preset" voyage/augment.py` → empty (every ch
 - Test evidence (in-container `voyage:latest`, CPU-only): new-file OOM leg green; all `test_augment_*` (125 passed, 3 skipped) green. Ruff + format + mypy strict clean.
 - DESIGN proposal (quoted text only, for the DESIGN owner — augment track): "OOM-split paths call `empty_cache` unconditionally (no-op without CUDA) — allocator relief never depends on device presence."
 - Residuals (out of scope, precise — for the E1 `augment.py` owner): (1) `voyage/augment.py:178-213` (`ffmpeg_encode_chunk`): thread a `preset` parameter (default `veryfast` to match intermediates, validated against an allow-list) + include it in the chunk metric — the `augment_benchmark_setup` shape in `voyage/bench.py` (154/163, this pass) already carries the field; (2) `:266-281` (`run_augment_chunks` `ThreadPoolExecutor(2)` fan-out): document the thread contract (one model per thread vs shared resident handle; SFX precedent is process-per-GPU) + chunk-count determinism under both paths.
+
+## Progress log (2026-09-30, CLI track — orchestration half, this pass)
+
+- Re-verified live first: `ffmpeg_encode_chunk` still had `crf` but no
+  `preset` (`voyage/augment.py:233-268` as-read); `run_augment_chunks` fanned
+  out immediately over `ThreadPoolExecutor(2)`; worker-side `_RRDB_CACHE` /
+  `_FILM_CACHE` (`augment_worker.py:85/93`, keyed by weights+device) and
+  `_run_frame_batches` list-halving confirmed present (batch-8/E2 halves
+  landed — not re-done). "Halve the list before stacking" verified done;
+  preset + fan-out gate done here. No `preset` in `media.py`'s chunked path
+  needed touching (media.py out of scope).
+- TDD: `tests/test_augment_preset_fanout.py` (5 tests) written first — all
+  failed pre-fix in-container, green post-fix.
+
+## Resolution (2026-09-30, CLI track — orchestration half, this pass)
+
+- Verdict: ORCHESTRATION HALF FIXED in the owned file; worker/production-path
+  legs RESIDUAL.
+- Changes (`voyage/augment.py` only): `CHUNK_PRESET_DEFAULT = "veryfast"` +
+  `CHUNK_PRESETS` (mirrors `media.FINALIZE_PRESETS` entry-for-entry, pinned by
+  test — local copy because `media` imports `augment`, so reuse would cycle)
+  + `validate_chunk_preset` + `preset` kwarg on `ffmpeg_encode_chunk`
+  (default `veryfast` per the issue; behavior change from libx264-default
+  `medium` — faster chunk encodes); `CHUNK_CRF_DEFAULT = 15` (value-unchanged
+  extraction for the benchmark setup to reference); `run_augment_chunks`
+  warm-first gate (chunk 0 serially populates any resident cache, remainder
+  fans out; order contract preserved; first-chunk failure fails fast) +
+  module-docstring contract note.
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 5 passed
+  (incl. event-synced warm-first ordering, no timing margins); neighbors
+  `test_augment_runner.py` + `test_augment_plan.py`-adjacent suites green.
+  Gates on touched files: ruff check + format-check + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — augment track):
+  "Chunk encodes thread a `preset` knob (default `veryfast`, validated
+  against the shared x264 vocabulary) recorded in the chunk metric, and the
+  two-device fan-out warms the first chunk serially so resident model caches
+  populate before threads spawn."
+- Residuals: worker-side single-flight lock (`_RRDB_CACHE`/`_FILM_CACHE` exist
+  but unlocked — a cold double-miss still double-loads; warm-first mitigates
+  from orchestration; worker-file owner); `preset` in the production finalize
+  encode path (`voyage/media.py` concat/vf sites — media owner; this change
+  covers the `augment.py` chunked orchestration only).

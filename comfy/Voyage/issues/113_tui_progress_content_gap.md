@@ -50,3 +50,15 @@ Pilot-level: drive `TuiProgress.segment_plan` with a full supervisor-style `info
 ## Refs
 
 - DESIGN §59 (console progress contract); `tests/test_tui_app.py:812-860` (liveness test — extend to content); issues 028/063 (sink/teardown/timing — explicitly not content parity).
+
+## Progress log
+
+- 2026-09-30 (console/TUI track): re-verified live first — premise HOLDS as-read (`voyage/tui.py:245-277` pre-fix emitted 3 shapes per segment vs `voyage/console.py:210-293` 6+ shapes; backend labels, drift hold, geometry line, energy, take ids + action, prefetch, elapsed total all absent from the TUI). TDD red-first: `tests/test_tui_progress_parity_113.py` (5 tests, canned plan/done pair through both sinks) failed 5/5 in-container (`voyage:latest`, CPU-only) before the fix, green after. No concurrent hunks in owned files (`voyage/console.py`, `voyage/tui.py`, `voyage/tui_state.py` clean in `git diff`).
+
+## Resolution
+
+- Verdict: FIXED.
+- Files changed: `voyage/tui.py` (`TuiProgress.segment_plan` now posts the drift line with director backend + hold flag, the `🎬 video · backend · geometry @fps · frames ≈ duration · blocks` line with scene-cut flag, the `🎵 audio · backend · beats @ BPM · energy` line, then the existing prompt + music lines; `segment_done` now posts take ids + take action, prefetch-hit marker, and elapsed total mirroring `console.py`; docstring updated to the actual contract — non-verbose mirror, verbose-gated detail stays console-only). No change to `voyage/console.py` for this issue (already the reference).
+- Test evidence: new `tests/test_tui_progress_parity_113.py` (5 passed); related `tests/test_console.py` + `tests/test_tui.py` + `tests/test_tui_state.py` + `tests/test_three_captions.py` (99 passed); `tests/test_tui_app.py` full file (33 passed); full suite 1690 passed / 8 failed — all 8 foreign (7 `test_cli_benchmark_sfx_augment.py` load-flakes passing in isolation, 1 `test_init_run_ratchet.py` scaffold-count ratchet tripped by concurrent tracks' files — own files contribute 0 `_init_run` lines, verified by grep). Gates on touched files: `ruff check` + `ruff format --check` + `mypy` (strict, `mypy voyage/console.py voyage/tui.py voyage/tui_state.py`) all clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §59 console progress contract): "The TUI run log mirrors the console's non-verbose segment lines (drift with backend + hold flag, video-geometry line, audio line with backend + energy, music + SFX captions, commit summaries with take ids + action, prefetch, elapsed totals); verbose-gated detail (seeds, transitions, texture/environment, notes, take reasons, finalize blend) stays console-only."
+- Residuals: none in this issue's scope (161's caption lines were added alongside — see issue 161 log — and are pinned separately in `tests/test_sfx_caption_render_161.py`).

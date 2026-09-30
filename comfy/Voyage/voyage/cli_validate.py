@@ -237,6 +237,12 @@ def validate_run(run_dir: Path) -> list[str]:
         )
     orphans = _collect_transient_orphans(segments_root, segments_root)
     orphans.extend(_collect_transient_orphans(run_dir / "novelty", run_dir))
+    orphans.extend(_collect_transient_orphans(run_dir / "audio", run_dir))
+    orphans.extend(
+        sorted(
+            str(path.relative_to(run_dir)) for path in run_dir.glob("*.partial") if path.is_file()
+        )
+    )
     orphans = sorted(set(orphans))
     if orphans:
         errors.append(f"orphan transient files: {orphans}")

@@ -729,13 +729,32 @@ class LTXVSession:
         save_total_ms = 0.0
         resident_tail = self._conditioning_tail_path
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
+        fresh_blocks = 0
+        resume_fallback: dict[str, Any] | None = None
         try:
             for index, (prompt, seed) in enumerate(zip(prompts, seeds, strict=True)):
                 conditioning_source: str | NDArray[np.uint8] | None
                 if index == 0:
                     tail_candidate = resident_tail
-                    if tail_candidate is None or scene_cuts[0] or not Path(tail_candidate).exists():
+                    if tail_candidate is None:
                         conditioning_source = None
+                        fresh_blocks += 1
+                        resume_fallback = {"reason": "fresh_session", "tail_path": None}
+                    elif scene_cuts[0]:
+                        conditioning_source = None
+                        fresh_blocks += 1
+                        resume_fallback = {"reason": "scene_cut", "tail_path": tail_candidate}
+                    elif not Path(tail_candidate).exists():
+                        conditioning_source = None
+                        fresh_blocks += 1
+                        resume_fallback = {
+                            "reason": "missing_tail",
+                            "tail_path": tail_candidate,
+                        }
+                        print(
+                            f"ltxv resume tail {tail_candidate} missing — starting fresh",
+                            file=sys.stderr,
+                        )
                     else:
                         conditioning_source = tail_candidate
                 elif pending_tail_frames is not None:
@@ -842,6 +861,8 @@ class LTXVSession:
             "conditioning_start_frame": 0,
             "native_fps": fps,
             "prompt_changed": prompt_changed,
+            "fresh_blocks": fresh_blocks,
+            "resume_fallback": resume_fallback,
             "conditioning_tail_path": str(tail_path),
             "recovery_path": str(tape_path),
             "fp8_fallback": self._fp8_fallback,

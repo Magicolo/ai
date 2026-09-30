@@ -649,11 +649,14 @@ def _add_benchmark_parser(sub: argparse._SubParsersAction[Any]) -> None:
     benchmark = sub.add_parser("benchmark", help="Performance probes")
     benchmark.add_argument(
         "benchmark_target",
-        choices=["video", "audio", "end-to-end"],
+        choices=["audio", "augment", "end-to-end", "sfx", "video"],
         help="which probe to run",
     )
     benchmark.add_argument(
-        "--run", default="", help="run directory (required for video/audio targets)"
+        "--run",
+        default="",
+        help="run directory (required for video/audio; sfx/augment use the run's "
+        "config when given — fake sfx and the augment ffmpeg probe need no run)",
     )
     benchmark.add_argument("--warmup", type=int, default=1, help="warmup iterations (must be >= 0)")
     benchmark.add_argument(

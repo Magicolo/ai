@@ -728,23 +728,28 @@ class CausvidSession:
             )
         return start_latents
 
-    def _materialize_resume_start(self) -> Any | None:
+    def _materialize_resume_start(self) -> tuple[Any | None, dict[str, Any] | None]:
         """Rebuild ``start_latents`` from the adopted tail video (resume path).
 
         Reads the committed tail mp4, takes the last re-encode window, and
-        VAE-encodes it to exactly ``overlap`` latent frames. Returns None
-        (fresh start) when the tail is missing or unreadable — the caller
-        logs the fallback; generation never crashes on a stale anchor.
+        VAE-encodes it to exactly ``overlap`` latent frames. Returns
+        ``(start_latents, fallback)``: ``fallback`` is None on success and
+        ``{"reason", "tail_path"}`` when the tail is missing, unreadable, or
+        re-encodes to the wrong shape — the caller renders fresh (never
+        crashes on a stale anchor) and records the fallback in the segment
+        result so the restart is visible above worker stderr (issue 134).
+        The pending anchor clears only after the outcome is recorded,
+        never before validation.
         """
         tail_path = self._pending_tail_path
         overlap = self._pending_overlap
-        self._pending_tail_path = None
         if tail_path is None or not Path(tail_path).exists():
             print(
                 f"causvid resume tail {tail_path} missing — starting fresh",
                 file=sys.stderr,
             )
-            return None
+            self._pending_tail_path = None
+            return None, {"reason": "missing", "tail_path": tail_path}
         try:
             stacked = np.stack(_imageio_v2().mimread(str(tail_path)))
             window = select_tail_window(stacked, overlap)
@@ -757,26 +762,29 @@ class CausvidSession:
                 f"causvid resume tail {tail_path} unreadable ({exc}) — starting fresh",
                 file=sys.stderr,
             )
-            return None
+            self._pending_tail_path = None
+            return None, {"reason": "unreadable", "tail_path": tail_path}
         if int(start_latents.shape[1]) != overlap:
             print(
                 f"causvid resume re-encode gave {int(start_latents.shape[1])} latent "
                 f"frames, expects {overlap} — starting fresh",
                 file=sys.stderr,
             )
-            return None
-        return start_latents
+            self._pending_tail_path = None
+            return None, {"reason": "shape_mismatch", "tail_path": tail_path}
+        self._pending_tail_path = None
+        return start_latents, None
 
-    def _rollout_start(self, scene_cut: bool) -> tuple[Any | None, bool]:
-        """Continuation latents for one rollout; (start, was_fresh)."""
+    def _rollout_start(self, scene_cut: bool) -> tuple[Any | None, bool, dict[str, Any] | None]:
+        """Continuation latents for one rollout; (start, was_fresh, fallback)."""
         if scene_cut:
-            return None, True
+            return None, True, None
         if self._start_latents is not None:
-            return self._start_latents, False
+            return self._start_latents, False, None
         if self._pending_tail_path is not None:
-            rebuilt = self._materialize_resume_start()
-            return rebuilt, rebuilt is None
-        return None, True
+            rebuilt, fallback = self._materialize_resume_start()
+            return rebuilt, rebuilt is None, fallback
+        return None, True, None
 
     def generate_blocks(
         self,
@@ -813,6 +821,7 @@ class CausvidSession:
         novel_per_rollout: list[int] = []
         fresh_rollouts = 0
         generated_total = 0
+        resume_fallback: dict[str, Any] | None = None
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
         # One T5 shuttle for the whole segment (issue 029): pre-encode
         # every prompt up front on a single CUDA roundtrip (each embed
@@ -821,7 +830,9 @@ class CausvidSession:
         conditionals = self._encode_conditionals(prompts)
         for index, (prompt, seed, cut) in enumerate(zip(prompts, seeds, scene_cuts, strict=True)):
             conditional = conditionals[index]
-            start, was_fresh = self._rollout_start(cut)
+            start, was_fresh, fallback = self._rollout_start(cut)
+            if fallback is not None and resume_fallback is None:
+                resume_fallback = fallback
             fresh_rollouts += 1 if was_fresh else 0
             rollout = self._run_rollout(prompt, seed, start, conditional)
             decoded_per_rollout.append(rollout.decoded)
@@ -884,6 +895,7 @@ class CausvidSession:
             "committed_frames": committed_frames,
             "rollouts": len(prompts),
             "fresh_rollouts": fresh_rollouts,
+            "resume_fallback": resume_fallback,
             "scene_cuts": list(scene_cuts),
             "overlap_frames": self._overlap_frames,
             "num_frame_per_block": self._num_frame_per_block,

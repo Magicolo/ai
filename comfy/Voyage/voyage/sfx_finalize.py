@@ -31,6 +31,7 @@ from voyage.errors import MediaError
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     _audio_duration_seconds,
+    _blend_fade_seconds,
     _blend_pair,
     probe,
     run_capture,
@@ -155,9 +156,18 @@ def segment_sfx_bounds(
     → "" — a history read must never break a finalize). A
     `caption_override` replaces every segment caption (old runs whose
     decisions predate SFX captions, or a deliberate single-caption dub).
+
+    The duration fallback searches the *video* stream (issue 191: the old
+    `streams[0]` read took whatever ffprobe listed first — routinely the
+    audio stream on muxed segments — and divided its frame count by the
+    video fps). A segment with no container duration and no video frame
+    count raises MediaError like the music path's `_segment_timeline`
+    instead of tiling a zero-length bound that shifts every later caption.
     """
     from voyage.models import EvolutionDecision
 
+    if fps <= 0:
+        raise MediaError(f"sfx bounds need positive fps (got {fps})")
     bounds: list[tuple[float, float, str]] = []
     cursor = 0.0
     for segment in usable:
@@ -168,12 +178,24 @@ def segment_sfx_bounds(
             duration = 0.0
         if duration <= 0.0:
             try:
-                streams = probe(segment / "video.mp4").get("streams", [{}])
-                first = streams[0] if streams else {}
-                frames = int(first.get("nb_frames", 0) if isinstance(first, dict) else 0)
+                streams = probe(segment / "video.mp4").get("streams", [])
+                video = next(
+                    (
+                        stream
+                        for stream in streams
+                        if isinstance(stream, dict) and stream.get("codec_type") == "video"
+                    ),
+                    None,
+                )
+                frames = int(video.get("nb_frames", 0) or 0) if video is not None else 0
                 duration = frames / fps if frames > 0 else 0.0
             except (MediaError, ValueError, KeyError, TypeError, IndexError):
                 duration = 0.0
+        if duration <= 0.0:
+            raise MediaError(
+                f"segment {segment.name} has unprobable duration "
+                "(no container duration, no video frame count)"
+            )
         caption = ""
         try:
             raw = load_transition(segment)
@@ -331,6 +353,8 @@ def render_sfx_bed(
     sample_rate: int,
     channels: int,
     num_workers: int = 1,
+    *,
+    blend_timings: list[float] | None = None,
 ) -> Path:
     """Render every window (reusing ledger-matching stems) and join the bed.
 
@@ -339,7 +363,9 @@ def render_sfx_bed(
     SFX_DUAL_MODEL_SIZE; two workers need two visible GPUs, gated below
     via `augment_devices`). Stems persist under audio/sfx/ with ledger
     entries; the bed joins stems with manual-fade `_blend_pair`s and
-    verifies timeline-exactness before returning.
+    verifies timeline-exactness before returning. Each stem is probed once
+    and threaded through the fold (issue 152); `blend_timings` collects one
+    wall-millisecond entry per pair for soak trending.
     """
     from voyage.rpc import SubprocessWorker
 
@@ -485,9 +511,21 @@ def render_sfx_bed(
             raise MediaError(f"sfx bed copy failed: {proc.stderr[-2000:]}")
         return bed
     accum = stems[0]
+    stem_seconds = [_audio_duration_seconds(stem) for stem in stems]
+    accum_seconds = stem_seconds[0]
     for index in range(1, len(stems)):
         step = tmpdir / f"sfx_blend_{index:02d}.wav"
-        _blend_pair(accum, stems[index], step, SFX_WINDOW_OVERLAP)
+        pair_fade = _blend_fade_seconds(accum_seconds, stem_seconds[index], SFX_WINDOW_OVERLAP)
+        _blend_pair(
+            accum,
+            stems[index],
+            step,
+            SFX_WINDOW_OVERLAP,
+            first_seconds=accum_seconds,
+            second_seconds=stem_seconds[index],
+            timing_ms=blend_timings,
+        )
+        accum_seconds = accum_seconds + stem_seconds[index] - pair_fade
         accum = step
     proc = run_capture(
         [

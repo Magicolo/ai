@@ -42,5 +42,17 @@ Resume is the path that runs when things already went wrong (crash, OOM-evict, a
 
 ## Refs
 
-- `Voyage/voyage/workers/video_causvid.py:209-225,271-370,701-749,784-868,870-897`; `Voyage/DESIGN.md` §5.4 (resume as documented approximation).
-- Adjacent, not overlapping: 123 (tape checksum/shape re-verification — pre-read content checks); 064-era short-anchor loudness (length checks — post-read); 006 (supervisor trusts worker *frame counts* — this file is the worker's *own* silent downgrade before counts exist).
+ - `Voyage/voyage/workers/video_causvid.py:209-225,271-370,701-749,784-868,870-897`; `Voyage/DESIGN.md` §5.4 (resume as documented approximation).
+ - Adjacent, not overlapping: 123 (tape checksum/shape re-verification — pre-read content checks); 064-era short-anchor loudness (length checks — post-read); 006 (supervisor trusts worker *frame counts* — this file is the worker's *own* silent downgrade before counts exist).
+
+## Progress log
+
+- 2026-09-30 (video-workers track): re-verified premise live first — CONFIRMED as-filed: `voyage/workers/video_causvid.py:731-768` cleared `self._pending_tail_path = None` before validation with three print-only fallbacks, and `grep -rn "fresh_rollouts\|prompt_changed" voyage/supervisor.py voyage/backends.py voyage/cli.py voyage/media.py` still returns zero hits (both fields write-only). TDD: new `tests/test_134_resume_fallback.py` (4 tests) failed pre-fix in-container (`voyage:latest`, CPU-only: `resume_fallback` key missing), then green post-fix. Existing `tests/test_causvid_worker.py:566-579` (`test_missing_resume_anchor_falls_back_to_fresh`, asserts the anchor ends `None`) still passes — the fix preserves that end-state and only moves the clear to after the outcome is recorded.
+
+## Resolution
+
+- Verdict: FIXED worker-side; supervisor-read half RESIDUAL (below).
+- Files changed: `voyage/workers/video_causvid.py` (`_materialize_resume_start` at `:731` now returns `(start_latents, fallback)` with `fallback` None on success else `{"reason", "tail_path"}` (`missing` / `unreadable` / `shape_mismatch`); the pending anchor clears only after the outcome is recorded, never before validation; `_rollout_start` at `:778` threads the triple through; `generate_blocks` at `:824-835` keeps the first fallback and returns it as `"resume_fallback"` at `:898` alongside the existing `fresh_rollouts`; stderr prints kept verbatim as the worker log) + new `tests/test_134_resume_fallback.py` (missing / unreadable / shape-mismatch → reason + tail + stderr line + fresh; no-pending happy path → `resume_fallback is None`).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 4 passed; related suites 163 passed total (incl. `test_causvid_worker`, `test_tail_derive`, `test_stage_a_telemetry`). Gates on touched files green: `ruff check` + `ruff format --check` + `mypy` strict.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §5.4): "Causvid `generate_blocks` returns `resume_fallback` (`{reason: missing|unreadable|shape_mismatch, tail_path}`, None on the conditioned path) alongside `fresh_rollouts`, and the supervisor logs one warn-level `video_resume_fallback` metric when it is set — shared with 169's metric, fed from both backends."
+- Residuals (supervisor owner, precise): wire the read half — `voyage/supervisor.py` (plus `voyage/backends.py` / `voyage/cli.py` / `voyage/media.py`, all zero hits today) never reads `fresh_rollouts`, `prompt_changed`, or the new `resume_fallback`; the `START_FROM_RESUME` label is still attached at `resume_from_tape` time (`video_causvid.py:941-945`) before materialization can fail, so a fallback segment still looks resumed-but-normal above the worker. Suggested: log `video_resume_fallback` from `result["resume_fallback"]` (warn-level, not fatal) exactly as this issue's fix candidate 1 proposes.

@@ -85,3 +85,51 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
   > spawn), never re-encoded N−1 times through a left fold. Soak trends
   > join wall-clock vs timeline length to prove the scaling."
 - Files changed: this issue file only (log appended; original above intact).
+
+## Progress log (2026-09-30, this pass — owned files: media.py + sfx_finalize.py)
+
+- Re-verified live FIRST: `render_sfx_bed` still left-folds, `build_final_audio`
+  still folds, `_blend_pair` still probes both inputs per blend. CONFIRMED.
+- Fold-restructure verdict: BEHAVIOR-RISKY, did not land. Decisive blocker:
+  `tests/test_final_blend_scale.py::test_final_blend_never_spawns_wide_acrossfade_graph`
+  pins EVERY ffmpeg call in the final blend to at most 2 audio inputs
+  (live 31-segment acrossfade deadlock) — a single-graph N-way join
+  violates it by construction, and that file is another group's (this
+  pass is new-tests-only). Per the issue's own fallback, landed the
+  probe-memo half + per-blend timing instead; fold topology untouched.
+- TDD: new `tests/test_issue_152_blend_probe_memo.py` (7 tests) failed
+  first in-container (TypeError on the new kwargs, probe-count
+  assertions), green after the fix.
+
+## Resolution (this pass)
+
+- Verdict: PARTIAL — probe-memo + timing landed; single-graph join
+  recorded as residual below.
+- Files changed: `voyage/media.py` (`_blend_fade_seconds` pure helper,
+  `_blend_pair` gains keyword-only `first_seconds`/`second_seconds`
+  (probe fallback kept when None) + `timing_ms` out-list;
+  `assemble_segment_audio` + `build_final_audio` gain keyword-only
+  `blend_timings` and thread per-input durations probed once, accum
+  tracked arithmetically with the shared fade formula),
+  `voyage/sfx_finalize.py` (`render_sfx_bed` gains keyword-only
+  `blend_timings`, same threading over stems), new tests only.
+- Test evidence: new file 7/7 green; related suites green
+  (`test_sfx_finalize`, `test_final_blend_scale`, `test_audio_accounting`,
+  `test_generation_stack` — 68 passed; `test_finalize_fastpath`,
+  `test_state_integrity`, `test_cli_split`, `test_sfx_contract`,
+  `test_commit_side_integrity_095_101_104` — 66 passed). Gates on touched
+  files: `ruff check` + `ruff format --check` + `ruff check --select
+  PLR2004` + `mypy` (5 source files) all green.
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Blend folds thread known durations: each stem/window is probed once
+  > and the accum tracks arithmetically through one shared fade formula
+  > (O(N) probes, one timing entry per pair); the pairwise topology stays
+  > until the wide-graph deadlock class is re-proven safe. Soak trends
+  > per-blend wall milliseconds vs timeline length."
+- Residual (exact handoff): the single-graph N-way join from the issue
+  log (one `-filter_complex` with chained afade/adelay/amix, each stem
+  decoded once) is unblocked only by relaxing
+  `tests/test_final_blend_scale.py:107-136` (the ≤2-input pin) with a
+  deadlock-class proof for wide MANUAL-fade graphs (the incident was
+  acrossfade-specific) — owner: that file's track + a GPU long-run;
+  do not attempt from the sfx/media side alone.

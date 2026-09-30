@@ -48,3 +48,44 @@ Deterministic CLI: `voyage benchmark sfx --run <dir>` → `error: argument bench
 - Test evidence (in-container `voyage:latest`, CPU-only): new file 4 passed; `test_benchmark.py` green. Ruff + format + mypy strict clean.
 - DESIGN proposal (quoted text only, for the DESIGN owner — §104): "Benchmark setup blocks record the discriminating knobs per target (SFX: `model_size` × `sfx_workers`; augment: chunk size × upscale factor × CRF × preset), and the soak SFX section aggregates plain window records post-run — no extra renders."
 - Residuals (out of scope, precise — for the CLI owner): (1) `voyage/cli.py:643-646`: add `"sfx"` (+ `"augment"`) to `benchmark_target` choices + help/`docs/BENCHMARKING.md`; (2) `voyage/cli_observe.py:161-198`: `cmd_benchmark` sfx branch (resolve `config.sfx.backend`, start the SFX worker via the supervisor `SFX_WORKER_MODULES`-class map, `call("benchmark", ...)`, `format_report`/`report_document` with `sfx_benchmark_setup`); note the supervisor currently exposes NO SFX worker handle (`grep _sfx supervisor.py/backends.py` → only caption strings — a supervisor seam is needed first); (3) `benchmark augment` additionally needs a `handle_benchmark`-shaped entry in `augment_worker.py` (zero `benchmark` hits today) plus orchestration-level chunk reporting — `augment.py` is E1's; (4) choices-pin test so future workers cannot ship headless benchmarks (fix candidate 3, CLI-side).
+
+## Progress log (2026-09-30, CLI track — this pass)
+
+- Re-verified live first: parser choices still `["video", "audio", "end-to-end"]`
+  (`voyage/cli.py:652`); `handle_benchmark` present on both SFX workers
+  (`sfx_mmaudio.py:405`, `sfx.py:80`); zero `benchmark` hits in
+  `augment_worker.py` (in-process library — "RPC ops are supervisor-track
+  follow-up"); supervisor still exposes no SFX handle (only caption strings);
+  batch-8 bench helpers present. Premise CONFIRMED.
+- TDD: `tests/test_cli_benchmark_sfx_augment.py` written first — all failed
+  pre-fix in-container (`voyage:latest`, CPU-only), green post-fix. One
+  live-caught fix during implementation: image2 testsrc numbers from 1, so
+  the augment probe stages with `-start_number 0`.
+
+## Resolution (2026-09-30, CLI track — this pass)
+
+- Verdict: CLI-TARGET HALF FIXED in owned files; augment-worker-op leg RESIDUAL.
+- Changes: `voyage/cli.py` (`_add_benchmark_parser`: choices sorted to
+  `["audio", "augment", "end-to-end", "sfx", "video"]`, `--run` help names the
+  run-optional targets); `voyage/cli_observe.py` (`_benchmark_sfx` dispatch +
+  `_sfx_probe` core: direct `SubprocessWorker` spawn via `SFX_WORKER_MODULES`,
+  run config or no-run fake defaults, `_require_cuda_stack` gate on the run
+  path, `sfx_benchmark_setup` + backend override + env + presentation facts,
+  artifact persist on the run path; `_benchmark_augment` + `_augment_probe`:
+  testsrc staging outside the measured region, real `augment_plan` +
+  `run_augment_chunks` + `ffmpeg_encode_chunk` walls, model leg recorded skip
+  with torch presence noted); choices-pin test. No supervisor seam was needed
+  (direct spawn mirrors `sfx_finalize.render_sfx_bed`).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 10 passed;
+  neighbors `test_benchmark.py` + `test_benchmark_counts.py` green. Gates on
+  touched files: ruff check + format-check + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §104): "The
+  `benchmark` verb offers `sfx` and `augment` targets alongside `video`,
+  `audio`, and `end-to-end`: `sfx` spawns one SFX worker directly (fake needs
+  no run dir; CUDA backends reuse the existing fast-fail gate), and `augment`
+  times the ffmpeg chunk-encode orchestration with the model leg recorded as
+  skipped until the FILM port lands."
+- Residuals: `benchmark augment` model probe needs a `handle_benchmark`-shaped
+  entry in `voyage/workers/augment_worker.py` (zero `benchmark` hits as-read;
+  worker-file owner); 2-worker SFX shard probe (single-worker probe ships —
+  sharding is a finalize topology, not a probe axis).

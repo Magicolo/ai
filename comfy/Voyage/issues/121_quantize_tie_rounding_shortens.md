@@ -86,3 +86,52 @@ print(q(45.0, 15.0))   # 45.0 exact — unaffected (control case)
   -> 46.0`) — needs the rhythm-test owner's sign-off, and consider the
   candidate-3 plan-site assertion (`take_seconds >> ahead_seconds`) in
   `voyage/audio/planner.py` at the same time.
+
+## Progress log (2026-09-30, tests-only pass — DECISION)
+
+- Premise re-verified live (read-only, no host pip): `voyage/audio/beat.py`
+  still `multiples = max(1, round(take_seconds / segment_seconds))`
+  (round-half-to-even); sole production caller is
+  `voyage/audio/planner.py:240` inside `_fresh_take` (only hit:
+  `rg quantize_take_seconds voyage/` → `planner.py:238,240` + `beat.py`
+  def; `__pycache__` hits ignored). No other production consumer depends
+  on the tie direction.
+- Pins re-verified live: `tests/test_rhythm.py:66-67` still expects
+  `(45.0, 2.0, 44.0)` ("22.5 segments rounds to 22") and `(45.0, 4.0,
+  44.0)` ("11.25 segments rounds to 11"); `test_rhythm.py:97-102`
+  (`test_planner_quantizes_fresh_takes_to_segment_grid`) still expects
+  `plan.take.duration == 44.0`; characterization file
+  `tests/test_beat_quantize_ties_121.py` still pins tie-down `45/18 →
+  36.0` (4 tests). Under ceil the first two pins become 46.0/48.0 and the
+  planner pin becomes 46.0; under half-up (`floor(x+0.5)`) they become
+  46.0/44.0 — either way at least one deliberately-pinned expectation plus
+  the characterization file must change in the same commit as the
+  `voyage/audio/beat.py` behavior edit.
+- DECISION per the task contract: rhythm-owner-blocked, NOT implemented
+  here. The behavior fix requires editing `voyage/audio/beat.py` (frozen
+  `voyage/` scope) AND updating `tests/test_rhythm.py:66-67,102` +
+  `tests/test_beat_quantize_ties_121.py` pins owned by the rhythm track —
+  changing the default here would trade this pass's green for the rhythm
+  owner's red (same collision the Group B log deferred). The pins are not
+  pure throwaway characterization: the `test_rhythm.py:66` comment
+  documents the rounding as intended ("rounds to 22"), and the planner pin
+  encodes the 44.0 duration downstream consumers observe.
+- No code change in this pass (tests/ owner cannot move first on a
+  `voyage/` behavior + cross-owned pins). Gate evidence: n/a (no files
+  changed).
+
+## Resolution (2026-09-30, tests-only pass)
+
+- Verdict: blocked (rhythm-owner-blocked with exact evidence above).
+  Files changed: none. DESIGN proposals: none (Group B proposal stands).
+- Residuals (exact handoff, rhythm/beat owner): switch
+  `voyage/audio/beat.py:quantize_take_seconds` to `math.ceil` (never plan
+  short) or round-half-up with the tie rule documented, AND update in the
+  same commit: `tests/test_rhythm.py:66` `(45,2) 44.0 → 46.0`, `:67`
+  `(45,4) 44.0 → 48.0` under ceil (46.0/44.0 under half-up — state the
+  chosen rule), `test_rhythm.py:102` `44.0 → 46.0` (ceil) plus the 44.0
+  literal at `:122`, and `tests/test_beat_quantize_ties_121.py:28-35`
+  tie-down/tie-up pins; consider candidate-3 plan-site assertion
+  (`take_seconds >> ahead_seconds`) in `voyage/audio/planner.py` at the
+  same time. Needs the rhythm-test owner's sign-off — do not land the
+  behavior half without the pin half.

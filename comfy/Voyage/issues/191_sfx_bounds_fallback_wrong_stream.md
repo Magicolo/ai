@@ -105,3 +105,35 @@ success. The fix is two lines plus a warning, and the precedent
 - Test evidence: live reads 2026-09-30 (cites above); no test added — the pins (audio-first listing → video `nb_frames`; all-unprobable → loud instead of zero-tiling; `fps > 0` validation at both functions) belong to the sfx_finalize owner with the module's probe stubs.
 - DESIGN proposal (quoted text only, for the DESIGN owner — three-caption doctrine): "SFX segment bounds search the video stream (`codec_type == video`, the house idiom) and fail loud (`MediaError`, matching `_segment_timeline`) on zero-duration bounds — every later junction caption shifts otherwise, defeating the pass while reporting success."
 - Residuals (for the sfx_finalize owner, precise): (1) `voyage/sfx_finalize.py:~162-164`: replace `streams[0]` with the `_probe_video_geometry` `next(... codec_type == "video" ...)` idiom; (2) zero-duration bound → `MediaError` (or at minimum a segment-naming warning — silent tiling is the current behavior); (3) validate `fps > 0` at `segment_sfx_bounds` + `_segment_timeline` entries (currently `ZeroDivisionError` vs silent-zero split).
+
+## Progress log (2026-09-30, this pass — owned file: sfx_finalize.py + media.py)
+
+- Re-verified live FIRST: `streams[0]` with no `codec_type` filter +
+  unconditional zero-bound append, both CONFIRMED as-read. `sfx_finalize.py`
+  is owned by this pass, so the residual is now actionable — claimed it.
+- TDD: new `tests/test_issue_191_sfx_bounds_streams.py` (4 tests: audio-first
+  listing, all-unprobable, `fps <= 0` at both functions) failed first
+  in-container (wrong-stream math 12.5s vs 4.0s, silent zero-tiling,
+  ZeroDivisionError), green after the fix.
+
+## Resolution (this pass)
+
+- Verdict: FIXED — both legs plus the secondary `fps` edge.
+- Files changed: `voyage/sfx_finalize.py` (`segment_sfx_bounds`: `fps <= 0`
+  guard; fallback searches `codec_type == "video"` via `next(...)` (the
+  `_probe_video_geometry` house idiom); still-zero duration raises
+  `MediaError` naming the segment instead of tiling `(cursor, cursor)`),
+  `voyage/media.py` (`_segment_timeline` gains the same `fps <= 0` guard),
+  new tests only.
+- Test evidence: new file 4/4 green; `test_sfx_finalize.py` + `test_three_captions.py`
+  and the 68/66 related-suite runs above all green (existing tests use real
+  probed videos, unaffected). Gates on touched files green (see 152 log).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> SFX segment bounds read the video stream (`codec_type == video`, the
+  > house idiom) and fail loud on unprobable durations — a zero-length
+  > bound shifts every later junction caption, defeating the pass while
+  > reporting success."
+- Residuals: none. Handoff note for the finalize owner: `finalize_sfx_pass`
+  on a run with a genuinely unprobable segment now aborts loud where it
+  used to mis-caption silently — intended (matches the music path), but
+  expect the error text if an old corrupt run ever resurfaces.
