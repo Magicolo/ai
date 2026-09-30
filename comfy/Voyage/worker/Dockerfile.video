@@ -179,6 +179,24 @@ COPY pyproject.toml README.md /app/
 COPY voyage/ /app/voyage/
 RUN pip install --no-deps -e /app
 
+# Director decider venv (GPU director): the main env pins transformers
+# 4.57.6 for LongLive, but the Qwen decider needs transformers 5.17.0
+# (native AWQ-via-gptqmodel path) — irreconcilable in one site-packages,
+# so the director worker runs in this isolated venv on the second GPU.
+# Pins are probe-verified 2026-09-30 on sm_75 (RTX 2060): torch 2.11.0+cu128
+# (cp310 wheel on the cu128 index) + GPTQModel 7.5.0 (transformers 5.17
+# loads AWQ through it; autoawq is deprecated and must NOT be installed).
+# The supervisor spawns the director with this interpreter via
+# VOYAGE_DIRECTOR_PYTHON below; unset (slim image, tests) falls back to
+# sys.executable. voyage itself resolves via the /app PYTHONPATH entry.
+RUN python3.10 -m venv /opt/venvs/director \
+    && /opt/venvs/director/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/director/bin/pip install torch==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+    && /opt/venvs/director/bin/pip install "GPTQModel==7.5.0" sentence-transformers \
+        "safetensors>=0.4.3" "huggingface_hub[cli]" "pydantic>=2.7,<2.11" \
+    && /opt/venvs/director/bin/pip install transformers==5.17.0
+
 # Run as the invoking host user (issue 053 follow-up): the supervisor and
 # its worker subprocesses share bind mounts with the host ($PWD:/app,
 # /tmp:/tmp, $models:/models), so a root container leaves root-owned
@@ -192,12 +210,13 @@ RUN set -eux; \
   getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
   getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
-  chown -R "${UID}:${GID}" /opt/longlive /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio; \
+  chown -R "${UID}:${GID}" /opt/longlive /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs; \
   chmod 777 /opt/longlive /opt/causvid/wan_models
 ENV HOME=/home/voyager
 USER voyager
 
 ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
+    VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

@@ -65,6 +65,27 @@ QWEN_MIN_BYTES = 15_000_000_000
 QWEN_LICENSE = "Apache 2.0"
 QWEN_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE"
 
+# GPU decider (unified worker image). Qwen3-4B AWQ-quantized, Apache 2.0,
+# ungated. Single-shard int4 weights (~2.6 GiB); served on cuda:1 from the
+# director venv — the 8B bf16 OOMs at materialization on a 6GB second GPU
+# (5.49GiB > 5.6GB; probe 2026-09-30: 4B-AWQ loads in 2.5s, 2.8GiB peak,
+# valid first-attempt JSON at temp 0.7).
+QWEN4B_AWQ_HF_REPO = "Qwen/Qwen3-4B-AWQ"
+QWEN4B_AWQ_HF_REVISION = "74d4bd2bd4bff9cafc9345221320bffb08b406a3"
+QWEN4B_AWQ_SUBDIR = "Qwen3-4B-AWQ"
+QWEN4B_AWQ_ALLOW = [
+    "model.safetensors",
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+]
+QWEN4B_AWQ_MIN_BYTES = 2_000_000_000
+QWEN4B_AWQ_LICENSE = "Apache 2.0"
+QWEN4B_AWQ_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LICENSE"
+
 # Phase 5 visual inspector (DESIGN §§43-44, 100, 132). Qwen3.5-9B
 # multimodal VLM, Apache 2.0, ungated. BF16 weights (~19 GiB); served on
 # CPU from system RAM in the director worker — never on the video GPU.
@@ -606,6 +627,37 @@ def _describe_director(models_dir: Path) -> str:
     )
 
 
+def _record_director_awq(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the GPU decider stack (4B-AWQ + MiniLM)."""
+    qwen_dir = models_dir / QWEN4B_AWQ_SUBDIR
+    weights = qwen_dir / "model.safetensors"
+    minilm_dir = models_dir / MINILM_SUBDIR
+    minilm_weights = minilm_dir / "model.safetensors"
+    return {
+        "repo": QWEN4B_AWQ_HF_REPO,
+        "revision": QWEN4B_AWQ_HF_REVISION,
+        "model_dir": str(qwen_dir),
+        "checkpoint_bytes": weights.stat().st_size if weights.exists() else 0,
+        "license": QWEN4B_AWQ_LICENSE,
+        "license_url": QWEN4B_AWQ_LICENSE_URL,
+        "embedding_repo": MINILM_HF_REPO,
+        "embedding_revision": MINILM_HF_REVISION,
+        "embedding_dir": str(minilm_dir),
+        "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
+        "embedding_license": MINILM_LICENSE,
+    }
+
+
+def _describe_director_awq(models_dir: Path) -> str:
+    """Exact OK string for the GPU decider stack (byte-stable)."""
+    weights = models_dir / QWEN4B_AWQ_SUBDIR / "model.safetensors"
+    minilm_weights = models_dir / MINILM_SUBDIR / "model.safetensors"
+    return (
+        f"director-qwen4b-awq OK (Qwen3-4B-AWQ {weights.stat().st_size / 1024**3:.1f} GiB "
+        f"+ MiniLM {minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
+    )
+
+
 def _describe_inspector(models_dir: Path) -> str:
     """Exact OK string for the VLM inspector (byte-stable)."""
     target_dir = models_dir / QWEN35_SUBDIR
@@ -749,6 +801,41 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             RequiredFile(f"{MINILM_SUBDIR}/vocab.txt", 0),
         ),
         success_message=_describe_director,
+    ),
+    "director-qwen4b-awq": ModelSpec(
+        name="director-qwen4b-awq",
+        manifest_key="director-awq",
+        snapshots=(
+            SnapshotSpec(
+                QWEN4B_AWQ_HF_REPO,
+                QWEN4B_AWQ_HF_REVISION,
+                QWEN4B_AWQ_SUBDIR,
+                tuple(QWEN4B_AWQ_ALLOW),
+            ),
+            SnapshotSpec(MINILM_HF_REPO, MINILM_HF_REVISION, MINILM_SUBDIR, tuple(MINILM_ALLOW)),
+        ),
+        files=(),
+        record_builder=_record_director_awq,
+        checks=(
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/model.safetensors", QWEN4B_AWQ_MIN_BYTES),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/config.json", 0),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/generation_config.json", 0),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/tokenizer.json", 0),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/tokenizer_config.json", 0),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/vocab.json", 0),
+            RequiredFile(f"{QWEN4B_AWQ_SUBDIR}/merges.txt", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/model.safetensors", MINILM_MIN_BYTES),
+            RequiredFile(f"{MINILM_SUBDIR}/config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/config_sentence_transformers.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/sentence_bert_config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/modules.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/1_Pooling/config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/tokenizer.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/tokenizer_config.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/special_tokens_map.json", 0),
+            RequiredFile(f"{MINILM_SUBDIR}/vocab.txt", 0),
+        ),
+        success_message=_describe_director_awq,
     ),
     "inspector-qwen35": ModelSpec(
         name="inspector-qwen35",
@@ -1124,6 +1211,20 @@ def download_director_models(models_dir: Path) -> dict[str, Any]:
 def verify_director_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the director stack."""
     return verify_model(models_dir, "director-qwen8b")
+
+
+def download_director_awq_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the GPU decider stack (Qwen3-4B-AWQ + MiniLM).
+
+    Merges under the `director-awq` manifest key (never the `director` key
+    the 8B stack owns — overwrite semantics would clobber it).
+    """
+    return download_model(models_dir, "director-qwen4b-awq")
+
+
+def verify_director_awq_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the GPU decider stack."""
+    return verify_model(models_dir, "director-qwen4b-awq")
 
 
 def download_inspector_models(models_dir: Path) -> dict[str, Any]:

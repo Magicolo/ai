@@ -111,9 +111,14 @@ def required_specs(
             )
         )
     if config.director.backend == "qwen":
+        # CUDA placements serve the 4-bit AWQ decider; the CPU opt-out
+        # keeps the bf16 8B stack.
+        director_spec = (
+            "director-qwen8b" if config.director.device == "cpu" else "director-qwen4b-awq"
+        )
         required.append(
             RequiredModel(
-                spec="director-qwen8b",
+                spec=director_spec,
                 models_dir=_resolve_dir(models_root, config.video.models_dir),
             )
         )

@@ -42,6 +42,7 @@ from voyage.media import probe as media_probe
 from voyage.model_registry import (
     download_audio_models,
     download_causvid_models,
+    download_director_awq_models,
     download_director_models,
     download_film_models,
     download_inspector_models,
@@ -51,6 +52,7 @@ from voyage.model_registry import (
     download_sfx_models,
     verify_audio_models,
     verify_causvid_models,
+    verify_director_awq_models,
     verify_director_models,
     verify_film_models,
     verify_inspector_models,
@@ -114,14 +116,22 @@ def is_flat_folder_name(value: str) -> bool:
 
 
 def _check_run_id(run_id: str) -> int:
-    """Reject traversal `--run-id` at the CLI layer (issue 008)."""
+    """Reject traversal run names at the CLI layer (issue 008)."""
     if not is_flat_folder_name(run_id):
         print(
-            f"error: --run-id must be a flat folder name (no slashes), got {run_id!r}",
+            f"error: --name/--run-id must be a flat folder name (no slashes), got {run_id!r}",
             file=sys.stderr,
         )
         return 2
     return 0
+
+
+def _effective_run_id(args: argparse.Namespace) -> str:
+    """Run name for init/generate: --name wins, --run-id is the legacy alias."""
+    named = getattr(args, "name", None)
+    if isinstance(named, str) and named != "":
+        return named
+    return str(args.run_id)
 
 
 def get_console(args: argparse.Namespace) -> VoyageConsole:
@@ -158,7 +168,8 @@ def launch_tui() -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    if _check_run_id(args.run_id) != 0:
+    run_id = _effective_run_id(args)
+    if _check_run_id(run_id) != 0:
         return 2
     run_dir = resolve_run_dir(args.output)
     if run_dir.exists() and any(run_dir.iterdir()) and not args.force:
@@ -169,8 +180,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
     backend: VideoBackendName = getattr(args, "backend", None) or "ltxv"
     director_backend: str = getattr(args, "director", None) or "qwen"
+    director_device: str = getattr(args, "director_device", None) or "cuda:1"
     config_text = default_config_toml(
-        args.run_id, args.style, args.seed, video_backend=backend, director_backend=director_backend
+        run_id,
+        args.style,
+        args.seed,
+        video_backend=backend,
+        director_backend=director_backend,
+        director_device=director_device,
     )
     (run_dir / paths.CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
     config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
@@ -193,6 +210,13 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
             print(f"gpu: {line}")
     else:
         print("gpu: no nvidia-smi data (CPU-only environment)")
+    director_python = facts.get("director_python")
+    if director_python and facts.get("director_python_exists"):
+        print(f"director python: {director_python}")
+    elif director_python:
+        print(f"director python: {director_python} (missing — director falls back to CPU)")
+    else:
+        print("director python: unset (director runs in-process on CPU)")
     return 0 if ok else 1
 
 
@@ -212,6 +236,22 @@ def _download_director(models_dir: Path) -> int:
     director = record["director"]
     assert isinstance(director, dict)
     print(f"qwen3-8b: {director.get('checkpoint_bytes')} bytes")
+    print(f"minilm: {director.get('embedding_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
+def _download_director_awq(models_dir: Path) -> int:
+    """Download the GPU decider stack (Qwen3-4B-AWQ + MiniLM)."""
+    print(f"downloading director-qwen4b-awq into {models_dir} ...")
+    try:
+        record = download_director_awq_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    director = record["director-awq"]
+    assert isinstance(director, dict)
+    print(f"qwen3-4b-awq: {director.get('checkpoint_bytes')} bytes")
     print(f"minilm: {director.get('embedding_bytes')} bytes")
     print(f"manifest: {models_dir / 'manifest.json'}")
     return 0
@@ -314,6 +354,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(cmessage)
         dok, dmessage = verify_director_models(_models_dir(args))
         print(dmessage)
+        dawq_ok, dawq_message = verify_director_awq_models(_models_dir(args))
+        print(dawq_message)
         aok, amessage = verify_audio_models(_models_dir(args))
         print(amessage)
         sok, smessage = verify_sfx_models(_models_dir(args))
@@ -325,7 +367,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        all_ok = ok and lok and cok and dok and aok and sok and fok and rok and iok
+        all_ok = ok and lok and cok and dok and dawq_ok and aok and sok and fok and rok and iok
         return 0 if all_ok else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
@@ -357,6 +399,8 @@ def cmd_models(args: argparse.Namespace) -> int:
             return 0
         if target == "director-qwen8b":
             return _download_director(_models_dir(args))
+        if target == "director-qwen4b-awq":
+            return _download_director_awq(_models_dir(args))
         if target == "audio-acestep":
             return _download_audio(_models_dir(args))
         if target == "sfx-mmaudio":
@@ -375,6 +419,7 @@ def cmd_models(args: argparse.Namespace) -> int:
                     "ltxv-2b",
                     "causvid",
                     "director-qwen8b",
+                    "director-qwen4b-awq",
                     "audio-acestep",
                     "sfx-mmaudio",
                     "film",
@@ -430,6 +475,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if (
         args.draft
         or is_provided(args.director)
+        or is_provided(getattr(args, "director_device", None))
         or is_provided(args.blocks)
         or is_provided(args.take_seconds)
         or is_provided(args.quantization)
@@ -444,6 +490,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 config,
                 draft=args.draft,
                 director=args.director,
+                director_device=getattr(args, "director_device", None),
                 blocks=args.blocks,
                 take_seconds=args.take_seconds,
                 quantization=args.quantization,
@@ -459,6 +506,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(
             "effective settings: "
             f"director={config.director.backend} "
+            f"director_device={config.director.device} "
             f"blocks={config.video.blocks_per_segment} "
             f"{config.video.width}x{config.video.height} "
             f"latent={list(config.video.latent_shape)} "
@@ -1197,20 +1245,23 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if args.backend in _CUDA_BACKENDS and not _torch_available():
         print(_cuda_stack_error(args.backend), file=sys.stderr)
         return 1
-    if _check_run_id(args.run_id) != 0:
+    run_id = _effective_run_id(args)
+    if _check_run_id(run_id) != 0:
         return 2
     # Resolve once: workers spawn with CWD=run_dir, so every downstream path
     # (payloads, takes, slices) must be absolute or they double up.
-    output = Path(args.output) if args.output else Path("output") / args.run_id
+    output = Path(args.output) if args.output else Path("output") / run_id
     run_dir = resolve_run_dir(str(output))
     init_args = argparse.Namespace(
         output=str(run_dir),
-        run_id=args.run_id,
+        run_id=run_id,
+        name=run_id,
         style=args.style,
         seed=args.seed,
         force=args.force,
         backend=args.backend,
         director=args.director,
+        director_device=getattr(args, "director_device", None),
     )
     code = cmd_init(init_args)
     if code != 0:
@@ -1229,6 +1280,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             config,
             draft=args.draft,
             director=director,
+            director_device=getattr(args, "director_device", None),
             blocks=args.blocks,
             take_seconds=args.take_seconds,
             quantization=args.quantization,
@@ -1308,6 +1360,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             segments=segments,
             draft=args.draft,
             director=director,
+            director_device=getattr(args, "director_device", None),
             blocks=args.blocks,
             take_seconds=args.take_seconds,
             quantization=args.quantization,
@@ -1597,6 +1650,11 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     init = sub.add_parser("init", help="Create a new run directory")
     init.add_argument("--output", required=True, help="run directory to create")
     init.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
+    init.add_argument(
+        "--name",
+        default=None,
+        help="run name (primary spelling; wins over --run-id, same flat folder rule)",
+    )
     init.add_argument("--style", required=True, help="permanent style charter for the run")
     init.add_argument("--seed", type=int, default=0, help="master seed for the run")
     init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
@@ -1612,6 +1670,12 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
         default="qwen",
         help="director backend written into the run config "
         "(default qwen; deterministic disables the LLM)",
+    )
+    init.add_argument(
+        "--director-device",
+        default="cuda:1",
+        help="director decider placement written into the run config "
+        "(default cuda:1; cpu = legacy bf16 CPU path)",
     )
     init.set_defaults(func=cmd_init)
 
@@ -1696,6 +1760,12 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         "--video-caption",
         default=None,
         help="pin the video caption family (default: director drives + evolves it)",
+    )
+    parser.add_argument(
+        "--director-device",
+        default=None,
+        help="director decider placement (default cuda:1 = second GPU via 4-bit AWQ; "
+        "cpu = legacy bf16 CPU path, explicit opt-out for single-GPU/CI boxes)",
     )
 
 
@@ -1820,6 +1890,11 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     gen.add_argument("--style", required=True, help="permanent style charter for the run")
     gen.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
+    gen.add_argument(
+        "--name",
+        default=None,
+        help="run name (primary spelling; wins over --run-id, same flat folder rule)",
+    )
     gen.add_argument("--output", default=None, help="run directory (default output/<run-id>)")
     gen.add_argument("--seed", type=int, default=0, help="master seed for the run")
     gen.add_argument("--force", action="store_true", help="allow init into a non-empty directory")

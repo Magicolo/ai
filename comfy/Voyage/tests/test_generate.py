@@ -293,6 +293,83 @@ def test_generate_refuses_nonempty_dir_without_force(tmp_path: Path) -> None:
     assert not (run_dir / "final.mp4").exists()
 
 
+def test_generate_name_routes_to_output_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`generate --name boba` lands in output/boba (the user-facing spelling)."""
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "generate",
+                "--backend",
+                "fake",
+                "--duration",
+                "2s",
+                "--style",
+                "pastel neon line-art, peaceful",
+                "--name",
+                "boba",
+                "--seed",
+                "11",
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "output" / "boba" / "final.mp4").exists()
+
+
+def test_generate_name_wins_over_run_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--name is primary; legacy --run-id loses when both are given."""
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "generate",
+                "--backend",
+                "fake",
+                "--duration",
+                "2s",
+                "--style",
+                "pastel neon line-art, peaceful",
+                "--run-id",
+                "legacy",
+                "--name",
+                "boba",
+                "--seed",
+                "11",
+            ]
+        )
+        == 0
+    )
+    assert (tmp_path / "output" / "boba" / "final.mp4").exists()
+    assert not (tmp_path / "output" / "legacy").exists()
+
+
+def test_generate_rejects_traversal_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crafted --name cannot escape the output tree (same rule as --run-id)."""
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "generate",
+                "--backend",
+                "fake",
+                "--duration",
+                "2s",
+                "--style",
+                "pastel neon line-art, peaceful",
+                "--name",
+                "../evil",
+                "--seed",
+                "11",
+            ]
+        )
+        == 2
+    )
+    assert not (tmp_path / "output" / "evil").exists()
+
+
 def test_generate_defaults_to_output_run_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

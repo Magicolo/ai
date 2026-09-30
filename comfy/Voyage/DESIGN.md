@@ -7536,3 +7536,43 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   (fastpath/stack tests pin legacy path with min_*=0, integration pins
   new defaults); full gates 1067 passed + 1 TUI Pilot flake (passes in
   isolation).
+
+## 2026-09-30 — GPU director: Qwen3-4B-AWQ on cuda:1, unified image, eager attention
+
+- User intent: the director must never run on CPU unless explicitly asked
+  (a 1-minute `generate` froze 31 segments on 500 s CPU decides). Decision
+  after Q&A + live probes: primary Qwen3-4B-AWQ on the idle RTX 2060
+  (`cuda:1`), CPU opt-out via `--director-device cpu`, all workers in one
+  image.
+- Live verdicts that shaped the design: official Qwen3-8B-AWQ OOMs at
+  materialization on 6 GB (5.49 GiB > 5.6 GB capacity — rejected, staging
+  deleted); Qwen3-4B-AWQ (rev `74d4bd2b…406a3`) loads in 2.5 s / 2.67 GiB
+  and generates valid JSON first-attempt at temp 0.7. Qwen's own quant
+  table (8B-AWQ-4bit MMLU 73.8 > 4B-FP16 73.0) justified smaller-AWQ over
+  larger-fp8.
+- `Dockerfile.video` gains `/opt/venvs/director` (CUDA torch 2.11 cu128 +
+  transformers 5.17 + GPTQModel 7.5.0; transformers loads AWQ via the
+  gptqmodel backend, autoawq deprecated and must NOT be installed);
+  `ENV VOYAGE_DIRECTOR_PYTHON` selects it. `worker/Dockerfile.director` +
+  `scripts/build-director.sh` retired (refs updated in README/Dockerfile/
+  docs/INSTALL.md/docs/BACKENDS.md). `run.sh` unchanged — ltxv already
+  selects `voyage-video:latest` with `--gpus all`.
+- `DirectorConfig.device` (default `cuda:1`) + `--director-device` on
+  init/run/generate + `[director] device` TOML key + manifest record;
+  `rpc.SubprocessWorker` gains an `executable` param (supervisor spawns
+  the director with `VOYAGE_DIRECTOR_PYTHON`); device flows through the
+  decide payload; absent CUDA falls back to CPU loudly, OOM never falls
+  back. `models_ensure` picks `director-qwen4b-awq` (registry pin +
+  download/verify) unless device is cpu.
+- Two live-caught bugs, both fixed: (1) transformers 5.17 defaults to
+  flash-attention, whose kernels need Ampere+ — every decide on Turing
+  sm_75 fell back with "FlashAttention only supports Ampere GPUs or
+  newer". Fix: `attn_implementation="eager"` on the CUDA load path
+  (verified: `fallback=false` in 76.8 s on cuda:1 vs 497.4 s CPU).
+  (2) The substitution cache key used the raw id while the stored id
+  was substituted — every retry reloaded all 902 tensors. Fix: pure
+  `_effective_qwen_id` helper normalizes before check and store.
+- Proof: `tests/test_director_device.py` (10 tests incl. the
+  substitution-cache regression) + `doctor.probe` director-venv fact +
+  2 `test_doctor.py` tests; full gates 1089 passed + 1 TUI Pilot flake
+  (passes in isolation — shared-box load, known class).

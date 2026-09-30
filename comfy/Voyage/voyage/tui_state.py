@@ -275,6 +275,7 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         duration=parse_duration(state.duration),
         style=state.style.strip(),
         run_id=name,
+        name=name,
         output=output,
         seed=int(state.seed),
         force=state.force,

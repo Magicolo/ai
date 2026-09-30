@@ -272,7 +272,7 @@ def test_load_qwen_loads_from_resolved_snapshot_path(
     monkeypatch.setattr(director_worker, "_resolve_model_source", lambda model_id: resolved)
     seen: dict[str, str] = {}
     _stub_torch_and_transformers(monkeypatch, seen)
-    director_worker._load_qwen(model_registry.QWEN_HF_REPO)
+    director_worker._load_qwen(model_registry.QWEN_HF_REPO, device="cpu")
     assert seen == {"tokenizer": resolved, "model": resolved}
 
 
@@ -350,4 +350,5 @@ def test_supervisor_passes_models_dir_to_director_worker(tmp_path: Path) -> None
     supervisor = Supervisor(run_dir, config)
     assert supervisor._director._init_payload == {
         "models_dir": config.video.models_dir,
+        "device": config.director.device,
     }

@@ -41,7 +41,7 @@ finalizer concat path, and checksums run exactly as in production.
 | video | `ltxv` | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
 | video | `causvid` | `voyage-video:latest` | DMD causal generator + Wan2.1-1.3B base, 832×480 @ 16 fps native, bf16 |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
-| director | `qwen` | `voyage-director:latest` | Qwen3-8B, non-thinking, temp 0.7 |
+| director | `qwen` | `voyage-video:latest` (`/opt/venvs/director` via `VOYAGE_DIRECTOR_PYTHON`) | Qwen3-4B-AWQ on cuda:1 (default) or Qwen3-8B bf16 on CPU (`--director-device cpu`), non-thinking, temp 0.7 |
 
 Select in TOML (`config.video.backend`, `config.audio.backend`,
 `config.director.backend`) or per-invocation for runs

@@ -36,15 +36,18 @@ stack as LongLive). Video and audio time-share the GPU sequentially —
 the supervisor evicts the video session, renders audio, evicts audio,
 and rebuilds video from `recovery.pt` (see ARCHITECTURE).
 
-## Director environment (`voyage-director:latest`)
+## Director environment (unified image, no separate build)
 
-Slim + torch CPU + transformers + sentence-transformers + accelerate +
-safetensors + pillow/torchvision. Runs the supervisor with fake workers
-plus the Qwen3-8B director and Qwen3.5-9B VLM inspector on CPU
-(~16 GB / ~19 GB host RAM respectively).
+No separate image: the director decider runs in its own venv inside
+`voyage-video:latest` (`/opt/venvs/director`: CUDA torch + transformers
+5.17 + GPTQModel for 4-bit AWQ) on cuda:1, spawned by the supervisor via
+`VOYAGE_DIRECTOR_PYTHON`. Default placement is cuda:1
+(`Qwen3-4B-AWQ`, ~2.6 GiB); `--director-device cpu` opts back into the
+legacy bf16 Qwen3-8B CPU path (~16 GB host RAM, slim-image compatible).
+The Qwen3.5-9B VLM inspector still serves from CPU system RAM (~19 GB).
 
 ```bash
-./scripts/build-director.sh
+./scripts/build-video.sh
 ```
 
 ## CUDA requirements

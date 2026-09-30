@@ -37,9 +37,14 @@ def test_qwen_loader_returns_cached_model_for_same_id(
     monkeypatch.setattr(
         director_worker,
         "_QWEN",
-        {"model": sentinel_model, "tokenizer": sentinel_tokenizer, "model_id": "model-a"},
+        {
+            "model": sentinel_model,
+            "tokenizer": sentinel_tokenizer,
+            "model_id": "model-a",
+            "device": "cuda:1",
+        },
     )
-    model, tokenizer = director_worker._load_qwen("model-a")
+    model, tokenizer = director_worker._load_qwen("model-a", device="cuda:1")
     assert model is sentinel_model
     assert tokenizer is sentinel_tokenizer
 
@@ -51,14 +56,19 @@ def test_qwen_loader_reloads_when_model_id_changes(
     monkeypatch.setattr(
         director_worker,
         "_QWEN",
-        {"model": sentinel_model, "tokenizer": object(), "model_id": "model-a"},
+        {
+            "model": sentinel_model,
+            "tokenizer": object(),
+            "model_id": "model-a",
+            "device": "cuda:1",
+        },
     )
     # Slim has no torch/transformers: the reload attempt must raise (not
     # silently keep serving model-a's weights), and the failed load must
     # not clobber the resident entry.
     with pytest.raises(ImportError):
-        director_worker._load_qwen("model-b")
-    model, _ = director_worker._load_qwen("model-a")
+        director_worker._load_qwen("model-b", device="cuda:1")
+    model, _ = director_worker._load_qwen("model-a", device="cuda:1")
     assert model is sentinel_model
 
 

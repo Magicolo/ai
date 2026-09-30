@@ -35,7 +35,7 @@ def test_ltxv_requires_own_spec_plus_audio_and_director() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
+    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen4b-awq", "film", "realesrgan-anime"}
 
 
 def test_video_backends_map_to_their_own_spec_only() -> None:
@@ -46,14 +46,31 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
     assert specs == {
         "longlive2-bf16",
         "audio-acestep",
-        "director-qwen8b",
+        "director-qwen4b-awq",
         "film",
         "realesrgan-anime",
     }
 
     config = with_video_backend(_config_with_style(), "causvid")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"causvid", "audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
+    assert specs == {
+        "causvid",
+        "audio-acestep",
+        "director-qwen4b-awq",
+        "film",
+        "realesrgan-anime",
+    }
+
+
+def test_cpu_director_opt_out_requires_8b_stack() -> None:
+    """`--director-device cpu` keeps the bf16 8B stack instead of the AWQ pin."""
+    from voyage.config import resolve_config
+    from voyage.models_ensure import required_specs
+
+    config = resolve_config(with_video_backend(_config_with_style(), "ltxv"), director_device="cpu")
+    specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
+    assert "director-qwen8b" in specs
+    assert "director-qwen4b-awq" not in specs
 
 
 def test_deterministic_director_needs_no_director_models() -> None:
@@ -99,7 +116,7 @@ def test_augment_disabled_excludes_film_and_realesrgan() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False, augment_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen8b"}
+    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen4b-awq"}
 
 
 def test_fake_stays_empty_with_augment_enabled() -> None:
@@ -144,7 +161,7 @@ def test_ensure_augment_disabled_skips_augment_downloads(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen8b"}
+    present = {"audio-acestep", "director-qwen4b-awq"}
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")
@@ -189,7 +206,7 @@ def test_ensure_downloads_only_missing_specs(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
+    present = {"audio-acestep", "director-qwen4b-awq", "film", "realesrgan-anime"}
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")

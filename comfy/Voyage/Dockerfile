@@ -20,7 +20,7 @@ WORKDIR /app
 # transitive closure (frozen 2026-09-25, see requirements.lock header for
 # the regen procedure); the editable install then adds only the voyage
 # package itself (--no-deps so the lock stays the single version source).
-# tests/ are NOT baked in (issue 054): build.sh/build-director.sh and
+# tests/ are NOT baked in (issue 054): build.sh and
 # gates.sh/test.sh all bind-mount the host tree, so in-image gates always
 # test current sources instead of a stale copy; baking them only widened
 # the prod image for no runtime benefit.

@@ -112,6 +112,7 @@ class SubprocessWorker:
         init_op: str | None = "init",
         init_payload: RpcPayload | None = None,
         timeout: float = DEFAULT_RPC_TIMEOUT_SECONDS,
+        executable: str | None = None,
     ) -> None:
         self._module = module
         self._workdir = workdir
@@ -119,6 +120,10 @@ class SubprocessWorker:
         self._init_op = init_op
         self._init_payload = dict(init_payload) if init_payload else {}
         self._timeout = timeout
+        # Alternate interpreter for the worker (the director runs in the
+        # unified image's director venv via VOYAGE_DIRECTOR_PYTHON); None
+        # keeps the supervisor's own interpreter.
+        self._executable = executable or sys.executable
         self._proc: subprocess.Popen[str] | None = None
         # Supervisor-side log handle, opened per start() (issue 058): kept
         # so stop() can close it instead of leaking one fd per restart.
@@ -136,7 +141,7 @@ class SubprocessWorker:
         log_file = self._log_path.open("a", encoding="utf-8")
         self._log_file = log_file
         self._proc = subprocess.Popen(
-            [sys.executable, "-m", self._module],
+            [self._executable, "-m", self._module],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log_file,

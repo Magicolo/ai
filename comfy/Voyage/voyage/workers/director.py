@@ -1,7 +1,8 @@
 """Director worker: `python -m voyage.workers.director`.
 
-Backends: `deterministic` (no model weights) and `qwen` (Qwen3-8B on
-CPU + MiniLM embeddings, DESIGN §§8-9). Ops: `decide`, `embed`, `inspect`.
+Backends: `deterministic` (no model weights) and `qwen` (Qwen decider:
+cuda:1 via 4-bit AWQ by default, bf16 on CPU with device="cpu", DESIGN
+§§8-9). Ops: `decide`, `embed`, `inspect`.
 Invalid model JSON follows the §51 chain inside the worker — stricter
 retry, lower temperature, then deterministic fallback — so a bad LLM
 response never corrupts persistent state. `inspect` (Qwen3.5-9B VLM,
@@ -17,6 +18,7 @@ import importlib.util
 import json
 import math
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -43,13 +45,15 @@ INSPECTOR_MODEL_ID = "Qwen/Qwen3.5-9B"
 INIT_STR_KEYS = (
     "backend",
     "model_id",
+    "device",
     "embedding_model_id",
     "inspector_model_id",
     "models_dir",
 )
 """String-valued `init` fields the worker records (models_dir added for the
 volume-deleted gap: the supervisor passes video.models_dir so snapshot
-resolution never guesses the mount)."""
+resolution never guesses the mount; device added for the GPU decider: the
+supervisor passes director.device so the Qwen load branches to cuda)."""
 
 INSPECT_PROMPT = (
     "Describe what is visible in this frame of an abstract infinite "
@@ -62,6 +66,22 @@ budget bounded (Step 0 probe: 92s for 128 tokens)."""
 
 MAX_NEW_TOKENS_LIMIT = 4096
 """Upper bound for `max_new_tokens`: unbounded budgets run away on CPU."""
+
+DEFAULT_CPU_MODEL_ID = "Qwen/Qwen3-8B"
+"""bf16 decider served from system RAM on the legacy CPU path."""
+
+DEFAULT_CUDA_MODEL_ID = "Qwen/Qwen3-4B-AWQ"
+"""4-bit AWQ decider for CUDA devices: the 8B bf16 cannot fit a 6GB second
+GPU (OOM at materialization, 5.49GiB > 5.6GB), while the 4B-AWQ serves at
+2.8GiB peak with valid first-attempt JSON (probe 2026-09-30)."""
+
+
+def _normalize_device(device: object) -> str:
+    """Validate a decider placement string (fail fast, never guess)."""
+    text = str(device or "cuda:1")
+    if text != "cpu" and not text.startswith("cuda"):
+        raise ValueError(f"director device must be 'cpu' or 'cuda[:N]' (got {text!r})")
+    return text
 
 
 def _require_module(module_name: str) -> None:
@@ -142,14 +162,46 @@ def _resolve_model_source(model_id: str) -> str:
     return str(models_dir / ref.relative_dir)
 
 
-def _load_qwen(model_id: str) -> tuple[Any, Any]:
+def _effective_qwen_id(model_id: str, device: str) -> str:
+    """Apply the 8B→4B-AWQ substitution for CUDA devices (pure helper).
+
+    Kept separate from `_load_qwen` so the cache key and the stored id
+    use one normalization — keying on the raw request reloaded the full
+    model on every call (live 2026-09-30).
+    """
+    if device != "cpu" and model_id == DEFAULT_CPU_MODEL_ID:
+        return DEFAULT_CUDA_MODEL_ID
+    return model_id
+
+
+def _cuda_available() -> bool:
+    """True when the resident torch stack reports a usable CUDA device.
+
+    Goes through `getattr` (not `torch.cuda.is_available()`) so unit
+    stubs of the torch module without a `cuda` attribute keep working.
+    """
+    torch_module = sys.modules.get("torch")
+    cuda = getattr(torch_module, "cuda", None)
+    is_available = getattr(cuda, "is_available", None)
+    return bool(is_available() if callable(is_available) else False)
+
+
+def _load_qwen(model_id: str, *, device: str) -> tuple[Any, Any]:
+    # `device` is keyword-only and required: the pre-GPU signature took a
+    # bare model_id (CPU always), and a silent "cuda:1" default would flip
+    # any unmigrated caller onto the second GPU behind its back.
     # Issue 075: reload (not reuse) when the id changed — a long-lived
     # worker re-`init` with a new model must not keep deciding with the
-    # old weights. Single resident entry (no per-id growth, cf. issue 030).
-    if "model" not in _QWEN or _QWEN.get("model_id") != model_id:
+    # old weights. Single resident entry (no per-id growth, cf. issue 030);
+    # the cache key is (effective_id, device) so a placement change reloads.
+    effective_id = _effective_qwen_id(model_id, device)
+    if (
+        "model" not in _QWEN
+        or _QWEN.get("model_id") != effective_id
+        or _QWEN.get("device") != device
+    ):
         _require_module("torch")
         _require_module("transformers")
-        source = _resolve_model_source(model_id)
         import torch
         from transformers import (
             AutoModelForCausalLM,
@@ -161,29 +213,73 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
         # fallback in seconds — never hang a commit on a model download).
         # Explicit HF_HUB_OFFLINE=0 re-enables downloads.
         offline = os.environ.get("HF_HUB_OFFLINE", "1") != "0"
-        tokenizer = AutoTokenizer.from_pretrained(
-            source, trust_remote_code=False, local_files_only=offline
-        )
-        try:
+        if device == "cpu":
+            source = _resolve_model_source(model_id)
+            tokenizer = AutoTokenizer.from_pretrained(
+                source, trust_remote_code=False, local_files_only=offline
+            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    source,
+                    dtype=torch.bfloat16,
+                    device_map="cpu",
+                    trust_remote_code=False,
+                    local_files_only=offline,
+                )
+            except Exception:
+                model = AutoModelForCausalLM.from_pretrained(
+                    source,
+                    dtype=torch.float32,
+                    device_map="cpu",
+                    trust_remote_code=False,
+                    local_files_only=offline,
+                )
+        else:
+            # CUDA path: AWQ-quantized decider via the transformers
+            # gptqmodel backend (no `import awq` — autoawq is deprecated and
+            # must NOT be installed). The 8B bf16 default cannot fit a
+            # small second GPU, so it substitutes the 4B-AWQ pin with a
+            # loud warning; explicit model ids pass through untouched.
+            # Absent CUDA (single-GPU/CI boxes) falls back to CPU loudly —
+            # an OOM never falls back (it propagates as retryable).
+            if not _cuda_available():
+                print(
+                    "WARNING: director device "
+                    f"{device!r} has no CUDA — falling back to the CPU path",
+                    file=sys.stderr,
+                )
+                return _load_qwen(model_id, device="cpu")
+            if model_id != effective_id:
+                print(
+                    "WARNING: director model "
+                    f"{model_id!r} cannot fit a small CUDA device — substituting "
+                    f"{effective_id!r} (pass an explicit --director model id to override)",
+                    file=sys.stderr,
+                )
+            source = _resolve_model_source(effective_id)
+            tokenizer = AutoTokenizer.from_pretrained(
+                source, trust_remote_code=False, local_files_only=offline
+            )
+            # attn_implementation="eager": transformers 5.17 defaults to
+            # flash-attention, whose kernels require Ampere (sm_80+) — the
+            # RTX 2060 second GPU is Turing (sm_75) and every decide fell
+            # back to deterministic with "FlashAttention only supports Ampere
+            # GPUs or newer" (verified live 2026-09-30; eager rescue probe
+            # /tmp/ab_eager.py generated clean JSON on cuda:1). Eager costs
+            # some throughput but the director is latency-tolerant.
             model = AutoModelForCausalLM.from_pretrained(
                 source,
-                dtype=torch.bfloat16,
-                device_map="cpu",
+                device_map=device,
+                attn_implementation="eager",
                 trust_remote_code=False,
                 local_files_only=offline,
             )
-        except Exception:
-            model = AutoModelForCausalLM.from_pretrained(
-                source,
-                dtype=torch.float32,
-                device_map="cpu",
-                trust_remote_code=False,
-                local_files_only=offline,
-            )
+            model_id = effective_id
         model.eval()
         _QWEN["model"] = model
         _QWEN["tokenizer"] = tokenizer
         _QWEN["model_id"] = model_id
+        _QWEN["device"] = device
     return _QWEN["model"], _QWEN["tokenizer"]
 
 
@@ -324,11 +420,13 @@ def _qwen_generate(
     temperature: float,
     max_new_tokens: int,
     enable_thinking: bool,
+    *,
+    device: str,
 ) -> str:
     _require_module("torch")
     import torch
 
-    model, tokenizer = _load_qwen(model_id)
+    model, tokenizer = _load_qwen(model_id, device=device)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -337,6 +435,11 @@ def _qwen_generate(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
     )
     inputs = tokenizer(prompt, return_tensors="pt")
+    if device != "cpu":
+        # The AWQ model lives on CUDA; input tensors must follow it there
+        # (the CPU path keeps host tensors — no .to() no-op churn).
+        target = str(model.device)
+        inputs = {key: value.to(target) for key, value in inputs.items()}
     generate_kwargs: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0.0,
@@ -355,6 +458,7 @@ def _qwen_generate(
 def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     """§51 chain: generate → validate → stricter retry → fallback."""
     model_id = str(payload.get("model_id") or _CONFIG.get("model_id", "Qwen/Qwen3-8B"))
+    device = _normalize_device(payload.get("device") or _CONFIG.get("device", "cuda:1"))
     temperature = float(payload.get("temperature", 0.7))
     max_new_tokens = int(payload.get("max_new_tokens", 1024))
     validate_temperature(temperature)
@@ -382,7 +486,12 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     for attempt_number, (attempt_message, attempt_temp) in enumerate(attempts):
         try:
             text = _qwen_generate(
-                model_id, attempt_message, attempt_temp, max_new_tokens, enable_thinking
+                model_id,
+                attempt_message,
+                attempt_temp,
+                max_new_tokens,
+                enable_thinking,
+                device=device,
             )
             data = _extract_json(text)
             data["decision_index"] = decision_index
@@ -476,7 +585,9 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "READY",
         "backend": _CONFIG["backend"],
+        "device": _CONFIG.get("device", "cuda:1"),
         "qwen_loaded": "model" in _QWEN,
+        "qwen_device": _QWEN.get("device"),
         "embedder_loaded": "model" in _EMBEDDER,
         "inspector_loaded": "model" in _INSPECTOR,
     }

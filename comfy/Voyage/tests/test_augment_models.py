@@ -189,6 +189,7 @@ def test_models_verify_reports_augment_stacks(
         "verify_ltxv_models",
         "verify_causvid_models",
         "verify_director_models",
+        "verify_director_awq_models",
         "verify_audio_models",
         "verify_sfx_models",
         "verify_inspector_models",

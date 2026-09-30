@@ -32,6 +32,16 @@ MODELS_DIR_ENVIRONMENT_VARIABLE = "VOYAGE_MODELS_DIR"
 MODELS_DIR_DEFAULT = "/models"
 """Container mount point when the env var is unset."""
 
+DIRECTOR_PYTHON_ENVIRONMENT_VARIABLE = "VOYAGE_DIRECTOR_PYTHON"
+"""Env var naming the director venv interpreter (unified image, DESIGN §140).
+
+The unified `voyage-video` image runs the director worker under
+`/opt/venvs/director/bin/python` (CUDA torch + transformers 5.17 +
+GPTQModel) while the supervisor stays on the video venv. Absent on the
+slim image and on hosts — that simply means the legacy in-process
+interpreter serves the director (CPU path).
+"""
+
 _SUBPROCESS_TIMEOUT_SECONDS = 15
 """Wall-clock cap per probe subprocess (nvidia-smi/ffmpeg must fail fast)."""
 
@@ -82,6 +92,26 @@ def models_dir() -> Path:
     """Resolve the models dir the same way `cli._models_dir` does."""
     raw = os.environ.get(MODELS_DIR_ENVIRONMENT_VARIABLE, MODELS_DIR_DEFAULT)
     return Path(raw)
+
+
+def director_python() -> Path | None:
+    """Resolve the director venv interpreter, None when unset/empty."""
+    raw = os.environ.get(DIRECTOR_PYTHON_ENVIRONMENT_VARIABLE, "")
+    if not raw.strip():
+        return None
+    return Path(raw.strip())
+
+
+def check_director_python(python: Path | None = None) -> dict[str, Any]:
+    """Presence summary for the director venv interpreter (never raises)."""
+    target = python if python is not None else director_python()
+    if target is None:
+        return {"path": None, "exists": False}
+    try:
+        exists = target.is_file()
+    except OSError:
+        exists = False
+    return {"path": str(target), "exists": exists}
 
 
 def check_models(present_dir: Path | None = None) -> dict[str, Any]:
@@ -151,6 +181,7 @@ def probe() -> dict[str, Any]:
         if model_facts["checks"]
         else False
     )
+    director = check_director_python()
     return {
         "python": sys.version.split()[0],
         "ffmpeg": shutil.which("ffmpeg"),
@@ -162,6 +193,8 @@ def probe() -> dict[str, Any]:
         "disk_free_gib": _disk_free_gib(Path("/")),
         "models": model_facts,
         "models_ok": models_ok,
+        "director_python": director["path"],
+        "director_python_exists": director["exists"],
     }
 
 

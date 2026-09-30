@@ -318,8 +318,15 @@ class Supervisor:
             "voyage.workers.director",
             run_dir,
             self._logs / "director-worker.log",
-            init_payload={"models_dir": config.video.models_dir},
+            init_payload={
+                "models_dir": config.video.models_dir,
+                "device": config.director.device,
+            },
             timeout=config.voyage.rpc_timeout_seconds,
+            # Unified image: the director runs in its own CUDA venv so the
+            # Qwen decider serves from the second GPU; unset (slim image,
+            # tests) falls back to the supervisor interpreter.
+            executable=os.environ.get("VOYAGE_DIRECTOR_PYTHON"),
         )
         self._workers_running = False
         self._stop_flag = False
@@ -855,6 +862,7 @@ class Supervisor:
                 "style": style_spec.prompt,
                 "backend": config.director.backend,
                 "model_id": config.director.model_id,
+                "device": config.director.device,
                 "temperature": config.director.temperature,
                 "max_new_tokens": config.director.max_new_tokens,
                 "enable_thinking": config.director.enable_thinking,

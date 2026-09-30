@@ -24,8 +24,7 @@ No `pip install` on the host, ever.
 
 ```bash
 ./scripts/build.sh          # slim CPU image (supervisor + fake backends)
-./scripts/build-video.sh    # CUDA image: torch + LongLive + ACE-Step
-./scripts/build-director.sh # CPU image: Qwen3-8B director + VLM inspector
+./scripts/build-video.sh    # CUDA image: torch + LongLive + ACE-Step + director venv (Qwen decider on cuda:1)
 ./scripts/gates.sh          # ruff + format-check + mypy strict + pytest
 ```
 

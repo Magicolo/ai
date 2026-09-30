@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from voyage import doctor
-from voyage.doctor import check_models, probe
+from voyage.doctor import check_director_python, check_models, director_python, probe
 
 EXPECTED_KEYS = {
     "python",
@@ -29,6 +29,8 @@ EXPECTED_KEYS = {
     "disk_free_gib",
     "models",
     "models_ok",
+    "director_python",
+    "director_python_exists",
 }
 
 
@@ -109,3 +111,31 @@ def test_check_models_missing_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert summary["exists"] is False
     assert summary["manifest"] is False
     assert all(check["ok"] is False for check in summary["checks"].values())
+
+
+def test_director_python_unset_yields_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env var (slim image / host) → None path, exists False, never raises."""
+    monkeypatch.delenv(doctor.DIRECTOR_PYTHON_ENVIRONMENT_VARIABLE, raising=False)
+    assert director_python() is None
+    summary = check_director_python()
+    assert summary == {"path": None, "exists": False}
+    facts = probe()
+    assert facts["director_python"] is None
+    assert facts["director_python_exists"] is False
+
+
+def test_director_python_present_reports_existence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Set env var → path reported; exists tracks the filesystem."""
+    interpreter = tmp_path / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv(doctor.DIRECTOR_PYTHON_ENVIRONMENT_VARIABLE, str(interpreter))
+    assert director_python() == interpreter
+    assert check_director_python()["exists"] is True
+    facts = probe()
+    assert facts["director_python"] == str(interpreter)
+    assert facts["director_python_exists"] is True
+    interpreter.unlink()
+    assert check_director_python()["exists"] is False

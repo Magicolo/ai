@@ -45,6 +45,7 @@ def build_manifest(
             "director": {
                 "backend": config.director.backend,
                 "model_id": config.director.model_id,
+                "device": config.director.device,
             },
             "embedding": {"backend": "token-set-fallback"},
         },

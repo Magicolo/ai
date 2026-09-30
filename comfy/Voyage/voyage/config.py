@@ -429,6 +429,11 @@ def parse_min_resolution(raw: str) -> tuple[int, int]:
 class DirectorConfig(BaseModel):
     backend: str = "qwen"
     model_id: str = "Qwen/Qwen3-8B"
+    # Decider placement: the unified worker image runs the Qwen decider on
+    # cuda:1 (second GPU) via a 4-bit AWQ model; "cpu" keeps the legacy bf16
+    # path (explicit opt-out for single-GPU / CI boxes). The worker falls
+    # back to CPU with a loud warning when the device is absent.
+    device: str = "cuda:1"
     temperature: float = 0.7
     # Qwen worker: non-thinking mode (no <think> parsing), JSON-only output.
     enable_thinking: bool = False
@@ -437,6 +442,18 @@ class DirectorConfig(BaseModel):
     # VLM inspector (Phase 5): Qwen3.5-9B lives in the director image
     # (transformers 5.x); a local path works for E2E (/models/Qwen3.5-9B).
     inspector_model_id: str = "Qwen/Qwen3.5-9B"
+
+    @field_validator("device")
+    @classmethod
+    def _placement(cls, value: str) -> str:
+        # Fail fast at the CLI/config layer: without this, garbage survives
+        # into TOML, ensures the AWQ weights, then dies deep in the worker.
+        # Mirrors workers/director._normalize_device across the boundary —
+        # the supervisor package must not import the worker (GPU ban), so
+        # the one-line predicate is deliberately duplicated, not shared.
+        if value != "cpu" and not value.startswith("cuda"):
+            raise ValueError(f"director device must be 'cpu' or 'cuda[:N]' (got {value!r})")
+        return value
 
 
 class VoyageConfig(BaseModel):
@@ -593,6 +610,7 @@ def default_config_toml(
     seed: int,
     video_backend: VideoBackendName = "ltxv",
     director_backend: str = "qwen",
+    director_device: str = "cuda:1",
 ) -> str:
     preset = _video_preset(video_backend)
     backend = str(preset.get("backend", video_backend))
@@ -667,6 +685,7 @@ min_height = 720
 [director]
 backend = "{director_backend}"
 model_id = "Qwen/Qwen3-8B"
+device = "{director_device}"
 temperature = 0.7
 enable_thinking = false
 max_new_tokens = 1024
@@ -719,6 +738,7 @@ def resolve_config(
     backend: VideoBackendName | None | UnsetType = Unset,
     draft: bool = False,
     director: str | None | UnsetType = Unset,
+    director_device: str | None | UnsetType = Unset,
     blocks: int | None | UnsetType = Unset,
     take_seconds: float | None | UnsetType = Unset,
     quantization: str | None | UnsetType = Unset,
@@ -770,6 +790,10 @@ def resolve_config(
         audio = AudioConfig(**{**audio.model_dump(), "take_seconds": profile.take_seconds})
     if is_provided(director):
         director_config = DirectorConfig(**{**director_config.model_dump(), "backend": director})
+    if is_provided(director_device):
+        director_config = DirectorConfig(
+            **{**director_config.model_dump(), "device": director_device}
+        )
     if is_provided(blocks):
         video = VideoConfig(**{**video.model_dump(), "blocks_per_segment": blocks})
     if is_provided(quantization):
@@ -817,6 +841,7 @@ def apply_draft_overrides(
     *,
     draft: bool = False,
     director: str | None | UnsetType = Unset,
+    director_device: str | None | UnsetType = Unset,
     blocks: int | None | UnsetType = Unset,
     take_seconds: float | None | UnsetType = Unset,
     quantization: str | None | UnsetType = Unset,
@@ -837,6 +862,7 @@ def apply_draft_overrides(
         config,
         draft=draft,
         director=director,
+        director_device=director_device,
         blocks=blocks,
         take_seconds=take_seconds,
         quantization=quantization,
