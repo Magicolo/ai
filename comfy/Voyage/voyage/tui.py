@@ -21,8 +21,8 @@ description in the side help panel (stacked below the form on narrow
 terminals). Every change re-validates per field: invalid widgets get a
 red-tinted background and the panel shows the message. The Style editor takes
 focus on mount so typing lands immediately. ``tui_state`` persistence /
-GPU-warning helpers are consumed defensively via ``getattr`` so the app
-mounts and generates either way. Quit while a run is active arms a
+GPU-warning helpers are imported directly (single source with the
+state layer). Quit while a run is active arms a
 two-press confirm instead of exiting at once. Keyboard alone drives the
 whole flow: ctrl+g generates, ctrl+x stops from the run view, ``b``
 goes back, ctrl+q quits (ctrl+s is deliberately unbound — it is
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import io
 import sys
 import time
@@ -67,7 +68,6 @@ from textual.widgets import (
     TextArea,
 )
 
-from voyage import tui_state as tui_state_module
 from voyage.console import SegmentProgress
 from voyage.tui_state import (
     BACKENDS,
@@ -76,8 +76,11 @@ from voyage.tui_state import (
     QUANTIZATIONS,
     GenerateFormState,
     field_errors,
+    gpu_warning,
+    load_last_settings,
     plan_counts,
     plan_summary,
+    save_last_settings,
     to_generate_namespace,
 )
 
@@ -159,9 +162,7 @@ def run_tui() -> int:
             file=sys.stderr,
         )
         return 2
-    try:
-        import textual  # noqa: F401
-    except ImportError:
+    if importlib.util.find_spec("textual") is None:
         print(
             "the voyage TUI needs the 'textual' package (pip install \"textual>=8.0\").",
             file=sys.stderr,
@@ -171,18 +172,14 @@ def run_tui() -> int:
             file=sys.stderr,
         )
         return 2
-    del textual
     VoyageApp().run()
     return 0
 
 
 def _load_initial_state() -> GenerateFormState:
-    """Best-effort restore of the last settings (Stream A may not exist yet)."""
-    loader = getattr(tui_state_module, "load_last_settings", None)
-    if not callable(loader):
-        return GenerateFormState()
+    """Best-effort restore of the last settings."""
     try:
-        loaded = loader()
+        loaded = load_last_settings()
     except Exception:
         return GenerateFormState()
     if not isinstance(loaded, GenerateFormState):
@@ -198,12 +195,9 @@ def _load_initial_state() -> GenerateFormState:
 
 
 def _backend_gpu_warning(backend: str) -> str:
-    """Per-backend GPU hint, or "" when Stream A has not landed / no warning."""
-    reporter = getattr(tui_state_module, "gpu_warning", None)
-    if not callable(reporter):
-        return ""
+    """Per-backend GPU hint, or "" when there is no warning."""
     try:
-        warning = reporter(backend)
+        warning = gpu_warning(backend)
     except Exception:
         return ""
     return warning if isinstance(warning, str) else ""
@@ -211,11 +205,8 @@ def _backend_gpu_warning(backend: str) -> str:
 
 def _save_last_settings(state: GenerateFormState) -> None:
     """Best-effort persist of the validated form (never raises)."""
-    saver = getattr(tui_state_module, "save_last_settings", None)
-    if not callable(saver):
-        return
     try:
-        saver(state)
+        save_last_settings(state)
     except Exception:
         pass
 

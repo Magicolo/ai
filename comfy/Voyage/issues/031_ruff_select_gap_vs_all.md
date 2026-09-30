@@ -171,3 +171,45 @@ enforcing.
   models_ensure, director ×2, tests ×2) clear their sites — the
   `cli_observe.py:756` handoff is this track's only owned site for that
   future pass.
+
+## Progress log (2026-09-30, this pass — PERF → N → PT retry)
+
+- `git diff --name-only` at pass start: clean tree; at pass end a
+  concurrent batch-9 + uncommitted foreign edits landed (incl. a 75-line
+  foreign `supervisor.py` hunk — never touched here). Adoption needs
+  EVERY site, so foreign/dirty holders block regardless of start state.
+- Re-verified live in-container (`voyage:latest`, CPU-only):
+  `ruff check --select PERF --output-format concise` → **12 hits**
+  (7 PERF401 + 5 PERF203): `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748`, `voyage/cli_observe.py:756` (PERF203 —
+  intentional per-file probe-error report, restructuring changes
+  fail-loud vs per-file semantics),
+  `voyage/cli_validate.py:223,229` (conditional appends, not clean
+  comprehension targets), `voyage/concepts.py:437`,
+  `voyage/models_ensure.py:227`, `voyage/supervisor.py:613,685`
+  (other group — record, do not touch),
+  `voyage/workers/director.py:390,517`,
+  `voyage/workers/video_longlive.py:389`.
+- `ruff check --select N --statistics` → **60** (N806 38 + N801 16 +
+  N802 5 + N818 1): 38 N806 are `VoyageApp` locals across the Pilot
+  suites (mass churn in load-flaky files), N801/N802 are intentional
+  test-double names (`_014_FakeTensor`, `Generator`, `Event`), N818
+  `ProposalRejected` is a public-exception rename (API break, other
+  groups). `ruff check --select PT --statistics` → **111** (PT011 63 +
+  PT018 45 + PT017/PT013/PT012 1 each — test-style track owns it).
+- No family is green in isolation; PERF is additionally hard-blocked by
+  the 2 `supervisor.py` sites (banned file). No `select` change, no
+  per-file-ignores added (ignoring supervisor to adopt PERF would be a
+  scope artifact of the same kind this issue tracks).
+- `pyproject.toml:70` select confirmed unchanged (16 families).
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: DEFERRED (record-only) — PERF 12, N 60, PT 111 as-read above.
+- Files changed: none for 031. Gate evidence: `select` untouched
+  (`ruff check .` whole-tree green).
+  DESIGN proposals: none. Residuals: full adoption list (ANN, D,
+  PLR2004-full, PT, S, PERF, N) still dark; PERF unblocks when the
+  supervisor sites + worker/test sites clear under their owners; N
+  unblocks with a test-double naming pass + a `ProposalRejected`
+  rename decision; PT rides the test-structure track.

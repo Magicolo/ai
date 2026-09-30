@@ -11,8 +11,8 @@ name below for backward compatibility.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
+from voyage.atomic import JsonValue
 from voyage.hashing import sha256_file
 
 LONGLIVE_COMMIT = "6b36d20ec6f7958d29d11a704dfa64611a9f2572"
@@ -486,7 +486,7 @@ _ACE_CHECKPOINTS_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}"
 _ACE_LM_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}/{ACE_LM_SUBDIR}"
 
 
-def _record_longlive2(models_dir: Path) -> dict[str, Any]:
+def _record_longlive2(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the LongLive 2.0 stack (fetch part lives in the table)."""
     wan_dir = models_dir / "wan_models" / WAN_SUBDIR
     generator_path = models_dir / "longlive2" / LONGLIVE_HF_FILE
@@ -506,7 +506,7 @@ def _record_longlive2(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_director(models_dir: Path) -> dict[str, Any]:
+def _record_director(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Phase 3 director stack."""
     qwen_dir = models_dir / QWEN_SUBDIR
     qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
@@ -529,7 +529,7 @@ def _record_director(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_inspector(models_dir: Path) -> dict[str, Any]:
+def _record_inspector(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Phase 5 VLM inspector."""
     target_dir = models_dir / QWEN35_SUBDIR
     shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
@@ -544,7 +544,7 @@ def _record_inspector(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_audio(models_dir: Path) -> dict[str, Any]:
+def _record_audio(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Phase 4 music stack."""
     checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
     turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
@@ -563,7 +563,7 @@ def _record_audio(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_ltxv(models_dir: Path) -> dict[str, Any]:
+def _record_ltxv(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Phase 7 LTXV stack."""
     ltxv_dir = models_dir / LTXV_SUBDIR
     dit_path = ltxv_dir / LTXV_DIT_FILE
@@ -586,7 +586,7 @@ def _record_ltxv(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_causvid(models_dir: Path) -> dict[str, Any]:
+def _record_causvid(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Stream D CausVid stack."""
     causvid_dir = models_dir / CAUSVID_SUBDIR
     checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
@@ -608,7 +608,7 @@ def _record_causvid(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_sfx(models_dir: Path) -> dict[str, Any]:
+def _record_sfx(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the SFX effects stack."""
     sfx_dir = models_dir / MMAUDIO_SUBDIR
     large_weights = sfx_dir / "weights" / "mmaudio_large_44k_v2.pth"
@@ -648,7 +648,7 @@ def _describe_director(models_dir: Path) -> str:
     )
 
 
-def _record_director_awq(models_dir: Path) -> dict[str, Any]:
+def _record_director_awq(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the GPU decider stack (4B-AWQ + MiniLM)."""
     qwen_dir = models_dir / QWEN4B_AWQ_SUBDIR
     weights = qwen_dir / "model.safetensors"
@@ -718,7 +718,7 @@ def _describe_causvid(models_dir: Path) -> str:
     return f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
 
 
-def _record_film(models_dir: Path) -> dict[str, Any]:
+def _record_film(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the FILM interpolation weights (Track C)."""
     weights_path = models_dir / FILM_REPO_PATH
     return {
@@ -735,7 +735,7 @@ def _record_film(models_dir: Path) -> dict[str, Any]:
     }
 
 
-def _record_realesrgan(models_dir: Path) -> dict[str, Any]:
+def _record_realesrgan(models_dir: Path) -> dict[str, JsonValue]:
     """Manifest value for the Real-ESRGAN anime upscaler weights (Track C)."""
     weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
     relative_path = f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}"

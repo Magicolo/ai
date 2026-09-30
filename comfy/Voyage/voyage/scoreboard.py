@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
+from voyage.atomic import JsonValue
 from voyage.logrotate import iter_metric_files
 from voyage.segment_manifest import load_audio_state, load_metrics, load_transition
 
@@ -38,13 +39,15 @@ _DELTA_ROUND_DIGITS = 3
 """Decimal places for per-segment metric deltas (enough to see drift)."""
 
 
-def _finite_float(value: Any) -> float | None:
+def _finite_float(value: JsonValue) -> float | None:
     """Numeric cell as float, or None when the cell is absent/unusable.
 
-    Why the guard: one hand-edited metrics.json with a string stage or
-    metric value used to abort the whole scoreboard (062/027). Bool is
-    excluded (it subclasses int); non-finite floats are dropped like the
-    hardened `_slowest_stage` sibling in cli.py.
+    `JsonValue` (issue 035), not bare `Any`: scoreboard cells come from
+    JSON-parsed metrics, so every input is JSON-shaped by construction —
+    the guard below still rejects non-numeric members (strings, bools,
+    nulls, containers, non-finite floats) instead of trusting the shape.
+    Bool is excluded (it subclasses int); non-finite floats are dropped
+    like the hardened `_slowest_stage` sibling in cli.py.
     """
     if isinstance(value, bool):
         return None

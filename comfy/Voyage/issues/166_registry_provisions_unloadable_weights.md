@@ -82,3 +82,81 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
 - Test evidence: live reads 2026-09-30 (cites above); no test added — the contract test (fix candidate 3: every `film`/`realesrgan-anime` FileSpec round-trips through its loader) must fail until the port lands, and a knowingly-failing test is not a gate asset. Existing `test_augment_weight_loading` pins the current `ModelCompatibilityError` behavior.
 - DESIGN proposal (quoted text only, for the DESIGN owner — augment track): "Until the full upstream FILM port + SRVGG anime-6B loader land, `augment_enabled` should default opt-in-gated (or ensure gated on loader readiness) so default CUDA runs stop fetching weights the spike loaders structurally reject; the weight↔loader round-trip contract test pins the port's completion."
 - Residuals (for the registry/augment owners, precise): (1) land the FILM port + SRVGG loader, re-verify both pinned weights load; (2) `voyage/models_ensure.py:83,105-113`: flip/gate the `augment_enabled` default meanwhile; (3) add the FileSpec round-trip contract test with the port.
+
+## Progress log (2026-09-30, this pass — IMPLEMENTED, ESRGAN leg)
+
+- TDD red first (in-container `voyage-video:latest`, CPU-only, models
+  volume mounted ro, no host pip): new
+  `tests/test_augment_contract_166.py` written before the loader — the
+  provisioned ESRGAN leg failed as documented (`_load_rrdb_net` on the
+  real `RealESRGAN_x4plus_anime_6B.pth` → `ModelCompatibilityError`
+  "needs its own loader"), while the mapping + stub-rejection legs
+  passed. `voyage:latest` is slim (no torch/safetensors — verified
+  `find_spec` None for both), so torch legs can only execute in
+  `voyage-video` (torch 2.8.0+cu128, CUDA unavailable → CPU); the
+  committed provisioned legs skip loudly there-absent instead of failing.
+- Weight forensics (same container, read-only): the pinned pth unwraps
+  one level (`params_ema` → 192 tensors) into an upstream RRDB layout —
+  `conv_first`, `body.0-5` × (`rdb1/2/3` × `conv1-5`, 32ch in / 64ch
+  out, growth 32), `conv_body`, `conv_up1/up2/hr`, `conv_last` — i.e.
+  xinntao `RRDBNet(num_feat=64, num_block=6, num_grow_ch=32)` naming,
+  NOT the vendored classic (`conv_up_first/...`, `body.N.blocks.M`).
+  Activation math (LeakyReLU 0.2, 0.2 residual scaling, two x2 nearest
+  stages) is identical either way. FILM probed too: 82 safetensors keys
+  under `extract`/`fuse`/`predict_flow` — a full upstream port, out of
+  scope here.
+- Green after: `voyage/workers/augment_worker.py` gained
+  `_build_upstream_rrdb_net(num_blocks)` (upstream names, depth measured
+  from the state dict), `_unwrap_esrgan_state` (single-key
+  `params_ema`/`params` strip, flat states pass through), and
+  `_upstream_block_count` (contiguous `body.0..N` + upconv-head check);
+  `_load_rrdb_net` builds upstream when detected, vendored classic
+  otherwise (byte-identical fallback — `_build_rrdb_net()` signature
+  untouched), `strict=True` both ways; module docstring + RRDBNet bullet
+  updated (ESRGAN leg DONE, FILM stand-in unchanged). New error names
+  both layouts instead of the stale "needs its own loader".
+- Gates (in-container): `ruff check` + `ruff format --check` + `mypy`
+  strict clean on `voyage/workers/augment_worker.py` +
+  `tests/test_augment_contract_166.py`; `voyage-video` driver green
+  (strict load → `_UpstreamRRDBNet`, block count 6, synthetic
+  `upscale_frames` scale 2 on 8×8 CPU → `(3, 16, 16)` finite in
+  [0.12, 0.80]; FILM still `ModelCompatibilityError` with the port
+  noted); slim `voyage:latest` pytest green:
+  `test_augment_contract_166 + weight_loading + augment_models +
+  rhythm + beat_ties` = 52 passed, 2 skipped (provisioned legs skip by
+  design — proven in `voyage-video`), neighbors (`runner + config +
+  plan + preset_fanout + registry_pins + worker_perf_rank2`) = 145
+  passed, 4 skipped. One test-shape fix on the way: bicubic downscale
+  (scale 2 of the native x4 pass) can ring ±0.05 past the [0, 1] clamp,
+  so the contract bounds overshoot (`[-0.1, 1.1]`) instead of the exact
+  range (native scale-4 clamp behavior untouched).
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: ESRGAN leg IMPLEMENTED (the weight IS provisionable —
+  `~/.cache/voyage-models/realesrgan/RealESRGAN_x4plus_anime_6B.pth`,
+  17,938,799 bytes — and now loads strict end to end); FILM leg remains
+  an explicit remainder (see contract below). Files changed:
+  `voyage/workers/augment_worker.py` (loader only, no registry/ensure
+  touch), `tests/test_augment_contract_166.py` (new, 5 tests), this
+  issue file. Test evidence: TDD red→green above; per-file gates green.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§56-57, to
+  replace the "not executable end-to-end" note): "The Real-ESRGAN
+  anime-6B weight loads strict into the upstream-named RRDB builder at
+  its measured depth (6 body blocks) and upscales end to end; the
+  augmentation floor is executable for upscale. FILM stays fail-loud
+  until the full upstream port lands (contract below) — default CUDA
+  runs still fetch a FILM weight no loader accepts."
+- Residuals (explicit remainder — the FILM port contract): port the
+  upstream frame-interpolation net that owns the pinned
+  `film_net_fp16.safetensors` (82 keys: `extract`/`fuse`/`predict_flow`
+  prefixes, fp16) so that `_load_film_net` decodes via safetensors and
+  `load_state_dict(strict=True)` succeeds; then flip
+  `test_film_provisioned_weights_fail_loud_with_port_note` from the
+  `ModelCompatibilityError`-with-"port" assertion to a strict-load +
+  synthetic `interpolate_pair` round-trip. The port must keep: no Comfy
+  imports (worker images carry no ComfyUI tree), fp16-on-CUDA /
+  fp32-elsewhere, the OOM-halving call shape `(B, 2, C, H, W)` +
+  `moment`, `FILM_MIN_BYTES` pre-check, and torch-free
+  `NotImplementedError` when weights are absent. `models_ensure.py`
+  default-gating (candidate 2) stays with the registry owner.

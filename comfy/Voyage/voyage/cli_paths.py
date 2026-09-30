@@ -82,3 +82,46 @@ def _effective_run_id(args: argparse.Namespace) -> str:
         return named.strip()
     fallback = getattr(args, "run_id", "")
     return fallback.strip() if isinstance(fallback, str) else str(fallback)
+
+
+def output_root() -> Path:
+    """Project output root: `./output/` resolved against the cwd (024).
+
+    The TUI hardcodes `output/<name>` and `generate` defaults to
+    `output/<run-id>` — both relative to wherever the user invoked the
+    command — so the containment root tracks the cwd, not the package.
+    """
+    return (Path.cwd() / "output").resolve()
+
+
+def is_outside_output_dir(path: Path | str) -> bool:
+    """Whether a write target escapes the project output tree (024).
+
+    Pure predicate over the resolved path (`Path.relative_to`): True
+    when the target is not under `./output/`. Absolute outside-tree
+    paths stay legal (documented `/tmp` flows, tmp_path-based suites),
+    so callers warn — never reject — on True.
+    """
+    try:
+        Path(path).resolve().relative_to(output_root())
+    except ValueError:
+        return True
+    return False
+
+
+def warn_if_outside_output_dir(path: Path | str, *, flag: str = "--output") -> bool:
+    """Warn on stderr when a write target escapes `./output/` (024).
+
+    Warn-only by design: rejecting would break the documented `/tmp`
+    flows and every tmp_path-based test, which init outside the cwd
+    tree without `--force`. Returns True when a warning was printed so
+    tests can assert the guard fired without parsing stderr.
+    """
+    if is_outside_output_dir(path):
+        print(
+            f"warning: {flag} {path} is outside {output_root()} "
+            "(writes escape the project output tree)",
+            file=sys.stderr,
+        )
+        return True
+    return False

@@ -112,3 +112,59 @@ grep -n "resolve()" voyage/cli.py   # every unbounded sink
   (`cli_generate.py:257-259`, `cli_finalize.py:125`, sfx `Path.resolve()`
   sites) + traversal tests mirroring the `--run-id` tests
   (`tests/test_cli_hardening.py` pattern, 45 tests green as base).
+
+## Progress log (2026-09-30, containment pass)
+
+- Premise re-verified live before touching code (in-container
+  `voyage:latest`, CPU-only): `resolve_run_dir('/tmp/evil-run')` →
+  `/tmp/evil-run`, `resolve_run_dir('../../tmp/evil')` → `/tmp/evil`;
+  source is bare `Path(value).resolve()` (`cli_paths.py:21`); grep for
+  `relative_to|outside.*output` across all four verb modules → zero
+  hits. Verdict at read time: OPEN.
+- Concurrency check: `git status` clean across `voyage/`/`tests/`
+  (only untracked `../../tango/Tango` outside the tree) — no concurrent
+  hunks in the write path, so the fix is disjoint and safe to land in
+  own files (`cli_paths`/`cli_run_ops`/`cli_generate`/`cli_finalize` +
+  new tests).
+- TDD red: new `tests/test_output_containment.py` (6 tests) failed at
+  collection (`ImportError: cannot import name
+  'is_outside_output_dir'`) before the fix; green after.
+- Policy decision (warn-only — recorded so it is not "strengthened"
+  later without context): rejecting outside-`output/` would break the
+  documented `/tmp/vdemo` flows (cheat sheet) and 40+ tmp_path-based
+  tests that init outside the cwd tree without `--force`. An
+  error-with-`--force`-escape was rejected: `--force` currently means
+  "allow non-empty dir", and redefining it is a breaking contract
+  change for the CLI owner with a migration, not a compatible
+  hardening. The warning is the typo guard (a bare `--output /` can no
+  longer scatter writes silently with exit 0).
+- `--video` (sfx input) deliberately not warned: it is read-only; the
+  derived/default `--output` beside it is what gets warned.
+
+## Resolution (2026-09-30, containment pass)
+
+- Verdict: fixed (warn-only containment). Files changed:
+  `voyage/cli_paths.py` (+`output_root`/`is_outside_output_dir`/`warn_if_outside_output_dir`),
+  `voyage/cli_run_ops.py` (`cmd_init` warns on `--output`),
+  `voyage/cli_generate.py` (`--final-video` warns; run dir warns via
+  the `cmd_init` funnel), `voyage/cli_finalize.py` (finalize
+  `--output` + sfx explicit `--output` warn), plus new
+  `tests/test_output_containment.py` (6 tests).
+- Test evidence: new 6 + `test_cli_hardening` 45 = 51 passed, no
+  regressions; per-file `ruff check` + `format --check` + `mypy`
+  green on all 5 files (the new test module is also mypy-strict
+  clean, ready for the 033 scope list); `mypy voyage` 63 files clean;
+  full suite 1702 passed + 8 skipped with only foreign
+  exclusions/failures (untracked `test_augment_contract_166.py`
+  format violation, untracked `test_supervisor_proposal_helpers.py`
+  collection error against missing `voyage.supervisor_proposal`, 3
+  `test_worker_perf_rank2` load-flakes green in isolation with zero
+  CLI refs — none touched, per §9).
+- DESIGN proposals (quoted, for the owner — DESIGN.md untouched):
+  "Unbounded `--output`/`--final-video` paths warn on stderr when the
+  resolved target escapes `./output/`; absolute outside-tree paths
+  remain legal. `--run-id` traversal stays a hard error (exit 2)."
+- Residuals: (1) error-semantics upgrade (reject outside `output/`
+  unless `--force`) belongs to the CLI owner with a test migration
+  (every tmp_path init would need `--force`); (2) new test module for
+  the 033 mypy-scope list once committed.

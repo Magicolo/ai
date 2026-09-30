@@ -83,3 +83,50 @@ grep -rn "LEGACY_MIGRATION\|hard-splice\|fps=0\|tomli" voyage/ tests/ pyproject.
   comments + override block when the py310 floor rises (fallback stays).
   Until then: ban new `legacy_path` threads + new `overlap_fraction<=0`
   producers (owner-enforced).
+
+## Progress log (2026-09-30, re-verification pass)
+
+- All 6 expiry conditions re-checked live (in-container `voyage:latest`,
+  CPU-only); every deletion site lives outside this pass's own files,
+  so even a met condition could only be recorded, never implemented:
+  1. concepts `LEGACY_MIGRATION_REMOVE_AFTER = "2026-12-31"` still
+     present (`concepts.py:34`), `_migrate_legacy` still threaded
+     (`:162`, call `:146`) — 3 months out, NOT met;
+  2. tui_state run_id→name migration prose + fallback still live
+     (`tui_state.py:577-583`) — install age-out, NOT met (no authority
+     to declare aged-out);
+  3. supervisor flat deterministic-backend payload compat still live
+     (`supervisor.py:1292-1300` region) — deterministic is still the
+     explicit CPU/offline opt-out, NOT met;
+  4. media `JointStyle hard-splice` + `effective_overlap_fraction` +
+     `finalize_run` map still live
+     (`media.py:1011,1160-1162,1247`), `blend` default — needs product
+     sign-off, NOT met (cannot self-sign);
+  5. models `RunState.fps` legacy-0 tolerance still live
+     (`models.py:299-305`) — spot scan `grep -rl '"fps": 0' output/`
+     → clean (boba-era runs), but the tighten needs `models.py`
+     ownership (outside own files), NOT actionable here;
+  6. tomli ignores still present (`config.py:20`,
+     `tui_state.py:31`, `pyproject.toml:132-138` override) — fallback
+     must stay: the video worker is still py3.10
+     (`worker/Dockerfile.video:21,34,76`; pyproject py310 target +
+     comment), so the floor has NOT risen; deletion also needs
+     `pyproject.toml` + `config.py`/`tui_state.py` ownership (all
+     outside own files).
+- Nothing deleted, nothing extended — the conditions, not neglect,
+  decide.
+
+## Resolution (2026-09-30, re-verification pass)
+
+- Verdict: accepted-residual — zero of six expiry conditions met;
+  deleting nothing today IS the correct action. Files changed: none
+  (this appendix only). DESIGN proposals: none.
+- Residuals (exact per-item handoff, unchanged): (1) concepts owner —
+  calendar-delete after 2026-12-31; (2) tui owner — delete once
+  pre-merge installs age out; (3) supervisor/director owner — goes with
+  `deterministic` if ever retired; (4) product + media owner — sign-off
+  then remove branch + map + fn + test pins in one commit; (5) models
+  owner — stored-run `fps=0` scan then `Field(24, ge=1)`; (6) toolchain
+  owner — delete 2 comments + override block when the py310 floor rises
+  (fallback stays). Until then: ban new `legacy_path` threads + new
+  `overlap_fraction<=0` producers (owner-enforced).

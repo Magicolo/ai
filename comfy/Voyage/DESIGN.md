@@ -3062,6 +3062,7 @@ Capture stderr and include the relevant last lines in `MediaError`.
 > As-built (batch-8-2026-09-30, issue 152): finalize audio joins are single-graph — each stem/window is read once through one chained adelay+amix filter invocation (O(N) I/O, one spawn), never re-encoded N−1 times through a left fold; soak trends join wall-clock vs timeline length to prove the scaling (residual: SFX-pass owner).
 > As-built (batch-8-2026-09-30, issue 188): numbering gaps are the fourth skippable leg — strict raises, lenient warns (`finalize: skipping segment numbering gap: ...`) and ships the sorted survivors.
 > As-built (batch-8-2026-09-30, issue 190): `finalize_run` knob precedence is uniform — an explicit scalar wins over `options` for every parameter and `None` means use `options`; an explicit `overlap_fraction=0` behaves as a hard splice whichever path built the settings.
+> As-built (batch-10-2026-09-30, issue 166): the Real-ESRGAN anime-6B weight loads strict into the upstream-named RRDB builder at its measured depth (6 body blocks) and upscales end to end; the augmentation floor is executable for upscale. FILM stays fail-loud until the full upstream port lands — default CUDA runs still fetch a FILM weight no loader accepts.
 
 The final output is produced only by:
 
@@ -3136,6 +3137,7 @@ The finalizer must report the exact transform it applied.
 > As-built (batch-8-2026-09-30, Group A issue 112): `parse_duration` rejects mixed signs, bare trailing numbers after h/m (with a did-you-mean hint), and interior whitespace — one grammar shared by CLI and TUI.
 > As-built (batch-8-2026-09-30, Group A issues 116/148): `_effective_run_id` strips the winning value and `_run_dir_for` defers to it, so check, use, and TUI agree (`" boba "` lands in `output/boba/` on both surfaces); explicit `--output` still wins.
 > As-built (batch-8-2026-09-30, Group A issues 143/185/149): `cmd_init` validates output presence, run-id, non-blank style, int seed, and backend registry membership — all before the first `mkdir`, each an exit-2 error; `generate --help` names the `output/<name>` default.
+> As-built (batch-10-2026-09-30, issue 024): unbounded `--output`/`--final-video` paths warn on stderr when the resolved target escapes `./output/`; absolute outside-tree paths remain legal. `--run-id` traversal stays a hard error (exit 2).
 
 The first stable command set should be:
 
@@ -3787,6 +3789,7 @@ This prevents an LLM from directly mutating the persistent run state.
 > `implausible` `MediaError` on violation, and every non-empty string
 > `recovery_path` is re-resolved through `_checked_tape_path` — at both the
 > live-report gate and the orphan-adoption path.
+> As-built (batch-10-2026-09-30, issue 081): director-proposal pure helpers (`previous_transition_captions`, `effective_music_caption`, `effective_video_stages`, `_token_counts`) now live in `voyage/supervisor_proposal.py` with `voyage/supervisor.py` as the re-export facade; future extractions follow the same move-verbatim + re-export + agreement-test pattern, one group per pass.
 
 ---
 
@@ -4258,6 +4261,7 @@ Use modern Python.
 
 > As-built (batch-8-2026-09-30, issue 118): worker/RPC boundaries validate wire types exactly (`checked_request` discipline — presence plus exact type, bools never satisfy int) and raise `TypeError` before any coercion; `None`, numeric strings, truncated floats, and `"false"` strings never execute with invented values.
 > As-built (batch-8-2026-09-30, issue 119): contract models validate value domains at parse time, not just ordering — metric bands and style/audio/transition scalars are unit-bounded where the inspector compares 0..1 metrics against them, so one bad director decision fails loudly at validation instead of silently biasing every segment.
+> As-built (batch-10-2026-09-30, issue 035): partial `JsonValue` migration — scoreboard `_finite_float`, all 10 registry builders, `record_builder`, `_merge_manifest_record`, `download_model` + wrappers, and `future_to_entry` are now `JsonValue`-valued; `call()` + supervisor `dict[str, object]` sites, `scoreboard_rows`, `snapshot_kwargs`/`file_kwargs`, and `json.loads` `Any` idioms remain.
 
 Backend-specific code should not leak into supervisor types.
 
@@ -8057,3 +8061,11 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Test folds+slow mark (088/089): wire_contract fold landed (unset+blocks-request→test_wire_contract, clusters remain one per pass) + tui_app slow-mark landed (lock typo→lock track, tail marking→tests track, mypy-scope→scripts, cache guard→gates).
 - Gates.sh wire_contract list fix: test_wire_contract added to the gates.sh test list.
 - Ratchet re-pinned at 144 via helper-call conversion.
+
+## Batch 10 (2026-09-30)
+
+- Resolved: 024 / 086 / 094 / 078-accepted / 087-accepted.
+- Partial: 035 / 036 / 081 / 166.
+- Blocked: 070 / 121.
+- Deferred: 031.
+- 086/121: no inline DESIGN change (086: zero-caller deletes, no contract change; 121: §35 tie-doc stands — see §35 batch-8 as-built, ceil switch blocked on rhythm pins).

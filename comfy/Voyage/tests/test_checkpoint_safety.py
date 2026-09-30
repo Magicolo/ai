@@ -102,7 +102,9 @@ def test_causvid_download_records_checkpoint_sha256(
     checkpoint = tmp_path / model_registry.CAUSVID_SUBDIR / model_registry.CAUSVID_CHECKPOINT_FILE
     expected = hashlib.sha256(b"fake-causvid-snapshot").hexdigest()
     assert checkpoint.exists()
-    assert record["causvid"]["checkpoint_sha256"] == expected
+    causvid_record = record["causvid"]
+    assert isinstance(causvid_record, dict)
+    assert causvid_record["checkpoint_sha256"] == expected
     assert _read_manifest(tmp_path)["causvid"]["checkpoint_sha256"] == expected
 
 

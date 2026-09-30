@@ -85,3 +85,31 @@ n/a (absence-of-control); audit is the repro: the grep above.
   (068/089) resolved in the same lock pass; (2) SBOM + provenance at
   every image build stored alongside release tags. Re-audit with the
   issue's grep; non-zero enforcement hits close this issue.
+
+## Progress log (2026-09-30, re-verification pass)
+
+- Premise re-verified live (in-container audit grep, CPU-only):
+  `require-hashes|hash=sha256|sbom|attest|provenance` across
+  `Dockerfile`, `worker/Dockerfile.video`, `requirements.lock`,
+  `scripts/build*.sh` → only hits are the
+  `worker/Dockerfile.video:46,61` comments naming `--require-hashes`
+  as future work; zero enforcement lines. `Dockerfile:28-30` still
+  bare `pip install -r requirements.lock`; lock regen still `pip
+  freeze` versions-only. The absence-of-control holds verbatim.
+- Tests-scope triage: nothing closable from `tests/` alone — both fix
+  candidates need network (`pip-compile` against the live index) +
+  container/build ownership + the 067 video-image freeze. A test
+  asserting hashes exist would fail by design and prove nothing
+  (theater). No code invented.
+
+## Resolution (2026-09-30, re-verification pass)
+
+- Verdict: accepted-residual (formal, with rationale — not pretended
+  done). Files changed: none (this appendix only). DESIGN proposals:
+  none.
+- Residuals (exact handoff, containers/lock owner): (1)
+  `pip-compile --generate-hashes` → hashed `requirements.lock` +
+  `--require-hashes` installs in `Dockerfile:28-30` + video image once
+  067 freezes; (2) SBOM + provenance at every image build stored
+  alongside release tags. Re-audit with the issue's grep; non-zero
+  enforcement hits close this issue.

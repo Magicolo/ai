@@ -17,7 +17,13 @@ from pydantic import ValidationError
 
 from voyage import paths
 from voyage.cli_core import _augment_overrides, _load_run, get_console
-from voyage.cli_paths import _check_run_id, _effective_run_id, _run_dir_arg, resolve_run_dir
+from voyage.cli_paths import (
+    _check_run_id,
+    _effective_run_id,
+    _run_dir_arg,
+    resolve_run_dir,
+    warn_if_outside_output_dir,
+)
 from voyage.cli_planning import _require_cuda_stack
 from voyage.config import (
     BACKEND_REGISTRY,
@@ -46,6 +52,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("error: --output is required (run directory to create)", file=sys.stderr)
         return 2
     run_dir = resolve_run_dir(output_value)
+    # Containment warning (issue 024): an explicit absolute --output is
+    # legal but a typo (`--output /`) scatters writes with exit 0, so warn
+    # when the resolved dir escapes ./output/. Warn-only: rejecting would
+    # break documented /tmp flows and tmp_path-based suites.
+    warn_if_outside_output_dir(run_dir, flag="--output")
     if run_dir.exists() and any(run_dir.iterdir()) and not getattr(args, "force", False):
         print(f"refusing to init non-empty directory {run_dir} (use --force)", file=sys.stderr)
         return 2

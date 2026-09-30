@@ -265,7 +265,7 @@ def ensure_models(
         console.parallel_downloads([entry.spec for entry, _ in missing]) as tracker,
         ThreadPoolExecutor(max_workers=min(len(missing), _MAX_PARALLEL_DOWNLOADS)) as pool,
     ):
-        future_to_entry: dict[Future[dict[str, Any]], RequiredModel] = {
+        future_to_entry: dict[Future[dict[str, JsonValue]], RequiredModel] = {
             pool.submit(model_registry.download_model, entry.models_dir, entry.spec): entry
             for entry, _ in missing
         }

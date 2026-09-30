@@ -135,3 +135,43 @@ print(q(45.0, 15.0))   # 45.0 exact — unaffected (control case)
   (`take_seconds >> ahead_seconds`) in `voyage/audio/planner.py` at the
   same time. Needs the rhythm-test owner's sign-off — do not land the
   behavior half without the pin half.
+
+## Progress log (2026-09-30, this pass — CHECK)
+
+- Premise re-verified live in-container (`voyage:latest`, CPU-only, no
+  host pip): `q(45,18)=36.0` (tie-down, 9 s short), `q(45,2)=44.0`,
+  `q(45,4)=44.0`, `q(45,15)=45.0` (control); `voyage/audio/beat.py:110`
+  still `round()`; sole production caller still
+  `voyage/audio/planner.py:240` (`rg quantize_take_seconds voyage/` hits
+  only `beat.py:88` def + `planner.py:238,240`).
+- Pins re-verified live (unchanged — rhythm owner has NOT freed them):
+  `tests/test_rhythm.py:66` `(45.0, 2.0, 44.0)` "22.5 segments rounds to
+  22", `:67` `(45.0, 4.0, 44.0)` "11.25 segments rounds to 11",
+  `:68` `(45.0, 5.04, 45.36)`, `:102`
+  `plan.take.duration == pytest.approx(44.0)` plus the `44.0` literal at
+  `:122`; `tests/test_beat_quantize_ties_121.py:32` tie-down `45/18 →
+  36.0`, `:37` tie-up `3.5 → 4`. Recent history shows no freeing commit
+  (`git log` tip `88496a4` batch 8; pins intact since batch 1 `b19a029`).
+- Under ceil the `:66`/`:67` pins become 46.0/48.0 and the `:102`
+  planner pin becomes 46.0; under half-up (`floor(x+0.5)`) they become
+  46.0/44.0 — either way the behavior edit (`voyage/audio/beat.py`,
+  outside own scope: only `planner.py` allowed, and the edit belongs in
+  `beat.py`) must land with cross-owned pin updates in the same commit.
+- No code change (own files only: `audio/beat.py` untouched,
+  `planner.py` needs no edit without the `beat.py` switch). Gate
+  evidence: n/a (no files changed); neighbor suite green in-container
+  (`test_rhythm` + `test_beat_quantize_ties_121` pass as part of the 166
+  run: 52 passed, 2 skipped — see issue 166 log for the full line).
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: blocked (rhythm-owner-blocked, exact pin cites above). Files
+  changed: none (this issue file only). DESIGN proposals: none (Group B
+  §35 proposal stands).
+- Residuals (exact handoff, rhythm/beat owner): unchanged from the
+  tests-only pass — switch `quantize_take_seconds` to `math.ceil` (never
+  plan short) or round-half-up with the tie rule documented, AND update
+  in the same commit `tests/test_rhythm.py:66,67,102` (+ `:122`
+  literal) and `tests/test_beat_quantize_ties_121.py:28-37`, plus the
+  candidate-3 plan-site assertion in `voyage/audio/planner.py`
+  (`_fresh_take`, after `:240`). Needs the rhythm-test owner's sign-off.

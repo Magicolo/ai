@@ -98,3 +98,31 @@ grep -n "RUF100\|BLE\|SIM\|S101\|T201" pyproject.toml
   files (7 docstrings, 4 constant extractions, 2 shim deletions —
   config.py carries both kinds), 9 issue files (this log pattern).
   DESIGN proposals: none.
+
+## Progress log (2026-09-30, re-verification pass)
+
+- Policy text verified present: `## Resolution (ratchet policy,
+  binding until superseded)` above is the record — no code needed.
+- Live re-verification (in-container `voyage:latest`): `[tool.ruff.lint]
+  select` still the 16-family list
+  (`E,F,I,UP,B,A,C4,DTZ,W,BLE,TRY,EM,SIM,RUF100,S101,T201`);
+  `per-file-ignores` block intact; `exclude = ["issues/"]` intact;
+  mypy `strict` + `warn_unused_ignores` + py310 target + tomli /
+  heavy-deps overrides intact.
+- Gates named by fix candidate 4 (`gates.sh` green + `ruff check` +
+  `ruff format --check` clean at current select): `ruff check .` →
+  "All checks passed!"; per-file gates on this pass's touched files
+  green; full `gates.sh` exits red ONLY on foreign in-flight files
+  (untracked `tests/test_augment_contract_166.py` format violation,
+  untracked `tests/test_supervisor_proposal_helpers.py` collection
+  error) + 3 `test_worker_perf_rank2` load-flakes green in isolation
+  — none in toolchain scope, none touched per §9.
+
+## Resolution (2026-09-30, re-verification pass)
+
+- Verdict: closed — the policy text IS the deliverable and it is on
+  record; no code changed. Files changed: none (this appendix only).
+  DESIGN proposals: none.
+- Residuals: none in this issue's scope; the two foreign
+  gate-blockers belong to their owners (augment-contract format,
+  supervisor-proposal migration).

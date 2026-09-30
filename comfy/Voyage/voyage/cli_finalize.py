@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from voyage.cli_core import _augment_overrides, _load_run, get_console
-from voyage.cli_paths import _run_dir_arg
+from voyage.cli_paths import _run_dir_arg, warn_if_outside_output_dir
 from voyage.config import resolve_config
 from voyage.errors import DiskSpaceError, MediaError, StateError
 from voyage.media import finalize_run
@@ -34,6 +34,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         print(f"error: invalid augment override: {exc}", file=sys.stderr)
         return 2
     output = Path(args.output).resolve()
+    # Containment warning (issue 024): warn-only, same policy as init —
+    # absolute outside-tree finals are legal, typos should be loud.
+    warn_if_outside_output_dir(output, flag="--output")
     try:
         finalize_run(
             run_dir,
@@ -119,6 +122,11 @@ def cmd_sfx(args: argparse.Namespace) -> int:
         print(f"sfx failed: no such video {video}", file=sys.stderr)
         return 1
     output = Path(args.output).resolve() if args.output else video.parent / "final-sfx.mp4"
+    if args.output:
+        # Containment warning (issue 024) for the explicit write target
+        # only: --video is a read-only input (never warned), and the
+        # derived default beside it inherits the input's location.
+        warn_if_outside_output_dir(output, flag="--output")
     backend = args.sfx_backend or config.sfx.backend
     try:
         if output != video:

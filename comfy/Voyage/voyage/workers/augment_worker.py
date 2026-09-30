@@ -2,14 +2,15 @@
 
 QUARANTINE (issue 083): this module is a spike stand-in, not the shipped
 augment path — `FilmNetMini` cannot load official `film_net` weights
-(shape mismatch raises `ModelCompatibilityError`) and the compact
-`RealESRGAN_x4plus_anime_6B` SRVGG variant needs its own loader. The
-orchestration (`voyage.augment`: chunk windows, ffmpeg chunk
-decode/encode, device pairing) is the shipped path and never imports
-this module; treat any vendored arch here as a placeholder until the
-full upstream FILM port + anime_6B loader land (or this module moves to
-`experimental/` with a spike contract). Debug augment quality via the
-orchestration + registry weights first, not these stand-ins.
+(shape mismatch raises `ModelCompatibilityError`) and the full upstream
+FILM port is follow-up. The orchestration (`voyage.augment`: chunk
+windows, ffmpeg chunk decode/encode, device pairing) is the shipped path
+and never imports this module; treat any vendored arch here as a
+placeholder until the full upstream FILM port lands (or this module moves
+to `experimental/` with a spike contract). Debug augment quality via the
+orchestration + registry weights first, not these stand-ins. The ESRGAN
+leg is DONE (issue 166): the pinned `RealESRGAN_x4plus_anime_6B` pth
+loads strict into the upstream-named builder below.
 
 `torch` loads only inside functions (behind a `find_spec` guard) — never
 at module scope (supervisor section 12 GPU ban) — and weight checks run
@@ -19,10 +20,12 @@ fetches weights at runtime.
 
 Architectures are vendored minimal inline — do NOT import Comfy nodes
 (the worker images carry no ComfyUI tree):
-- RRDBNet: the Real-ESRGAN x4 residual-in-residual dense net (state-dict
-  shapes match the x4plus/UltraSharp ESRGAN family; the compact
-  `RealESRGAN_x4plus_anime_6B` SRVGG variant needs its own loader —
-  follow-up, not this spike).
+- RRDBNet: two layouts (issue 166) — upstream-named weights
+  (`body.N.rdb1/2/3` + `conv_up1/up2/hr`, EMA-wrapped; the pinned
+  `RealESRGAN_x4plus_anime_6B` pth carries 6 body blocks) build
+  `_build_upstream_rrdb_net` at the measured depth, while anything else
+  falls back to the classic x4 residual-in-residual dense net below
+  (state-dict shapes match the x4plus/UltraSharp ESRGAN family).
 - FilmNetMini: a spike stand-in flow blender with FILM's semantic
   contract (two frames + time give the mid frame), batched as
   `(B, 2, C, H, W)` so OOM-halving applies. Official `film_net` weights
@@ -58,6 +61,15 @@ RRDB_GROWTH_CHANNELS = 32
 
 RRDB_NATIVE_SCALE = 4
 """Native upscale of the vendored RRDBNet (two x2 nearest stages)."""
+
+RRDB_ANIME_NUM_BLOCKS = 6
+"""Body depth of the pinned `RealESRGAN_x4plus_anime_6B` pth (`body.0`–`body.5`)."""
+
+_UPSTREAM_UPCONV_KEYS = ("conv_up1", "conv_up2", "conv_hr")
+"""Upconv names distinguishing upstream RRDB weights from the vendored classic net."""
+
+_ESRGAN_WRAPPER_KEYS = ("params_ema", "params")
+"""Outer keys of training-checkpoint pth files (the inference net hides one level down)."""
 
 ALLOWED_UPSCALE_FACTORS = (1, 2, 4)
 """Targets served from one x4 pass (4 is native; 2/1 downscale the x4 output)."""
@@ -297,6 +309,136 @@ def _build_rrdb_net() -> Any:
     return _RRDBNet()
 
 
+def _build_upstream_rrdb_net(num_blocks: int) -> Any:
+    """Upstream-named RRDBNet (xinntao Real-ESRGAN family — issue 166).
+
+    Same dense-block math as the vendored classic (five convs, 0.2 scaling,
+    two x2 nearest stages), but submodule names follow the released
+    weights: `body.N.rdb1/2/3` (chained, 0.2-scaled residual) plus
+    `conv_up1/up2/hr/last`. Depth is measured from the state dict (the
+    pinned anime-6B pth carries `RRDB_ANIME_NUM_BLOCKS`), so this one
+    builder serves every upstream-depth release.
+    """
+    import torch
+    from torch import nn
+    from torch.nn import functional as functional
+
+    # NOTE (mypy strict): same `# type: ignore[misc]` idiom as the classic
+    # builder above — torch resolves to Any in the slim gates image.
+    class _UpstreamResidualDenseBlock(nn.Module):  # type: ignore[misc]
+        """Five-layer dense block with 0.2 residual scaling (Real-ESRGAN)."""
+
+        def __init__(
+            self,
+            num_features: int = RRDB_NUM_FEATURES,
+            growth_channels: int = RRDB_GROWTH_CHANNELS,
+        ) -> None:
+            super().__init__()
+            self.conv1 = nn.Conv2d(num_features, growth_channels, 3, 1, 1)
+            self.conv2 = nn.Conv2d(num_features + growth_channels, growth_channels, 3, 1, 1)
+            self.conv3 = nn.Conv2d(num_features + growth_channels * 2, growth_channels, 3, 1, 1)
+            self.conv4 = nn.Conv2d(num_features + growth_channels * 3, growth_channels, 3, 1, 1)
+            self.conv5 = nn.Conv2d(num_features + growth_channels * 4, num_features, 3, 1, 1)
+            self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+        def forward(self, value: Any) -> Any:
+            grown1 = self.activation(self.conv1(value))
+            grown2 = self.activation(self.conv2(torch.cat((value, grown1), 1)))
+            grown3 = self.activation(self.conv3(torch.cat((value, grown1, grown2), 1)))
+            grown4 = self.activation(self.conv4(torch.cat((value, grown1, grown2, grown3), 1)))
+            return self.conv5(torch.cat((value, grown1, grown2, grown3, grown4), 1)) * 0.2 + value
+
+    class _UpstreamRRDB(nn.Module):  # type: ignore[misc]
+        """Chained triple dense block with 0.2-scaled residual (upstream RRDB)."""
+
+        def __init__(
+            self,
+            num_features: int = RRDB_NUM_FEATURES,
+            growth_channels: int = RRDB_GROWTH_CHANNELS,
+        ) -> None:
+            super().__init__()
+            self.rdb1 = _UpstreamResidualDenseBlock(num_features, growth_channels)
+            self.rdb2 = _UpstreamResidualDenseBlock(num_features, growth_channels)
+            self.rdb3 = _UpstreamResidualDenseBlock(num_features, growth_channels)
+
+        def forward(self, value: Any) -> Any:
+            return self.rdb3(self.rdb2(self.rdb1(value))) * 0.2 + value
+
+    class _UpstreamRRDBNet(nn.Module):  # type: ignore[misc]
+        """Full x4 net: head, N chained RRDBs, body residual, two x2 stages."""
+
+        def __init__(self, depth: int) -> None:
+            super().__init__()
+            self.conv_first = nn.Conv2d(3, RRDB_NUM_FEATURES, 3, 1, 1)
+            self.body = nn.Sequential(
+                *[_UpstreamRRDB(RRDB_NUM_FEATURES, RRDB_GROWTH_CHANNELS) for _ in range(depth)]
+            )
+            self.conv_body = nn.Conv2d(RRDB_NUM_FEATURES, RRDB_NUM_FEATURES, 3, 1, 1)
+            self.conv_up1 = nn.Conv2d(RRDB_NUM_FEATURES, RRDB_NUM_FEATURES, 3, 1, 1)
+            self.conv_up2 = nn.Conv2d(RRDB_NUM_FEATURES, RRDB_NUM_FEATURES, 3, 1, 1)
+            self.conv_hr = nn.Conv2d(RRDB_NUM_FEATURES, RRDB_NUM_FEATURES, 3, 1, 1)
+            self.conv_last = nn.Conv2d(RRDB_NUM_FEATURES, 3, 3, 1, 1)
+            self.activation = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+        def forward(self, value: Any) -> Any:
+            head = self.conv_first(value)
+            trunk = head + self.conv_body(self.body(head))
+            upsampled = self.activation(
+                self.conv_up1(functional.interpolate(trunk, scale_factor=2, mode="nearest"))
+            )
+            upsampled = self.activation(
+                self.conv_up2(functional.interpolate(upsampled, scale_factor=2, mode="nearest"))
+            )
+            return self.conv_last(self.activation(self.conv_hr(upsampled)))
+
+    if num_blocks <= 0:
+        raise ValueError(f"upstream RRDB depth must be positive (got {num_blocks})")
+    return _UpstreamRRDBNet(num_blocks)
+
+
+def _unwrap_esrgan_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the inference state dict, stripping a training wrapper when present.
+
+    Released inference weights (including the pinned anime-6B pth) nest the
+    net one level down under `params_ema`; raw training checkpoints may use
+    `params`. A flat upstream/vendored state passes through untouched — only
+    a single-key wrapper dict is ever unwrapped, so a flat net that happens
+    to carry such a key alongside real weights is never truncated.
+    """
+    for wrapper in _ESRGAN_WRAPPER_KEYS:
+        if set(state) == {wrapper} and isinstance(state[wrapper], dict):
+            unwrapped: dict[str, Any] = state[wrapper]
+            return unwrapped
+    return state
+
+
+def _upstream_block_count(state: dict[str, Any]) -> int | None:
+    """Body depth when `state` uses upstream RRDB naming, else None (vendored classic).
+
+    Upstream means every body index `0..N` appears under `rdb1/2/3` with the
+    `conv_first/body/up1/up2/hr/last` head set present. Anything else (the
+    vendored classic names, a foreign net) returns None so the caller falls
+    back — `strict=True` at the load then fails loud on a partial match.
+    """
+    indices: set[int] = set()
+    for key in state:
+        parts = key.split(".")
+        if len(parts) < 3 or parts[0] != "body":
+            continue
+        if not parts[1].isdigit() or parts[2] not in ("rdb1", "rdb2", "rdb3"):
+            continue
+        indices.add(int(parts[1]))
+    if not indices:
+        return None
+    depth = max(indices) + 1
+    if sorted(indices) != list(range(depth)):
+        return None
+    present = {key.split(".")[0] for key in state}
+    if not {"conv_first", "conv_body", "conv_last", *_UPSTREAM_UPCONV_KEYS} <= present:
+        return None
+    return depth
+
+
 def _build_film_net() -> Any:
     """Spike stand-in flow blender with FILM's semantic contract.
 
@@ -479,20 +621,32 @@ def _verify_weights_manifest(weights_path: Path) -> None:
 
 
 def _load_rrdb_net(weights_path: Path) -> Any:
-    """Build RRDBNet and load `weights_path`; shape/content failures become compatibility errors."""
+    """Build the matching RRDBNet and load `weights_path`; failures become compatibility errors.
+
+    Two layouts (issue 166): upstream-named weights (`body.N.rdb1/2/3` +
+    `conv_up1/up2/hr`, EMA-wrapped — the pinned anime-6B pth) build an
+    upstream net at the measured depth; anything else falls back to the
+    vendored x4 net. `strict=True` in both cases, so a partial match still
+    fails loud instead of inferring on random init.
+    """
     from voyage.model_registry import REALESRGAN_ANIME_MIN_BYTES
 
     _verify_weights_size(weights_path, "Real-ESRGAN", REALESRGAN_ANIME_MIN_BYTES)
     _verify_weights_manifest(weights_path)
 
-    model = _build_rrdb_net()
     try:
-        state = _load_state_dict(weights_path)
+        state = _unwrap_esrgan_state(_load_state_dict(weights_path))
+        block_count = _upstream_block_count(state)
+        if block_count is not None:
+            model = _build_upstream_rrdb_net(block_count)
+        else:
+            model = _build_rrdb_net()
         model.load_state_dict(state, strict=True)
     except _LOAD_ERRORS as exc:
         raise ModelCompatibilityError(
-            f"Real-ESRGAN weights at {weights_path} do not match the vendored "
-            f"x4 RRDBNet (compact anime_6B needs its own loader — follow-up): {exc}"
+            f"Real-ESRGAN weights at {weights_path} match neither the upstream RRDB "
+            f"layout (body.N.rdb1/2/3 + conv_up1/up2/hr, e.g. the pinned anime-6B) "
+            f"nor the vendored x4 net: {exc}"
         ) from exc
     return model
 

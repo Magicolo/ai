@@ -86,3 +86,58 @@ is folded as their tracker (not deleted) until the remaining splits land.
 - AGENTS.md §12 soft signals ("~500-line module split signal, god-module
   watch, dead-code removal on sight").
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §6.
+
+## Progress log (2026-09-30, this pass — one safe extraction)
+
+- Re-measured host `wc -l` (batch-9 tree; `supervisor.py` 2760→2701 via
+  foreign edits, never touched here): `supervisor.py` 2701, `media.py`
+  1631, `video_longlive.py` 1346, `model_registry.py` 1264,
+  `video_causvid.py` 1226, `video_ltxv.py` 1159, `tui.py` 1155,
+  `config.py` 1037, `cli_observe.py` 769, `registry_records.py` 767,
+  `cli.py` 745.
+- Tree was quiet at pass start (`git diff --name-only` clean; concurrent
+  batch-9 + uncommitted foreign edits landed mid-pass in other files —
+  left intact per §9), so the one extraction went ahead in owned scope:
+  the `cmd_inspect` scoreboard branch out of `cli_observe.py` (769, above
+  the signal) into new `voyage/cli_scoreboard.py` (`render_scoreboard`,
+  DESIGN §59, 54 lines) — verbatim move, `cmd_inspect` keeps its name
+  and delegates, so the 080 seam (`cli.cmd_inspect is
+  cli_observe.cmd_inspect`) holds.
+- TDD: `tests/test_cli_scoreboard.py` written first (4 tests: empty run,
+  no-visual row, `0.500(+0.000)` metric cells, trailing `final.mp4`
+  line) — watched fail on collection (`ModuleNotFoundError`), then green
+  after the move. One real catch on the way: the first cut imported
+  `scoreboard_rows` at module top, which froze the reference and broke
+  `test_inspect_scoreboard_tolerates_unformattable_cells` (it patches
+  `voyage.scoreboard.scoreboard_rows`) — fixed by restoring the original
+  call-time import inside `render_scoreboard` (080 seam-dispatch rule),
+  all green after.
+- Next splits in rank order (all owned elsewhere — recorded, not taken):
+  supervisor commit/augment-helper extraction (foreign-owned, needs a
+  quiet tree), `media.py` workers/media surface (open since batch 4),
+  registry per-family tables (082 residual — this pass migrated their
+  types, not their location), video-worker splits, then the two big
+  test files by area.
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: PARTIALLY RESOLVED — one extraction landed
+  (`cli_observe.py` 769→741 + new `cli_scoreboard.py` 54).
+- Files changed: `voyage/cli_scoreboard.py` (new),
+  `voyage/cli_observe.py` (branch → delegation),
+  `tests/test_cli_scoreboard.py` (new, 4 tests). Gate evidence:
+  in-container `mypy` strict + `ruff check` + `ruff format --check`
+  clean on all 3; 39 tests green (`test_cli_scoreboard`,
+  `test_scoreboard`, `test_cli_split` incl. 080 seam identity,
+  `test_issue_142_inspect_failsoft` incl. the seam-patch test,
+  `test_inspect_metrics_fps_029`, `test_cli_tui_split`) + 42 CLI
+  neighbors (`test_cli_group_a`, `test_cli_benchmark_sfx_augment`,
+  `test_observability_rank2`) + full `mypy voyage` (65 files) +
+  `ruff check .` whole-tree green.
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: the new
+  module follows the existing DESIGN §59 scoreboard contract and the
+  issue-080 verb-module seam convention; a future split index could
+  list `cli_scoreboard.py` alongside the other `cli_*` fragments."
+  Residuals: tracker table above (supervisor/media/workers/test
+  splits still open under their owners).

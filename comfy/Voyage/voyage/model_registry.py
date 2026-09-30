@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from voyage.atomic import JsonValue
 from voyage.hashing import sha256_file
 from voyage.registry_records import (
     _ACE_CHECKPOINTS_RELATIVE,
@@ -348,7 +349,6 @@ __all__ = [
     "_record_sfx",
     "_require_spec",
     "_run_spec_downloads",
-    "_sha256",
     "_vocoder_python_files",
     "download_audio_models",
     "download_causvid_models",
@@ -378,14 +378,6 @@ __all__ = [
     "verify_realesrgan_models",
     "verify_sfx_models",
 ]
-
-
-def _sha256(path: Path) -> str:
-    """Legacy alias of :func:`voyage.hashing.sha256_file` (issue 021).
-
-    Kept so existing callers keep working; new code imports hashing directly.
-    """
-    return sha256_file(path)
 
 
 def verify_checkpoint_sha256(checkpoint: Path, expected_sha256: str) -> None:
@@ -452,7 +444,7 @@ def verify_checkpoint_against_manifest(
     verify_checkpoint_sha256(checkpoint, recorded)
 
 
-def download_longlive2_bf16(models_dir: Path) -> dict[str, Any]:
+def download_longlive2_bf16(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download (DESIGN §85). Returns a manifest-ready record dict."""
     return download_model(models_dir, "longlive2-bf16")
 
@@ -462,7 +454,9 @@ def verify_longlive2_bf16(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "longlive2-bf16")
 
 
-def _merge_manifest_record(models_dir: Path, key: str, value: dict[str, Any]) -> dict[str, Any]:
+def _merge_manifest_record(
+    models_dir: Path, key: str, value: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
     """Merge one record into models_dir/manifest.json (DESIGN §85)."""
     manifest_path = models_dir / "manifest.json"
     record: dict[str, Any] = {}
@@ -543,7 +537,7 @@ class ModelSpec:
     manifest_key: str
     snapshots: tuple[SnapshotSpec, ...]
     files: tuple[FileSpec, ...]
-    record_builder: Callable[[Path], dict[str, Any]]  # manifest value for the key
+    record_builder: Callable[[Path], dict[str, JsonValue]]  # manifest value for the key
     checks: tuple[RequiredFile | RequiredGlob | ShardFloor, ...]  # in order
     success_message: Callable[[Path], str]  # exact OK string (byte-stable)
     expected_hashes: tuple[ExpectedHash, ...] = ()  # ingest pins (071, checked pre-merge)
@@ -977,7 +971,7 @@ def _run_spec_downloads(models_dir: Path, spec: ModelSpec) -> None:
         hf_hub_download(**file_kwargs)
 
 
-def download_model(models_dir: Path, spec_name: str) -> dict[str, Any]:
+def download_model(models_dir: Path, spec_name: str) -> dict[str, JsonValue]:
     """Table-driven download: fetch, pre-verify expected hashes, merge record.
 
     The hash check runs BEFORE the manifest merge (071): whatever the hub
@@ -1077,7 +1071,7 @@ def verify_model(models_dir: Path, spec_name: str) -> tuple[bool, str]:
     return True, spec.success_message(models_dir)
 
 
-def download_director_models(models_dir: Path) -> dict[str, Any]:
+def download_director_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Phase 3 director stack (DESIGN §§8-9, 85).
 
     Qwen3-8B snapshot (bf16 shards + tokenizer) plus MiniLM-L6-v2
@@ -1092,7 +1086,7 @@ def verify_director_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "director-qwen8b")
 
 
-def download_director_awq_models(models_dir: Path) -> dict[str, Any]:
+def download_director_awq_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the GPU decider stack (Qwen3-4B-AWQ + MiniLM).
 
     Merges under the `director-awq` manifest key (never the `director` key
@@ -1106,7 +1100,7 @@ def verify_director_awq_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "director-qwen4b-awq")
 
 
-def download_inspector_models(models_dir: Path) -> dict[str, Any]:
+def download_inspector_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Phase 5 VLM inspector (DESIGN §§43-44).
 
     Qwen3.5-9B multimodal snapshots into <models>/Qwen3.5-9B. The
@@ -1122,7 +1116,7 @@ def verify_inspector_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "inspector-qwen35")
 
 
-def download_audio_models(models_dir: Path) -> dict[str, Any]:
+def download_audio_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Phase 4 music stack (DESIGN §§6, 37, 85).
 
     All four MAIN_MODEL_COMPONENTS (turbo DiT + VAE + text encoder + the
@@ -1141,7 +1135,7 @@ def verify_audio_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "audio-acestep")
 
 
-def download_sfx_models(models_dir: Path) -> dict[str, Any]:
+def download_sfx_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the SFX effects stack (SFX slice 2).
 
     All three 44 kHz variants (small/medium/large_v2) + shared VAE +
@@ -1181,7 +1175,7 @@ def _vocoder_python_files(models_dir: Path) -> list[str]:
     return sorted(str(path) for path in vocoder_dir.rglob("*.py") if path.is_file())
 
 
-def download_ltxv_models(models_dir: Path) -> dict[str, Any]:
+def download_ltxv_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Phase 7 LTXV stack (DESIGN Phase 7).
 
     2B-distilled DiT + spatial upscaler from Lightricks/LTX-Video plus the
@@ -1197,7 +1191,7 @@ def verify_ltxv_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "ltxv-2b")
 
 
-def download_causvid_models(models_dir: Path) -> dict[str, Any]:
+def download_causvid_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Stream D CausVid stack (DESIGN §5.4).
 
     The autoregressive DMD checkpoint from tianweiy/CausVid plus the
@@ -1214,7 +1208,7 @@ def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "causvid")
 
 
-def download_film_models(models_dir: Path) -> dict[str, Any]:
+def download_film_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the FILM interpolation weights (Track C).
 
     Single fp16 file into <models>/frame_interpolation/ (ComfyUI layout).
@@ -1229,7 +1223,7 @@ def verify_film_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "film")
 
 
-def download_realesrgan_models(models_dir: Path) -> dict[str, Any]:
+def download_realesrgan_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Real-ESRGAN anime upscaler (Track C).
 
     Single .pth into <models>/realesrgan/. Merges into the shared manifest;

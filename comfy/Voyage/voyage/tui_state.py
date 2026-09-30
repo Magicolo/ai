@@ -6,7 +6,7 @@ unit-testable without a terminal. Everything here is pure stdlib, so
 ``tests/test_tui.py`` covers it without Textual running. The Textual app
 only reads widgets into :class:`GenerateFormState` and calls these
 helpers. Last-settings persistence lives here for the same reason: the
-next launch prefills the form from ``LAST_SETTINGS_PATH`` via
+next launch prefills the form from the default settings path via
 :func:`load_last_settings` (Stream B), and every Generate stores the
 submitted form via :func:`save_last_settings`. Both directions stay
 silent on I/O failure so a bad home directory can never break the UI.
@@ -61,17 +61,16 @@ def _fake_row_frames_and_fps() -> tuple[int, int]:
 _FALLBACK_FRAMES_PER_SEGMENT, _FALLBACK_FPS = _fake_row_frames_and_fps()
 """Frames/segment + fps for unknown backends (the fake registry row)."""
 
-# Home for the last submitted TUI form (TOML). Stream B loads it at launch
-# to prefill the form and saves it on every Generate.
-LAST_SETTINGS_PATH: Path = Path.home() / ".config" / "voyage" / "tui-last.toml"
+# Home for the last submitted TUI form (TOML, see `_default_settings_path`
+# below). Stream B loads it at launch to prefill the form and saves it
+# on every Generate.
 
 
 def _default_settings_path() -> Path:
     """Home-relative settings path, resolved at call time (not import).
 
     Call-time resolution keeps HOME redirection working (tests isolate the
-    home directory per case); the module constant above is the default
-    value for documentation and explicit passing.
+    home directory per case).
     """
     return Path.home() / ".config" / "voyage" / "tui-last.toml"
 

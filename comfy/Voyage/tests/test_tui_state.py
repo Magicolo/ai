@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from voyage.tui_state import (
-    LAST_SETTINGS_PATH,
     GenerateFormState,
+    _default_settings_path,
     _flat_folder_name,
     field_errors,
     gpu_warning,
@@ -47,7 +47,7 @@ def _filled_state() -> GenerateFormState:
 
 
 def test_last_settings_path_default() -> None:
-    assert LAST_SETTINGS_PATH == Path.home() / ".config" / "voyage" / "tui-last.toml"
+    assert _default_settings_path() == Path.home() / ".config" / "voyage" / "tui-last.toml"
 
 
 def test_save_load_round_trip(tmp_path: Path) -> None:

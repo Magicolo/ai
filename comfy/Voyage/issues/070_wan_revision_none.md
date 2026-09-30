@@ -112,3 +112,37 @@ Voyage/voyage/model_registry.py:~455-471 (_record_longlive2): records repo/revis
   against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
   `tests/test_registry_pins.py` floating-set to empty. Do NOT pick the
   revision from the Hub API alone without byte verification.
+
+## Progress log (2026-09-30, this pass — CHECK)
+
+- Probe executed live (no GPU needed, no host pip): `$VOYAGE_MODELS`
+  unset; `~/.cache/voyage-models/` holds 12 entries (`PixArt-XL-2-1024-MS`,
+  `Qwen3-4B-AWQ`, `Qwen3-8B`, `Qwen3.5-9B`, `acestep`, `all-MiniLM-L6-v2`,
+  `frame_interpolation`, `ltx25-gguf`, `ltxv-2b`, `manifest.json`,
+  `mmaudio`, `realesrgan`) — `wan_models/` ABSENT and `longlive2/`
+  ABSENT (both `ls` → "No such file or directory", dated 2026-09-30).
+  Prune date 2026-09-24 still in effect; no Wan bytes re-provisioned
+  since (the two new entries vs the last probe, `frame_interpolation`
+  + `realesrgan`, are the augment weights for issue 166 — not Wan).
+- Pin state re-verified in-container (`voyage:latest`, read-only):
+  `WAN_HF_REVISION` still `None` (`voyage/registry_records.py:52`,
+  honest placeholder with pin procedure); `SnapshotSpec(WAN_HF_REPO,
+  WAN_HF_REVISION, …)` reads the constant (`voyage/model_registry.py:557`,
+  no inline `None`); manifest records `"wan_revision": None`
+  (`registry_records.py:503`, visible gap, not absent).
+- Verdict: STILL-BLOCKED — no verified bytes exist to measure a revision
+  against. Per the contract NO hash was invented (a wrong pin fails every
+  provision loudly). No code change (`model_registry.py`/`registry_records.py`
+  may only change if weights unblock — they did not). Gate evidence: n/a
+  (no files changed); adjacent `tests/test_registry_pins.py` green in the
+  166 neighbor run (145 passed, 4 skipped — shared line, same container).
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: blocked (still-blocked with dated probe output above). Files
+  changed: none (this issue file only). DESIGN proposals: none.
+- Residuals (exact handoff, GPU+network owner): unchanged — re-provision
+  the Wan2.2 subset at the verified main commit, sha256 the shards
+  against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
+  the floating-set gate to empty. Do NOT pick the revision from the Hub
+  API alone without byte verification.

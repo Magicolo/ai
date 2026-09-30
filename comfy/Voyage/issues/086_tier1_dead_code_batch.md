@@ -147,9 +147,86 @@ grep -n "_sha256\|getattr(tui_state" voyage/model_registry.py voyage/tui.py test
   `importlib.util.find_spec` probe; (4) tui-state pass — delete
   `voyage/tui_state.py:66` constant, fix docstring `:9`, update
   `tests/test_tui_state.py:15,50` in the same commit; (5) cli-paths pass —
-  inline `voyage/cli_paths.py:59` `_check_run_id` at its call sites
-  (`cli_run_ops.py`, `cli_generate.py` via re-export) with re-anchored
-  cites; (6) already fixed — no action; (7) `__init__`/bench disposition
-  pass — real exports or delete pointers (`voyage/audio/__init__.py`,
-  `voyage/vision/__init__.py`), refresh `voyage/workers/__init__.py`
-  prose, fold-or-keep decision for 232L `voyage/bench.py`.
+   inline `voyage/cli_paths.py:59` `_check_run_id` at its call sites
+   (`cli_run_ops.py`, `cli_generate.py` via re-export) with re-anchored
+   cites; (6) already fixed — no action; (7) `__init__`/bench disposition
+   pass — real exports or delete pointers (`voyage/audio/__init__.py`,
+   `voyage/vision/__init__.py`), refresh `voyage/workers/__init__.py`
+   prose, fold-or-keep decision for 232L `voyage/bench.py`.
+
+## Progress log (2026-09-30, voyage-scope resolution pass)
+
+- Premises re-verified live in-container
+  (`docker run --rm -v $PWD/Voyage:/app -w /app voyage:latest`,
+  CPU-only, no host pip): (1) `LongLiveBackend`/`AceStepBackend` still
+  `NotImplementedError` placeholders at `voyage/fake_backends.py:186/200`
+  with zero importers outside that file (`grep -rn` hits only the defs +
+  `.pyc`) — holds. (2) `_sha256` still at
+  `voyage/model_registry.py:383` + `__all__` `:351`, sole pin
+  `tests/test_hashing.py:47` — holds. (3) `getattr` shims still at
+  `voyage/tui.py:181,202,214` + `import textual/del textual` probe
+  `:163-174`; `tui_state` always defines `load_last_settings` (`:562`),
+  `gpu_warning` (`:607`), `save_last_settings` (`:505`) — holds. (4)
+  `LAST_SETTINGS_PATH` still at `voyage/tui_state.py:66` + docstring `:9`,
+  pinned by `tests/test_tui_state.py:15,50`; runtime uses
+  `_default_settings_path()` (`:514,572`) — holds. (5) `_check_run_id`
+  still at `voyage/cli_paths.py:59` with live call sites
+  (`cli_generate.py:99`, `cli_run_ops.py:42` via re-export) — holds in
+  substance (NOT zero-caller). (6) Still refuted: the only `1e-9` in
+  `voyage/` is the `FLOAT_DUST_EPSILON` def (`backends.py:94`) + use
+  (`:115`); `cli_planning.py:16,111` imports the single source — no
+  cli re-literal remains. (7) `workers/__init__.py` still docstring-only
+  with stale Phase-0 prose; `audio`/`vision` `__init__.py` still 1-line
+  pointers; `bench.py` 232L with live importers
+  (`cli_observe.py`, `test_benchmark.py`, `test_unit.py`, …) — holds.
+- Actions: (1) DELETED both placeholder classes from
+  `voyage/fake_backends.py` (provably zero-caller). (2) DELETED
+  `model_registry._sha256` + `__all__` entry AND removed its pin
+  `tests/test_hashing.py:test_registry_alias_delegates` in the same edit
+  (pin cannot move first). (3) REPLACED all three `tui.py` `getattr`
+  shims with direct imports/calls (`load_last_settings`,
+  `gpu_warning`, `save_last_settings` added to the `tui_state` import;
+  `tui_state_module` import removed) + replaced the
+  `import textual/del textual` probe with
+  `importlib.util.find_spec("textual") is None` (same idiom as
+  `tui_state.textual_available()`); docstring getattr line updated.
+  (4) DELETED `LAST_SETTINGS_PATH`, fixed module docstring + comment to
+  reference `_default_settings_path()`, updated
+  `tests/test_tui_state.py` import + `test_last_settings_path_default`
+  to assert the function. (5) KEPT `_check_run_id` — live helper with
+  2 call sites, not dead code; inlining would churn two verbs for zero
+  safety payoff. `cli_paths.py` also carries concurrent uncommitted
+  edits (another track) — doubly out of scope to reshape. (6) NO ACTION
+  (already fixed). (7) REFRESHED `workers/__init__.py` prose to list
+  the real workers (video/video_ltxv/video_longlive/video_causvid,
+  audio/audio_acestep, sfx/sfx_mmaudio, director, augment_worker);
+  KEPT `audio`/`vision` 1-line pointers (deleting the docstring leaves
+  an empty file — worse) and KEPT `bench.py` as the math lib (live
+  importers — fold decision belongs to its owning pass).
+- Gate evidence (in-container `voyage:latest`): `ruff check` clean on
+  all 7 touched files; `ruff format --check` clean on all 7;
+  `mypy voyage/tui.py` clean; `mypy` on the other touched files clean
+  except 3 pre-existing `comparison-overlap` errors in
+  `tests/test_tui_state.py:146,151,199` (verified present on HEAD via
+  stash — plan-counts tests, untouched by this pass). Suites:
+  `test_hashing.py + test_tui_state.py` 64 passed,
+  `test_tui.py` 20 passed.
+
+## Resolution (2026-09-30, voyage-scope resolution pass)
+
+- Verdict: resolved except explicitly kept items below. Files changed:
+  `voyage/fake_backends.py` (delete 2 placeholder classes),
+  `voyage/model_registry.py` (delete `_sha256` + `__all__` entry),
+  `tests/test_hashing.py` (drop registry-alias pin + import),
+  `voyage/tui.py` (direct imports/calls + `find_spec` probe),
+  `voyage/tui_state.py` (delete `LAST_SETTINGS_PATH`, docstring fix),
+  `tests/test_tui_state.py` (import + path test → function),
+  `voyage/workers/__init__.py` (prose refresh).
+- DESIGN proposals: none — "No DESIGN change required: this pass deletes
+  zero-caller placeholders/aliases/shims and refreshes worker-index prose;
+  no behavior, contract, or geometry changes."
+- Residuals: (5) `_check_run_id` thin-wrapper inline (cli-paths pass,
+  after concurrent edits land); (6) none; (7) `audio`/`vision`
+  `__init__` real-exports-or-delete + `bench.py` fold-or-keep (owning
+  passes); `tests/test_tui_app.py:193,483` defensive `getattr` mirrors
+  (test code, still passing — tui pass may direct-call them).

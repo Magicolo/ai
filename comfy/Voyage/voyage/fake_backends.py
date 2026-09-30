@@ -181,26 +181,3 @@ class FakeSfxBackend:
             "channels": channels,
             "duration_seconds": duration_seconds,
         }
-
-
-class LongLiveBackend:
-    """Real LongLive 2.0 adapter — Phase 1/2 work (task group E).
-
-    Pinned commit, loader, stream session, per-block causal generation,
-    relative RoPE, recovery replay. Not implemented in the Phase 0
-    skeleton; the worker refuses `generate_blocks` until this lands.
-    """
-
-    name = "longlive2"
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise NotImplementedError("LongLiveBackend lands in Phase 1/2 (task group E)")
-
-
-class AceStepBackend:
-    """Real ACE-Step 1.5 adapter — Phase 4 work (task group H)."""
-
-    name = "acestep"
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise NotImplementedError("AceStepBackend lands in Phase 4 (task group H)")

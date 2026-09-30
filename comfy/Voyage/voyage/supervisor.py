@@ -84,9 +84,20 @@ from voyage.seeds import audio_seed, video_seed
 from voyage.segment_manifest import (
     build_segment_manifest,
     load_segment_manifest,
-    load_transition,
     update_manifest_metrics,
     write_segment_manifest,
+)
+from voyage.supervisor_proposal import (
+    _token_counts as _token_counts,
+)
+from voyage.supervisor_proposal import (
+    effective_music_caption as effective_music_caption,
+)
+from voyage.supervisor_proposal import (
+    effective_video_stages as effective_video_stages,
+)
+from voyage.supervisor_proposal import (
+    previous_transition_captions as previous_transition_captions,
 )
 from voyage.vision.metrics import (
     Histogram,
@@ -261,72 +272,8 @@ def video_worker_module(backend: str) -> str:
         ) from None
 
 
-def previous_transition_captions(run_dir: Path, number: int) -> str:
-    """Previous segment's three caption families as director-prompt text.
-
-    Best-effort history for the drift chain: reads segment number-1's
-    committed transition.json and formats its video stages + music/SFX
-    captions via format_previous_captions. Missing segment (voyage
-    start), torn JSON, or legacy decisions without captions all yield ""
-    so the director prompt is unchanged — a history read must never
-    break a commit.
-    """
-    if number <= 0:
-        return ""
-    from voyage.director import format_previous_captions
-
-    prev_id = paths.format_segment_id(number - 1)
-    prev_dir = paths.segment_dir(run_dir, prev_id)
-    raw = load_transition(prev_dir)
-    if not raw:
-        return ""
-    try:
-        decision = EvolutionDecision.model_validate(raw)
-    except Exception:
-        return ""
-    return format_previous_captions(
-        previous_video_stages=list(decision.video.stages),
-        previous_music=decision.audio.music_caption,
-        previous_sfx=decision.audio.sfx_caption,
-    )
-
-
-def effective_music_caption(
-    explicit: str | None, decision_caption: str, style_fallback: str
-) -> str:
-    """Music caption precedence: explicit CLI pin, else the director's
-    evolving caption, else the charter style fallback. Pure (pins the
-    precedence the slow-loop planner and the console display share)."""
-    return explicit or decision_caption or style_fallback
-
-
-def effective_video_stages(explicit: str | None, stages: list[str]) -> list[str]:
-    """Video stage precedence: a one-item explicit CLI pin, else the
-    director's evolving stages. Pure (pins the substitution the prompt
-    planner applies after the accept transaction)."""
-    if explicit:
-        return [explicit]
-    return list(stages)
-
-
-def _token_counts(raw: dict[str, Any]) -> dict[str, int]:
-    """LLM token usage carried on an accepted/prefetched raw (Stage A telemetry).
-
-    Worker decide replies report `prompt_tokens`/`completion_tokens`; older
-    or deterministic payloads carry neither and read as zero. Non-int,
-    bool or negative values are untrusted wire data and also read as zero.
-    Pure so the accept loop and the prefetch consumer share one rule.
-    """
-
-    def _as_count(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return 0
-        return value
-
-    return {
-        "prompt_tokens": _as_count(raw.get("prompt_tokens")),
-        "completion_tokens": _as_count(raw.get("completion_tokens")),
-    }
+# Director-proposal pure helpers live in `voyage.supervisor_proposal`
+# (issue 081; re-exported at the top so existing importers keep working).
 
 
 class Supervisor:

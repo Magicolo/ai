@@ -14,7 +14,12 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from voyage.cli_core import _augment_overrides, _load_run, get_console
-from voyage.cli_paths import _check_run_id, _effective_run_id, resolve_run_dir
+from voyage.cli_paths import (
+    _check_run_id,
+    _effective_run_id,
+    resolve_run_dir,
+    warn_if_outside_output_dir,
+)
 from voyage.cli_planning import (
     _CUDA_VIDEO_BACKENDS,
     _cuda_stack_error,
@@ -256,6 +261,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print("continuing with --skip-bad ...", file=sys.stderr)
     final_video = getattr(args, "final_video", None)
     final = Path(final_video).resolve() if final_video else run_dir / "final.mp4"
+    if final_video:
+        # Containment warning (issue 024): the run dir already warned via
+        # cmd_init's funnel; the final video is this verb's own write.
+        warn_if_outside_output_dir(final, flag="--final-video")
     final.parent.mkdir(parents=True, exist_ok=True)
     final_code = cmd_finalize(
         argparse.Namespace(

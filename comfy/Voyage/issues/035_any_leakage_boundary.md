@@ -183,3 +183,64 @@ own plan.
   `voyage/models_ensure.py:268` (`future_to_entry` — narrow only with the
   worker-result type). Order stands: `call()` → scoreboard → models_ensure →
   registry.
+
+## Progress log (2026-09-30, this pass — migration in recorded order)
+
+- `git diff --name-only` at pass start: clean tree. `voyage/supervisor.py`
+  was NOT touched (another group owns it — its sites are remainder only).
+- Leg 1, `rpc.py call()` → `RpcPayload`: BLOCKED, re-verified live
+  against the batch-9 tree — `supervisor.py` still holds
+  `payload: dict[str, object]` (`:611`, `:1488`) plus `dict[str, Any]`
+  `video_init`/`prefetched_raw`/`raw`, so narrowing `call()` reddens
+  those foreign sites (dict invariance; same trap `voyage/atomic.py`
+  documents for the write/read sides). `raw_stdout`/`readable: Any`
+  (`rpc.py:281,284`) stay by construction (fd juggling). No edit.
+- Leg 2, scoreboard dicts: MIGRATED `_finite_float(value: Any)` →
+  `(value: JsonValue)` (`scoreboard.py:21,41` + docstring) — callers pass
+  JSON-parsed `Any`, so the boundary documents without breaking.
+  `scoreboard_rows -> list[dict[str, Any]]` (`:114,118`) STAYS: a live
+  in-container mypy probe proved `dict[str, float]` variables
+  (`stages.get(...)`, `current`, `deltas`) are invariant-blocked from
+  `JsonValue` nesting (`Dict entry has incompatible type ... [dict-item]`),
+  while all-literal nesting passes — casts would be needed, out of scope.
+- Leg 3, models_ensure: MIGRATED `future_to_entry` →
+  `dict[Future[dict[str, JsonValue]], RequiredModel]` (`:268`) once
+  `download_model` migrated below. `raw: Any` (`:167`) stays (the
+  `json.loads` narrow-with-`isinstance` idiom, same as `atomic`).
+- Leg 4, registry builders: MIGRATED all 10 `_record_*` in
+  `registry_records.py` → `dict[str, JsonValue]` (import swap; zero `Any`
+  left in the file — probe shape `h()` verified comprehensions,
+  `list(...)` calls, `str | None` revisions and nested `str→str` dicts
+  all context-infer cleanly) + `model_registry.py` `record_builder`
+  field, `_merge_manifest_record` param/return (internal `record` stays
+  `dict[str, Any]` — the `json.loads` idiom), `download_model` + all 10
+  thin `download_*` wrappers → `dict[str, JsonValue]`.
+  `snapshot_kwargs`/`file_kwargs` (`:953,:963`) STAY: `**dict[str,
+  JsonValue]` is not assignable to the hub signatures (invariance —
+  same class as `future_to_entry`'s old typeshed block).
+- Foreign coexistence note: `model_registry.py` carries a concurrent
+  uncommitted hunk in the same file (`__all__` `_sha256` removal, issue
+  021, another group) — different region, no overlap; left intact.
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: PARTIALLY RESOLVED — scoreboard `_finite_float`, all 10
+  registry builders, `record_builder` field, `_merge_manifest_record`,
+  `download_model` + 10 wrappers, `future_to_entry` now `JsonValue`-valued.
+- Files changed: `voyage/registry_records.py` (import + 10 returns),
+  `voyage/model_registry.py` (import + field + merge + 11 returns),
+  `voyage/models_ensure.py` (1 annotation), `voyage/scoreboard.py`
+  (import + param + docstring). Gate evidence: in-container `mypy`
+  strict clean on all 4 files (plus full `mypy voyage`, 65 files,
+  clean) + `ruff check` + `ruff format --check` clean; narrow tests
+  green — `test_scoreboard` + `test_registry_split` +
+  `test_generate_ensure` + `test_cli_split` (46 passed),
+  `test_director_models_dir` + `test_single_source` (26 passed),
+  `test_registry_pins` + `test_models_ranges_119` +
+  `test_backend_registry` + `test_augment_models` (51 passed).
+  DESIGN proposals: none (annotation-only, no behavior change).
+  Residuals: `call()` signature + supervisor `dict[str, object]` sites
+  (`:611,:1488` + `video_init`/`prefetched_raw`/`raw`); `scoreboard_rows`
+  return + `rows` local (invariance probe on file); `snapshot_kwargs` /
+  `file_kwargs`; `raw: Any` + merge-internal `record` (`json.loads`
+  idiom); `raw_stdout`/`readable` (fd juggling).

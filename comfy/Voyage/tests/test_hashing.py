@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from voyage import hashing, media, model_registry
+from voyage import hashing, media
 from voyage.hashing import sha256_file, sha256_text
 from voyage.workers import video_causvid, video_ltxv
 
@@ -39,12 +39,6 @@ def test_sha256_file_streams_in_chunks(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_sha256_text_known_vector() -> None:
     assert sha256_text("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-
-
-def test_registry_alias_delegates(tmp_path: Path) -> None:
-    target = tmp_path / "model.pt"
-    target.write_bytes(b"registry-bytes")
-    assert model_registry._sha256(target) == sha256_file(target)
 
 
 def test_media_alias_delegates(tmp_path: Path) -> None:

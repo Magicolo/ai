@@ -693,37 +693,9 @@ def cmd_soak(args: argparse.Namespace) -> int:
 def cmd_inspect(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     if args.inspect_target == "scoreboard":
-        from voyage.scoreboard import METRIC_KEYS, scoreboard_rows
+        from voyage.cli_scoreboard import render_scoreboard
 
-        rows = scoreboard_rows(run_dir)
-        if not rows:
-            print("no committed segments")
-            return 0
-        header = ["seg", "frames", "stages", *[f"{key[:12]}" for key in METRIC_KEYS]]
-        print("  ".join(header))
-        for row in rows:
-            stages = row["stages"]
-            stage_cells = (
-                ",".join(f"{name}={seconds:.1f}" for name, seconds in stages.items())
-                if isinstance(stages, dict) and stages
-                else "-"
-            )
-            metrics = row["metrics"]
-            deltas = row["deltas"]
-            if isinstance(metrics, dict) and isinstance(deltas, dict):
-                try:
-                    cells = [f"{metrics[key]:.3f}({deltas[key]:+.3f})" for key in METRIC_KEYS]
-                except (KeyError, TypeError, ValueError):
-                    cells = ["no-visual"] * len(METRIC_KEYS)
-            else:
-                cells = ["no-visual"] * len(METRIC_KEYS)
-            print("  ".join([str(row["segment_id"]), str(row["frames"]), stage_cells, *cells]))
-            print(f"  -> {row['destination']} [{row['phase']}] takes={row['take_ids']}")
-            print(f"  view: {row['video_path']} + {row['audio_path']}")
-        final = run_dir / "final.mp4"
-        if final.exists():
-            print(f"final: {final}")
-        return 0
+        return render_scoreboard(run_dir)
     if args.inspect_target == "concepts":
         try:
             store = ConceptStore(run_dir / "novelty", legacy_path=run_dir / paths.CONCEPTS_FILENAME)
