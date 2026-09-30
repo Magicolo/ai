@@ -218,6 +218,96 @@ WAN21_T5_MIN_BYTES = 10_000_000_000
 WAN21_LICENSE = "Apache 2.0"
 WAN21_LICENSE_URL = "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/LICENSE.txt"
 
+# SFX effects stack (SFX slice 2, three-caption doctrine). Upstream
+# hkchengrex/MMAudio (CVPR 2025 video-to-audio, CC-BY-NC-4.0
+# non-commercial — same class as the CausVid DMD checkpoint): native
+# .pth weights (no comfy-loader machinery), 44 kHz variants only (the
+# pipeline is 44.1/48 kHz end to end). small_44k (157 M params, 601 MB)
+# is the 2060 ladder candidate; large_44k_v2 (1.03 B, 3.9 GB,
+# upstream-recommended) is the 4060 default.
+# Code pin: main HEAD 2026-02-23 (docs-only tip commit — inference code
+# untouched since the vendored ComfyUI copy). Weights pin: HF main
+# 2026-02-19. The 44 kHz BigVGAN vocoder auto-downloads upstream from
+# nvidia (pinned here instead — explicit, never at run time); CLIP text
+# tower loads from the registry-pinned DFN5B .bin via open_clip's
+# builtin ViT-H-14-378-quickgelu arch entry (no hub round-trip).
+MMAUDIO_CODE_COMMIT = "974010a026c731054592d8f777218bd9d85a6c24"
+MMAUDIO_CODE_COMMIT_SHORT = "974010a"
+MMAUDIO_HF_REPO = "hkchengrex/MMAudio"
+MMAUDIO_HF_REVISION = "eb13a1a98fdbec91753775c57b074ccdfc60587c"
+MMAUDIO_SUBDIR = "mmaudio"
+MMAUDIO_WEIGHT_FILES = (
+    "weights/mmaudio_small_44k.pth",
+    "weights/mmaudio_medium_44k.pth",
+    "weights/mmaudio_large_44k_v2.pth",
+)
+MMAUDIO_EXT_FILES = (
+    "ext_weights/v1-44.pth",
+    "ext_weights/synchformer_state_dict.pth",
+)
+MMAUDIO_SMALL_MIN_BYTES = 500_000_000
+MMAUDIO_MEDIUM_MIN_BYTES = 2_000_000_000
+MMAUDIO_LARGE_MIN_BYTES = 3_400_000_000
+MMAUDIO_VAE_MIN_BYTES = 1_000_000_000
+MMAUDIO_SYNCHFORMER_MIN_BYTES = 800_000_000
+MMAUDIO_LICENSE = "CC BY-NC 4.0 (non-commercial)"
+MMAUDIO_LICENSE_URL = "https://huggingface.co/hkchengrex/MMAudio/blob/main/README.md"
+MMAUDIO_VOCODER_REPO = "nvidia/bigvgan_v2_44khz_128band_512x"
+MMAUDIO_VOCODER_REVISION = "95a9d1dcb12906c03edd938d77b9333d6ded7dfb"
+MMAUDIO_VOCODER_SUBDIR = f"{MMAUDIO_SUBDIR}/vocoder/bigvgan_v2_44khz_128band_512x"
+MMAUDIO_VOCODER_ALLOW = (
+    "*.py",
+    "config.json",
+    "bigvgan_generator.pt",
+    "alias_free_activation/*",
+)
+MMAUDIO_VOCODER_MIN_BYTES = 400_000_000
+MMAUDIO_VOCODER_LICENSE = "MIT"
+MMAUDIO_CLIP_REPO = "apple/DFN5B-CLIP-ViT-H-14-384"
+MMAUDIO_CLIP_REVISION = "01b771ed0d1395ca5ffdd279897d665ebe00dfd2"
+MMAUDIO_CLIP_SUBDIR = f"{MMAUDIO_SUBDIR}/clip"
+MMAUDIO_CLIP_ALLOW = ("open_clip_pytorch_model.bin", "config.json")
+MMAUDIO_CLIP_MIN_BYTES = 3_000_000_000
+MMAUDIO_CLIP_LICENSE = "Apple AMLR (research, see repo LICENSE)"
+
+
+# Finalize-stage augmentation weights (Track C): FILM frame interpolation +
+# Real-ESRGAN anime upscaler. Inference-only weights fetched at runtime via
+# `voyage models download film/realesrgan-anime` (or pulled automatically by
+# `generate`'s ensure step on CUDA backends) — the video image carries only
+# the torch-native loaders (safetensors/Pillow leaf deps in
+# worker/Dockerfile.video), never retraining code.
+#
+# FILM: Comfy-Org repack of google-research/frame-interpolation (Apache 2.0)
+# + hzwer/Practical-RIFE (MIT) — hence the repack's mit-and-apache-2.0 tag.
+# fp16 weights (~66 MB); floor holds ~10% headroom below measured.
+FILM_HF_REPO = "Comfy-Org/frame_interpolation"
+FILM_HF_REVISION = "219da3c9d8c357ceaf457fc1d5932c6e861b8dee"
+FILM_SUBDIR = "frame_interpolation"
+FILM_FILE = "film_net_fp16.safetensors"
+FILM_REPO_PATH = f"{FILM_SUBDIR}/{FILM_FILE}"
+FILM_MIN_BYTES = 60_000_000
+FILM_LICENSE = "MIT + Apache 2.0 (Comfy-Org repack tag mit-and-apache-2.0)"
+FILM_LICENSE_URL = "https://huggingface.co/Comfy-Org/frame_interpolation"
+#
+# Real-ESRGAN anime 6B: xinntao/Real-ESRGAN v0.2.2.4 release asset (RRDBNet
+# 6-block, 4x, 17,938,799 bytes, BSD-3-Clause (c) 2021 Xintao Wang),
+# re-hosted 1:1 on the Hub — xinntao ships no HF repo, so the registry pins
+# the amd mirror (its card records the upstream release URL + sha256
+# f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da).
+# Floor holds ~15% headroom below measured.
+REALESRGAN_HF_REPO = "amd/realesrgan-x4plus-anime-6b"
+REALESRGAN_HF_REVISION = "b14ff5f8ecb5a4b56ce4049a58d0bca1f8814690"
+REALESRGAN_SUBDIR = "realesrgan"
+REALESRGAN_ANIME_FILE = "RealESRGAN_x4plus_anime_6B.pth"
+REALESRGAN_ANIME_MIN_BYTES = 15_000_000
+REALESRGAN_UPSTREAM_URL = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/"
+    "RealESRGAN_x4plus_anime_6B.pth"
+)
+REALESRGAN_LICENSE = "BSD 3-Clause (c) 2021 Xintao Wang"
+REALESRGAN_LICENSE_URL = "https://huggingface.co/amd/realesrgan-x4plus-anime-6b/blob/main/LICENSE"
+
 
 def _sha256(path: Path) -> str:
     """Legacy alias of :func:`voyage.hashing.sha256_file` (issue 021).
@@ -476,6 +566,28 @@ def _record_causvid(models_dir: Path) -> dict[str, Any]:
     }
 
 
+def _record_sfx(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the SFX effects stack."""
+    sfx_dir = models_dir / MMAUDIO_SUBDIR
+    large_weights = sfx_dir / "weights" / "mmaudio_large_44k_v2.pth"
+    return {
+        "repo": MMAUDIO_HF_REPO,
+        "revision": MMAUDIO_HF_REVISION,
+        "model_dir": str(sfx_dir),
+        "variants": list(MMAUDIO_WEIGHT_FILES),
+        "large_bytes": large_weights.stat().st_size if large_weights.exists() else 0,
+        "code_commit": MMAUDIO_CODE_COMMIT,
+        "license": MMAUDIO_LICENSE,
+        "license_url": MMAUDIO_LICENSE_URL,
+        "vocoder_repo": MMAUDIO_VOCODER_REPO,
+        "vocoder_revision": MMAUDIO_VOCODER_REVISION,
+        "vocoder_license": MMAUDIO_VOCODER_LICENSE,
+        "clip_repo": MMAUDIO_CLIP_REPO,
+        "clip_revision": MMAUDIO_CLIP_REVISION,
+        "clip_license": MMAUDIO_CLIP_LICENSE,
+    }
+
+
 def _describe_longlive2(models_dir: Path) -> str:
     """Exact OK string for the LongLive 2.0 stack (byte-stable)."""
     size_gib = (models_dir / "longlive2" / LONGLIVE_HF_FILE).stat().st_size / 1024**3
@@ -519,10 +631,60 @@ def _describe_ltxv(models_dir: Path) -> str:
     return f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
 
 
+def _describe_sfx(models_dir: Path) -> str:
+    """Exact OK string for the SFX stack (byte-stable)."""
+    large_weights = models_dir / MMAUDIO_SUBDIR / "weights" / "mmaudio_large_44k_v2.pth"
+    return (
+        f"sfx-mmaudio OK (large {large_weights.stat().st_size / 1024**3:.1f} GiB + VAE/sync/CLIP)"
+    )
+
+
 def _describe_causvid(models_dir: Path) -> str:
     """Exact OK string for the CausVid stack (byte-stable)."""
     gib = (models_dir / CAUSVID_SUBDIR / CAUSVID_CHECKPOINT_FILE).stat().st_size / 1024**3
     return f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
+
+
+def _record_film(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the FILM interpolation weights (Track C)."""
+    weights_path = models_dir / FILM_REPO_PATH
+    return {
+        "repo": FILM_HF_REPO,
+        "revision": FILM_HF_REVISION,
+        "model_dir": str(models_dir / FILM_SUBDIR),
+        "checkpoint_bytes": weights_path.stat().st_size,
+        "files": [FILM_REPO_PATH],
+        "license": FILM_LICENSE,
+        "license_url": FILM_LICENSE_URL,
+    }
+
+
+def _record_realesrgan(models_dir: Path) -> dict[str, Any]:
+    """Manifest value for the Real-ESRGAN anime upscaler weights (Track C)."""
+    weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
+    return {
+        "repo": REALESRGAN_HF_REPO,
+        "revision": REALESRGAN_HF_REVISION,
+        "model_dir": str(models_dir / REALESRGAN_SUBDIR),
+        "checkpoint_bytes": weights_path.stat().st_size,
+        "files": [REALESRGAN_ANIME_FILE],
+        "upstream_url": REALESRGAN_UPSTREAM_URL,
+        "license": REALESRGAN_LICENSE,
+        "license_url": REALESRGAN_LICENSE_URL,
+    }
+
+
+def _describe_film(models_dir: Path) -> str:
+    """Exact OK string for the FILM weights (byte-stable)."""
+    size_mib = (models_dir / FILM_REPO_PATH).stat().st_size / 1024**2
+    return f"film OK (FILM fp16 {size_mib:.0f} MiB)"
+
+
+def _describe_realesrgan(models_dir: Path) -> str:
+    """Exact OK string for the Real-ESRGAN anime weights (byte-stable)."""
+    weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
+    size_mib = weights_path.stat().st_size / 1024**2
+    return f"realesrgan-anime OK (anime 6B {size_mib:.0f} MiB)"
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
@@ -651,6 +813,83 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         ),
         success_message=_describe_audio,
     ),
+    "sfx-mmaudio": ModelSpec(
+        name="sfx-mmaudio",
+        manifest_key="sfx",
+        snapshots=(
+            SnapshotSpec(
+                MMAUDIO_VOCODER_REPO,
+                MMAUDIO_VOCODER_REVISION,
+                MMAUDIO_VOCODER_SUBDIR,
+                MMAUDIO_VOCODER_ALLOW,
+            ),
+            SnapshotSpec(
+                MMAUDIO_CLIP_REPO,
+                MMAUDIO_CLIP_REVISION,
+                MMAUDIO_CLIP_SUBDIR,
+                MMAUDIO_CLIP_ALLOW,
+            ),
+        ),
+        files=(
+            FileSpec(
+                MMAUDIO_HF_REPO,
+                MMAUDIO_HF_REVISION,
+                "weights/mmaudio_small_44k.pth",
+                "",
+                MMAUDIO_SUBDIR,
+            ),
+            FileSpec(
+                MMAUDIO_HF_REPO,
+                MMAUDIO_HF_REVISION,
+                "weights/mmaudio_medium_44k.pth",
+                "",
+                MMAUDIO_SUBDIR,
+            ),
+            FileSpec(
+                MMAUDIO_HF_REPO,
+                MMAUDIO_HF_REVISION,
+                "weights/mmaudio_large_44k_v2.pth",
+                "",
+                MMAUDIO_SUBDIR,
+            ),
+            FileSpec(
+                MMAUDIO_HF_REPO, MMAUDIO_HF_REVISION, "ext_weights/v1-44.pth", "", MMAUDIO_SUBDIR
+            ),
+            FileSpec(
+                MMAUDIO_HF_REPO,
+                MMAUDIO_HF_REVISION,
+                "ext_weights/synchformer_state_dict.pth",
+                "",
+                MMAUDIO_SUBDIR,
+            ),
+        ),
+        record_builder=_record_sfx,
+        checks=(
+            RequiredFile(
+                f"{MMAUDIO_SUBDIR}/weights/mmaudio_small_44k.pth", MMAUDIO_SMALL_MIN_BYTES
+            ),
+            RequiredFile(
+                f"{MMAUDIO_SUBDIR}/weights/mmaudio_medium_44k.pth", MMAUDIO_MEDIUM_MIN_BYTES
+            ),
+            RequiredFile(
+                f"{MMAUDIO_SUBDIR}/weights/mmaudio_large_44k_v2.pth", MMAUDIO_LARGE_MIN_BYTES
+            ),
+            RequiredFile(f"{MMAUDIO_SUBDIR}/ext_weights/v1-44.pth", MMAUDIO_VAE_MIN_BYTES),
+            RequiredFile(
+                f"{MMAUDIO_SUBDIR}/ext_weights/synchformer_state_dict.pth",
+                MMAUDIO_SYNCHFORMER_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{MMAUDIO_VOCODER_SUBDIR}/bigvgan_generator.pt", MMAUDIO_VOCODER_MIN_BYTES
+            ),
+            RequiredFile(f"{MMAUDIO_VOCODER_SUBDIR}/config.json", 0),
+            RequiredFile(
+                f"{MMAUDIO_CLIP_SUBDIR}/open_clip_pytorch_model.bin", MMAUDIO_CLIP_MIN_BYTES
+            ),
+            RequiredFile(f"{MMAUDIO_CLIP_SUBDIR}/config.json", 0),
+        ),
+        success_message=_describe_sfx,
+    ),
     "ltxv-2b": ModelSpec(
         name="ltxv-2b",
         manifest_key="ltxv",
@@ -701,7 +940,91 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         ),
         success_message=_describe_causvid,
     ),
+    "film": ModelSpec(
+        name="film",
+        manifest_key="film",
+        snapshots=(),
+        files=(FileSpec(FILM_HF_REPO, FILM_HF_REVISION, FILM_REPO_PATH, "", ""),),
+        record_builder=_record_film,
+        checks=(RequiredFile(FILM_REPO_PATH, FILM_MIN_BYTES),),
+        success_message=_describe_film,
+    ),
+    "realesrgan-anime": ModelSpec(
+        name="realesrgan-anime",
+        manifest_key="realesrgan",
+        snapshots=(),
+        files=(
+            FileSpec(
+                REALESRGAN_HF_REPO,
+                REALESRGAN_HF_REVISION,
+                REALESRGAN_ANIME_FILE,
+                "",
+                REALESRGAN_SUBDIR,
+            ),
+        ),
+        record_builder=_record_realesrgan,
+        checks=(
+            RequiredFile(
+                f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}", REALESRGAN_ANIME_MIN_BYTES
+            ),
+        ),
+        success_message=_describe_realesrgan,
+    ),
 }
+
+
+@dataclass(frozen=True)
+class SnapshotRef:
+    """A known hub snapshot's single /models home plus its owning spec.
+
+    The owning spec drives fetch (`download_model`) and full-stack verify
+    (`verify_model`); `relative_dir` is the snapshot's own directory for
+    load-from-path and per-snapshot presence checks.
+    """
+
+    spec_name: str
+    repo_id: str
+    revision: str | None
+    relative_dir: str
+
+
+def resolve_snapshot(repo_id: str) -> SnapshotRef | None:
+    """Map any known hub repo id to its /models snapshot (None when unknown).
+
+    First spec wins; repo ids are unique across snapshot rows today. Only
+    snapshot repos map — FileSpec single-file rows have no loadable
+    directory, so they keep hub behavior.
+    """
+    for spec_name, spec in MODEL_SPECS.items():
+        for snapshot in spec.snapshots:
+            if snapshot.repo_id == repo_id:
+                return SnapshotRef(
+                    spec_name=spec_name,
+                    repo_id=snapshot.repo_id,
+                    revision=snapshot.revision,
+                    relative_dir=snapshot.relative_dir,
+                )
+    return None
+
+
+def snapshot_present(models_dir: Path, ref: SnapshotRef) -> bool:
+    """True when the snapshot's own checklist passes (no cross-snapshot coupling).
+
+    A qwen load must not fail just because the MiniLM side of its spec is
+    missing (and vice versa) — each snapshot gates only its own files, so
+    a partial volume still serves whatever is complete.
+    """
+    spec = _require_spec(ref.spec_name)
+    prefix = ref.relative_dir.rstrip("/") + "/"
+
+    def _belongs(check: RequiredFile | RequiredGlob | ShardFloor) -> bool:
+        if isinstance(check, RequiredFile):
+            return check.relative_path.startswith(prefix)
+        if isinstance(check, RequiredGlob):
+            return check.relative_pattern.startswith(prefix)
+        return check.relative_glob.startswith(prefix)
+
+    return not _collect_missing(models_dir, spec, [c for c in spec.checks if _belongs(c)])
 
 
 def _require_spec(spec_name: str) -> ModelSpec:
@@ -838,6 +1161,23 @@ def verify_audio_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "audio-acestep")
 
 
+def download_sfx_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the SFX effects stack (SFX slice 2).
+
+    All three 44 kHz variants (small/medium/large_v2) + shared VAE +
+    synchformer from hkchengrex/MMAudio, the nvidia 44 kHz BigVGAN
+    vocoder snapshot, and the DFN5B CLIP weights — the exact layout
+    `voyage.audio.mmaudio_sfx` loads (no hub round-trip at run time).
+    Merges into the shared manifest; returns the merged record.
+    """
+    return download_model(models_dir, "sfx-mmaudio")
+
+
+def verify_sfx_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the SFX stack."""
+    return verify_model(models_dir, "sfx-mmaudio")
+
+
 def download_ltxv_models(models_dir: Path) -> dict[str, Any]:
     """Explicit download of the Phase 7 LTXV stack (DESIGN Phase 7).
 
@@ -871,12 +1211,43 @@ def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "causvid")
 
 
+def download_film_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the FILM interpolation weights (Track C).
+
+    Single fp16 file into <models>/frame_interpolation/ (ComfyUI layout).
+    Merges into the shared manifest; returns the merged record. Backs the
+    `models download film` CLI target.
+    """
+    return download_model(models_dir, "film")
+
+
+def verify_film_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the FILM weights."""
+    return verify_model(models_dir, "film")
+
+
+def download_realesrgan_models(models_dir: Path) -> dict[str, Any]:
+    """Explicit download of the Real-ESRGAN anime upscaler (Track C).
+
+    Single .pth into <models>/realesrgan/. Merges into the shared manifest;
+    returns the merged record. Backs the `models download realesrgan-anime`
+    CLI target.
+    """
+    return download_model(models_dir, "realesrgan-anime")
+
+
+def verify_realesrgan_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the Real-ESRGAN anime weights."""
+    return verify_model(models_dir, "realesrgan-anime")
+
+
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     """Every models-tree root the registry downloads (086).
 
     Covers all shipped stacks: Wan2.2 + LongLive generator, Wan2.1 +
     CausVid DMD, LTXV DiT/upscaler + its PixArt text encoder, Qwen3-8B
-    director, Qwen3.5-9B inspector, MiniLM embeddings, ACE-Step music.
+    director, Qwen3.5-9B inspector, MiniLM embeddings, ACE-Step music,
+    MMAudio SFX, FILM interpolation, Real-ESRGAN anime upscaler.
     """
     return {
         "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
@@ -889,56 +1260,8 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
         "inspector_dir": str(models_dir / QWEN35_SUBDIR),
         "minilm_dir": str(models_dir / MINILM_SUBDIR),
         "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),
+        "sfx_dir": str(models_dir / MMAUDIO_SUBDIR),
+        "film_dir": str(models_dir / FILM_SUBDIR),
+        "realesrgan_dir": str(models_dir / REALESRGAN_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),
     }
-class SnapshotRef:
-    """A known hub snapshot's single /models home plus its owning spec.
-
-    The owning spec drives fetch (`download_model`) and full-stack verify
-    (`verify_model`); `relative_dir` is the snapshot's own directory for
-    load-from-path and per-snapshot presence checks.
-    """
-
-    spec_name: str
-    repo_id: str
-    revision: str | None
-    relative_dir: str
-
-
-def resolve_snapshot(repo_id: str) -> SnapshotRef | None:
-    """Map any known hub repo id to its /models snapshot (None when unknown).
-
-    First spec wins; repo ids are unique across snapshot rows today. Only
-    snapshot repos map — FileSpec single-file rows have no loadable
-    directory, so they keep hub behavior.
-    """
-    for spec_name, spec in MODEL_SPECS.items():
-        for snapshot in spec.snapshots:
-            if snapshot.repo_id == repo_id:
-                return SnapshotRef(
-                    spec_name=spec_name,
-                    repo_id=snapshot.repo_id,
-                    revision=snapshot.revision,
-                    relative_dir=snapshot.relative_dir,
-                )
-    return None
-
-
-def snapshot_present(models_dir: Path, ref: SnapshotRef) -> bool:
-    """True when the snapshot's own checklist passes (no cross-snapshot coupling).
-
-    A qwen load must not fail just because the MiniLM side of its spec is
-    missing (and vice versa) — each snapshot gates only its own files, so
-    a partial volume still serves whatever is complete.
-    """
-    spec = _require_spec(ref.spec_name)
-    prefix = ref.relative_dir.rstrip("/") + "/"
-
-    def _belongs(check: RequiredFile | RequiredGlob | ShardFloor) -> bool:
-        if isinstance(check, RequiredFile):
-            return check.relative_path.startswith(prefix)
-        if isinstance(check, RequiredGlob):
-            return check.relative_pattern.startswith(prefix)
-        return check.relative_glob.startswith(prefix)
-
-    return not _collect_missing(models_dir, spec, [c for c in spec.checks if _belongs(c)])

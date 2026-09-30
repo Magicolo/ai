@@ -669,6 +669,108 @@ def build_final_audio(
 # keep the plain fps filter (no behavior change).
 PRESENTATION_MIN_FPS = 24
 
+#: Presentation floors for the Track B augment path (coming config): the
+#: shipped video is always >= 32fps and covers 1280x720. `finalize_run`
+#: and `FinalizeOptions` default to these so headless/legacy callers get
+#: the same presentation without a config round-trip.
+AUGMENT_DEFAULT_MIN_FPS = 32
+AUGMENT_DEFAULT_MIN_WIDTH = 1280
+AUGMENT_DEFAULT_MIN_HEIGHT = 720
+
+
+@dataclass
+class AugmentPlan:
+    """Presentation geometry/fps the finalizer must produce (Track B).
+
+    Why this exists: segment videos render at backend-native geometry
+    (CausVid 832x480@16, LTXV 768x512@24, fake 768x432@24) but the
+    shipped video must always cover the presentation floors. The plan is
+    pure math over probed source + requested target + floors, so unit
+    tests pin it without ffmpeg and `finalize_run` just renders it.
+    """
+
+    out_w: int
+    out_h: int
+    out_fps: int
+    needs_reencode: bool
+    needs_minterpolate: bool
+
+
+def plan_augmentation(
+    source_w: int,
+    source_h: int,
+    source_fps: float,
+    target_w: int,
+    target_h: int,
+    requested_fps: int,
+    min_fps: int | None,
+    min_width: int | None,
+    min_height: int | None,
+) -> AugmentPlan:
+    """Compute the presentation box/fps for one finalize (pure, Track B).
+
+    `effective_fps = max(requested, min_fps or 0, PRESENTATION_MIN_FPS)`;
+    geometry is `max(target, min)` per axis — the output box always
+    covers both the requested target and the floors, preserving aspect
+    downstream via the scale-to-fit + pad vf (never stretched). Floors
+    only ever upscale: a target already above them is kept as-is
+    ("minimal upscale"), and a 0/None floor disables that axis (the
+    24fps `PRESENTATION_MIN_FPS` still applies — 0 disables the new
+    32fps floor, not the shipped-video guarantee).
+
+    `needs_minterpolate` is True only for an fps lift (source + 0.5 <
+    out — motion interpolation); an fps drop uses the plain fps filter.
+    `needs_reencode` covers any pixel/timing change (dims differ, fps
+    differs past 0.5 either way, lift, or unknown source fps) and gates
+    the stream-copy fast path off.
+    """
+    if target_w <= 0 or target_h <= 0:
+        raise ValueError(f"target geometry must be positive (got {target_w}x{target_h})")
+    if requested_fps <= 0:
+        raise ValueError(f"requested fps must be positive (got {requested_fps})")
+    floor_fps = int(min_fps or 0)
+    floor_w = int(min_width or 0)
+    floor_h = int(min_height or 0)
+    if floor_fps < 0 or floor_w < 0 or floor_h < 0:
+        raise ValueError(f"augment floors must be >= 0 (got {min_fps}/{min_width}/{min_height})")
+    out_fps = max(int(requested_fps), floor_fps, PRESENTATION_MIN_FPS)
+    out_w = max(int(target_w), floor_w)
+    out_h = max(int(target_h), floor_h)
+    source_fps_value = float(source_fps)
+    needs_minterpolate = source_fps_value > 0 and out_fps > source_fps_value + 0.5
+    fps_mismatch = source_fps_value <= 0 or abs(out_fps - source_fps_value) > 0.5
+    needs_reencode = bool(
+        needs_minterpolate or fps_mismatch or int(source_w) != out_w or int(source_h) != out_h
+    )
+    return AugmentPlan(
+        out_w=out_w,
+        out_h=out_h,
+        out_fps=out_fps,
+        needs_reencode=needs_reencode,
+        needs_minterpolate=needs_minterpolate,
+    )
+
+
+def _probe_video_geometry(info: dict[str, Any]) -> tuple[int, int]:
+    """Source WxH from ffprobe info; (0, 0) when absent/unparseable.
+
+    Unknown geometry forces the augment re-encode path (the plan treats
+    0 as "differs from any positive out box"), so callers never
+    stream-copy blind.
+    """
+    streams = info.get("streams", [])
+    video = next(
+        (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"),
+        None,
+    )
+    if video is None:
+        return (0, 0)
+    try:
+        return (int(video.get("width", 0) or 0), int(video.get("height", 0) or 0))
+    except (ValueError, TypeError):
+        return (0, 0)
+
+
 JointStyle = Literal["blend", "hard-splice"]
 """Audio-joint rendering for the final mix (issues 045, 046).
 
@@ -690,6 +792,11 @@ class FinalizeOptions:
     callers should pass `options=`; the legacy scalars stay as the
     default path and build an equivalent instance internally, so existing
     callers are untouched.
+
+    Track B augment fields (`min_fps`/`min_width`/`min_height`): the
+    presentation floors `finalize_run` enforces via `plan_augmentation`
+    (defaults 32/1280/720 to match the coming config; 0 disables that
+    axis — the 24fps `PRESENTATION_MIN_FPS` still applies).
     """
 
     skip_bad: bool = False
@@ -698,6 +805,9 @@ class FinalizeOptions:
     overlap_fraction: float = 0.10
     overlap_cap_seconds: float = 0.5
     joint_style: JointStyle = "blend"
+    min_fps: int = 32
+    min_width: int = 1280
+    min_height: int = 720
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -708,6 +818,12 @@ class FinalizeOptions:
             raise ValueError(f"overlap_fraction must be >= 0 (got {self.overlap_fraction})")
         if self.overlap_cap_seconds < 0:
             raise ValueError(f"overlap_cap_seconds must be >= 0 (got {self.overlap_cap_seconds})")
+        if self.min_fps < 0:
+            raise ValueError(f"min_fps must be >= 0 (got {self.min_fps})")
+        if self.min_width < 0:
+            raise ValueError(f"min_width must be >= 0 (got {self.min_width})")
+        if self.min_height < 0:
+            raise ValueError(f"min_height must be >= 0 (got {self.min_height})")
 
     def effective_overlap_fraction(self) -> float:
         """Overlap the mixer actually uses: hard-splice forces zero."""
@@ -750,21 +866,37 @@ def finalize_run(
     channels: int = 2,
     overlap_fraction: float = 0.10,
     overlap_cap_seconds: float = 0.5,
+    min_fps: int | None = None,
+    min_width: int | None = None,
+    min_height: int | None = None,
     options: FinalizeOptions | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
-    Native-geometry runs (the default — generation WxH/fps already match)
-    stream-copy the committed videos with zero video re-encodes (issue 031
-    fast path); anything else takes the single scale/pad/fps re-encode.
-    Then mux audio, validate, atomically publish. With skip_bad, corrupt
-    segments are skipped with a warning instead of aborting the whole
-    finalize. A positive `min_free_space_gib` runs the §53 preflight first
-    so a full disk fails fast instead of mid-encode.
+    The presentation box/fps come from `plan_augmentation` (Track B):
+    `max(requested, floors, 24fps)` for fps and `max(target, floors)`
+    per axis for geometry, so backend-native segments (CausVid
+    832x480@16, LTXV 768x512@24) ship at >= 1280x720@32 by default.
+    Explicit `min_*` scalars override `options` when both are given;
+    `None` means "use the options value" (which defaults to
+    32/1280/720); pass 0 to disable a floor axis (the 24fps
+    `PRESENTATION_MIN_FPS` still applies).
+
+    Native-geometry runs (presentation already matches) stream-copy the
+    committed videos with zero video re-encodes (issue 031 fast path);
+    anything the plan flags (`needs_reencode`) takes the
+    minterpolate-when-lifting + scale/pad/fps re-encode. Then mux audio,
+    validate against the presentation box/fps, atomically publish. With
+    skip_bad, corrupt segments are skipped with a warning instead of
+    aborting the whole finalize. A positive `min_free_space_gib` runs
+    the §53 preflight first so a full disk fails fast instead of
+    mid-encode.
 
     Audio joints get a proportional overlap crossfade (re-sliced from
     the takes ledger — previews untouched); pass overlap_fraction=0 to
-    keep the legacy hard splice.
+    keep the legacy hard splice. The audio timeline stays on the source
+    fps (frame counts / requested fps = seconds) — the fps lift touches
+    video only, never the mix.
     """
     settings = (
         options
@@ -776,8 +908,14 @@ def finalize_run(
             overlap_fraction=overlap_fraction,
             overlap_cap_seconds=overlap_cap_seconds,
             joint_style="hard-splice" if overlap_fraction <= 0 else "blend",
+            min_fps=AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
+            min_width=AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
+            min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
         )
     )
+    effective_min_fps = min_fps if min_fps is not None else settings.min_fps
+    effective_min_width = min_width if min_width is not None else settings.min_width
+    effective_min_height = min_height if min_height is not None else settings.min_height
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
@@ -813,17 +951,28 @@ def finalize_run(
     if not usable:
         raise MediaError(f"no usable segments in {run_dir}")
 
-    # Presentation frame rate: sources below the floor (CausVid 16fps) are
-    # lifted with motion interpolation; the audio timeline stays on source
-    # fps (frame counts / source fps = seconds either way).
+    # Presentation box/fps via the pure augment plan (Track B): sources
+    # below the floors (CausVid 16fps, sub-720p natives) are lifted with
+    # motion interpolation + upscale; the audio timeline stays on the
+    # requested (== source) fps — frame counts / source fps = seconds.
     source_info = probe(usable[0] / "video.mp4")
     source_fps = _probe_video_fps(source_info)
-    presentation_fps = max(fps, PRESENTATION_MIN_FPS)
+    source_w, source_h = _probe_video_geometry(source_info)
+    plan = plan_augmentation(
+        source_w,
+        source_h,
+        source_fps,
+        width,
+        height,
+        fps,
+        effective_min_fps,
+        effective_min_width,
+        effective_min_height,
+    )
+    out_w, out_h, out_fps = plan.out_w, plan.out_h, plan.out_fps
     lift = ""
-    if source_fps > 0 and presentation_fps > source_fps + 0.5:
-        lift = (
-            f"minterpolate=fps={presentation_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
-        )
+    if plan.needs_minterpolate:
+        lift = f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
@@ -840,16 +989,18 @@ def finalize_run(
         )
         staged = tmpdir / "final.mp4"
         # Issue 031 fast path: every committed video already matches the
-        # target geometry/pix_fmt/fps, so concat the originals with a stream
-        # copy and mux the final audio — zero video re-encodes. The per-part
-        # re-encode below is pure waste on native runs.
+        # presentation geometry/pix_fmt/fps, so concat the originals with a
+        # stream copy and mux the final audio — zero video re-encodes. The
+        # per-part re-encode below is pure waste on native runs. The
+        # augment plan gates it off whenever an upscale or fps lift is
+        # required (needs_reencode covers both, plus any fps mismatch).
         native = (
             lift == ""
+            and not plan.needs_reencode
             and source_fps > 0
-            and abs(presentation_fps - source_fps) <= 0.5
+            and abs(out_fps - source_fps) <= 0.5
             and all(
-                _segment_video_matches_target(segment, width, height, presentation_fps)
-                for segment in usable
+                _segment_video_matches_target(segment, out_w, out_h, out_fps) for segment in usable
             )
         )
         if native:
@@ -888,7 +1039,7 @@ def finalize_run(
             )
             if proc.returncode != 0:
                 raise MediaError(f"final concat copy failed: {proc.stderr[-2000:]}")
-            validate_video(staged, width, height, presentation_fps)
+            validate_video(staged, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(output_path, staged.read_bytes())
             return output_path
@@ -920,8 +1071,8 @@ def finalize_run(
         concat_list = tmpdir / "concat.txt"
         concat_list.write_text("".join(f"file '{part}'\n" for part in parts), encoding="utf-8")
         vf = (
-            f"{lift}scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={presentation_fps}"
+            f"{lift}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
         )
         proc = run_capture(
             [
@@ -959,7 +1110,7 @@ def finalize_run(
         )
         if proc.returncode != 0:
             raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
-        validate_video(staged, width, height, presentation_fps)
+        validate_video(staged, out_w, out_h, out_fps)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(output_path, staged.read_bytes())
     return output_path

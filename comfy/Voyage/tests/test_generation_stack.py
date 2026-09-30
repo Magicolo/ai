@@ -198,7 +198,9 @@ def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
     finally:
         supervisor.stop_workers()
     out = tmp_path / "final-24.mp4"
-    assert finalize_run(run_dir, out, fps=16).exists()
+    # Floors disabled: this pins the legacy 24fps presentation-floor path
+    # at native geometry (default floors would lift to 1280x720@32).
+    assert finalize_run(run_dir, out, fps=16, min_fps=0, min_width=0, min_height=0).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)
     # 2 fake segments x 48f @16fps = 6.0s of content; the 24fps presentation

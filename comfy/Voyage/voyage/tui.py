@@ -92,6 +92,8 @@ FIELD_WIDGET_IDS = {
     "take_seconds": "field-take-seconds",
     "beats_per_segment": "field-beats",
     "drift_every_n": "field-drift",
+    "min_fps": "field-min-fps",
+    "min_resolution": "field-min-resolution",
     "seed": "field-seed",
 }
 WIDGET_FIELD_NAMES = {widget_id: field for field, widget_id in FIELD_WIDGET_IDS.items()}
@@ -634,6 +636,26 @@ class VoyageApp(App[None]):
             ),
         )
         yield self._field_row(
+            "Min fps",
+            "min_fps",
+            Input(
+                value=self.initial_state.min_fps,
+                placeholder="32",
+                id="field-min-fps",
+                tooltip=FIELD_HELP["min_fps"],
+            ),
+        )
+        yield self._field_row(
+            "Min resolution",
+            "min_resolution",
+            Input(
+                value=self.initial_state.min_resolution,
+                placeholder="1280x720",
+                id="field-min-resolution",
+                tooltip=FIELD_HELP["min_resolution"],
+            ),
+        )
+        yield self._field_row(
             "Seed",
             "seed",
             Input(
@@ -751,6 +773,8 @@ class VoyageApp(App[None]):
             quantization=_read_choice_field(self, "#field-quantization"),
             beats_per_segment=_read_text_field(self, "#field-beats"),
             drift_every_n=_read_text_field(self, "#field-drift"),
+            min_fps=_read_text_field(self, "#field-min-fps"),
+            min_resolution=_read_text_field(self, "#field-min-resolution"),
             verbose=_read_flag_field(self, "#flag-verbose"),
             no_color=_read_flag_field(self, "#flag-no-color"),
         )

@@ -2518,11 +2518,16 @@ It should **not** block video generation unless an explicit closed-loop mode is 
 
 This is important: an unavailable or slow inspector must not stop an otherwise healthy voyage.
 
-> As-built (§44-vlm-trust-2026-09-29, issue 056): the Qwen3.5-9B inspector
-> loads with `trust_remote_code=True` (custom modeling/processor code —
-> required), while the Qwen3 text path stays `False`. Pin + allow-list
-> (`chat_template.jinja`) mitigate availability, not execution; vendoring
-> + hash-pinning the modeling files and minimal mounts are the follow-up.
+> As-built (§44-vlm-trust-2026-09-29, issue 056, superseded 2026-09-29):
+> the Qwen3.5-9B inspector loaded with `trust_remote_code=True` under
+> transformers 4.57.6 (no native qwen3_5 modeling — the flag was
+> load-bearing AND the model was unloadable without Hub code). Since
+> the director image moved to transformers 5.17.0 (native
+> Qwen3_5ForConditionalGeneration + multimodal auto class), the loader
+> uses `trust_remote_code=False` (verified live: processor resolves as
+> Qwen3VLProcessor, 9.4B params load) — no remote code executes by
+> design. The pin + allow-list (`chat_template.jinja`) remain as
+> availability guards.
 
 ---
 
@@ -7112,6 +7117,93 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   strict + 867 pytest, 1 deselected). Next: SFX worker + VRAM ladder
   (slice 2), finalize windowing/sharding/mix (slice 3).
 
+## 2026-09-29 — SFX worker + 2060 VRAM ladder (SFX slice 2)
+
+- Worker + fake behind a shared `generate_sfx` contract
+  (`voyage/workers/sfx_mmaudio.py` real, `voyage/workers/sfx.py` fake
+  seeded pink noise, `FakeSfxBackend` in `fake_backends.py`):
+  `{window_id, caption, video_path, start_seconds, duration_seconds,
+  seed, output_path, sample_rate, channels}` → WAV + `{artifacts,
+  sfx}`. Validation before side effects, benchmark count guard,
+  uniform evict — same shape as the ACE-Step pair. The real worker
+  extracts CLIP (8 fps @ 384 px) + sync (25 fps @ 224 px) frames via
+  two ffmpeg passes and renders native 44.1 kHz FLAC → requested WAV.
+- Compat (`voyage/audio/mmaudio_sfx.py`, lazy imports, §12 clean):
+  upstream hkchengrex/MMAudio @ `974010a0` with native .pth weights
+  (no comfy-loader machinery), fp16 resident, euler 25 steps, cfg 4.5.
+  Two pinned-constructor hub hardcodes are redirected at the registry
+  files (restored in `finally`): the nvidia 44 kHz vocoder
+  (`from_pretrained` accepts the local snapshot dir) and the DFN5B
+  CLIP tower (open_clip `create_model` with the pinned .bin under the
+  builtin `ViT-H-14-378-quickgelu` arch entry). Caught live: the
+  pinned API differs from the newer vendored ComfyUI copy
+  (`AutoEncoderModule(vae_ckpt_path=…)`, `FeaturesUtils(tod_vae_ckpt=,
+  synchformer_ckpt=, mode=)` — the vendored copy takes state dicts).
+- Config + registry + CLI: `[sfx]` section (`SfxConfig`: backend
+  fake|mmaudio, device, models_dir, model_size; default fake keeps old
+  runs byte-identical), `sfx-mmaudio` MODEL_SPECS row (3 variants +
+  VAE/synchformer files, nvidia vocoder + DFN5B CLIP snapshots,
+  CC-BY-NC-4.0 recorded like CausVid), `models download/verify
+  sfx-mmaudio` (~13 GB), `docs/MODELS.md` mirror. `test_longlive`
+  layout-keys test extended with `sfx_dir`.
+- Ladder (idle GPUs, 8 s benchmark windows): small_44k fits the 2060
+  (4.6 GiB peak, ~6.0 s/window, 1.4 GB headroom); medium_44k OOMs it
+  (5.19 GiB PyTorch vs 5.6 usable); large_44k_v2 fits the 4060
+  (6.2 GiB peak, ~5.9 s/window). Locked: large on the 4060 primary
+  (user's quality-first directive); dual-shard (slice 3) runs small on
+  both GPUs for quality consistency across windows. Dockerfile.video
+  carries `/opt/mmaudio` (`--no-deps` + inference-only leaves, so the
+  transformers 4.57.6 pin still wins) + PYTHONPATH.
+- Proof: `tests/test_sfx_contract.py` (9 TDD tests, watched fail, then
+  green incl. fake byte-determinism); `models verify sfx-mmaudio` OK
+  live; ladder numbers above from live runs. Full gates: pytest 872
+  passed + 4 load-flaky TUI Pilot failures (all pass isolated —
+  known shared-box flakiness, re-run idle) + 10 ruff errors all in
+  `voyage/workers/video_common.py` (concurrent agent's in-flight file,
+  untouched per §9). Next: finalize windowing/sharding/mix (slice 3).
+
+## 2026-09-29 — Finalize-time SFX pass (SFX slice 3)
+
+- Post-pass design (zero-touch to `finalize_run`): after the
+  music-only final publishes, `finalize_sfx_pass` (`voyage/
+  sfx_finalize.py`) renders the SFX bed conditioned on the shipped
+  pixels, mixes, and muxes video-copy + mixed audio back over the same
+  path (atomic replace — a failed pass never strands a half-written
+  final; disabled backends leave music bytes untouched). Windows tile
+  [0, timeline) at 8 s / 1 s overlap; junction windows join both
+  adjacent segments' `sfx_caption`s (the incoherence the user flagged);
+  stub tails < 1.0 s merge into their predecessor; seeds derive
+  deterministically so re-finalize re-renders identical bytes and
+  ledger-matching stems are reused. Bed joins via manual-fade
+  `_blend_pair`s (never acrossfade); amix lays it at -6 dB
+  (normalize=0, no auto-gain); every stage verifies duration against
+  the 0.6 s A/V tolerance. Stems persist under `audio/sfx/` +
+  fsynced `sfx.jsonl` (takes-philosophy); `validate_run` extends
+  read-only (missing ledger = clean for old runs).
+- Live incident (proof run, drove the fix): `clip_f [1,17] vs
+  _clip_seq_len=16` on the first non-8 s window. Root cause: the
+  duration-derived `SequenceConfig` asserts EXACT counts (synchformer
+  emits S segments × 8 — temporal stride 2 — CLIP passes frames
+  through), so the fixed pad-to-17 floor corrupted every non-8 s
+  window. Fix mirrors the canonical `load_video`: exact counts
+  (int(rate × duration)), truncate-to-reality with a 0.05 s fail-loud
+  guard, no padding. Proved by the retry: w0001 [7, 9.04) rendered
+  clean (16 clip / 51 sync → lens 16/40/88).
+- Proof (idle GPUs, `sfxproof` 2-seg ltxv + deterministic director):
+  `final.mp4` 9.042 s h264 + AAC, SFX stem mean -12.3 dB / max
+  -2.5 dB (genuine effects, not silence), mix mean -21.9 dB,
+  `validate` VALID incl. the new sfx checks. CLI: `--no-sfx`,
+  `--sfx-device`, `--sfx-model-size`, `--sfx-workers 1|2` (dual
+  forces small/small on cuda:0+cuda:1 for joint consistency; cuda:1
+  single with larger models fails fast per the ladder).
+- Proof: `tests/test_sfx_finalize.py` (12 TDD tests incl. a fake
+  end-to-end over junctions — worker spawn, stems, bed, mix, ledger,
+  validate — all in slim gates); my scope ruff + format + mypy clean.
+  Full tree: 903 passed + 1 failed in another agent's untracked
+  `test_generate_blocks_request.py` (message mismatch inside their
+  in-flight `video_common.py` — same file holding the 10 ruff errors
+  from slice 2; untouched per §9).
+
 ## 2026-09-29 — Director backend qwen by default (poulah freeze fix)
 
 - User report on the poulah run (31 segments): the general prompt never
@@ -7189,6 +7281,8 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   (run.sh `--user` + no HOME breaks HF downloads), `-v
   /tmp/causvid-anchor:/opt/causvid/wan_models`,
   `-e VOYAGE_LONGLIVE_DIR=/tmp/ll-tree` (host symlinks into /models).
+
+## 2026-09-29 — `generate` ensures required models inline (selective + parallel)
 
 - User intent: `voyage generate` must download/verify all models (and
   other external deps) it needs as part of the command, with polished
@@ -7332,6 +7426,56 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   investigation file this section was drafted against has since been
   archived — it lives on in git history only; see AGENTS.md §11.)
 
+## 2026-09-29 — SFX/music on-by-default + explicit caption pins (SFX slice 4)
+
+- User directives: (1) "Ensure that SFX/music generation is enabled by
+  default for all relevant cli commands (especially the 'generate'
+  verb) and it must use the GPU by default as well." (2) "SFX captions,
+  music captions and video captions may be provided as explicit
+  arguments to the relevant CLI commands but when using the director,
+  they must be driven by it. The goal is to have those captions evolve
+  as the general/styling prompt evolves."
+- Defaults-on: `BackendRecord` gains `sfx_backend`/`sfx_device`
+  (CUDA rows → mmaudio/cuda:0, fake → fake/cpu); `default_config_toml`
+  and the `resolve_config` backend-switch pair SFX like audio, so
+  `generate --backend ltxv` (the default) renders ACE-Step music AND
+  MMAudio SFX on cuda:0 with no flags, while fake stays CPU-only
+  (gates never touch weights) and old runs without `[sfx]` keep
+  byte-identical behavior via `SfxConfig` fake defaults. `ensure_models`
+  already gates the sfx stack (no change needed).
+- Explicit pins (in-memory only, never written to voyage.toml):
+  `AudioConfig.music_caption` / `VideoConfig.video_caption` via
+  `resolve_config` (+ wrapper), flags `--music-caption` /
+  `--video-caption` on run+generate (shared `_add_generation_overrides`
+  helper); `--sfx-caption` already existed on the finalize family.
+  Precedence helpers `effective_music_caption` /
+  `effective_video_stages` (supervisor, pure, tested): explicit pin,
+  else director's evolving caption/stages, else charter fallback.
+  The video pin applies AFTER the accept transaction (novelty +
+  destination stay director-driven) but is still style-checked —
+  charter-violating pins fail the commit loudly. The decision record
+  keeps director stages (drift chain stays director-pure);
+  prompt_plan.json keeps what rendered. TUI namespaces untouched
+  (getattr-defensive reads; TUI caption fields are a follow-up).
+- Poulah SFX attempt: first pass died on the last window
+  (w0017 [119, 125.29): source yielded 6.20s for 6.29s — EOF edge
+  rounding under the `-frames:v` cap). Fix: truncate-and-continue
+  when the shortfall is < 0.6s (ledger records resolved reality),
+  fail loud beyond it; plus a sub-1.0s stub-tail merge rule in the
+  planner. Retry then failed at startup: `output/poulah/` (31
+  segments + final.mp4, gitignored scratch) vanished from disk
+  mid-session — likely another agent's scratch cleanup; recovery
+  options with the user.
+- Gates: own scope ruff + format + mypy clean; 51 SFX/config/registry
+  tests green. Full tree 919 passed + 9 failed, all outside this
+  slice: 5 finalize-geometry failures traceback into the concurrent
+  in-flight `media.py` refactor (e.g. 1280x720 != 768x432 from
+  validate_video — untouched by this change), 4 generate_ensure
+  failures pass in isolation/grouped reruns (their file + models_ensure
+  are concurrent-modified). Poulah recovery still open (see below).
+
+## 2026-09-29 — Director snapshots resolve to the single /models copy (volume-deleted safe)
+
 - User intent: the Qwen gap — `generate` ensured `director-qwen8b` into
   the volume, but the director worker loaded by hub id from the
   ephemeral HF cache only, so a deleted volume silently degraded to
@@ -7366,3 +7510,29 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   1280x720 != 768x432, + 1 TUI tick flake — none touch this path).
 - Reviewed + re-gated (ruff/format/mypy green, 1065 passed + 3 foreign
   finalize-geometry failures triaged); committed with explicit approval.
+
+## 2026-09-30 — Finalize-time augmentation floors: min-fps 32 + min-resolution 1280x720 (Real-ESRGAN + FILM)
+
+- User intent: every shipped video is >=32fps and >=HD by default, via a
+  model-free floor today with the model-augmentation path staged. Knobs:
+  `--min-fps` / `--min-resolution` (`0` disables) on `finalize`/`generate`/
+  `run`, `[augment]` TOML section, TUI fields, `AugmentConfig`
+  (`min_fps=32`, `min_width=1280`, `min_height=720`).
+- `media.py`: `plan_augmentation` (pure: `max(requested, min, 24)` fps +
+  per-axis `max`, 0/None disables, minterpolate only on lift) gates the
+  stream-copy fast path off; vf is minterpolate-when-lifting +
+  scale/pad/setsar/fps. 24fps sources re-encode 2x + fps-decimate to 32.
+- `model_registry`: `film` (Comfy-Org `film_net_fp16`, 66M) +
+  `realesrgan-anime` (x4plus-anime-6B, 18M) specs; `models_ensure`
+  `augment_enabled` (CUDA backends include both, fake stays empty);
+  `Dockerfile.video` gains leaf-only safetensors+Pillow.
+- New `voyage/augment.py` (chunked orchestration, 2-GPU
+  video-aug-cuda:0/SFX-cuda:1 pairing) + `workers/augment_worker.py`
+  (lazy-torch vendored RRDBNet + FilmNetMini stand-in; full FILM weight
+  port is follow-up — official `film_net` weights will NOT load).
+- Proof: 6 new test modules (138 tests); the 5 legacy
+  finalize-geometry failures other agents triaged as foreign were this
+  change's default shift (768x432@24 -> 1280x720@32) — fixed in place
+  (fastpath/stack tests pin legacy path with min_*=0, integration pins
+  new defaults); full gates 1067 passed + 1 TUI Pilot flake (passes in
+  isolation).

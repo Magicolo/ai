@@ -42,6 +42,28 @@ at `adb6a5ecd07666b4d0290042915c8406e6d5ce22`, cloned in
 geometry 832×480 @ 16 fps; full notes:
 `docs/UPSTREAM_CAUSVID_NOTES.md`.
 
+## Finalize augmentation — FILM interpolation (`models download film`, ~66 MB)
+
+| Artifact | Repo / file | Revision |
+|----------|-------------|----------|
+| FILM fp16 (`frame_interpolation/film_net_fp16.safetensors`) | [Comfy-Org/frame_interpolation](https://huggingface.co/Comfy-Org/frame_interpolation) | `219da3c9d8c357ceaf457fc1d5932c6e861b8dee` |
+
+Torch-native load (state dict via `safetensors`, no retraining code). The
+repack bundles google-research/frame-interpolation (Apache 2.0) and
+hzwer/Practical-RIFE (MIT), hence the `mit-and-apache-2.0` tag. Weights
+land in `<models>/frame_interpolation/` (ComfyUI layout); leaf deps in
+`worker/Dockerfile.video`.
+
+## Finalize augmentation — Real-ESRGAN anime 6B (`models download realesrgan-anime`, ~18 MB)
+
+| Artifact | Repo / file | Revision |
+|----------|-------------|----------|
+| Anime upscaler (`RealESRGAN_x4plus_anime_6B.pth`, 4x RRDBNet 6-block) | [amd/realesrgan-x4plus-anime-6b](https://huggingface.co/amd/realesrgan-x4plus-anime-6b) (1:1 mirror of the [xinntao/Real-ESRGAN v0.2.2.4 release asset](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth)) | `b14ff5f8ecb5a4b56ce4049a58d0bca1f8814690` |
+
+BSD-3-Clause (c) 2021 Xintao Wang. Torch-native `torch.load`
+(weights-only) of the RRDBNet generator; weights land in
+`<models>/realesrgan/`.
+
 ## Director — Qwen3-8B + MiniLM (`models download director-qwen8b`, ~16 GB)
 
 | Artifact | Repo | Revision |
@@ -63,11 +85,11 @@ hub/cache behavior untouched.
 | VLM | [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | `c202236235762e1c871ad0ccb60c8ee5ba337b9a` |
 
 The allow-list must include `chat_template.jinja`. Only needed when
-`[experimental] visual_inspector = true`. Note: the inspector loads with
-`trust_remote_code=True` (the model ships custom modeling/processor code;
-the Qwen3 text path stays `False`) — a compromised revision is RCE in the
-director container. The pin + allow-list mitigate availability, not
-execution; vendoring + hash-pinning the modeling files is the follow-up.
+`[experimental] visual_inspector = true`. Same /models resolution as the
+director pair above (`Qwen3.5-9B/`). Note: the inspector loads with
+`trust_remote_code=False` (transformers 5.17.0 ships native qwen3_5
+modeling — verified live 2026-09-29, issue 056); no remote code executes.
+The pin + allow-list remain as availability guards.
 
 ## Audio — ACE-Step 1.5 (`models download audio-acestep`)
 
@@ -81,8 +103,30 @@ Code: [ace-step/ACE-Step-1.5](https://github.com/ace-step/ACE-Step-1.5) at
 `<models>/acestep/checkpoints/` matching upstream `MAIN_MODEL_COMPONENTS`
 (includes the gate-only 1.7 B LM).
 
+## SFX — MMAudio 44 kHz (`models download sfx-mmaudio`, ~13 GB)
+
+| Artifact | Repo | Revision |
+|----------|------|----------|
+| small_44k (157 M, 601 MB) | [hkchengrex/MMAudio](https://huggingface.co/hkchengrex/MMAudio) | `eb13a1a98fdbec91753775c57b074ccdfc60587c` |
+| medium_44k (621 M, 2.4 GB) | [hkchengrex/MMAudio](https://huggingface.co/hkchengrex/MMAudio) | `eb13a1a98fdbec91753775c57b074ccdfc60587c` |
+| large_44k_v2 (1.03 B, 3.9 GB, recommended) | [hkchengrex/MMAudio](https://huggingface.co/hkchengrex/MMAudio) | `eb13a1a98fdbec91753775c57b074ccdfc60587c` |
+| VAE v1-44 (1.2 GB) + synchformer (907 MB) | [hkchengrex/MMAudio](https://huggingface.co/hkchengrex/MMAudio) | `eb13a1a98fdbec91753775c57b074ccdfc60587c` |
+| 44 kHz BigVGAN vocoder | [nvidia/bigvgan_v2_44khz_128band_512x](https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_512x) | `95a9d1dcb12906c03edd938d77b9333d6ded7dfb` |
+| DFN5B CLIP tower | [apple/DFN5B-CLIP-ViT-H-14-384](https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-384) | `01b771ed0d1395ca5ffdd279897d665ebe00dfd2` |
+
+Code: [hkchengrex/MMAudio](https://github.com/hkchengrex/MMAudio) at
+`974010a026c731054592d8f777218bd9d85a6c24`. Layout under
+`<models>/mmaudio/` (`weights/`, `ext_weights/`, `vocoder/`,
+`clip/`). Ladder results 2026-09-29: small fits the 6 GB 2060
+(4.6 GiB peak), medium OOMs it, large needs the 4060 (6.2 GiB peak).
+
 ## License notes
 
-- 4x-UltraSharp / RealESRGAN weights are a Zoomy concern, not Voyage's.
+- 4x-UltraSharp weights are a Zoomy concern, not Voyage's (Voyage pins the
+  Real-ESRGAN anime 6B mirror above instead).
+- FILM repack is MIT + Apache 2.0; Real-ESRGAN anime is BSD-3-Clause —
+  both permissive, unlike the non-commercial stacks below.
+- MMAudio weights are CC-BY-NC-4.0 (non-commercial) — same class as the
+  CausVid DMD checkpoint; check before redistributing models or images.
 - The Wan 2.2 base weights carry their own license; check the repo page
   before redistributing models.

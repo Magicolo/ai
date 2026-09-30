@@ -153,6 +153,14 @@ module = [
   "sentence_transformers.*",
   "acestep",
   "acestep.*",
+  "accelerate",
+  "accelerate.*",
+  "mmaudio",
+  "mmaudio.*",
+  "open_clip",
+  "open_clip.*",
+  "soundfile",
+  "soundfile.*",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"

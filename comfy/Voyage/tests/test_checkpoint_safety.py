@@ -341,3 +341,5 @@ def test_models_dir_layout_covers_shipped_stacks(tmp_path: Path) -> None:
     assert layout["wan21_dir"] == str(tmp_path / model_registry.WAN21_SUBDIR)
     assert layout["inspector_dir"] == str(tmp_path / model_registry.QWEN35_SUBDIR)
     assert layout["ltxv_text_encoder_dir"] == str(tmp_path / model_registry.LTXV_TE_SUBDIR)
+    assert layout["film_dir"] == str(tmp_path / model_registry.FILM_SUBDIR)
+    assert layout["realesrgan_dir"] == str(tmp_path / model_registry.REALESRGAN_SUBDIR)

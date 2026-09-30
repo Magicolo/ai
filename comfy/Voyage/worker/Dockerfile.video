@@ -86,6 +86,30 @@ RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-St
 # 4.57.6; MiniLM embedding is verified against it below.
 RUN pip install transformers==4.57.6
 
+# MMAudio SFX stack (SFX slice 2, three-caption doctrine): upstream
+# hkchengrex/MMAudio at the pinned commit (CC-BY-NC-4.0 non-commercial
+# weights — same class as the CausVid DMD checkpoint; check before
+# redistributing images). Native .pth weights load with plain torch
+# (no comfy-loader machinery); 44 kHz variants only. `--no-deps`: the
+# upstream project pulls training/demo weight (gradio, torchcodec,
+# tensorboard, hydra, gitpython, tensordict — never `pip install -r`
+# a second requirements file here, same rule as the CausVid note);
+# only the inference closure lands explicitly (open_clip CLIP tower,
+# librosa/torchdiffeq/accelerate). Its requirements land BEFORE the
+# transformers pin below is re-asserted, so the 4.57.6 LongLive needs
+# always wins.
+# Verified-fetch clone (issue 055): see the LongLive note above.
+RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
+    && git -C /opt/mmaudio fetch --depth 1 origin 974010a026c731054592d8f777218bd9d85a6c24 \
+    && git -C /opt/mmaudio checkout 974010a026c731054592d8f777218bd9d85a6c24 \
+    && git -C /opt/mmaudio rev-parse --verify HEAD \
+    && pip install --no-deps -e /opt/mmaudio \
+    && pip install "open_clip_torch>=2.29.0" "librosa>=0.10.1" "torchdiffeq>=0.2.5" accelerate colorlog
+
+# Re-assert the transformers floor after the SFX requirements (same pin,
+# same reason as above — idempotent when already satisfied).
+RUN pip install transformers==4.57.6
+
 # LTXV 2B-distilled alternative backend (Phase 7, DESIGN §140): native
 # ltx-video library at the probe-verified pin (NOT diffusers — the image
 # has no LTX pipelines). --no-deps: ltx-video demands
@@ -118,6 +142,19 @@ RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
     && git -C /opt/causvid checkout adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
     && git -C /opt/causvid rev-parse --verify HEAD \
     && pip install omegaconf easydict ftfy diffusers
+
+# Finalize-stage augmentation weights (Track C): FILM interpolation
+# (Comfy-Org fp16 .safetensors) + Real-ESRGAN anime 6B upscaler (xinntao
+# v0.2.2.4 release asset) — pins in voyage/model_registry.py
+# (FILM_*/REALESRGAN_*), fetched at runtime by `voyage models download`
+# into /models. Both load torch-native (FILM state dict via safetensors,
+# ESRGAN RRDBNet via torch.load weights_only) with vendored model code at
+# the worker — no git clones, no basicsr/realesrgan packages (their pins
+# would break the torch 2.8 / transformers 4.57.6 stack above). Leaf deps
+# only: safetensors (.safetensors decode; floor matches transformers'
+# requirement so the 4.57.6 pin above always wins) + Pillow (frame PNG
+# I/O; torchvision already needs it, so this is explicit, never a bump).
+RUN pip install "safetensors>=0.4.3" "Pillow>=10.0.0"
 
 # Pre-created wan_models links (causvid-perms fix): the worker shims
 # (`_enter_causvid_tree` / `_enter_longlive_tree`) must satisfy upstream's
@@ -160,7 +197,7 @@ RUN set -eux; \
 ENV HOME=/home/voyager
 USER voyager
 
-ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/app \
+ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
     VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

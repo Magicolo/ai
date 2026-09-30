@@ -4,12 +4,14 @@ Why this module exists: `generate` used to fail late inside workers when
 weight files were missing (a `FileNotFoundError` surfacing as a worker
 retry/circuit-breaker after minutes of GPU work). This module derives the
 exact stacks the effective run config needs — the video backend's own spec
-plus its paired ACE-Step audio, the qwen director unless deterministic,
-MMAudio SFX only when the finalize pass will run, the VLM inspector only
-when enabled — verifies each via `model_registry`, and downloads the
-missing ones in parallel with per-model console progress. Fake backends
-need no weight files at all (the director falls back to deterministic),
-so a fake run ensures the empty set and stays offline-friendly.
+plus the FILM/Real-ESRGAN finalize augmentation on CUDA (unless
+`augment_enabled=False`), its paired ACE-Step audio, the qwen director
+unless deterministic, MMAudio SFX only when the finalize pass will run,
+the VLM inspector only when enabled — verifies each via `model_registry`,
+and downloads the missing ones in parallel with per-model console
+progress. Fake backends need no weight files at all (the director falls
+back to deterministic), so a fake run ensures the empty set and stays
+offline-friendly.
 
 Manifest race note: `model_registry.download_model` bundles the hub fetch
 with a read-modify-write of `manifest.json`, so parallel calls can drop
@@ -66,14 +68,19 @@ def required_specs(
     config: ProjectConfig,
     sfx_enabled: bool = False,
     models_root: str | Path | None = None,
+    augment_enabled: bool = True,
 ) -> list[RequiredModel]:
     """Specs the effective generate config needs — nothing else.
 
     `sfx_enabled` mirrors the finalize gate (`not no_sfx and backend is
     mmaudio`): the SFX stack downloads only when the pass will run. A
     fake video backend needs the empty set (weight-free offline runs).
-    `VideoBackendName` is a closed Literal, so past the fake early-return
-    the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
+    `augment_enabled` gates the finalize-stage augmentation floors (FILM
+    interpolation + Real-ESRGAN anime upscaler): CUDA backends include
+    them by default, `False` restores the pre-augmentation set (tests,
+    weight-free probes). `VideoBackendName` is a closed Literal, so past
+    the fake early-return the `_VIDEO_SPEC_FOR_BACKEND` index below is
+    total (no KeyError).
     """
     if config.video.backend == "fake":
         return []
@@ -83,6 +90,19 @@ def required_specs(
             models_dir=_resolve_dir(models_root, config.video.models_dir),
         )
     ]
+    if augment_enabled:
+        required.extend(
+            [
+                RequiredModel(
+                    spec="film",
+                    models_dir=_resolve_dir(models_root, config.video.models_dir),
+                ),
+                RequiredModel(
+                    spec="realesrgan-anime",
+                    models_dir=_resolve_dir(models_root, config.video.models_dir),
+                ),
+            ]
+        )
     if config.audio.backend == "acestep":
         required.append(
             RequiredModel(
@@ -150,16 +170,19 @@ def ensure_models(
     models_root: str | Path | None = None,
     *,
     allow_download: bool = True,
+    augment_enabled: bool = True,
 ) -> int:
     """Verify (+ download when allowed) every spec `generate` needs.
 
     Returns 0 when all verify, 1 with console feedback otherwise.
     `allow_download=False` (`--no-download`) never touches the network:
     missing stacks fail fast with their verify message instead.
+    `augment_enabled=False` skips the FILM/Real-ESRGAN floors (weight-free
+    probes); the CLI never passes it today, so CUDA runs ensure them.
     """
     from voyage import model_registry
 
-    required = required_specs(config, sfx_enabled, models_root)
+    required = required_specs(config, sfx_enabled, models_root, augment_enabled)
     if not required:
         return 0
     checked = [

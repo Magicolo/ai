@@ -35,7 +35,7 @@ def test_ltxv_requires_own_spec_plus_audio_and_director() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen8b"}
+    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
 
 
 def test_video_backends_map_to_their_own_spec_only() -> None:
@@ -43,11 +43,17 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
 
     config = with_video_backend(_config_with_style(), "longlive2")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"longlive2-bf16", "audio-acestep", "director-qwen8b"}
+    assert specs == {
+        "longlive2-bf16",
+        "audio-acestep",
+        "director-qwen8b",
+        "film",
+        "realesrgan-anime",
+    }
 
     config = with_video_backend(_config_with_style(), "causvid")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"causvid", "audio-acestep", "director-qwen8b"}
+    assert specs == {"causvid", "audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
 
 
 def test_deterministic_director_needs_no_director_models() -> None:
@@ -56,7 +62,7 @@ def test_deterministic_director_needs_no_director_models() -> None:
     config = with_video_backend(_config_with_style(), "ltxv")
     config.director.backend = "deterministic"
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep"}
+    assert specs == {"ltxv-2b", "audio-acestep", "film", "realesrgan-anime"}
 
 
 def test_sfx_and_inspector_are_opt_in_only() -> None:
@@ -77,6 +83,86 @@ def test_sfx_and_inspector_are_opt_in_only() -> None:
     assert "inspector-qwen35" in {
         item.spec for item in required_specs(inspect_config, sfx_enabled=False)
     }
+
+
+def test_cuda_backends_include_augmentation_by_default() -> None:
+    from voyage.models_ensure import required_specs
+
+    for backend in ("longlive2", "ltxv", "causvid"):
+        config = with_video_backend(_config_with_style(), backend)
+        specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
+        assert {"film", "realesrgan-anime"} <= specs
+
+
+def test_augment_disabled_excludes_film_and_realesrgan() -> None:
+    from voyage.models_ensure import required_specs
+
+    config = with_video_backend(_config_with_style(), "ltxv")
+    specs = {item.spec for item in required_specs(config, sfx_enabled=False, augment_enabled=False)}
+    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen8b"}
+
+
+def test_fake_stays_empty_with_augment_enabled() -> None:
+    from voyage.models_ensure import required_specs
+
+    config = with_video_backend(_config_with_style(), "fake")
+    assert required_specs(config, sfx_enabled=False, augment_enabled=True) == []
+
+
+def test_augment_specs_share_video_models_dir() -> None:
+    from voyage.models_ensure import required_specs
+
+    config = with_video_backend(_config_with_style(), "ltxv")
+    entries = {item.spec: item.models_dir for item in required_specs(config, sfx_enabled=False)}
+    assert entries["film"] == entries["realesrgan-anime"] == Path(config.video.models_dir)
+
+
+def test_ensure_no_download_flag_reports_augment_specs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import voyage.model_registry as registry
+    from voyage.models_ensure import ensure_models
+
+    monkeypatch.setattr(registry, "verify_model", lambda _dir, _spec: (False, "missing"))
+
+    def _fail_download(_dir: Path, _spec: str) -> dict[str, object]:
+        raise AssertionError("must not download with allow_download=False")
+
+    monkeypatch.setattr(registry, "download_model", _fail_download)
+    stream = io.StringIO()
+    console = VoyageConsole(no_color=True, stream=stream)
+    config = with_video_backend(_config_with_style(), "ltxv")
+    assert ensure_models(config, False, console, str(tmp_path), allow_download=False) == 1
+    output = stream.getvalue()
+    assert "film" in output
+    assert "realesrgan-anime" in output
+
+
+def test_ensure_augment_disabled_skips_augment_downloads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import voyage.model_registry as registry
+    from voyage.models_ensure import ensure_models
+
+    present = {"audio-acestep", "director-qwen8b"}
+
+    def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
+        return (spec in present, "OK" if spec in present else "missing")
+
+    downloaded: list[str] = []
+
+    def _download(_dir: Path, spec: str) -> dict[str, object]:
+        downloaded.append(spec)
+        present.add(spec)
+        return {}
+
+    monkeypatch.setattr(registry, "verify_model", _verify)
+    monkeypatch.setattr(registry, "download_model", _download)
+    stream = io.StringIO()
+    console = VoyageConsole(no_color=True, stream=stream)
+    config = with_video_backend(_config_with_style(), "ltxv")
+    assert ensure_models(config, False, console, str(tmp_path), augment_enabled=False) == 0
+    assert downloaded == ["ltxv-2b"]
 
 
 def test_ensure_skips_download_when_everything_verified(
@@ -103,7 +189,7 @@ def test_ensure_downloads_only_missing_specs(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen8b"}
+    present = {"audio-acestep", "director-qwen8b", "film", "realesrgan-anime"}
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")
@@ -247,12 +333,19 @@ def test_generate_ensure_receives_selective_scope(
         models_root: str | Path | None = None,
         *,
         allow_download: bool = True,
+        augment_enabled: bool = True,
     ) -> int:
         seen["video"] = config.video.backend
         seen["sfx_enabled"] = sfx_enabled
         seen["allow_download"] = allow_download
+        seen["augment_enabled"] = augment_enabled
         return real_ensure(config, sfx_enabled, console, models_root)
 
     monkeypatch.setattr(ensure, "ensure_models", _spy)
     assert cli.main(_fake_generate_argv(tmp_path / "run")) == 0
-    assert seen == {"video": "fake", "sfx_enabled": False, "allow_download": True}
+    assert seen == {
+        "video": "fake",
+        "sfx_enabled": False,
+        "allow_download": True,
+        "augment_enabled": True,
+    }

@@ -31,6 +31,7 @@ from voyage.config import (
     default_config_toml,
     is_provided,
     load_config,
+    resolve_config,
 )
 from voyage.console import RichSegmentProgress, VoyageConsole
 from voyage.doctor import check_ffmpeg, probe
@@ -42,15 +43,21 @@ from voyage.model_registry import (
     download_audio_models,
     download_causvid_models,
     download_director_models,
+    download_film_models,
     download_inspector_models,
     download_longlive2_bf16,
     download_ltxv_models,
+    download_realesrgan_models,
+    download_sfx_models,
     verify_audio_models,
     verify_causvid_models,
     verify_director_models,
+    verify_film_models,
     verify_inspector_models,
     verify_longlive2_bf16,
     verify_ltxv_models,
+    verify_realesrgan_models,
+    verify_sfx_models,
 )
 from voyage.persistence import (
     build_manifest,
@@ -241,6 +248,52 @@ def _download_inspector(models_dir: Path) -> int:
     return 0
 
 
+def _download_sfx(models_dir: Path) -> int:
+    """Download the SFX effects stack (SFX slice 2, three-caption doctrine)."""
+    print(f"downloading sfx-mmaudio into {models_dir} ...")
+    try:
+        record = download_sfx_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    sfx = record["sfx"]
+    assert isinstance(sfx, dict)
+    print(f"variants: {sfx.get('variants')}")
+    print(f"large: {sfx.get('large_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
+def _download_film(models_dir: Path) -> int:
+    """Download the FILM interpolation weights (Track C: augment floors)."""
+    print(f"downloading film into {models_dir} ...")
+    try:
+        record = download_film_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    film = record["film"]
+    assert isinstance(film, dict)
+    print(f"checkpoint: {film.get('checkpoint_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
+def _download_realesrgan(models_dir: Path) -> int:
+    """Download the Real-ESRGAN anime upscaler (Track C: augment floors)."""
+    print(f"downloading realesrgan-anime into {models_dir} ...")
+    try:
+        record = download_realesrgan_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    realesrgan = record["realesrgan"]
+    assert isinstance(realesrgan, dict)
+    print(f"checkpoint: {realesrgan.get('checkpoint_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     action = args.models_action
     if action == "list":
@@ -248,6 +301,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
         print("audio: fake (built-in) | acestep (ACE-Step 1.5 turbo + 0.6B planner)")
+        print("sfx: fake (built-in) | mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")
         print("director: deterministic (built-in) | qwen3-8b (Qwen3-8B + MiniLM)")
         print("inspector: skipped (built-in) | qwen3.5-9b (Qwen3.5-9B VLM, experimental)")
         return 0
@@ -262,10 +316,17 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(dmessage)
         aok, amessage = verify_audio_models(_models_dir(args))
         print(amessage)
+        sok, smessage = verify_sfx_models(_models_dir(args))
+        print(smessage)
+        fok, fmessage = verify_film_models(_models_dir(args))
+        print(fmessage)
+        rok, rmessage = verify_realesrgan_models(_models_dir(args))
+        print(rmessage)
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        return 0 if (ok and lok and cok and dok and aok and iok) else 1
+        all_ok = ok and lok and cok and dok and aok and sok and fok and rok and iok
+        return 0 if all_ok else 1
     if action == "download":
         target = getattr(args, "models_target", "longlive2-bf16")
         if target == "ltxv-2b":
@@ -298,6 +359,12 @@ def cmd_models(args: argparse.Namespace) -> int:
             return _download_director(_models_dir(args))
         if target == "audio-acestep":
             return _download_audio(_models_dir(args))
+        if target == "sfx-mmaudio":
+            return _download_sfx(_models_dir(args))
+        if target == "film":
+            return _download_film(_models_dir(args))
+        if target == "realesrgan-anime":
+            return _download_realesrgan(_models_dir(args))
         if target == "inspector-qwen35":
             return _download_inspector(_models_dir(args))
         if target != "longlive2-bf16":
@@ -309,6 +376,9 @@ def cmd_models(args: argparse.Namespace) -> int:
                     "causvid",
                     "director-qwen8b",
                     "audio-acestep",
+                    "sfx-mmaudio",
+                    "film",
+                    "realesrgan-anime",
                     "inspector-qwen35",
                 ]
             )
@@ -331,6 +401,9 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("backends: `voyage models list` (video/audio/director/inspector)")
         print("weights: longlive2-bf16 (~48 GB) | ltxv-2b (~7 GB) | causvid (~28 GB)")
         print("weights: director-qwen8b (~16 GB) | audio-acestep | inspector-qwen35 (~19 GB)")
+        print("weights: sfx-mmaudio (~8 GB: 3 variants + VAE/sync/CLIP/vocoder)")
+        print("weights: film (~66 MB interpolation) | realesrgan-anime (~18 MB upscaler)")
+        print("note: MMAudio weights are CC-BY-NC-4.0 (non-commercial)")
         print("pins: voyage/model_registry.py (single source); human mirror docs/MODELS.md")
         print("note: CausVid DMD checkpoint is CC BY-NC-SA 4.0 (non-commercial)")
         print("check: `voyage models verify` for presence + size sanity")
@@ -362,6 +435,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         or is_provided(args.quantization)
         or is_provided(getattr(args, "beats_per_segment", None))
         or is_provided(getattr(args, "drift_every_n", None))
+        or is_provided(getattr(args, "music_caption", None))
+        or is_provided(getattr(args, "video_caption", None))
+        or bool(_augment_overrides(args))
     ):
         try:
             config = apply_draft_overrides(
@@ -373,8 +449,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 quantization=args.quantization,
                 beats_per_segment=getattr(args, "beats_per_segment", None),
                 drift_every_n_segments=getattr(args, "drift_every_n", None),
+                music_caption=getattr(args, "music_caption", None),
+                video_caption=getattr(args, "video_caption", None),
+                **_augment_overrides(args),
             )
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
         print(
@@ -386,7 +465,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"take_seconds={config.audio.take_seconds} "
             f"beats_per_segment={config.audio.beats_per_segment} "
             f"drift_every_n={config.voyage.drift_every_n_segments} "
-            f"quantization={config.video.quantization}"
+            f"quantization={config.video.quantization} "
+            f"min_fps={config.augment.min_fps} "
+            f"min_resolution={config.augment.min_width}x{config.augment.min_height}"
         )
     if not _require_cuda_stack(config):
         return 1
@@ -790,6 +871,12 @@ def validate_run(run_dir: Path) -> list[str]:
     novelty_dir = run_dir / "novelty"
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))
+    fps = state.fps if isinstance(state.fps, int) and state.fps > 0 else 24
+    timeline = state.timeline_frames / fps
+    if timeline > 0.0:
+        from voyage.sfx_finalize import validate_sfx_ledger
+
+        errors.extend(validate_sfx_ledger(run_dir, timeline))
     return errors
 
 
@@ -821,9 +908,37 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """CLI augment flags → resolve_config kwargs (Track A).
+
+    `--no-augment` wins over explicit floors (both to 0). Every read
+    goes through getattr + `is_provided` so TUI/hand-built namespaces
+    (Unset blanks, missing attrs) resolve to absent, never to a value.
+    """
+    if bool(getattr(args, "no_augment", False)):
+        return {"min_fps": 0, "min_resolution": "0"}
+    overrides: dict[str, Any] = {}
+    min_fps = getattr(args, "min_fps", None)
+    if is_provided(min_fps):
+        overrides["min_fps"] = min_fps
+    min_resolution = getattr(args, "min_resolution", None)
+    if is_provided(min_resolution):
+        overrides["min_resolution"] = min_resolution
+    return overrides
+
+
 def cmd_finalize(args: argparse.Namespace) -> int:
     run_dir = _run_dir_arg(args.run)
     config, _digest = _load_run(run_dir)
+    try:
+        # CLI floors ride the stored [augment] section: explicit flags win,
+        # otherwise the run TOML rules. Invalid floors fail here (exit 2),
+        # before any media work. The resolved floors ride `config.augment`
+        # for the finalize consumer (a later slice reads them).
+        config = resolve_config(config, **_augment_overrides(args))
+    except (ValidationError, ValueError) as exc:
+        print(f"error: invalid augment override: {exc}", file=sys.stderr)
+        return 2
     output = Path(args.output).resolve()
     try:
         finalize_run(
@@ -841,10 +956,35 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             channels=config.audio.channels,
             overlap_fraction=config.audio.final_overlap_fraction,
             overlap_cap_seconds=config.audio.final_overlap_cap_seconds,
+            min_fps=config.augment.min_fps,
+            min_width=config.augment.min_width,
+            min_height=config.augment.min_height,
         )
     except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
         return 1
+    sfx_backend = getattr(args, "sfx_backend", None) or config.sfx.backend
+    if not getattr(args, "no_sfx", False) and sfx_backend != "fake":
+        from voyage.sfx_finalize import finalize_sfx_pass
+
+        try:
+            finalize_sfx_pass(
+                run_dir,
+                output,
+                backend=sfx_backend,
+                models_dir=config.sfx.models_dir,
+                device=getattr(args, "sfx_device", None) or config.sfx.device,
+                model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
+                seed=config.seed,
+                sample_rate=config.audio.sample_rate,
+                channels=config.audio.channels,
+                num_workers=getattr(args, "sfx_workers", 1),
+                fps=config.video.fps,
+                caption_override=getattr(args, "sfx_caption", None),
+            )
+        except (MediaError, StateError) as exc:
+            print(f"sfx pass failed (music-only final kept at {output}): {exc}", file=sys.stderr)
+            return 1
     console = get_console(args)
     try:
         info = media_probe(output)
@@ -858,6 +998,60 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         size_text = "unknown size"
     console.ok(f"finalized -> {output} ({duration}s, {size_text})")
     print(f"finalized -> {output}")
+    return 0
+
+
+def cmd_sfx(args: argparse.Namespace) -> int:
+    """Dub SFX onto an existing video (standalone post-pass, no re-finalize).
+
+    Conditions on `--video` (default: the run's `final.mp4`), mixes the
+    bed under its audio, and publishes `--output` (default:
+    `final-sfx.mp4` beside the input — the input is never modified).
+    Caption source is per-segment director captions unless
+    `--sfx-caption` overrides (required for runs committed before SFX
+    captions existed, e.g. poulah).
+    """
+    import shutil
+
+    from voyage.sfx_finalize import finalize_sfx_pass
+
+    run_dir = _run_dir_arg(args.run)
+    config, _digest = _load_run(run_dir)
+    video = Path(args.video).resolve() if args.video else run_dir / "final.mp4"
+    if not video.exists():
+        print(f"sfx failed: no such video {video}", file=sys.stderr)
+        return 1
+    output = Path(args.output).resolve() if args.output else video.parent / "final-sfx.mp4"
+    backend = args.sfx_backend or config.sfx.backend
+    try:
+        if output != video:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(video, output)
+        finalize_sfx_pass(
+            run_dir,
+            output,
+            backend=backend,
+            models_dir=config.sfx.models_dir,
+            device=args.sfx_device or config.sfx.device,
+            model_size=args.sfx_model_size or config.sfx.model_size,
+            seed=config.seed,
+            sample_rate=config.audio.sample_rate,
+            channels=config.audio.channels,
+            num_workers=args.sfx_workers,
+            fps=config.video.fps,
+            caption_override=args.sfx_caption,
+        )
+    except (MediaError, StateError, OSError) as exc:
+        print(f"sfx dub failed: {exc}", file=sys.stderr)
+        return 1
+    console = get_console(args)
+    try:
+        info = media_probe(output)
+        duration = info.get("format", {}).get("duration", "?") if isinstance(info, dict) else "?"
+    except MediaError:
+        duration = "?"
+    console.ok(f"sfx dubbed -> {output} ({duration}s, backend {backend})")
+    print(f"sfx dubbed -> {output}")
     return 0
 
 
@@ -1040,8 +1234,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
             quantization=args.quantization,
             beats_per_segment=args.beats_per_segment,
             drift_every_n_segments=args.drift_every_n,
+            music_caption=getattr(args, "music_caption", None),
+            video_caption=getattr(args, "video_caption", None),
+            **_augment_overrides(args),
         )
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         print(f"error: invalid numeric override: {exc}", file=sys.stderr)
         return 2
     frames_per_segment = _frames_per_segment(effective)
@@ -1082,6 +1279,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
             sfx_enabled,
             console,
             allow_download=not bool(getattr(args, "no_download", False)),
+            augment_enabled=not bool(getattr(args, "no_augment", False))
+            and (effective.augment.min_fps > 0 or effective.augment.min_width > 0),
         )
         != 0
     ):
@@ -1114,6 +1313,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
             quantization=args.quantization,
             beats_per_segment=args.beats_per_segment,
             drift_every_n=args.drift_every_n,
+            min_fps=getattr(args, "min_fps", None),
+            min_resolution=getattr(args, "min_resolution", None),
+            no_augment=bool(getattr(args, "no_augment", False)),
             verbose=console.verbose,
             no_color=getattr(args, "no_color", False),
             progress_sink=sink,
@@ -1145,6 +1347,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
             sfx_device=getattr(args, "sfx_device", None),
             sfx_model_size=getattr(args, "sfx_model_size", None),
             sfx_workers=getattr(args, "sfx_workers", 1),
+            min_fps=getattr(args, "min_fps", None),
+            min_resolution=getattr(args, "min_resolution", None),
+            no_augment=bool(getattr(args, "no_augment", False)),
         )
     )
     if final_code != 0:
@@ -1435,6 +1640,9 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
             "causvid",
             "director-qwen8b",
             "audio-acestep",
+            "sfx-mmaudio",
+            "film",
+            "realesrgan-anime",
             "inspector-qwen35",
         ],
         help="weight bundle for download (default ltxv-2b)",
@@ -1479,6 +1687,90 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="director drifts every Nth segment (must be positive; default 1); other segments hold",
     )
+    parser.add_argument(
+        "--music-caption",
+        default=None,
+        help="pin the music caption family (default: director drives + evolves it)",
+    )
+    parser.add_argument(
+        "--video-caption",
+        default=None,
+        help="pin the video caption family (default: director drives + evolves it)",
+    )
+
+
+def _add_sfx_args(parser: argparse.ArgumentParser, *, include_no_sfx: bool = True) -> None:
+    """Finalize-time SFX flags, shared by every verb that finalizes (092).
+
+    `finalize` owns the pass; `generate`/`stop --finalize` forward into
+    it; the standalone `sfx` verb dubs an existing video (no --no-sfx
+    there — the verb IS the pass). One helper so the flags (and their
+    defaults) cannot drift apart across verbs — a missing flag on any
+    finalizing verb is an AttributeError at finalize time.
+    """
+    if include_no_sfx:
+        parser.add_argument(
+            "--no-sfx",
+            action="store_true",
+            help="skip the finalize-time SFX pass even when [sfx] is configured",
+        )
+    parser.add_argument(
+        "--sfx-backend",
+        default=None,
+        choices=["fake", "mmaudio"],
+        help="SFX backend override (default: [sfx] backend)",
+    )
+    parser.add_argument(
+        "--sfx-caption",
+        default=None,
+        help="single SFX caption for the whole timeline (default: per-segment "
+        "director captions; required for runs committed before SFX captions existed)",
+    )
+    parser.add_argument(
+        "--sfx-device",
+        default=None,
+        help="SFX worker device override (default: [sfx] device)",
+    )
+    parser.add_argument(
+        "--sfx-model-size",
+        default=None,
+        choices=["small_44k", "medium_44k", "large_44k_v2"],
+        help="MMAudio variant override (default: [sfx] model_size)",
+    )
+    parser.add_argument(
+        "--sfx-workers",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="1 = one worker (default); 2 = shard small_44k across cuda:0+cuda:1",
+    )
+
+
+def _add_augment_args(parser: argparse.ArgumentParser) -> None:
+    """Finalize-time augmentation floors, shared by verbs carrying them (Track A).
+
+    `finalize` owns the floors (defaults ride the run's [augment] TOML
+    section); `generate`/`run` forward overrides into resolve_config so
+    the effective config carries them. One helper so the flags (and their
+    defaults) cannot drift apart across verbs — mirrors `_add_sfx_args`.
+    """
+    parser.add_argument(
+        "--min-fps",
+        type=int,
+        default=None,
+        help="floor output fps at finalize (default: [augment] min_fps 32; 0 disables)",
+    )
+    parser.add_argument(
+        "--min-resolution",
+        default=None,
+        help='floor output resolution at finalize, WxH e.g. "1280x720" '
+        '(default: [augment] 1280x720; "0" disables)',
+    )
+    parser.add_argument(
+        "--no-augment",
+        action="store_true",
+        help="disable all finalize augmentation floors (fps + resolution floors to 0)",
+    )
 
 
 def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
@@ -1503,6 +1795,7 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="override the director backend",
     )
     _add_generation_overrides(run)
+    _add_augment_args(run)
     _add_console_args(run)
     run.set_defaults(func=cmd_run)
 
@@ -1545,6 +1838,8 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="fail instead of downloading missing models (verify only)",
     )
+    _add_sfx_args(gen)
+    _add_augment_args(gen)
     gen.add_argument(
         "--draft",
         action="store_true",
@@ -1591,6 +1886,7 @@ def _add_stop_parser(sub: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="run the finalizer inline after requesting stop",
     )
+    _add_sfx_args(stop)
     stop.set_defaults(func=cmd_stop)
 
 
@@ -1611,8 +1907,29 @@ def _add_finalize_parser(sub: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="skip corrupt segments with a warning instead of aborting",
     )
+    _add_sfx_args(finalize)
+    _add_augment_args(finalize)
     _add_console_args(finalize)
     finalize.set_defaults(func=cmd_finalize)
+
+
+def _add_sfx_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`sfx` verb: dub SFX onto an existing video (no re-finalize)."""
+    sfx = sub.add_parser("sfx", help="Dub SFX onto an existing video")
+    sfx.add_argument("--run", required=True, help="run directory (captions + ledger + seeds)")
+    sfx.add_argument(
+        "--video",
+        default=None,
+        help="existing mp4 to condition on (default: <run>/final.mp4)",
+    )
+    sfx.add_argument(
+        "--output",
+        default=None,
+        help="dubbed mp4 to write (default: final-sfx.mp4 beside the input)",
+    )
+    _add_sfx_args(sfx, include_no_sfx=False)
+    _add_console_args(sfx)
+    sfx.set_defaults(func=cmd_sfx)
 
 
 def _add_benchmark_parser(sub: argparse._SubParsersAction[Any]) -> None:
@@ -1682,6 +1999,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_stop_parser(sub)
     _add_validate_parser(sub)
     _add_finalize_parser(sub)
+    _add_sfx_parser(sub)
     _add_benchmark_parser(sub)
     _add_soak_parser(sub)
     _add_inspect_parser(sub)

@@ -32,6 +32,9 @@ def test_models_dir_layout_keys(tmp_path: Path) -> None:
         "inspector_dir",
         "minilm_dir",
         "acestep_dir",
+        "sfx_dir",
+        "film_dir",
+        "realesrgan_dir",
         "manifest",
     }
     assert layout["generator_ckpt"].endswith("model_bf16.pt")
@@ -39,6 +42,9 @@ def test_models_dir_layout_keys(tmp_path: Path) -> None:
     assert layout["wan21_dir"].endswith(model_registry.WAN21_SUBDIR)
     assert layout["inspector_dir"].endswith(model_registry.QWEN35_SUBDIR)
     assert layout["ltxv_text_encoder_dir"].endswith(model_registry.LTXV_TE_SUBDIR)
+    assert layout["sfx_dir"].endswith(model_registry.MMAUDIO_SUBDIR)
+    assert layout["film_dir"].endswith(model_registry.FILM_SUBDIR)
+    assert layout["realesrgan_dir"].endswith(model_registry.REALESRGAN_SUBDIR)
 
 
 def test_director_pins(tmp_path: Path) -> None:
@@ -74,6 +80,54 @@ def test_verify_reports_missing_on_empty_dir(tmp_path: Path) -> None:
     ok, message = model_registry.verify_longlive2_bf16(tmp_path)
     assert not ok
     assert "missing" in message
+
+
+def test_registry_carries_augment_specs() -> None:
+    film = model_registry.MODEL_SPECS["film"]
+    assert film.manifest_key == "film"
+    assert [file.repo_id for file in film.files] == ["Comfy-Org/frame_interpolation"]
+    esrgan = model_registry.MODEL_SPECS["realesrgan-anime"]
+    assert esrgan.manifest_key == "realesrgan"
+    assert [file.repo_id for file in esrgan.files] == ["amd/realesrgan-x4plus-anime-6b"]
+
+
+def test_film_pins(tmp_path: Path) -> None:
+    assert model_registry.FILM_HF_REPO == "Comfy-Org/frame_interpolation"
+    assert len(model_registry.FILM_HF_REVISION) == 40
+    assert model_registry.FILM_FILE == "film_net_fp16.safetensors"
+    assert model_registry.FILM_MIN_BYTES == 60_000_000
+    ok, message = model_registry.verify_film_models(tmp_path)
+    assert not ok
+    assert "missing" in message
+    assert "film_net_fp16.safetensors" in message
+
+
+def test_realesrgan_pins(tmp_path: Path) -> None:
+    assert model_registry.REALESRGAN_HF_REPO == "amd/realesrgan-x4plus-anime-6b"
+    assert len(model_registry.REALESRGAN_HF_REVISION) == 40
+    assert model_registry.REALESRGAN_ANIME_FILE == "RealESRGAN_x4plus_anime_6B.pth"
+    assert model_registry.REALESRGAN_ANIME_MIN_BYTES == 15_000_000
+    ok, message = model_registry.verify_realesrgan_models(tmp_path)
+    assert not ok
+    assert "missing" in message
+    assert "RealESRGAN_x4plus_anime_6B.pth" in message
+
+
+def test_augment_specs_verify_ok_above_floor(tmp_path: Path) -> None:
+    film_path = tmp_path / model_registry.FILM_REPO_PATH
+    film_path.parent.mkdir(parents=True)
+    with film_path.open("wb") as handle:
+        handle.truncate(model_registry.FILM_MIN_BYTES)
+    ok, message = model_registry.verify_film_models(tmp_path)
+    assert ok
+    assert message.startswith("film OK")
+    esrgan_path = tmp_path / model_registry.REALESRGAN_SUBDIR / model_registry.REALESRGAN_ANIME_FILE
+    esrgan_path.parent.mkdir(parents=True)
+    with esrgan_path.open("wb") as handle:
+        handle.truncate(model_registry.REALESRGAN_ANIME_MIN_BYTES)
+    ok, message = model_registry.verify_realesrgan_models(tmp_path)
+    assert ok
+    assert message.startswith("realesrgan-anime OK")
 
 
 def test_video_worker_module_map() -> None:

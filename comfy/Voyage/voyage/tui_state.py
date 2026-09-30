@@ -80,6 +80,9 @@ FIELD_HELP = {
     "beats_per_segment": "Beats per segment for the rhythm grid (empty = 4, "
     "doubles to hold >=60 BPM).",
     "drift_every_n": "Director drifts every Nth segment (empty = 1); other segments hold.",
+    "min_fps": "Floor output fps at finalize (empty = 32; 0 disables the floor).",
+    "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1280x720" '
+    '(empty = 1280x720; "0" disables the floor).',
 }
 
 
@@ -106,6 +109,8 @@ class GenerateFormState:
     quantization: str = "fp8"
     beats_per_segment: str = ""
     drift_every_n: str = ""
+    min_fps: str = "32"
+    min_resolution: str = "1280x720"
     verbose: bool = False
     no_color: bool = False
 
@@ -218,6 +223,24 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
         _positive_int(state.drift_every_n.strip(), "drift-every-n", drift_errors)
         if drift_errors:
             errors["drift_every_n"] = drift_errors[0]
+    if state.min_fps.strip():
+        try:
+            min_fps_value = int(state.min_fps.strip())
+        except ValueError:
+            errors["min_fps"] = f"min-fps must be a non-negative integer, got {state.min_fps!r}"
+        else:
+            if min_fps_value < 0:
+                errors["min_fps"] = f"min-fps must be a non-negative integer, got {state.min_fps!r}"
+    if state.min_resolution.strip():
+        from voyage.config import AugmentConfig, parse_min_resolution
+
+        try:
+            width, height = parse_min_resolution(state.min_resolution.strip())
+            AugmentConfig(min_width=width, min_height=height)
+        except ValueError as exc:
+            errors["min_resolution"] = (
+                f"min-resolution must be WxH or 0 to disable, got {state.min_resolution!r} ({exc})"
+            )
     return errors
 
 
@@ -264,8 +287,15 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         quantization=state.quantization,
         beats_per_segment=optional_int(state.beats_per_segment),
         drift_every_n=optional_int(state.drift_every_n),
+        # Finalize-time augment floors (Track A): blank means "run TOML
         # default" (Unset); 0 / "0" explicitly disable a floor. The form
         # defaults ("32" / "1280x720") match the config defaults, so an
+        # untouched form resolves to the same floors. no_augment stays
+        # False — the TUI has no disable-all checkbox (clear both fields
+        # or pass --no-augment on the CLI).
+        min_fps=int(min_fps_raw) if min_fps_raw else Unset,
+        min_resolution=min_resolution_raw if min_resolution_raw else Unset,
+        no_augment=False,
         verbose=state.verbose,
         no_color=state.no_color,
         # Finalize-time SFX pass-through (the generate parser defaults;
@@ -435,6 +465,8 @@ def save_last_settings(state: GenerateFormState, path: Path | None = None) -> No
             f"quantization = {_toml_string(state.quantization)}",
             f"beats_per_segment = {_toml_string(state.beats_per_segment)}",
             f"drift_every_n = {_toml_string(state.drift_every_n)}",
+            f"min_fps = {_toml_string(state.min_fps)}",
+            f"min_resolution = {_toml_string(state.min_resolution)}",
             f"verbose = {'true' if state.verbose else 'false'}",
             f"no_color = {'true' if state.no_color else 'false'}",
         ]
@@ -496,6 +528,8 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
         quantization=_choice_field(parsed, "quantization", defaults.quantization, QUANTIZATIONS),
         beats_per_segment=_string_field(parsed, "beats_per_segment", defaults.beats_per_segment),
         drift_every_n=_string_field(parsed, "drift_every_n", defaults.drift_every_n),
+        min_fps=_string_field(parsed, "min_fps", defaults.min_fps),
+        min_resolution=_string_field(parsed, "min_resolution", defaults.min_resolution),
         verbose=_boolean_field(parsed, "verbose", defaults.verbose),
         no_color=_boolean_field(parsed, "no_color", defaults.no_color),
     )

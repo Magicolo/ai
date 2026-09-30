@@ -115,6 +115,8 @@ _FORM_IDS = (
     "field-take-seconds",
     "field-beats",
     "field-drift",
+    "field-min-fps",
+    "field-min-resolution",
     "field-seed",
     "flag-draft",
     "flag-force",
@@ -160,9 +162,9 @@ def test_form_fields_expose_expected_ids() -> None:
         async with app.run_test(size=(120, 40)):
             await asyncio.sleep(0)
             form_col = app.query_one("#form-col", Vertical)
-            # 11 field rows + gpu-warning + 5 flags + plan/errors lines +
+            # 13 field rows + gpu-warning + 5 flags + plan/errors lines +
             # button row + key hints: the seam owns exactly this region.
-            assert len(form_col.children) == 21
+            assert len(form_col.children) == 23
             for expected in _FORM_IDS:
                 app.query_one(f"#{expected}")
 

@@ -248,6 +248,24 @@ def previous_transition_captions(run_dir: Path, number: int) -> str:
     )
 
 
+def effective_music_caption(
+    explicit: str | None, decision_caption: str, style_fallback: str
+) -> str:
+    """Music caption precedence: explicit CLI pin, else the director's
+    evolving caption, else the charter style fallback. Pure (pins the
+    precedence the slow-loop planner and the console display share)."""
+    return explicit or decision_caption or style_fallback
+
+
+def effective_video_stages(explicit: str | None, stages: list[str]) -> list[str]:
+    """Video stage precedence: a one-item explicit CLI pin, else the
+    director's evolving stages. Pure (pins the substitution the prompt
+    planner applies after the accept transaction)."""
+    if explicit:
+        return [explicit]
+    return list(stages)
+
+
 class Supervisor:
     def __init__(
         self,
@@ -1148,7 +1166,9 @@ class Supervisor:
             takes=takes,
             segment_seconds=duration,
         )
-        caption = decision.audio.music_caption or audio_cfg.music_style
+        caption = effective_music_caption(
+            audio_cfg.music_caption, decision.audio.music_caption, audio_cfg.music_style
+        )
         energy = min(1.0, max(0.0, decision.audio.energy))
         seed = audio_seed(config.seed, number, len(planner.takes))
         # Beat grid: the take BPM derives from this segment's duration so
@@ -1368,7 +1388,11 @@ class Supervisor:
         if not isinstance(planned_frames, int) or planned_frames <= 0:
             planned_frames = config.video.segment_frames
         planned_duration = planned_frames / config.video.fps
-        caption = decision.audio.music_caption or config.audio.music_style
+        caption = effective_music_caption(
+            config.audio.music_caption,
+            decision.audio.music_caption,
+            config.audio.music_style,
+        )
         energy = min(1.0, max(0.0, decision.audio.energy))
         beats, grid_bpm = beats_for_segment(planned_duration, config.audio.beats_per_segment)
         seeds = video_payload.get("seeds", [video_payload.get("seed", 0)])
@@ -1462,6 +1486,15 @@ class Supervisor:
                 prefetched_raw=prefetched_raw,
             )
         stage_seconds["director"] = round(time.monotonic() - director_started, 3)
+        # Explicit video-caption pin (CLI --video-caption): the staged
+        # prompt uses it instead of the director's evolving stages (no
+        # drift for this family), still style-checked against the
+        # charter — a charter-violating pin fails the commit loudly
+        # instead of rendering off-charter. The decision record keeps
+        # the director's stages (drift chain stays director-pure);
+        # prompt_plan.json keeps what actually rendered.
+        if config.video.video_caption:
+            check_prompt_against_style(config.video.video_caption, style_spec)
         # Prefetch the next segment's raw proposal while this one renders
         # (CPU director vs GPU video — no contention by construction).
         self._prefetch_decide_for_next(config, number, decision, store, style_spec)
@@ -1472,7 +1505,9 @@ class Supervisor:
         prompt_plan = build_staged_prompt_plan(
             segment_id,
             style_spec,
-            stage_texts=list(decision.video.stages),
+            stage_texts=effective_video_stages(
+                config.video.video_caption, list(decision.video.stages)
+            ),
             transition_texts=list(decision.transition.intermediate_stages),
             num_blocks=num_blocks,
             blocks_per_stage=config.voyage.blocks_per_prompt_stage,

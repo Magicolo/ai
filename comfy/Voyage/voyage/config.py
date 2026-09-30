@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeGuard, TypeVar
@@ -29,6 +30,12 @@ instead of after GPU init."""
 
 AudioBackendName = Literal["fake", "acestep"]
 """Audio backend vocabulary (issue 022): fake sine vs the ACE-Step music stack."""
+
+SfxBackendName = Literal["fake", "mmaudio"]
+"""SFX backend vocabulary: fake noise vs the MMAudio effects stack."""
+
+SfxModelSize = Literal["small_44k", "medium_44k", "large_44k_v2"]
+"""MMAudio 44 kHz variant vocabulary (mirrors audio.mmaudio_sfx)."""
 
 StateMode = Literal["persistent_kv", "reconstructable_prefix", "independent_clip"]
 """Continuation-state vocabulary (DESIGN §5.1): how a backend resumes work.
@@ -101,6 +108,8 @@ class BackendRecord:
     device: str
     audio_backend: AudioBackendName
     audio_device: str
+    sfx_backend: SfxBackendName
+    sfx_device: str
     state_mode: StateMode
     streaming: bool
 
@@ -133,6 +142,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cpu",
         audio_backend="fake",
         audio_device="cpu",
+        sfx_backend="fake",
+        sfx_device="cpu",
         state_mode="independent_clip",
         streaming=False,
     ),
@@ -146,6 +157,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cuda:0",
         audio_backend="acestep",
         audio_device="cuda:0",
+        sfx_backend="mmaudio",
+        sfx_device="cuda:0",
         state_mode="persistent_kv",
         streaming=True,
     ),
@@ -159,6 +172,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cuda:0",
         audio_backend="acestep",
         audio_device="cuda:0",
+        sfx_backend="mmaudio",
+        sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
         streaming=True,
     ),
@@ -175,6 +190,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cuda:0",
         audio_backend="acestep",
         audio_device="cuda:0",
+        sfx_backend="mmaudio",
+        sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
         streaming=True,
     ),
@@ -223,6 +240,12 @@ class VideoConfig(BaseModel):
     # the worker's VAE-offload-for-generate (breakdown: 13.16 + 2.59 -
     # 1.31 = 14.44 GiB peak). Upstream uses 32 (needs >24GB VRAM).
     local_attn_size: int = 16
+    # Explicit video-caption pin (CLI --video-caption, in-memory only —
+    # never written to voyage.toml). When set, every segment's staged
+    # prompt uses it instead of the director's evolving stages (no drift
+    # for this family, still style-checked against the charter); when
+    # None the director drives (stages evolve with the general prompt).
+    video_caption: str | None = None
 
     @field_validator(
         "width", "height", "fps", "segment_frames", "blocks_per_segment", "local_attn_size"
@@ -265,6 +288,12 @@ class AudioConfig(BaseModel):
     # device the resident stack loads on. Fake backend ignores both.
     models_dir: str = "/models"
     device: str = "cpu"
+    # Explicit music-caption pin (CLI --music-caption, in-memory only —
+    # never written to voyage.toml). When set, every take uses it instead
+    # of the director's evolving caption (no drift for this family);
+    # when None the director drives (captions evolve with the general
+    # prompt). Empty string is falsy → falls back like an absent pin.
+    music_caption: str | None = None
 
     @field_validator("sample_rate", "channels")
     @classmethod
@@ -326,6 +355,75 @@ class AudioConfig(BaseModel):
                 "keep take_seconds >> ahead_seconds (defaults 45.0/20.0)"
             )
         return self
+
+
+class SfxConfig(BaseModel):
+    """Finalize-time effects config (SFX slice 2, three-caption doctrine).
+
+    `backend="fake"` keeps old runs byte-identical (finalize without the
+    SFX pass); `"mmaudio"` renders director-captioned windows at finalize
+    (slice 3 wiring). `model_size` rides the ladder vocabulary — the 2060
+    ladder (slice 2c) locks the deployed value.
+    """
+
+    backend: SfxBackendName = "fake"
+    device: str = "cpu"
+    models_dir: str = "/models"
+    model_size: SfxModelSize = "large_44k_v2"
+
+
+class AugmentConfig(BaseModel):
+    """Finalize-time augmentation floors (Track A: knobs only).
+
+    `min_fps = 0` disables the fps floor; `min_width = min_height = 0`
+    disables the resolution floor. Geometry must be both-zero or
+    both-positive — a half-disabled floor (0 wide x 720 high) is
+    meaningless, so the model rejects it. The media consumer that reads
+    these floors lands in a later slice; this track only plumbs them
+    through TOML + CLI + TUI.
+    """
+
+    min_fps: int = 32
+    min_width: int = 1280
+    min_height: int = 720
+
+    @field_validator("min_fps", "min_width", "min_height")
+    @classmethod
+    def non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be non-negative (0 disables the floor)")
+        return value
+
+    @model_validator(mode="after")
+    def geometry_both_or_neither(self) -> AugmentConfig:
+        if (self.min_width == 0) != (self.min_height == 0):
+            raise ValueError("min_width and min_height must both be 0 or both positive")
+        return self
+
+
+def parse_min_resolution(raw: str) -> tuple[int, int]:
+    """Parse a resolution floor: WxH like "1280x720", or "0" to disable.
+
+    Returns (width, height); "0" (and the equivalent "0x0") returns
+    (0, 0). Anything else — wrong shape, non-digits, or a half-disabled
+    pair like "0x720" — raises ValueError so CLI/TUI/resolve paths share
+    one error source. The full both-or-neither invariant also lives on
+    AugmentConfig for direct construction and TOML loads.
+    """
+    text = raw.strip().lower()
+    if text == "0":
+        return (0, 0)
+    match = re.fullmatch(r"(\d+)\s*x\s*(\d+)", text)
+    if match is None:
+        raise ValueError(
+            f'invalid resolution {raw!r} (expected WxH like "1280x720" or "0" to disable)'
+        )
+    width, height = int(match.group(1)), int(match.group(2))
+    if (width == 0) != (height == 0):
+        raise ValueError(
+            f"invalid resolution {raw!r}: width and height must both be 0 or both positive"
+        )
+    return (width, height)
 
 
 class DirectorConfig(BaseModel):
@@ -447,6 +545,8 @@ class ProjectConfig(BaseModel):
     min_free_space_gib: float = SPEC_MIN_FREE_SPACE_GIB
     video: VideoConfig = Field(default_factory=VideoConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
+    sfx: SfxConfig = Field(default_factory=SfxConfig)
+    augment: AugmentConfig = Field(default_factory=AugmentConfig)
     director: DirectorConfig = Field(default_factory=DirectorConfig)
     voyage: VoyageConfig = Field(default_factory=VoyageConfig)
     experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)
@@ -510,6 +610,9 @@ def default_config_toml(
     audio_preset = _audio_preset(video_backend)
     audio_backend = audio_preset["backend"]
     audio_device = audio_preset["device"]
+    sfx_preset = _sfx_preset(video_backend)
+    sfx_backend = sfx_preset["backend"]
+    sfx_device = sfx_preset["device"]
     escaped_run_id = _toml_basic_string(run_id)
     escaped_style = _toml_basic_string(style)
     return f"""\
@@ -547,6 +650,19 @@ final_overlap_fraction = 0.1
 final_overlap_cap_seconds = 0.5
 models_dir = "/models"
 device = "{audio_device}"
+
+[sfx]
+# "mmaudio" (CUDA) | "fake" (built-in noise — CPU-only/test runs)
+backend = "{sfx_backend}"
+device = "{sfx_device}"
+models_dir = "/models"
+model_size = "large_44k_v2"
+
+[augment]
+# Finalize-time floors: 0 disables a floor (min_fps = 0, or 0x0 geometry).
+min_fps = 32
+min_width = 1280
+min_height = 720
 
 [director]
 backend = "{director_backend}"
@@ -726,6 +842,10 @@ def apply_draft_overrides(
         quantization=quantization,
         beats_per_segment=beats_per_segment,
         drift_every_n_segments=drift_every_n_segments,
+        music_caption=music_caption,
+        video_caption=video_caption,
+        min_fps=min_fps,
+        min_resolution=min_resolution,
     )
 
 
@@ -753,6 +873,11 @@ _AUDIO_BACKEND_PRESETS: dict[str, dict[str, str]] = {
     for name, record in BACKEND_REGISTRY.items()
 }
 
+_SFX_BACKEND_PRESETS: dict[str, dict[str, str]] = {
+    name: {"backend": record.sfx_backend, "device": record.sfx_device}
+    for name, record in BACKEND_REGISTRY.items()
+}
+
 
 def _video_preset(backend: str) -> dict[str, str | int | list[int]]:
     """Video preset row as a plain dict (derived from BACKEND_REGISTRY).
@@ -774,6 +899,20 @@ def _audio_preset(backend: str) -> dict[str, str]:
         return _AUDIO_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_AUDIO_BACKEND_PRESETS))
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+
+
+def _sfx_preset(backend: str) -> dict[str, str]:
+    """SFX pairing row as a plain dict (derived from BACKEND_REGISTRY).
+
+    CUDA video backends pair the MMAudio stack on cuda:0 (SFX/music on
+    by default on GPU); fake keeps the fake-noise backend on CPU so
+    CPU-only test runs never touch weights.
+    """
+    try:
+        return _SFX_BACKEND_PRESETS[backend]
+    except KeyError:
+        known = ", ".join(sorted(_SFX_BACKEND_PRESETS))
         raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
 
 

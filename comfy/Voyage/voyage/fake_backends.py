@@ -135,6 +135,54 @@ class FakeAudioBackend:
         }
 
 
+class FakeSfxBackend:
+    """Fake SFX backend behind the same `generate_sfx` shape as MMAudio.
+
+    Deterministic seeded pink noise through ffmpeg so the finalize-time
+    windowing/sharding/mix path is genuine with no GPU, no weights, no
+    network. The seed reaches the bytes via anoisesrc's seed knob, so
+    the same window re-renders byte-identical bytes (ledger-friendly).
+    """
+
+    name = "fake"
+
+    def generate_window(
+        self,
+        output_path: Path,
+        caption: str,
+        seed: int,
+        sample_rate: int,
+        channels: int,
+        duration_seconds: float,
+    ) -> dict[str, object]:
+        del caption
+        _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"anoisesrc=color=pink:duration={duration_seconds}:seed={seed}:"
+                f"sample_rate={sample_rate}",
+                "-c:a",
+                "pcm_s16le",
+                "-ac",
+                str(channels),
+                "-ar",
+                str(sample_rate),
+                str(output_path),
+            ]
+        )
+        return {
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "duration_seconds": duration_seconds,
+        }
+
+
 class LongLiveBackend:
     """Real LongLive 2.0 adapter — Phase 1/2 work (task group E).
 
