@@ -7331,3 +7331,38 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   isolation), none touching the SFX path. (The `Voyage/issues/097_*`
   investigation file this section was drafted against has since been
   archived — it lives on in git history only; see AGENTS.md §11.)
+
+- User intent: the Qwen gap — `generate` ensured `director-qwen8b` into
+  the volume, but the director worker loaded by hub id from the
+  ephemeral HF cache only, so a deleted volume silently degraded to
+  deterministic/skip. Now every snapshot resolves from /models, and a
+  missing one is fetched on demand (no duplication, hub id stays the
+  fallback).
+- `model_registry`: new `SnapshotRef` (spec_name/repo_id/revision/
+  relative_dir) + `resolve_snapshot(repo_id)` (first spec wins across
+  ALL snapshot rows — any known repo maps, FileSpec-only rows excluded
+  since they have no loadable directory) + `snapshot_present` (runs only
+  the checks under the snapshot's own subdir, via an optional `checks`
+  param on `_collect_missing`, so a partial volume still serves whatever
+  is complete).
+- `workers/director`: new `_models_dir()` (init payload wins, then
+  `VOYAGE_MODELS_DIR`, then `/models`) + `_resolve_model_source`
+  (local-dir passthrough, unknown-id passthrough, known repo →
+  `<models_dir>/<subdir>`, absent snapshot → `download_model` into the
+  volume with `HF_HUB_OFFLINE` lifted for that fetch only and restored
+  after, still-incomplete → raise into the caller's fallback chain).
+  Wired into `_load_qwen`/`_load_embedder`/`_load_inspector` AFTER the
+  `_require_module` guards (slim stays fail-fast, never downloads without
+  the stack); id-change cache keys unchanged. `handle_init` records
+  `models_dir` (new `INIT_STR_KEYS` tuple, str-checked like the ids).
+- `supervisor`: director worker now gets
+  `init_payload={"models_dir": config.video.models_dir}` (the same mount
+  `generate` ensures the director/inspector specs under).
+- Proof: `tests/test_director_models_dir.py` (19 TDD tests: mapping incl.
+  any-known-repo, sparse-file presence, passthrough, download-once +
+  env-restore, init recording, from_pretrained-source plumbing via stub
+  modules, supervisor payload); ruff + format + mypy green; full suite
+  1062 passed + 6 failed, all foreign (5 Track-B finalize-geometry, e.g.
+  1280x720 != 768x432, + 1 TUI tick flake — none touch this path).
+- Reviewed + re-gated (ruff/format/mypy green, 1065 passed + 3 foreign
+  finalize-geometry failures triaged); committed with explicit approval.

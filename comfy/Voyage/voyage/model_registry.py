@@ -747,10 +747,18 @@ def download_model(models_dir: Path, spec_name: str) -> dict[str, Any]:
     return _merge_manifest_record(models_dir, spec.manifest_key, spec.record_builder(models_dir))
 
 
-def _collect_missing(models_dir: Path, spec: ModelSpec) -> list[str]:
-    """Run a spec's checklist in order; missing entries as display strings."""
+def _collect_missing(
+    models_dir: Path,
+    spec: ModelSpec,
+    checks: list[RequiredFile | RequiredGlob | ShardFloor] | None = None,
+) -> list[str]:
+    """Run a spec's checklist in order; missing entries as display strings.
+
+    `checks` optionally narrows the run (per-snapshot presence); None runs
+    the full spec checklist (verify path).
+    """
     missing: list[str] = []
-    for check in spec.checks:
+    for check in spec.checks if checks is None else checks:
         if isinstance(check, RequiredFile):
             candidate = models_dir / check.relative_path
             if check.min_bytes > 0:
@@ -883,3 +891,54 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
         "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),
     }
+class SnapshotRef:
+    """A known hub snapshot's single /models home plus its owning spec.
+
+    The owning spec drives fetch (`download_model`) and full-stack verify
+    (`verify_model`); `relative_dir` is the snapshot's own directory for
+    load-from-path and per-snapshot presence checks.
+    """
+
+    spec_name: str
+    repo_id: str
+    revision: str | None
+    relative_dir: str
+
+
+def resolve_snapshot(repo_id: str) -> SnapshotRef | None:
+    """Map any known hub repo id to its /models snapshot (None when unknown).
+
+    First spec wins; repo ids are unique across snapshot rows today. Only
+    snapshot repos map — FileSpec single-file rows have no loadable
+    directory, so they keep hub behavior.
+    """
+    for spec_name, spec in MODEL_SPECS.items():
+        for snapshot in spec.snapshots:
+            if snapshot.repo_id == repo_id:
+                return SnapshotRef(
+                    spec_name=spec_name,
+                    repo_id=snapshot.repo_id,
+                    revision=snapshot.revision,
+                    relative_dir=snapshot.relative_dir,
+                )
+    return None
+
+
+def snapshot_present(models_dir: Path, ref: SnapshotRef) -> bool:
+    """True when the snapshot's own checklist passes (no cross-snapshot coupling).
+
+    A qwen load must not fail just because the MiniLM side of its spec is
+    missing (and vice versa) — each snapshot gates only its own files, so
+    a partial volume still serves whatever is complete.
+    """
+    spec = _require_spec(ref.spec_name)
+    prefix = ref.relative_dir.rstrip("/") + "/"
+
+    def _belongs(check: RequiredFile | RequiredGlob | ShardFloor) -> bool:
+        if isinstance(check, RequiredFile):
+            return check.relative_path.startswith(prefix)
+        if isinstance(check, RequiredGlob):
+            return check.relative_pattern.startswith(prefix)
+        return check.relative_glob.startswith(prefix)
+
+    return not _collect_missing(models_dir, spec, [c for c in spec.checks if _belongs(c)])

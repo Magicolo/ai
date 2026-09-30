@@ -300,6 +300,7 @@ class Supervisor:
             "voyage.workers.director",
             run_dir,
             self._logs / "director-worker.log",
+            init_payload={"models_dir": config.video.models_dir},
             timeout=config.voyage.rpc_timeout_seconds,
         )
         self._workers_running = False

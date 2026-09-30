@@ -49,6 +49,13 @@ geometry 832×480 @ 16 fps; full notes:
 | LLM | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | `b968826d9c46dd6066d109eabc6255188de91218` |
 | Novelty embeddings | [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | `1110a243fdf4706b3f48f1d95db1a4f5529b4d41` |
 
+The director worker resolves both ids to its single `/models` copy
+(`Qwen3-8B/`, `all-MiniLM-L6-v2/`) and fetches a missing snapshot into
+the volume on demand — a deleted volume re-downloads automatically
+instead of silently falling back. Any other known registry repo id maps
+the same way; unknown ids and local directory paths pass through to
+hub/cache behavior untouched.
+
 ## Inspector — Qwen3.5-9B VLM (`models download inspector-qwen35`, ~19 GB, optional)
 
 | Artifact | Repo | Revision |

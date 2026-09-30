@@ -18,6 +18,7 @@ import json
 import math
 import os
 import time
+from pathlib import Path
 from typing import Any, cast
 
 from voyage.director import (
@@ -38,6 +39,17 @@ _INSPECTOR: dict[str, Any] = {}
 
 INSPECTOR_MODEL_ID = "Qwen/Qwen3.5-9B"
 """Default VLM weights (pinned in the model registry, Step 5)."""
+
+INIT_STR_KEYS = (
+    "backend",
+    "model_id",
+    "embedding_model_id",
+    "inspector_model_id",
+    "models_dir",
+)
+"""String-valued `init` fields the worker records (models_dir added for the
+volume-deleted gap: the supervisor passes video.models_dir so snapshot
+resolution never guesses the mount)."""
 
 INSPECT_PROMPT = (
     "Describe what is visible in this frame of an abstract infinite "
@@ -85,6 +97,51 @@ def validate_temperature(temperature: float) -> None:
         raise ValueError(f"temperature must be finite and >= 0 (got {temperature})")
 
 
+def _models_dir() -> str:
+    """Where this worker's /models snapshots live (init payload wins)."""
+    configured = _CONFIG.get("models_dir")
+    if isinstance(configured, str) and configured:
+        return configured
+    return os.environ.get("VOYAGE_MODELS_DIR", "/models")
+
+
+def _resolve_model_source(model_id: str) -> str:
+    """Map a hub id to its single /models snapshot, fetching when absent.
+
+    Local directories pass through untouched (E2E/inspector local paths);
+    ids outside the registry keep today's hub/cache behavior. A known repo
+    resolves to `<models_dir>/<relative_dir>`; when that snapshot's own
+    checklist fails, the owning spec is fetched into /models (the
+    HF_HUB_OFFLINE guard is lifted for that fetch — it protects the
+    ephemeral cache, not the persistent volume) and re-checked. Download
+    failure raises so the caller's fallback chain (deterministic /
+    inspect-skip) engages with the error recorded — the worker never
+    serves half-fetched weights.
+    """
+    from voyage import model_registry  # lazy: registry is torch-free (§12)
+
+    if os.path.isdir(model_id):
+        return model_id
+    ref = model_registry.resolve_snapshot(model_id)
+    if ref is None:
+        return model_id
+    models_dir = Path(_models_dir())
+    if model_registry.snapshot_present(models_dir, ref):
+        return str(models_dir / ref.relative_dir)
+    previous_offline = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "0"
+    try:
+        model_registry.download_model(models_dir, ref.spec_name)
+    finally:
+        if previous_offline is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous_offline
+    if not model_registry.snapshot_present(models_dir, ref):
+        raise RuntimeError(f"snapshot {ref.relative_dir} still incomplete after download")
+    return str(models_dir / ref.relative_dir)
+
+
 def _load_qwen(model_id: str) -> tuple[Any, Any]:
     # Issue 075: reload (not reuse) when the id changed — a long-lived
     # worker re-`init` with a new model must not keep deciding with the
@@ -92,6 +149,7 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
     if "model" not in _QWEN or _QWEN.get("model_id") != model_id:
         _require_module("torch")
         _require_module("transformers")
+        source = _resolve_model_source(model_id)
         import torch
         from transformers import (
             AutoModelForCausalLM,
@@ -104,11 +162,11 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
         # Explicit HF_HUB_OFFLINE=0 re-enables downloads.
         offline = os.environ.get("HF_HUB_OFFLINE", "1") != "0"
         tokenizer = AutoTokenizer.from_pretrained(
-            model_id, trust_remote_code=False, local_files_only=offline
+            source, trust_remote_code=False, local_files_only=offline
         )
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                model_id,
+                source,
                 dtype=torch.bfloat16,
                 device_map="cpu",
                 trust_remote_code=False,
@@ -116,7 +174,7 @@ def _load_qwen(model_id: str) -> tuple[Any, Any]:
             )
         except Exception:
             model = AutoModelForCausalLM.from_pretrained(
-                model_id,
+                source,
                 dtype=torch.float32,
                 device_map="cpu",
                 trust_remote_code=False,
@@ -142,12 +200,13 @@ def _load_inspector(model_id: str) -> tuple[Any, Any]:
     if "model" not in _INSPECTOR or _INSPECTOR.get("model_id") != model_id:
         _require_module("torch")
         _require_module("transformers")
+        source = _resolve_model_source(model_id)
         import torch
         from transformers import AutoModelForMultimodalLM, AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=False)
+        processor = AutoProcessor.from_pretrained(source, trust_remote_code=False)
         model = AutoModelForMultimodalLM.from_pretrained(
-            model_id,
+            source,
             dtype=torch.bfloat16,
             device_map="cpu",
             low_cpu_mem_usage=True,
@@ -164,9 +223,10 @@ def _load_embedder(model_id: str) -> Any:
     # Issue 075: same reload-on-id-change contract as `_load_qwen`.
     if "model" not in _EMBEDDER or _EMBEDDER.get("model_id") != model_id:
         _require_module("sentence_transformers")
+        source = _resolve_model_source(model_id)
         from sentence_transformers import SentenceTransformer
 
-        _EMBEDDER["model"] = SentenceTransformer(model_id, device="cpu")
+        _EMBEDDER["model"] = SentenceTransformer(source, device="cpu")
         _EMBEDDER["model_id"] = model_id
     return _EMBEDDER["model"]
 
@@ -403,16 +463,10 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     id reloads on next use (issue 075), and the process can start while
     video still owns the GPU.
     """
-    for key in ("backend", "model_id", "embedding_model_id", "inspector_model_id"):
+    for key in INIT_STR_KEYS:
         if key in payload and not isinstance(payload[key], str):
             raise TypeError(f"init field {key!r} must be str, got {type(payload[key]).__name__}")
-    _CONFIG.update(
-        {
-            key: payload[key]
-            for key in ("backend", "model_id", "embedding_model_id", "inspector_model_id")
-            if key in payload
-        }
-    )
+    _CONFIG.update({key: payload[key] for key in INIT_STR_KEYS if key in payload})
     return {"status": "READY", "backend": _CONFIG["backend"]}
 
 
