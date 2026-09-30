@@ -103,3 +103,43 @@ after stop _proc None: True
 ## Investigation log
 
 - 2026-09-30: filed by the 168-177 tails sweep; probe run live in `voyage:latest` CPU-only per task brief (never `-e PYTHONPATH` alone — bind mount + image interpreter); code citations are as-read values (concurrent uncommitted edits noted in `voyage/rpc.py` among others).
+
+## Progress log
+
+- 2026-09-30: relevance/integrity check — still live. `voyage/rpc.py` `start()` assigned
+  `self._proc` before the init RPC with no failure path: reproduced failing-test-first
+  with the issue's own probe shape (nonexistent module, CPU-only, in-container) —
+  `tests/test_rpc_start.py::test_failed_init_leaves_no_stale_handle` failed with
+  `_proc` still mounted and the log fd open after `start()` raised.
+- 2026-09-30: implemented the issue's preferred fence (candidate 1, reuse `stop()`),
+  re-ran new + adjacent suites green, `ruff check` + `ruff format --check` + `mypy`
+  (strict, in-container) clean on all touched files.
+
+## Resolution
+
+- Verdict: fixed.
+- What changed (`voyage/rpc.py` only):
+  - `voyage/rpc.py:163-194` — `start()` wraps spawn + init handshake in
+    `try/except (VoyageError, OSError)` (narrow on purpose: `call()` only raises the
+    worker taxonomy, `Popen` only raises `OSError`); on failure it calls `self.stop()`
+    (reaps the child, clears `_proc`, closes the log fd) and re-raises. Covers both
+    `Popen` failure and init-RPC failure. `stop()` stays safe/idempotent, so calling
+    it after a failed `start()` is a no-op.
+- Tests (`tests/test_rpc_start.py`, new, CPU-only, no GPU/network):
+  - `test_failed_init_leaves_no_stale_handle` — the issue's probe as a test
+    (nonexistent module → init raises Recoverable): asserts `_proc is None`,
+    `running is False`, `_log_file is None` (all failed pre-fix).
+  - `test_retry_after_failed_init_starts_clean` — init stubbed to fail once then
+    succeed: asserts the fence after attempt 1 and a fresh mounted handle after
+    attempt 2 (`_proc`/`_log_file` live, log not closed), then `stop()` rests clean.
+- Gates (in-container, `voyage:latest`): `ruff check` + `ruff format --check` +
+  `mypy` clean on `voyage/rpc.py` + both new test files; pytest
+  `tests/test_rpc_timeout.py tests/test_rpc_start.py tests/test_commit_hardening.py
+  tests/test_failure_policy.py` → 35 passed; plus `test_observability.py
+  test_unit.py test_integration.py` → 69 passed total, no regressions.
+- Supervisor-side contract (no supervisor change needed): after a failed `start()`
+  (or `restart()`, which delegates) the handle rests exactly as before the call —
+  `_proc None`, log fd closed, `running False`. Callers can distinguish "not
+  running" (`call()` raises Fatal fast) from retryable staleness, retry `start()`
+  with no ghost of the failed attempt, and stack issue 014's budget fix on top
+  without handle-state surprises. `stop()` after a failed `start()` remains safe.

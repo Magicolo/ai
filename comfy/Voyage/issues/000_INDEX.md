@@ -49,10 +49,8 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 - 007 — Worker error taxonomy erased over RPC; checked_request empty (MAJOR)
 - 015 — resolve_stored_path traversal + absolute-path trust (HIGH)
 - 016 — _checked_tape_path symlink bypass + TOCTOU (HIGH)
-- 012 — start_workers() leak strands GPU workers on partial init (HIGH)
 - 013 — DONE-before-state crash window + silent overwrite on retry (HIGH)
 - 014 — worker.restart() bypasses budget + circuit breaker (HIGH)
-- 137 — RPC timeout desync poisons the next call into Fatal (HIGH; review-raised from MEDIUM-HIGH — recoverable→Fatal defeats the restart budget)
 - 052 — ACE-Step OOM wrapped non-retryable → instant Fatal (HIGH)
 - 068 — requirements.lock ships httpx2/httpcore2 lookalike names (HIGH)
 - 071 — checkpoint SHA self-attested post-download, pass-through verify (HIGH)
@@ -83,7 +81,6 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 - 017 — validate_run tracebacks on hostile inputs (MEDIUM)
 - 018 — probe() leaks raw JSONDecodeError (MEDIUM)
 - 019 — run_capture has no timeout (MEDIUM)
-- 099 — control-plane lost update eats stop/pause (MEDIUM)
 - 100 — NaN/inf pass positive_seconds into select (MEDIUM)
 - 101 — ledger/concept/metrics fsync gaps (MEDIUM)
 - 102 — finalize /tmp staging vs preflight fs (MEDIUM; quoting/RAM → 053/043)
@@ -194,7 +191,7 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 
 ## Pass 4 (31 new: 137-167, 2026-09-30 reactivation — six tracks below all prior windows)
 
-- 137 — RPC timeout desync poisons next call (HIGH; aftermath of 001, triggers are 017/030-class)
+- 137 — RESOLVED batch 1 (was: RPC timeout desync poisons next call)
 - 143 — cmd_init mkdirs before validating (MEDIUM; same family as 110, init-verb site)
 - 152 — SFX bed left-fold O(N²) re-encode (MEDIUM; audio analogue of 050, unfiled)
 - 154 — benchmark has no SFX/augment targets (MEDIUM; 051/060 cover shape, not targets — owns the target half vs 163)
@@ -229,7 +226,7 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 ## Pass 2 (23 new: 168-172, 178-185, 188-197 — tails below all prior windows)
 
 - 168 — prefetch hit logged before drift-hold discard (LOW-MEDIUM; new discard site vs 136; drift_every_n>1 only)
-- 170 — worker start keeps stale handle on failed init (LOW-MEDIUM; beyond 012/014 — probe-proven open fd)
+- 170 — RESOLVED batch 1 (was: worker start keeps stale handle on failed init)
 - 171 — recovery-tape size unbounded (LOW-MEDIUM; count+containment landed, size open — CWE-400 third leg)
 - 188 — skip_bad silently disables numbering-gap check (LOW-MEDIUM; 138 misdescribes it as strict — read both)
 - 189 — single-slice audio paths skip duration/output checks (LOW-MEDIUM)
@@ -256,6 +253,10 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 
 ## Resolved in live tree (record only, do not re-fix)
 
+- 012 — start_workers() leak (was HIGH, fixed 2026-09-30 batch 1: exception-safe unwind + start inside try/finally)
+- 099 — control-plane lost update (was MEDIUM, fixed 2026-09-30 batch 1: commit preserves STOP/PAUSE_REQUESTED via pre-write re-read)
+- 137 — RPC timeout desync (was HIGH, fixed 2026-09-30 batch 1: generation fencing discards stale ids within the deadline)
+- 170 — stale handle on failed init (was LOW-MEDIUM, fixed 2026-09-30 batch 1: start() fence reaps child + closes log)
 - 001 — RPC readline deadline bypass (was CRITICAL, fixed: non-blocking reader + cap)
 - 002 — non-VoyageError escapes commit (was CRITICAL, fixed: ingress wraps)
 - 005 — torch.load RCE (was CRITICAL, fixed: weights_only + pre-verify)

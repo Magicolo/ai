@@ -94,3 +94,51 @@ Host cannot import `voyage.supervisor` directly (pydantic/numpy are container-on
 - `voyage/rpc.py:133-147` (`start` replays `init` via `call`, the raising operation).
 - Python `try/finally` — "If an exception occurs in `start_workers()` before the `try` statement is entered, the `finally` clause is never executed": https://docs.python.org/3/tutorial/errors.html#defining-clean-up-actions
 - DESIGN §73 (supervisor owns lifecycle); §69 crash hook (`inject_worker_crash`) assumes `stop()` reaps — same invariant violated here.
+
+## Progress log
+
+- 2026-09-30: re-verified live before touching anything — `run_segments`
+  still called `self.start_workers()` outside the `try` (pre-fix
+  `supervisor.py:630`), and `start_workers` still started the three workers
+  sequentially with no unwind (pre-fix `:442-449`). Premise holds; no
+  prior fix, no concurrent edits in these regions (`git diff` shows only
+  the hunks below; the tree's other uncommitted changes are `voyage/rpc.py`
+  + `tests/test_rpc_{start,timeout}.py`, another agent's scope, untouched).
+- 2026-09-30 (TDD red): new `tests/test_supervisor_lifecycle.py` with
+  `test_start_workers_failure_stops_already_started` and
+  `test_run_segments_partial_start_stops_workers` (recording start/stop
+  doubles, no subprocesses; audio start raises `FatalWorkerError`). Both
+  failed as predicted (`stopped == []` — the orphan leak, live).
+- 2026-09-30 (green): implemented BOTH fix candidates — exception-safe
+  `start_workers` (reverse-order unwind, original error wins) AND
+  `start_workers()` moved inside the `try` in `run_segments` (defense in
+  depth; `stop_workers` tolerates non-started workers, double-stop is
+  safe). All 4 new tests pass.
+- 2026-09-30: red-proof — `git stash push -- voyage/supervisor.py` →
+  all 4 new tests fail; `git stash pop` → all 4 pass. Fix verified
+  load-bearing, not vacuous.
+- 2026-09-30: regression `test_failure_policy + test_crash_matrix +
+  test_commit_hardening + test_commit_split + test_state_integrity` green
+  (62 passed with the new file); full `./scripts/gates.sh` green —
+  ruff + format + mypy strict clean, 1101 passed / 3 skipped /
+  1 deselected (gpu), coverage 77% (floor 65).
+
+## Resolution
+
+Fixed (both fix candidates applied, defense in depth):
+
+- `voyage/supervisor.py:442-465` — `start_workers()` is now
+  exception-safe: starts are tracked in a `started` list and any failure
+  stops already-started workers in reverse order before re-raising
+  (unwind `stop()` errors are swallowed so the original start error wins;
+  `_workers_running` stays `False`).
+- `voyage/supervisor.py:647-648` — `run_segments()` now calls
+  `self.start_workers()` INSIDE the `try`, so `finally:
+  self.stop_workers()` always runs even when the start itself raises.
+- Tests: `tests/test_supervisor_lifecycle.py`
+  (`test_start_workers_failure_stops_already_started`,
+  `test_run_segments_partial_start_stops_workers` — fake backends on
+  `tmp_path`, no GPU/network).
+- Gates: `ruff check` + `ruff format --check` + `mypy` (strict) clean on
+  both touched files; full `Voyage/scripts/gates.sh` green (1101 passed,
+  3 skipped, 1 deselected).

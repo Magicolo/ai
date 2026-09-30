@@ -75,4 +75,64 @@ The commit's counter advance (`n: 0 → 1`) is correct while the operator's stat
 **Refs:**
 - Overlaps with 097 (the lock hardened there is the lock the control plane bypasses here) — ownership stays here (control-plane writers).
 - In-tree: `voyage/supervisor.py:352-390` (lock), `:1789-1799` (state advance), `:623-629` ("each loop iteration re-reads state.json so `voyage pause` / `voyage stop` … takes effect at the next segment boundary" — the contract this bug breaks); `voyage/cli.py:750-770`; `voyage/tui.py:1059-1071`; `voyage/persistence.py:82-99`.
-- `fcntl.flock` semantics (Python docs, https://docs.python.org/3/library/fcntl.html): locks are advisory — "only … processes … that also use flock" are excluded. Quoting the mechanism: a lock that one side never acquires excludes nobody on that side. Verified by code inspection (no `fcntl` import or lock call anywhere in `cli.py`/`tui.py`).
+ - `fcntl.flock` semantics (Python docs, https://docs.python.org/3/library/fcntl.html): locks are advisory — "only … processes … that also use flock" are excluded. Quoting the mechanism: a lock that one side never acquires excludes nobody on that side. Verified by code inspection (no `fcntl` import or lock call anywhere in `cli.py`/`tui.py`).
+
+## Progress log
+
+- 2026-09-30: re-verified live before touching anything — `_commit_segment`
+  step 6 still did `fresh = read_state(...)` → mutate counters → bare
+  `write_state(fresh)` (pre-fix `supervisor.py:1789-1799`), never touching
+  `status`; `cli.py:_set_status` and the TUI Stop handler still write
+  unlocked (out of scope for this task — explicitly uneditable here).
+  Commit→operator clobber direction confirmed live; premise holds.
+- 2026-09-30: reverse-direction audit (same task scope): the loop's resting
+  writes (`run_segments` SIGINT/finite-batch paths) and `_pause_requested`
+  already `read_state` fresh immediately before each `write_state`, run
+  sequentially in one process between commits (never concurrent with a
+  commit in-process), and a second supervisor's concurrent commit is
+  excluded by `_held_run_lock` — so no stale-counter write-back exists on
+  the supervisor side. The commit-side CAS below is therefore the complete
+  in-scope fix; the remaining hardening (blocking lock acquisition in
+  `_set_status` / TUI Stop) needs `cli.py`/`tui.py` and is left as a
+  follow-up proposal, not applied.
+- 2026-09-30 (TDD red): new `tests/test_supervisor_lifecycle.py` with
+  `test_commit_preserves_stop_requested` /
+  `test_commit_preserves_pause_requested` — real single-segment fake commit
+  on `tmp_path` (no GPU/network) with the supervisor module's `read_state`
+  wrapped so the operator's unlocked write lands exactly in the step-6
+  window (after the `fresh` sample, before the commit's write-back).
+  First draft injected at the write seam (after the CAS re-read) and stayed
+  red post-fix — wrong window; rewrote to inject at the read seam and
+  confirmed BOTH tests fail pre-fix (status clobbered to `CREATED`) via
+  `git stash push -- voyage/supervisor.py`.
+- 2026-09-30 (green): CAS applied; all 4 new tests pass with the fix.
+- 2026-09-30: regression `test_failure_policy + test_crash_matrix +
+  test_commit_hardening + test_commit_split + test_state_integrity` green
+  (62 passed with the new file); full `./scripts/gates.sh` green —
+  ruff + format + mypy strict clean, 1101 passed / 3 skipped /
+  1 deselected (gpu), coverage 77% (floor 65).
+
+## Resolution
+
+Fixed (supervisor-side compare-and-swap; the `cli.py`/`tui.py` lock half
+is out of scope and proposed, not applied):
+
+- `voyage/supervisor.py:1816-1828` — `_commit_segment` step 6 now re-reads
+  `read_state(...).status` immediately before `write_state` (inside the
+  already-held `_held_run_lock`) and carries over any `STOP_REQUESTED` /
+  `PAUSE_REQUESTED` onto the advancing `fresh` copy. Narrows the clobber
+  window from seconds (checksum passes) to microseconds. A re-read failure
+  (`VoyageError`, e.g. torn state) falls back to the sampled status so the
+  commit never fails on the guard itself. Normal path untouched (no
+  `*_REQUESTED` → byte-identical write as before).
+- NOT changed (deliberate, in-scope audit): `_pause_requested` and the
+  `run_segments` resting writes already read fresh immediately before
+  writing and cannot race a commit in-process; cross-process races there
+  are excluded by the commit lock. No fix invented where none was needed.
+- Tests: `tests/test_supervisor_lifecycle.py`
+  (`test_commit_preserves_stop_requested`,
+  `test_commit_preserves_pause_requested` — fake backends on `tmp_path`,
+  no GPU/network).
+- Gates: `ruff check` + `ruff format --check` + `mypy` (strict) clean on
+  both touched files; full `Voyage/scripts/gates.sh` green (1101 passed,
+  3 skipped, 1 deselected).

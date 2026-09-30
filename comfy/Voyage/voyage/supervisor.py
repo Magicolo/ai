@@ -440,10 +440,27 @@ class Supervisor:
         return pid
 
     def start_workers(self) -> None:
+        """Start video/audio/director workers (issue 012).
+
+        Exception-safe: if one start raises (e.g. a model-load init
+        failure), already-started workers are stopped in reverse order
+        before re-raising, so a partial start never orphans GPU residents
+        (video DiT ~6-14 GiB, ACE ~5 GiB). A stop failure during the
+        unwind must not mask the original start error.
+        """
         self._logs.mkdir(parents=True, exist_ok=True)
-        self._video.start()
-        self._audio.start()
-        self._director.start()
+        started: list[SubprocessWorker] = []
+        try:
+            for worker in (self._video, self._audio, self._director):
+                worker.start()
+                started.append(worker)
+        except Exception:
+            for worker in reversed(started):
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+            raise
         self._workers_running = True
         if self._prefetch_executor is None:
             self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
@@ -627,8 +644,8 @@ class Supervisor:
         another process — or SIGINT via `request_stop()` — takes effect at
         the next segment boundary. Returns committed segment ids.
         """
-        self.start_workers()
         try:
+            self.start_workers()
             self._restarts = {}
             state = read_state(self._run_dir)
             if state.status in ("PAUSE_REQUESTED", "STOP_REQUESTED"):
@@ -1796,6 +1813,19 @@ class Supervisor:
         fresh.decision_index = state.decision_index + 1
         fresh.audio_buffer_seconds = covered.audio_ahead
         fresh.last_error = None
+        try:
+            live_status = read_state(self._run_dir).status
+        except VoyageError:
+            live_status = fresh.status
+        if live_status in ("STOP_REQUESTED", "PAUSE_REQUESTED"):
+            # Control-plane compare-and-swap (issue 099): `voyage stop` /
+            # `voyage pause` (and the TUI Stop button) write state.json
+            # without the run lock, so a request that landed after the
+            # `fresh` read above — e.g. during the seconds-long checksum
+            # passes — would otherwise be clobbered by this write-back.
+            # The request wins; the run loop honors it at the next
+            # segment boundary.
+            fresh.status = live_status
         write_state(self._run_dir, fresh)
         stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
         elapsed = round(time.monotonic() - started, 3)

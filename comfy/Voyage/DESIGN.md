@@ -2592,6 +2592,16 @@ Do not mix diagnostics into stdout.
 
 Every operation has a stable operation name and typed payload schema.
 
+> As-built (§45-resync-2026-09-30, issue 137): timeouts never poison the
+> pipe — `call()` reads within one deadline and discards well-formed
+> responses from strictly older requests; only future/unparseable ids are
+> Fatal id-mismatch. A timeout that consumed *partial* bytes of the late
+> line surfaces on the next call as Recoverable `malformed response line`
+> (never Fatal); carrying partials across calls is deferred.
+> As-built (§45-start-fence-2026-09-30, issue 170): a failed `start()`
+> leaves no handle — the child is reaped, `_proc` cleared, the log fd
+> closed — so callers retry `start()` cleanly or observe not-running.
+
 ---
 
 # 46. Worker operations
@@ -3514,6 +3524,17 @@ The director proposes state transitions.
 The supervisor validates and commits them.
 
 This prevents an LLM from directly mutating the persistent run state.
+
+> As-built (§73-lifecycle-2026-09-30, issue 012): `start_workers()` is
+> exception-safe — a partial start unwinds already-started workers in
+> reverse order — and `run_segments()` starts inside its `try/finally`,
+> so `stop_workers()` always runs.
+> As-built (§73-commit-cas-2026-09-30, issue 099): the commit's state
+> advance preserves an externally-written `STOP_REQUESTED` /
+> `PAUSE_REQUESTED` across its read-modify-write (compare-and-swap just
+> before the write); the run loop honors it at the next segment boundary.
+> Full mutual exclusion with the CLI/TUI control plane is still open —
+> `_set_status` and the TUI Stop button write without the run lock.
 
 ---
 

@@ -121,3 +121,61 @@ As-read values: `MAX_RESPONSE_LINE_BYTES = 8 * 1024 * 1024` (`rpc.py:51`),
 - 2026-09-30: filed by Track A sweep (6 new issues); live re-verified via Read (concurrent
   uncommitted edits noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`,
   `config/persistence/rpc/supervisor` — all citations are as-read values above).
+
+## Progress log
+
+- 2026-09-30: relevance/integrity check — still live. `voyage/rpc.py` `call()` wrote
+  one request then read exactly one line; any id mismatch raised Fatal, with no
+  drain, discard, or fence after a timeout. Reproduced failing-test-first:
+  `tests/test_rpc_timeout.py::test_timeout_then_next_call_succeeds_no_fatal` and
+  `::test_two_stale_lines_both_discarded` failed with `FatalWorkerError: id mismatch`
+  on the unfixed code (slow writer thread answers after the 0.3 s deadline).
+- 2026-09-30: fix chosen — resync-on-timeout via generation fencing (candidate 3),
+  not fence-after-timeout restart (candidate 1) and not drain-with-grace (candidate 2).
+  Rationale: a restart per timeout would bypass the Phase 6 slice B restart budget
+  (issue 014, owned by another track), and a grace drain misses late arrivals past
+  the grace (the common case: 5 s gauge timeout vs a worker answering at 30 s).
+  Discard-until-match handles arbitrarily late full lines with no extra deadline
+  path and no supervisor-side change (supervisor.py is owned by a concurrent group).
+- 2026-09-30: implemented in `voyage/rpc.py`, re-ran new + adjacent suites green,
+  `ruff check` + `ruff format --check` + `mypy` (strict, in-container) clean on all
+  touched files.
+
+## Resolution
+
+- Verdict: fixed.
+- What changed (`voyage/rpc.py` only):
+  - `voyage/rpc.py:87` — new `_request_sequence_number()`: parses the numeric suffix
+    of a `req-NNNNNN` id, `None` for anything else (never raises).
+  - `voyage/rpc.py:100` — new `_is_stale_response()`: true only for a strictly older
+    sequence number; future/unparseable ids are not stale.
+  - `voyage/rpc.py:303` — `call()` now loops reads within the call's single deadline:
+    a line matching the request id breaks the loop; a stale (older-id) well-formed
+    line is discarded (`continue` at `:366`); anything else still raises Fatal id
+    mismatch at `:367`. The whole read-check-return block moved inside `_call_lock`
+    (the old id check sat outside the lock). Timeout expiry inside the loop still
+    raises `RecoverableWorkerError` with the call's configured budget.
+  - `voyage/rpc.py:13` — import extended with `VoyageError` (needed by the sibling
+    issue-170 fence in `start()`; landed in the same file edit).
+- Tests (`tests/test_rpc_timeout.py`, new, CPU-only pipe stubs + writer threads):
+  - `test_timeout_then_next_call_succeeds_no_fatal` — the issue's minimal repro
+    (timeout at 0.3 s, late full line, next call succeeds; failed Fatal pre-fix).
+  - `test_two_stale_lines_both_discarded` — two consecutive timeouts, third call wins.
+  - `test_future_id_still_fatal` / `test_garbage_id_still_fatal` — pin that genuine
+    protocol breaks stay Fatal (passed pre- and post-fix).
+- Gates (in-container, `voyage:latest`): `ruff check` + `ruff format --check` +
+  `mypy` clean on `voyage/rpc.py` + both new test files; pytest
+  `tests/test_rpc_timeout.py tests/test_rpc_start.py tests/test_commit_hardening.py
+  tests/test_failure_policy.py` → 35 passed; plus `test_observability.py
+  test_unit.py test_integration.py` → 69 passed total, no regressions.
+- Residual (documented, not fixed): if the timeout fires after *partial* bytes of
+  the late line were already consumed, the next call reads the tail fragment and
+  fails loud as Recoverable `malformed response line` (never Fatal) — the
+  supervisor restarts and recovers. Carrying the partial buffer across calls would
+  need new worker state that `__new__`-constructed test doubles lack; out of scope.
+- Supervisor-side contract (no supervisor change needed): a `call()` that times out
+  raises Recoverable as before; a later call on the same worker discards that late
+  line within its own deadline and returns the fresh response (or times out
+  Recoverable if it never arrives) — mixed per-op timeouts (gauge 5 s, embed 60 s,
+  default 600 s) no longer convert slowness into Fatal. A Fatal id mismatch now
+  means a genuinely unexpected (future/unparseable) id.

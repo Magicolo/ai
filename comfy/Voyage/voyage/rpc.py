@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from voyage.atomic import JsonValue
-from voyage.errors import FatalWorkerError, RecoverableWorkerError
+from voyage.errors import FatalWorkerError, RecoverableWorkerError, VoyageError
 from voyage.logrotate import rotate_log
 from voyage.models import WorkerErrorDetail, WorkerRequest, WorkerResponse
 
@@ -84,6 +84,31 @@ def decode_response(line: str) -> WorkerResponse:
     return WorkerResponse.model_validate_json(line)
 
 
+def _request_sequence_number(request_id: str) -> int | None:
+    """Numeric suffix of a `req-NNNNNN` id, else None (issue 137).
+
+    Never raises: an id that is not ours (future, garbage, another
+    protocol's) yields None so the caller treats it as a genuine
+    protocol break instead of a discardable stale line.
+    """
+    prefix, _, suffix = request_id.partition("-")
+    if prefix != "req" or not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def _is_stale_response(response_id: str, request_id: str) -> bool:
+    """True when a response line belongs to an earlier request (issue 137).
+
+    Only a strictly older sequence number counts as stale: a future or
+    unparseable id is not a late line from a timed-out call but a
+    protocol break, and the caller keeps it Fatal.
+    """
+    seen = _request_sequence_number(response_id)
+    expected = _request_sequence_number(request_id)
+    return seen is not None and expected is not None and seen < expected
+
+
 def success(request_id: str, result: RpcResult) -> WorkerResponse:
     return WorkerResponse(id=request_id, ok=True, result=result)
 
@@ -136,20 +161,37 @@ class SubprocessWorker:
         self._call_lock = threading.Lock()
 
     def start(self) -> None:
+        """Launch the worker and run the init handshake.
+
+        A failed start leaves no stale handle (issue 170): the init call
+        can raise (timeout, broken pipe, fatal desync), and without a
+        fence `_proc` would keep pointing at the dead or half-initialized
+        child with the log fd open. The teardown below reaps the child,
+        clears `_proc`, and closes the log, so a failed start rests
+        exactly as before the call (`_proc` None, `running` False) and
+        the next `start()` mounts a fresh handle.
+        """
         rotate_log(self._log_path)
         self._close_log_file()
         log_file = self._log_path.open("a", encoding="utf-8")
         self._log_file = log_file
-        self._proc = subprocess.Popen(
-            [self._executable, "-m", self._module],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=log_file,
-            text=True,
-            cwd=str(self._workdir),
-        )
-        if self._init_op is not None:
-            self.call(self._init_op, dict(self._init_payload))
+        try:
+            self._proc = subprocess.Popen(
+                [self._executable, "-m", self._module],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=log_file,
+                text=True,
+                cwd=str(self._workdir),
+            )
+            if self._init_op is not None:
+                self.call(self._init_op, dict(self._init_payload))
+        except (VoyageError, OSError):
+            # Narrow on purpose: `call()` only raises the worker taxonomy
+            # and `Popen` only raises `OSError` — anything else is a bug
+            # that should surface with the handle untouched by cleanup.
+            self.stop()
+            raise
 
     def _close_log_file(self) -> None:
         """Close the supervisor-side log handle, if any (best-effort)."""
@@ -267,10 +309,17 @@ class SubprocessWorker:
         for the response line: expiry raises RecoverableWorkerError so the
         supervisor's restart path engages (`stop()` kills the hung worker).
         The response is accumulated byte-wise on a non-blocking fd until a
-        full `\\n`-terminated line arrives or the deadline passes (issue
+        full `\n`-terminated line arrives or the deadline passes (issue
         001): `select` only guarantees *some* bytes are readable, so a
         worker dribbling a partial line can never wedge this call past the
         deadline. Lines past MAX_RESPONSE_LINE_BYTES fail the same way.
+
+        A timed-out call's late response does not poison the next call
+        (issue 137): reads loop within this call's deadline, discarding
+        well-formed lines from strictly older requests, until the line
+        matching this request arrives. A future or unparseable id is not
+        a late line but a protocol break and stays Fatal, as does calling
+        a worker that was never started.
 
         `payload` stays `dict[str, Any]` (not `RpcPayload`) for now: callers
         hold `dict[str, object]`, which is not JSON-shaped, and those call
@@ -288,31 +337,45 @@ class SubprocessWorker:
                 proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 raise RecoverableWorkerError(f"worker {self._module} pipe broken") from exc
-            line = self._read_response_line(proc, op, effective_timeout)
-            try:
-                response = decode_response(line)
-            except ValueError as exc:
-                # Narrow on purpose: the line is already str, so the only
-                # failure is schema validation (pydantic ValidationError
-                # subclasses ValueError). Anything else (MemoryError and
-                # friends) propagates raw instead of masquerading as a
-                # worker protocol error.
-                raise RecoverableWorkerError(
-                    f"worker {self._module} sent a malformed response line: {exc}"
-                ) from exc
-        if response.id != request.id:
-            raise FatalWorkerError(f"worker {self._module} id mismatch: {response.id}")
-        if not response.ok:
-            code = response.error.code if response.error else "UNKNOWN"
-            message = response.error.message if response.error else "unknown error"
-            retryable = response.error.retryable if response.error else False
-            error: RecoverableWorkerError | FatalWorkerError = (
-                RecoverableWorkerError(f"{code}: {message}")
-                if retryable
-                else FatalWorkerError(f"{code}: {message}")
-            )
-            raise error
-        return response.result
+            deadline = time.monotonic() + effective_timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RecoverableWorkerError(
+                        f"worker {self._module} timed out after {effective_timeout}s on {op}"
+                    )
+                line = self._read_response_line(proc, op, remaining)
+                try:
+                    response = decode_response(line)
+                except ValueError as exc:
+                    # Narrow on purpose: the line is already str, so the only
+                    # failure is schema validation (pydantic ValidationError
+                    # subclasses ValueError). Anything else (MemoryError and
+                    # friends) propagates raw instead of masquerading as a
+                    # worker protocol error.
+                    raise RecoverableWorkerError(
+                        f"worker {self._module} sent a malformed response line: {exc}"
+                    ) from exc
+                if response.id == request.id:
+                    break
+                if _is_stale_response(response.id, request.id):
+                    # Late full line from an earlier timed-out call: the
+                    # worker is serial, so our fresh response still arrives
+                    # after it — discard and keep waiting within the same
+                    # deadline instead of converting slowness into Fatal.
+                    continue
+                raise FatalWorkerError(f"worker {self._module} id mismatch: {response.id}")
+            if not response.ok:
+                code = response.error.code if response.error else "UNKNOWN"
+                message = response.error.message if response.error else "unknown error"
+                retryable = response.error.retryable if response.error else False
+                error: RecoverableWorkerError | FatalWorkerError = (
+                    RecoverableWorkerError(f"{code}: {message}")
+                    if retryable
+                    else FatalWorkerError(f"{code}: {message}")
+                )
+                raise error
+            return response.result
 
     def health(self) -> RpcResult:
         return self.call("health", {})
