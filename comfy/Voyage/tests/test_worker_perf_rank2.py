@@ -54,7 +54,7 @@ def test_046_decode_fast_seek_uses_input_ss(
     def _fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         dest_dir = Path(argv[-1]).parent
-        for index in range(4):
+        for index in range(32):
             (dest_dir / f"frame_{index:06d}.png").write_bytes(b"fake-png-payload")
         return _completed(argv)
 
@@ -62,7 +62,7 @@ def test_046_decode_fast_seek_uses_input_ss(
     frames = augment_module.ffmpeg_decode_chunk(
         tmp_path / "source.mp4", tmp_path / "chunk_09", 288, 32, fps=32.0
     )
-    assert len(frames) == 4
+    assert len(frames) == 32
     (command,) = calls
     assert command.index("-ss") < command.index("-i")
     assert command[command.index("-ss") + 1] == f"{288 / 32.0:.6f}"
@@ -79,7 +79,8 @@ def test_046_decode_exact_fallback_without_fps(
     def _fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         dest_dir = Path(argv[-1]).parent
-        (dest_dir / "frame_000000.png").write_bytes(b"fake-png-payload")
+        for index in range(4):
+            (dest_dir / f"frame_{index:06d}.png").write_bytes(b"fake-png-payload")
         return _completed(argv)
 
     monkeypatch.setattr(augment_module, "run_capture", _fake)

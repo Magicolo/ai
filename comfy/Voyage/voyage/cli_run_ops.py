@@ -11,6 +11,7 @@ import argparse
 import signal
 import sys
 from types import FrameType
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from voyage.cli_core import _augment_overrides, _load_run, get_console
 from voyage.cli_paths import _check_run_id, _effective_run_id, _run_dir_arg, resolve_run_dir
 from voyage.cli_planning import _require_cuda_stack
 from voyage.config import (
+    BACKEND_REGISTRY,
     VideoBackendName,
     apply_draft_overrides,
     default_config_toml,
@@ -32,24 +34,45 @@ from voyage.supervisor import Supervisor
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    # Validate-before-mutate (issues 143/185): every pure-config check
+    # below runs BEFORE the first mkdir, so a bad value exits 2 with no
+    # partial run dir for the retry to trip over. Hand-built namespaces
+    # read via getattr with the same exit-2 shape — never AttributeError.
     run_id = _effective_run_id(args)
     if _check_run_id(run_id) != 0:
         return 2
-    run_dir = resolve_run_dir(args.output)
-    if run_dir.exists() and any(run_dir.iterdir()) and not args.force:
+    output_value = getattr(args, "output", None)
+    if not isinstance(output_value, str) or not output_value.strip():
+        print("error: --output is required (run directory to create)", file=sys.stderr)
+        return 2
+    run_dir = resolve_run_dir(output_value)
+    if run_dir.exists() and any(run_dir.iterdir()) and not getattr(args, "force", False):
         print(f"refusing to init non-empty directory {run_dir} (use --force)", file=sys.stderr)
+        return 2
+    style_value = getattr(args, "style", None)
+    if not isinstance(style_value, str) or not style_value.strip():
+        print("error: --style must be a non-empty human-owned style string", file=sys.stderr)
+        return 2
+    seed_value = getattr(args, "seed", None)
+    if isinstance(seed_value, bool) or not isinstance(seed_value, int):
+        print(f"error: --seed must be an integer, got {seed_value!r}", file=sys.stderr)
+        return 2
+    backend_value = getattr(args, "backend", None) or "ltxv"
+    if backend_value not in BACKEND_REGISTRY:
+        known = ", ".join(sorted(BACKEND_REGISTRY))
+        print(f"error: unknown video backend {backend_value!r} (known: {known})", file=sys.stderr)
         return 2
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    backend: VideoBackendName = getattr(args, "backend", None) or "ltxv"
+    backend: VideoBackendName = cast(VideoBackendName, backend_value)
     warn_if_deprecated_backend(backend)
     director_backend: str = getattr(args, "director", None) or "qwen"
     director_device: str = getattr(args, "director_device", None) or "cuda:1"
     config_text = default_config_toml(
         run_id,
-        args.style,
-        args.seed,
+        style_value,
+        seed_value,
         video_backend=backend,
         director_backend=director_backend,
         director_device=director_device,

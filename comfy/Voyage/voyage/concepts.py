@@ -40,7 +40,13 @@ above, delete the `legacy_path` parameter, `_migrate_legacy`, and this
 constant — every use site warns until then.
 """
 
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[^\W_]+")
+# Word runs in any script (issue 117): `[a-z0-9]+` collapsed every
+# non-Latin concept to the empty token set, so unrelated CJK concepts scored
+# similarity 1.0 (false duplicates) and accented Latin shredded into
+# fragments. `[^\W_]+` keeps Unicode letters + digits in any script
+# (`.lower()` is already Unicode-aware); `_` stays a separator as before.
+# repairs the token-set fallback.
 
 
 def tokenize(text: str) -> frozenset[str]:

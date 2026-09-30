@@ -122,7 +122,7 @@ re-encode) without weights.
 ## Cost note and benchmark effect
 
 Lifting costs pixels × fps. CausVid (832×480 @ 16) and fake testsrc
-(320×180-class) both ship as 1280×720 @ 32 — ~2.7× pixels plus a 2×
+(768×432 fake-432p) both ship as 1280×720 @ 32 — ~2.7× pixels plus a 2×
 fps lift through minterpolate + upscale + re-encode. Expect finalize
 to dominate e2e wall time on those backends; ltxv (768×512 @ 24) pays
 a smaller lift. `BENCHMARKING.md` e2e numbers predate the floors —

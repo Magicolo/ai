@@ -18,3 +18,25 @@
   2. Cross-ref `docs/BACKENDS.md:94-98` (inspector backend) and DESIGN §44 from the new line.
   3. Gate: `grep -n "inspect" docs/ARCHITECTURE.md` non-empty; gates green (docs only).
 - **Refs:** `Voyage/issues/091_new_docs_sfx_augment.md` (SFX/AUGMENT operator docs — adjacent gap, fix separately); `Voyage/issues/092_docs_oneline_batch_qual_leg.md` (ARCHITECTURE layout items — no pipeline item); DESIGN §44; `Voyage/voyage/supervisor.py:1285-1301`.
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live on the docs side. `docs/ARCHITECTURE.md:31-36`
+  pipeline had no inspect/amend/style step and `grep -n -i
+  "inspector|feedback|amend"` on the file returned zero hits; the
+  `docs/BACKENDS.md:96-100` inspector backend (retry→skip, never blocks a
+  commit) confirms the flag-gated behavior the pipeline must place.
+  Supervisor cites (`:1439-1481`, `:949`, `:1293-1301`) are as-recorded —
+  the file is under concurrent migration (CLI split landed), so the exact
+  lines were not re-read; the docs edit cites BACKENDS + DESIGN §44 only.
+- Fix: pipeline line prefixed with the bracketed inspect stage + one
+  paragraph (amendments apply post-validation pre-style-check, invalidate
+  the prefetched proposal, degrade to `inspect_skipped`, never block;
+  cross-refs BACKENDS inspector section + DESIGN §44), per fix candidate 1-2.
+- Files changed: `docs/ARCHITECTURE.md`.
+- Gates: `grep -n "inspect" docs/ARCHITECTURE.md` non-empty; docs-only.
+
+## Resolution
+
+- Done. Residual: none in this file's scope (supervisor line re-verification
+  belongs to any future code-side change of the inspect step).

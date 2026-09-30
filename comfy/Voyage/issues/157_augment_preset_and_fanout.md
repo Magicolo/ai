@@ -37,5 +37,18 @@ Static + measurement: (1) `rg -n "preset" voyage/augment.py` → empty (every ch
 
 ## Refs
 
-- `Voyage/voyage/augment.py:34-50,136-213,266-281`; `Voyage/voyage/workers/augment_worker.py:301-353,356-394`; `Voyage/voyage/media.py:1046-1110` (050's encode sites); DESIGN augment track + §40 (residency).
-- Adjacent, not overlapping: 046 (decode rescan); 047 (spike-scope reload/stack-first — this file is the preset + fan-out + peak-ordering remainder); 050 (finalize double-encode knobs).
+ - `Voyage/voyage/augment.py:34-50,136-213,266-281`; `Voyage/voyage/workers/augment_worker.py:301-353,356-394`; `Voyage/voyage/media.py:1046-1110` (050's encode sites); DESIGN augment track + §40 (residency).
+ - Adjacent, not overlapping: 046 (decode rescan); 047 (spike-scope reload/stack-first — this file is the preset + fan-out + peak-ordering remainder); 050 (finalize double-encode knobs).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise PARTLY SUPERSEDED: 047 already landed resident caches (`_RRDB_CACHE`/`_FILM_CACHE`), list-halving (`_run_frame_batches` — the full-batch stack never builds), and gc-before-empty_cache — so candidates 2 (resident handles) and the stack-vs-halve peak ordering are done. Remaining worker-owned: the two `if torch.cuda.is_available()` guards around `empty_cache` (`_run_stacked`, `_run_frame_batches`) — still present as-read. The preset knob + fan-out contract live in `augment.py` (E1's, out of scope) — residuals. TDD: `tests/test_e2_augment_worker_157_193.py` OOM-split leg failed pre-fix (no `empty_cache` call without CUDA), green post-fix. Note: `augment_worker.py` is not in the brief's OWN-FILES list but the brief explicitly assigns "the worker-owned half" here (and 193's file) to Group E2 — hunks kept to the cited lines only.
+
+## Resolution
+
+- Verdict: WORKER-OWNED REMAINDER FIXED; orchestration legs RESIDUAL (below).
+- Changes (`voyage/workers/augment_worker.py` only): both OOM-split `empty_cache` calls unconditional with why-comments (`empty_cache` is a no-op without CUDA — the guard bought nothing and skipped relief on CPU-OOM recursion). Tested with stubbed torch (no real torch needed).
+- Files changed: `voyage/workers/augment_worker.py` (+ OOM leg in `tests/test_e2_augment_worker_157_193.py`).
+- Test evidence (in-container `voyage:latest`, CPU-only): new-file OOM leg green; all `test_augment_*` (125 passed, 3 skipped) green. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — augment track): "OOM-split paths call `empty_cache` unconditionally (no-op without CUDA) — allocator relief never depends on device presence."
+- Residuals (out of scope, precise — for the E1 `augment.py` owner): (1) `voyage/augment.py:178-213` (`ffmpeg_encode_chunk`): thread a `preset` parameter (default `veryfast` to match intermediates, validated against an allow-list) + include it in the chunk metric — the `augment_benchmark_setup` shape in `voyage/bench.py` (154/163, this pass) already carries the field; (2) `:266-281` (`run_augment_chunks` `ThreadPoolExecutor(2)` fan-out): document the thread contract (one model per thread vs shared resident handle; SFX precedent is process-per-GPU) + chunk-count determinism under both paths.

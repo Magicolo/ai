@@ -60,3 +60,31 @@ print('has skip_bad:', hasattr(ns, 'skip_bad'))  # False -> cmd_finalize crashes
 
 - `voyage/cli.py:1718-1763` (`_add_sfx_args` docstring already states the one-helper rule "so the flags (and their defaults) cannot drift apart across verbs — a missing flag on any finalizing verb is an AttributeError at finalize time" — this issue is that sentence coming true for `--skip-bad`).
 - Issue 022 (same handoff class: inner-namespace slice silently incomplete); `clig.dev` ("validate user input… check early and bail out before anything bad happens").
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live in-container — stop
+  namespace still lacked `skip_bad` and `cmd_finalize` still read
+  `args.skip_bad` directly (code has since split: `cmd_finalize` lives
+  in `voyage/cli_finalize.py:50`, parsers in `voyage/cli.py`).
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_stop_finalize_end_to_end_without_crash`):
+  red with the exact `AttributeError: 'Namespace' object has no attribute
+  'skip_bad'` after `status -> STOP_REQUESTED`.
+- Fixed structurally (the issue's preferred candidate) + defensively.
+
+## Resolution: FIXED
+
+- `voyage/cli.py:594-601` (`_add_stop_parser`): added `--skip-bad` plus
+  `_add_augment_args(stop)` and `_add_console_args(stop)` (shared
+  helpers — the stop-finalize surface now matches `finalize`; this also
+  resolves 179 in the same hunk).
+- `voyage/cli_finalize.py:50`: `skip_bad=getattr(args, "skip_bad",
+  False)` — belt-and-braces for hand-built namespaces, matching every
+  neighboring read.
+- Test evidence: `tests/test_cli_group_a.py` 17 passed in-container;
+  neighbors (`test_cli_hardening`, `test_cli_split`,
+  `test_cli_tui_split`, `test_generate`, ...) green.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green on
+  all touched files.
+- Residuals: none.

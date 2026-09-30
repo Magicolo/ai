@@ -66,3 +66,42 @@ print(feedback_amendments({'palette_distance': 0.5, 'scene_boundary_strength': 0
 
 - `voyage/prompts.py:82-107`; `voyage/director.py:230-237` (renders all six); `voyage/models.py:67-82` (charter covers four); `voyage/scoreboard.py:25-32` (six-metric contract).
 - Not-a-duplicate: 144 (NaN/±inf finiteness in the same two functions — coverage, not finiteness); 026 (staged-plan truncation + blocklist — different function); 027/062 (scoreboard crash/paths — read-only view, not steering).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`, CPU-only):
+  `feedback_amendments({'palette_distance': 0.99,
+  'scene_boundary_strength': 0.99}, style)` → `[]` while motion 0.99 amends;
+  `StyleSpec` fields carry no palette/scene keys. Premise confirmed.
+- Charter decision (candidate 1, steering over informational-only): both
+  metrics steer — palette blowout / cut instability are exactly the
+  user-reported failure modes the Phase 5 loop exists to correct.
+- TDD: wrote `tests/test_feedback_six_metrics_180.py` first — 4 failed / 2
+  passed (in-band + non-finite pins green) before the fix.
+- Fix: `StyleSpec.palette_distance_max` + `scene_boundary_strength_max`
+  (default 0.30, matching the director-context hardcoded ceilings, covered
+  by 119's `values_in_domain` [0,1] validator) + two `feedback_amendments`
+  branches with the file's established finite-guard idiom (issue 144).
+- Gates (in-container): new tests + `test_models_ranges_119` +
+  `test_feedback` + `test_inspector_wiring` + `test_stage_a_telemetry` +
+  `test_phase3` = 50 passed; `ruff check` + `ruff format --check` + `mypy`
+  on `voyage/models.py` + `voyage/prompts.py` clean.
+
+## Resolution
+
+- Verdict: FIXED. Files changed: `voyage/models.py` (2 charter fields +
+  validator coverage), `voyage/prompts.py` (2 amendment branches),
+  `tests/test_feedback_six_metrics_180.py` (new: isolation pins for all
+  six, in-band/none, non-finite/none, configurable bands + range pins).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §43, after
+  the amendment contract, add: "All six MEASURED metrics steer: each
+  out-of-band metric appends exactly one corrective amendment to the next
+  segment's middle-layer text (palette blowout → palette restraint,
+  boundary spike → single-shot continuity), thresholded against the
+  charter's bands."
+- Residuals (other files, not touched per scope): `voyage/director.py:235`
+  + `:237` still hardcode `(0.0, 0.30)` for palette/scene instead of
+  reading `style.palette_distance_max` /
+  `style.scene_boundary_strength_max` — wire the MEASURED-band table to the
+  new charter fields so a retuned charter and the director flags cannot
+  disagree.

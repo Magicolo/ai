@@ -1,4 +1,4 @@
-"""Shared video-worker scaffolding (issue 019).
+"""Shared video-worker scaffolding.
 
 Extracted from `video_longlive.py` / `video_ltxv.py` / `video_causvid.py`,
 whose operational skeleton (mp4 writes, atomic JSON tape writes, benchmark
@@ -21,7 +21,8 @@ from the sibling segment video via ffmpeg, so the supervisor's
 resume/rebuild flow works unchanged while committed segments carry one
 fewer file.
 
-Top level is numpy + stdlib only (both in every image); imageio stays
+Top level is numpy + stdlib (+ `voyage.atomic`, itself stdlib-only)
+only (both in every image); imageio stays
 function-level — the slim gates image has none, so CPU tests stub
 `sys.modules["imageio.v2"]`.
 """
@@ -29,6 +30,7 @@ function-level — the slim gates image has none, so CPU tests stub
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import time
@@ -36,11 +38,12 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 
+from voyage.atomic import fsync_dir
 from voyage.workers.loop import Handler, checked_request, validate_benchmark_counts
 
 BoundaryKind = Literal["fresh", "continue"]
@@ -56,6 +59,36 @@ rolling stream. The RPC wire keeps `scene_cuts: list[bool]` (compat);
 def boundary_from_scene_cut(scene_cut: bool) -> BoundaryKind:
     """Name a scene-cut flag (issue 045)."""
     return "fresh" if scene_cut else "continue"
+
+
+T = TypeVar("T")
+"""Element type for `_strict_element` (issue 118)."""
+
+
+def _strict_element(value: Any, field: str, expected: type[T]) -> T:
+    """One wire element with `checked_request` discipline (issue 118).
+
+    Bare `str()`/`int()`/`bool()` never fail and invent values (`None →
+    "None"`, `"false" → True`, `1.9 → 1`, `True → 1px`) — a mistyped seed
+    then truncates instead of erroring, breaking the determinism story
+    (§62). Mirror `checked_request`: exact type, bools never satisfy int.
+    """
+    if isinstance(value, bool) and expected is not bool:
+        raise TypeError(
+            f"payload field {field!r} must be {expected.__name__}, got {type(value).__name__}"
+        )
+    if not isinstance(value, expected):
+        raise TypeError(
+            f"payload field {field!r} must be {expected.__name__}, got {type(value).__name__}"
+        )
+    return value
+
+
+def _strict_optional_int(value: Any, field: str) -> int | None:
+    """Geometry element: int or None, never bool/str/float (issue 118)."""
+    if value is None:
+        return None
+    return _strict_element(value, field, int)
 
 
 @dataclass(frozen=True)
@@ -110,29 +143,30 @@ class GenerateBlocksRequest:
             raw_seeds = payload["seeds"]
             if not isinstance(raw_prompts, list) or not isinstance(raw_seeds, list):
                 raise TypeError("payload prompts/seeds must be lists")
-            prompts = tuple(str(item) for item in raw_prompts)
-            seeds = tuple(int(item) for item in raw_seeds)
+            prompts = tuple(_strict_element(item, "prompts[]", str) for item in raw_prompts)
+            seeds = tuple(_strict_element(item, "seeds[]", int) for item in raw_seeds)
             raw_cuts = payload.get("scene_cuts", [False] * len(prompts))
             if not isinstance(raw_cuts, list) or len(raw_cuts) != len(prompts):
                 raise ValueError("payload scene_cuts must match prompts in length")
-            scene_cuts = tuple(bool(item) for item in raw_cuts)
+            scene_cuts = tuple(_strict_element(item, "scene_cuts[]", bool) for item in raw_cuts)
         else:
             checked_request(payload, prompt=str, seed=int)
             prompts = (str(payload["prompt"]),)
             seeds = (int(payload["seed"]),)
-            scene_cuts = (bool(payload.get("scene_cut", False)),)
+            raw_cut = payload.get("scene_cut", False)
+            scene_cuts = (_strict_element(raw_cut, "scene_cut", bool),)
         if not prompts or not (len(prompts) == len(seeds) == len(scene_cuts)):
             raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
-        raw_width = payload.get("width", width_default)
-        raw_height = payload.get("height", height_default)
-        width = None if raw_width is None else int(raw_width)
-        height = None if raw_height is None else int(raw_height)
+        width = _strict_optional_int(payload.get("width", width_default), "width")
+        height = _strict_optional_int(payload.get("height", height_default), "height")
         raw_requested = payload.get("frames")
         if isinstance(raw_requested, bool):
             requested = None
         else:
             requested = int(raw_requested) if isinstance(raw_requested, int) else None
         raw_digest = payload.get("prompt_plan_hash")
+        raw_profile = payload.get("profile_stages", False)
+        profile_stages = _strict_element(raw_profile, "profile_stages", bool)
         return cls(
             prompts=prompts,
             seeds=seeds,
@@ -144,7 +178,7 @@ class GenerateBlocksRequest:
             segment_id=str(payload["segment_id"]),
             prompt_plan_digest=str(raw_digest) if isinstance(raw_digest, str) else None,
             requested_frames=requested,
-            profile_stages=bool(payload.get("profile_stages", False)),
+            profile_stages=profile_stages,
         )
 
 
@@ -173,6 +207,72 @@ SEGMENT_VIDEO_FILENAME = "video.mp4"
 
 TAIL_DERIVE_TIMEOUT_SECONDS = 120.0
 """Bound for each ffmpeg/ffprobe spawn in tail derivation (short trims)."""
+
+MAX_RECOVERY_TAPE_BYTES = 1024**3
+"""Byte ceiling for recovery tapes (issue 171).
+
+Legitimate tapes are megabytes (tail latents bf16 `[1,8,C,H,W]` plus
+embeds plus RNG state — DESIGN §22 logs ~7 MB), so any gigabyte-scale tape
+is corrupt or hostile; `weights_only=True` stops code execution, not
+allocation, and torch still materializes every tensor in the archive. The
+cap sits two orders of magnitude above legitimate — no false-positive
+surface. Enforced at the supervisor gates and (residually) at the worker
+`torch.load` call sites.
+"""
+
+
+def check_recovery_tape_size(resolved: Path) -> Path:
+    """Reject implausibly large tapes before `torch.load` (issue 171).
+
+    One `stat` syscall against a multi-minute GPU rebuild: a multi-GB
+    `.pt` — runaway write, a weights file renamed `.pt`, a hostile worker
+    report — fails here with ValueError instead of OOMing the worker and
+    burning the whole restart budget on a knowably oversized input.
+    Returns `resolved` for chaining.
+    """
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"recovery tape unreadable: {resolved}: {exc}") from exc
+    if size > MAX_RECOVERY_TAPE_BYTES:
+        raise ValueError(
+            f"implausible tape size {size} bytes (>{MAX_RECOVERY_TAPE_BYTES}) "
+            f"at {resolved} — re-render from seed instead of resuming"
+        )
+    return resolved
+
+
+def verify_conditioning_tail_sha(segment_dir: Path, tape: dict[str, Any]) -> None:
+    """Recompute a taped conditioning-tail hash, if the tape carries one.
+
+    Issue 123: ltxv/causvid persist `conditioning_tail_sha256` at commit
+    but no resume path recomputes it, so a truncated tail (disk-full
+    mid-write, partial copy, bit-rot) passes `Path.exists()` and becomes
+    the conditioning anchor — the next segment conditions on garbage
+    without crashing, the worst failure mode for a continuity system.
+    A mismatch raises ValueError ("re-render from seed"). No-op when the
+    tape carries no hash (run-file pruning records the would-be tail path
+    with nothing persisted to hash) or when the tail file is absent (the
+    derive path materializes it — absence is not corruption).
+    """
+    digest = tape.get("conditioning_tail_sha256")
+    raw_path = tape.get("conditioning_tail_path")
+    if not isinstance(digest, str) or not digest or not isinstance(raw_path, str):
+        return
+    tail_path = Path(raw_path)
+    if not tail_path.is_absolute():
+        tail_path = segment_dir / tail_path
+    if not tail_path.is_file():
+        return
+    from voyage.hashing import sha256_file
+
+    actual = sha256_file(tail_path)
+    if actual != digest:
+        raise ValueError(
+            f"tail sha mismatch at {tail_path} (taped {digest[:16]}…, "
+            f"actual {actual[:16]}…) — re-render from seed instead of resuming"
+        )
+
 
 EMBED_CACHE_CAPACITY = 8
 """Resident text-embed entries per worker session (issues 014, 030).
@@ -266,16 +366,55 @@ def move_to_device(value: Any, device: Any) -> Any:
     return value
 
 
-def write_tape_atomic(tape_path: Path, tape: dict[str, Any]) -> Path:
-    """Atomically write a JSON recovery tape (sorted keys, trailing newline).
+def cuda_device_index(device: str) -> int:
+    """CUDA index behind a `"cuda[:N]"` session device string (issue 124).
 
-    Writes to a `.tmp` sibling then renames, so a crash mid-write never
-    leaves a half-written tape behind. Returns `tape_path`.
+    Single home for the `"cuda:N" → N` parse the video workers need to
+    index device-scoped torch telemetry (`get_device_name`,
+    `mem_get_info`, peak-memory stats) at the *session* device instead
+    of device 0. Bare `"cuda"` means index 0 (torch's own default).
+    Raises ValueError on non-CUDA strings — placement must fail fast,
+    never silently report GPU 0's numbers for a `cuda:1` session.
+    """
+    prefix, _, index_text = device.partition(":")
+    if prefix != "cuda":
+        raise ValueError(f"expected a CUDA device like 'cuda:0' (got {device!r})")
+    if not index_text.strip():
+        return 0
+    if not index_text.strip().isdigit():
+        raise ValueError(f"expected a CUDA device like 'cuda:0' (got {device!r})")
+    return int(index_text.strip())
+
+
+def torch_device_arg(device_index: int) -> tuple[int, ...]:
+    """Positional device arg for torch peak-memory calls (issue 124).
+
+    Empty on device 0: torch defaults peak reads to the current device
+    (0 on single-GPU boxes), and the zero-arg shape is what the worker
+    test fakes pin — so the default path keeps it byte-for-byte, and
+    only non-zero sessions route explicitly.
+    """
+    return () if device_index == 0 else (device_index,)
+
+
+def write_tape_atomic(tape_path: Path, tape: dict[str, Any]) -> Path:
+    """Atomically + durably write a JSON recovery tape (sorted keys, trailing newline).
+
+    Writes to a `.tmp` sibling, flushes + fsyncs the file, renames, then
+    fsyncs the directory (issue 122, DESIGN §31 — the `concepts`
+    `_append_vector` contract). Rename-without-fsync is atomic against
+    *process* crashes but can lose the latest tape on OS crash / power
+    loss — exactly the tape a restart needs. A failed fsync raises before
+    the rename, so the previous tape survives. Returns `tape_path`.
     """
     tape_text = json.dumps(tape, indent=2, sort_keys=True) + "\n"
     tape_tmp = tape_path.with_suffix(".tmp")
-    tape_tmp.write_text(tape_text, encoding="utf-8")
+    with open(tape_tmp, "w", encoding="utf-8") as handle:
+        handle.write(tape_text)
+        handle.flush()
+        os.fsync(handle.fileno())
     tape_tmp.replace(tape_path)
+    fsync_dir(tape_path.parent)
     return tape_path
 
 

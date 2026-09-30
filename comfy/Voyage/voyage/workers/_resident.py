@@ -1,4 +1,4 @@
-"""Shared resident-stack helpers (issue 084).
+"""Shared resident-stack helpers (issue 084, DESIGN §40).
 
 Single home for `BYTES_PER_GIB` plus the `find_spec` optional-dependency
 guards. The ACE-Step and MMAudio workers each carried their own

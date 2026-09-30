@@ -28,12 +28,16 @@ def select_frame_indices(total_frames: int, count: int) -> list[int]:
     """Evenly spaced frame indices over `total_frames` (pure helper).
 
     `count == 1` picks the middle frame (the VLM inspect view) —
-    the same choice `sample_frames` documents.
+    the same choice `sample_frames` documents. Over-requests clamp to
+    `total_frames` (issue 126): a short clip serves its distinct frames
+    instead of a duplicated `[0, 0, 0]` that would read as zero motion.
     """
     if total_frames < 1:
         raise MediaError(f"frame selection needs total_frames >= 1 (got {total_frames})")
     if count < 1:
         raise MediaError(f"frame selection needs count >= 1 (got {count})")
+    if count > total_frames:
+        count = total_frames
     if count == 1:
         return [total_frames // 2]
     return [round(index * (total_frames - 1) / (count - 1)) for index in range(count)]
@@ -76,9 +80,12 @@ def estimate_frame_total(
         duration = float(str(raw_duration))
         numerator, _, denominator = str(raw_rate).partition("/")
         rate = float(numerator) / float(denominator)
-    except (TypeError, ValueError, ZeroDivisionError):
+        estimated = round(duration * rate)
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        # Non-numeric, missing, or non-finite probe data (inf/nan from a
+        # broken moov atom — issue 126): no estimate, the caller takes
+        # the full-decode path instead of crashing on a raw numeric error.
         return None
-    estimated = round(duration * rate)
     return estimated if estimated > 0 else None
 
 
@@ -209,6 +216,8 @@ def sample_frames(video_path: Path, count: int = 3, width: int = 160) -> list[Fr
     """
     if count < 1:
         raise MediaError(f"sample_frames needs count >= 1 (got {count})")
+    if width < 1:
+        raise MediaError(f"sample_frames needs width >= 1 (got {width})")
     info = probe(video_path)
     streams = [s for s in info.get("streams", []) if isinstance(s, dict)]
     video = next((s for s in streams if s.get("codec_type") == "video"), None)

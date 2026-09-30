@@ -84,3 +84,21 @@ and `voyage/fake_backends.py:73`. Or run the fake preset end-to-end
   `Voyage/voyage/fake_backends.py:60-85`.
 - Adjacent, not overlapping: 042 (README geometry drift — different
   file); 135 (LTXV 576p addendum — different backend).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live. `docs/BACKENDS.md:28` read
+  "deterministic `testsrc` 320x180-class H.264"; live preset is
+  `config.py:167-179` (`profile="fake-432p", width=768, height=432,
+  fps=24, segment_frames=48`) and the backend renders the request
+  geometry (`fake_backends.py` testsrc `size={width}x{height}`; no
+  320/180 literal in the file).
+- Fix: cell updated to "deterministic `testsrc` 768x432 H.264
+  (fake-432p preset)" — one line, no code change.
+- Files changed: `docs/BACKENDS.md`.
+- Gates: docs-only (no test surface).
+
+## Resolution
+
+- Done. Residual: none (the optional parameterization citation was
+  dropped to keep the one-liner tight; the preset name carries it).

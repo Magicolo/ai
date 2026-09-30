@@ -1,4 +1,4 @@
-"""Audio slow-loop planner (§35/§40): 30-60s music takes covering the video timeline.
+"""Audio slow-loop planner (DESIGN §§35/40): 30-60s music takes covering the video timeline.
 
 The planner is pure logic over a persisted takes ledger (`audio/takes.jsonl`
 under the run dir): given the video time consumed so far and the director's

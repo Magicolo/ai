@@ -68,3 +68,39 @@ wc -l tests/*.py | sort -rn | head -n 15
   singletons) stay open — continue one cluster per pass with the same
   discipline (re-read live, check mtime/`git log`, keep assertion
   counts identical, record before/after collection time).
+
+## Progress log (2026-09-30, Group D pass)
+
+- Folded the issue-quintet into `tests/test_perf_regressions.py` (new):
+  014 (6 tests) + 027 (9) + 029 (6) + 030 (11) + 032 (13) = **45 tests,
+  same assertions, test fn names unchanged**. Cluster helpers prefixed
+  `_014_`/`_027_`/`_029_`/`_030_`/`_032_` (four `Fake*` class names —
+  `_FakeTensor`, `_FakeCuda`, `_FakeTorch`, `_FakeTextEncoder` — collided
+  verbatim); each cluster keeps its original module docstring as a banner
+  so the issue ID stays greppable. The 5 source files are deleted; `rg`
+  confirms zero importers. None of the five used `_init_run`, so the
+  batch-7 ratchet is untouched.
+- Mid-pass collision (concurrent agent, issue 124): `video_causvid.py`
+  changed `text_encoder.to("cuda")` → `to(self._device)` between the solo
+  verify and the combined run, flipping 3 device assertions to
+  `["cuda:0", "cpu"]`. Updated in the merged file with a 124 comment —
+  intent (single shuttle: up once, park once) preserved and strengthened.
+- As-left: 139 `test_*.py` files, 1486 `def test_` (fold net-zero at 45
+  preserved; growth vs the 128/1366 as-read is 6+ concurrent-agent files
+  and their tests landing mid-pass, plus the 4 new 132 tests).
+
+## Resolution (2026-09-30, Group D pass)
+
+- Partially resolved (second proof fold landed). The 150 ignore fixes were
+  applied in the merged file (single site — see 150 log) rather than the
+  five originals.
+- Files changed: `tests/test_perf_regressions.py` (new, ~950L), deleted
+  `tests/test_issue_{014_embed_restore,027_concepts_perf,029_causvid_shuttle,030_embed_bounds,032_commit_fanout}.py`.
+  Gate evidence: merged file 45/45 solo; 100/100 with
+  qualification/director_models_dir/generate_ensure neighbors after the
+  124 adaptation; `ruff check` + `ruff format --check` clean.
+  DESIGN proposals: none. Residuals: remaining clusters per the issue
+  (adapter triple, augment quad, audio validators, TUI trio,
+  video-worker quartet, finalize/commit merges, singletons) — one per
+  pass; `gates.sh` mypy-list entries must move with any fold that deletes
+  a listed file (scripts-owned, not this pass).

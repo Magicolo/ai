@@ -82,11 +82,13 @@ hub/cache behavior untouched.
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
-| 4-bit AWQ decider | pinned in `voyage/model_registry.py` (`director-qwen4b-awq` spec) | pinned snapshot in registry |
+| 4-bit AWQ decider | [Qwen/Qwen3-4B-AWQ](https://huggingface.co/Qwen/Qwen3-4B-AWQ) | `74d4bd2bd4bff9cafc9345221320bffb08b406a3` |
+| Novelty embeddings | shared with the Qwen3-8B stack above (MiniLM `1110a243…`) | — |
 
+Apache 2.0 ([license](https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LICENSE)).
 Default placement is cuda:1 (the second GPU) via `VOYAGE_DIRECTOR_PYTHON`;
 `--director-device cpu` opts back into the Qwen3-8B CPU path above.
-Full row (repo id, revision, allow-list): `MODEL_SPECS["director-qwen4b-awq"]`.
+Full row (subdir, allow-list, size floor): `MODEL_SPECS["director-qwen4b-awq"]`.
 
 ## Inspector — Qwen3.5-9B VLM (`models download inspector-qwen35`, ~19 GB, optional)
 

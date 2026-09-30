@@ -86,6 +86,18 @@ $ sed -n '600,605p' voyage/workers/video_ltxv.py
 - Neighbor issues — not a duplicate of 134 (134 is causvid's *unreadable-tail* fallback + the *write-only* `fresh_rollouts`/`prompt_changed` fields; this is ltxv's *block-0* fallback having *no field at all* — different backend, different branch, strictly less telemetry; fix the supervisor metric once, add the per-backend counters separately): 123 (tape content trust — pre-read checks; this file is *readability* fallback, which returns before any hash comparison), 064-era tail-length loudness (post-read length checks).
 - External: same `record_prefetch_cancelled`-class rationale as 136/168 — degraded-but-accepted work must be counted, not just rendered.
 
-## Investigation log
+ ## Investigation log
 
-- 2026-09-30: filed by the 168-177 tails sweep; re-verified live via Read/Grep (concurrent uncommitted edits noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`, `voyage/config.py`, `voyage/persistence.py`, `voyage/rpc.py`, `voyage/supervisor.py` — citations are as-read values above).
+ - 2026-09-30: filed by the 168-177 tails sweep; re-verified live via Read/Grep (concurrent uncommitted edits noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`, `voyage/config.py`, `voyage/persistence.py`, `voyage/rpc.py`, `voyage/supervisor.py` — citations are as-read values above).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first against the CURRENT tree (post-pruning `34c0a29`). Premise CONFIRMED as-read: `voyage/workers/video_ltxv.py:734-740` still takes the silent `conditioning_source = None` branch on block 0 (missing tail / scene cut / vanished path) with no counter, no log, no metric; the result dict (`:843+`) still carries frame accounting only (`generated/conditioning/novel/committed/prefix_discarded`, `prompt_changed`) — no `fresh_blocks`-class field; `resume_from_tape` still reports `resumed: True` at adopt time. Causvid's counted precedent (`fresh_rollouts` at `video_causvid.py:~796-807,868`) is intact. `video_ltxv.py` is explicitly out of this group's scope (concurrent-hot) and `supervisor.py` (the metric consumer) likewise — logged as residual with exact lines, no code touched. No supervisor-side workaround exists in this group's files: `bench.py`/`doctor.py` cannot observe a field the worker never emits.
+
+## Resolution
+
+- Verdict: RESIDUAL — fully verified, not ownable from this group's files.
+- Files changed: none (this issue file only).
+- Test evidence: live reads 2026-09-30 (cites above: `sed -n '734,740p'` branch, result-dict keys, causvid contrast); no test added — the pins (missing-tail/cut/fresh block-0 → fresh reason in result + one supervisor fallback metric; conditioned path → zero) belong to the ltxv/supervisor owners.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §5.3/§5.4): "Mirror causvid: `generate_blocks` returns `fresh_blocks` (blocks rendered with `conditioning_source is None`, split by scene-cut vs missing-tail reason) and the supervisor logs one warn-level `video_resume_fallback` metric when `fresh_blocks > 0` on a non-first segment — shared with 134's metric, fed from both backends — plus one stderr line on the block-0 fallback branch."
+- Residuals (for the ltxv + supervisor owners, precise): (1) `voyage/workers/video_ltxv.py:734-740`: count + log the `None` branch; result dict `:843+`: add the fresh-reason field; (2) supervisor: `video_resume_fallback` metric wiring (shared with 134 candidate 1); (3) scene-cut fresh vs missing-tail fresh distinguished (candidate 3).

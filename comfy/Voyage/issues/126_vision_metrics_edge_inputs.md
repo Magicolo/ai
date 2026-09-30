@@ -49,5 +49,18 @@ print(e({'avg_frame_rate':'24/1','duration':'inf'}, {}))  # OverflowError, shoul
 
 ## Refs
 
-- `Voyage/voyage/vision/metrics.py:27-39,57-82,90-128,131-175`.
-- Adjacent, not overlapping: 055 (rotation-blind metrics — *what* is measured); 029 (rotation/fps divergence); 017 (validate_run hostile inputs — different function); 044 (decode copies — performance, not these branches).
+ - `Voyage/voyage/vision/metrics.py:27-39,57-82,90-128,131-175`.
+ - Adjacent, not overlapping: 055 (rotation-blind metrics — *what* is measured); 029 (rotation/fps divergence); 017 (validate_run hostile inputs — different function); 044 (decode copies — performance, not these branches).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. All three premises CONFIRMED as-read (`round()` outside the try, `select_frame_indices(2, 5) → [0, 0, 0, 1, 1]`, unguarded `width` into `divmod`). TDD: `tests/test_e2_vision_edges_126.py` written first — 6 failed pre-fix (inf/nan/inf-rate estimates raised raw `OverflowError`/`ValueError`, over-requests duplicated, `width=0` raised raw `ZeroDivisionError`), 8/8 green post-fix.
+
+## Resolution
+
+- Verdict: FIXED in `voyage/vision/metrics.py` (all three legs, minimal hunks).
+- Changes: (1) `estimate_frame_total` computes `round(duration * rate)` INSIDE the try and catches `OverflowError` too — non-finite probe data returns None → full-decode fallback, matching the docstring; (2) `select_frame_indices` clamps `count` to `total_frames` (single home — both `sample_frames` branches inherit; documented in the docstring); (3) `sample_frames` validates `width >= 1` → `MediaError` before any probe/ffmpeg work. Banker's-rounding spacing asymmetry noted but deliberately untouched (no caller depends on it, out of this file's scope).
+- Files changed: `voyage/vision/metrics.py` (+ new `tests/test_e2_vision_edges_126.py`). Verified the clamp changes none of the existing pins (`test_media_memory`, `test_perf_regressions` use count <= total).
+- Test evidence (in-container `voyage:latest`, real ffmpeg): new file 8 passed (inf/nan/inf-rate → None, healthy estimates unchanged, over-requests serve distinct frames, `width=0` → MediaError without ffmpeg, 5-frame testsrc clip over-requested at 8 serves exactly 5 distinct frames); `test_vision_metrics` + `test_media_memory` + `test_perf_regressions` green (98 passed, 1 skipped). Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§43-44 inspector): "Probe-derived frame estimates are best-effort: non-finite probe data yields no estimate (full-decode fallback), over-requested frame counts clamp to the decoded total (metrics never describe duplicated frames), and degenerate sample geometry fails as `MediaError`."
+- Residuals: none in this file.

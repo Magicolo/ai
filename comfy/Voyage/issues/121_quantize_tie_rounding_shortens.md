@@ -44,3 +44,45 @@ print(q(45.0, 15.0))   # 45.0 exact — unaffected (control case)
 
 - `Voyage/voyage/audio/beat.py:61-76`; `Voyage/voyage/audio/planner.py:176-194`; `Voyage/voyage/config.py:340-357` (ahead invariant); `Voyage/voyage/supervisor.py:1217-1224` (094 clamp — contains, doesn't prevent).
 - Adjacent, not overlapping: 120 (same module, tempo-ceiling axis); 100 (non-finite inputs — this file is finite-input rounding).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`,
+  CPU-only): `q(45, 18) = 36.0` (shortened 9 s), `q(45, 2) = q(45, 4) =
+  44.0`. Bug premise confirmed — but the behavior is DELIBERATELY pinned
+  by another pass: `tests/test_rhythm.py:66-67` expects `(45, 2) -> 44.0`
+  ("22.5 segments rounds to 22") and `(45, 4) -> 44.0` ("11.25 segments
+  rounds to 11"). Any no-shorten rule (ceil → 46/48, half-up → 46/44)
+  breaks those pins, and the sole caller (`voyage/audio/planner.py:240`)
+  plus the pin file are outside this group's file scope ("OWN FILES ONLY",
+  "never undo another agent's work"). Changing the default here would
+  trade one agent's green gates for another's red.
+- Owned-file contribution instead: documented the tie rule in the
+  `quantize_take_seconds` docstring (round-half-to-even, may plan short,
+  094 clamp contains per-take damage, ceil/half-up preferred on
+  renegotiation) + new `tests/test_beat_quantize_ties_121.py`
+  CHARACTERIZATION (labeled as such per §12: pins exact-multiple, min-1,
+  tie-down `45/18 -> 36.0`, tie-up `3.5 -> 4` cases) so a future rounding
+  change must update the pins deliberately instead of silently.
+- Gates (in-container): characterization + `test_rhythm` = 26 passed;
+  `ruff check` + `ruff format --check` + `mypy voyage/audio/beat.py` clean.
+
+## Resolution
+
+- Verdict: CONFIRMED bug, fix DEFERRED (blocked, not folded — the defect is
+  real). Files changed: `voyage/audio/beat.py` (docstring tie rule only,
+  zero behavior change), `tests/test_beat_quantize_ties_121.py` (new
+  characterization).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §35, after
+  the take-quantization description, add: "Take quantization uses
+  round-half-to-even: exact-half segment ratios can plan short (a 45 s
+  take on 18 s segments plans 36 s), chaining extra takes. Prefer ceil or
+  round-half-up when the rhythm pins are renegotiated; until then the
+  per-take clamp contains the damage."
+- Residuals (exact handoff for the owning pass): switch
+  `quantize_take_seconds` to `math.ceil` (or round-half-up) AND update
+  `tests/test_rhythm.py:66-67` (`(45, 2) -> 46.0`, `(45, 4) -> 48.0` under
+  ceil) plus `test_planner_quantizes_fresh_takes_to_segment_grid` (`44.0
+  -> 46.0`) — needs the rhythm-test owner's sign-off, and consider the
+  candidate-3 plan-site assertion (`take_seconds >> ahead_seconds`) in
+  `voyage/audio/planner.py` at the same time.

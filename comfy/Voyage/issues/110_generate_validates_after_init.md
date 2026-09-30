@@ -66,3 +66,31 @@ print(cli.cmd_generate(argparse.Namespace(**base)))             # 2: refusing no
 ## Refs
 
 - `voyage/config.py:348-355` (the `take_seconds > ahead_seconds` validator); `voyage/cli.py:1236-1254` (post-init gate); https://clig.dev/ (validate early, bail before state changes).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live in-container —
+  `cmd_generate` (now `voyage/cli_generate.py`) still called `cmd_init`
+  at line 71-equivalent before `apply_draft_overrides` at
+  line 84-equivalent; repro left the exact orphan dir
+  (`logs`, `run_manifest.json`, `segments`, `state.json`, `voyage.toml`)
+  with exit 2.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_generate_rejects_bad_take_seconds_before_init`):
+  red — orphan dir existed after exit 2.
+- Fixed with the first candidate (validate pre-init, resolve twice).
+
+## Resolution: FIXED
+
+- `voyage/cli_generate.py:30-84` (new `_pre_init_override_gate`): renders
+  the exact TOML `cmd_init` would write, validates it into a
+  `ProjectConfig`, and dry-runs the same `apply_draft_overrides` call
+  the post-init path makes — pure, no directory touched. Failure exits
+  2 with the same `invalid numeric override` message before init.
+- Blank styles skip the gate (`cmd_init` reports those itself,
+  litter-free since the 143/185 fix); the post-init gate stays as the
+  second resolution (configs could theoretically differ — they cannot
+  today, same inputs, same function).
+- Test evidence: new test green; full `test_cli_group_a.py` 17 passed.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

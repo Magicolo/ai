@@ -84,4 +84,56 @@ ls Voyage/worker/Dockerfile.director  # No such file (live 2026-09-30)
 - `Voyage/worker/Dockerfile.video:1,29,36,75,101,120,139,170,205,213`; `Voyage/Dockerfile:1,11,23,49`; `Voyage/.dockerignore:1`; `Voyage/.gitignore:7`; `Voyage/voyage/hashing.py:1`; `Voyage/voyage/model_registry.py:313,385`; `Voyage/voyage/workers/director.py:89,95,193,463`; `Voyage/voyage/workers/video_ltxv.py:120,185,235,738,808`; `Voyage/voyage/vision/metrics.py:43,60,179`; `Voyage/voyage/audio/acestep.py:41,47,58,64,149`; `Voyage/issues/000_INDEX.md` (live-number authority)
 - Docker "Pin dependencies and verify integrity" (https://www.docker.com/blog/software-supply-chain-security-best-practices/); SLSA provenance/attestation expectations (https://slsa.dev/provenance/v1)
 
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: mapping verified live against `issues/000_INDEX.md` (read-only).
+  The reactivation reassigned 001-097 numbers to new sweep topics, so
+  pre-reactivation comments mismatch. In-scope fixes applied (owned files
+  only); everything else logged as residual.
+- Fixed (owned):
+  - `.dockerignore:1` "(issues 084/069)" → "(issue 069)": 069 = dockerignore
+    gaps (MATCHES, plausibly the authoring issue); 084 = triplicated
+    validators (STALE).
+  - `.dockerignore:3` "(issue 054)" on the tests-not-baked sentence → number
+    stripped (054 = SFX ledger race, STALE; no live issue covers the
+    procedure — prose kept per cheapest-fix rule).
+  - `.dockerignore:18` "mirrors .gitignore issue 085" → "mirrors the
+    .gitignore stray-artifact extensions" (085 = duplication, STALE).
+  - `.gitignore:7` "(issue 085)" → stripped (same staleness; prose kept).
+  - `workers/video_common.py:1` "(issue 019)" → stripped: file born in
+    batch-4 commit `cd8b0d8` (structural refactors), live 019 = run_capture
+    timeout, and the module contains no run_capture (`grep` empty) — stale
+    pointer (DESIGN §§5.3-5.4 at :14 already carries traceability).
+  - Verified MATCHES and left alone: `loop.py` (007 = error taxonomy),
+    `_resident.py`/`_validators.py`/`sfx_mmaudio.py:42` (084 = validators),
+    `augment_worker.py:3` (083 = media/augment split),
+    `sfx_mmaudio.py` (045) lines, `planner.py:49` (016, plausible),
+    `qualify.sh` (064/090/060), `gates.sh` (092/037/041/033),
+    `common.sh`/`run.sh` (090), `test.sh`/`build.sh` (041/092 self-cites
+    by the authoring batch-7 — kept).
+  - New gate test `tests/test_issue_citation_gate.py` (allowed scope):
+    every `(issue NNN)` in .py/.sh/.md/.toml + Dockerfile* + ignores
+    (excluding `issues/`/`reports/`/`output/`/caches) must match an
+    existing `issues/NNN_*.md`; plus a scan-sanity test (known pointers
+    gates.sh:092, loop.py:007; >50 cites). Pre-verified tree-wide that all
+    cited numbers resolve (no dangling numbers live).
+- Files changed: `.dockerignore`, `.gitignore`,
+  `voyage/workers/video_common.py` (one line),
+  `tests/test_issue_citation_gate.py` (new).
+- Gates: `ruff check` + `format --check` + `mypy` clean; new tests 2 passed
+  (in-container `voyage:latest`, CPU-only).
+
+## Resolution
+
+- Done for owned scope. Residuals (out of scope — for owning tracks):
+  Dockerfile* cites (012 digest-pins, 055 verified-fetch, 053
+  voyager-user/WORKDIR, 054 tests-not-baked, 048 doctor gate — all
+  pre-reactivation meanings), `scripts/` (042) cache-hygiene cites in
+  `gates.sh:22`/`common.sh:24` (042 = README geometry) and (053)
+  host-user cites in `common.sh:29`/`run.sh:111` (053 = concat quoting),
+  worker-body cites (`video_longlive` 066/074/014/045, `video_ltxv`
+  064/028/021/019/045, `vision/metrics` 032, `audio/acestep` 063/038,
+  `model_registry`/`hashing` 021/026). The gate test pins existence only —
+  topic remap/strip of these is a follow-up, not silent.
+
 (End of file)

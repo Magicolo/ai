@@ -162,7 +162,10 @@ def ffmpeg_decode_chunk(
 
     `dest_dir` must be a fresh per-chunk directory: any pre-existing
     `frame_*.png` files raise before ffmpeg spawns (a stale dir would
-    silently merge old frames into the chunk). With `fps` given and
+    silently merge old frames into the chunk). After decoding, the glob
+    must hold exactly `frame_count` frames (issue 192) — over/under-
+    delivery (stale survivors, short source) raises instead of mixing
+    silently into the chunk. With `fps` given and
     `start_frame > 0`, an input `-ss` fast-seek skips the already-decoded
     prefix and the select filter re-bases to `between(n,0,count-1)`; without
     `fps` (or at chunk 0) the exact from-start select path is preserved.
@@ -218,6 +221,12 @@ def ffmpeg_decode_chunk(
     for frame in frames:
         if frame.stat().st_size == 0:
             raise MediaError(f"chunk decode produced empty frame {frame}")
+    if len(frames) != count:
+        raise MediaError(
+            f"chunk decode produced {len(frames)} frames for {start}-{end} "
+            f"(expected {count}): stale files or a short source must fail loud, "
+            "never mix silently into the chunk"
+        )
     return frames
 
 

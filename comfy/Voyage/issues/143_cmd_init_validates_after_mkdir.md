@@ -62,3 +62,34 @@ print('retry:', cli.cmd_init(argparse.Namespace(**{**vars(ns), 'style':'ok'})))
 ## Refs
 
 - `voyage/cli.py:170-200`; `voyage/config.py:560-565`; issue 110 (same validate-after-mutate class one layer up).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live on the split tree
+  (`cmd_init` now `voyage/cli_run_ops.py:35-64`): blank style raised
+  `ConfigurationError` post-write, littering `segments/`+`logs/`+
+  `voyage.toml`, and the retry hit the non-empty guard. Note: the
+  concurrent uncommitted hunk in this file (root-concepts removal) sits
+  below the init guards — kept disjoint, untouched.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_cmd_init_rejects_blank_style_without_litter`):
+  red (raised instead of returning 2, dir littered).
+- Fixed with the first candidate (full in-memory validation before any
+  mkdir), folded with 185's missing-attribute trigger in the same hunk.
+
+## Resolution: FIXED
+
+- `voyage/cli_run_ops.py:35-63`: `cmd_init` now validates output
+  presence, run-id (existing), style non-blank, seed int (bool
+  rejected), and backend membership in `BACKEND_REGISTRY` (single
+  source) — all before the first `mkdir`, each a stderr message + exit
+  2. Post-write `load_config` stays as the full validator.
+- `BACKEND_REGISTRY` added to the `voyage.config` imports; `cast` added
+  for the `VideoBackendName` narrowing (`mypy strict` clean).
+- Test evidence: blank-style and missing-attribute cases assert exit 2
+  AND `not run_dir.exists()`; pre-existing `test_cli_run_ops_pruning`
+  + `test_concepts_pruning` still green.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none. (Director backend/device strings are free-form in
+  the config model — inventing a pre-mkdir rejection for them would be
+  new behavior, deliberately not added.)

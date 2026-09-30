@@ -63,3 +63,28 @@ docker run --rm -v "$PWD:/app" -w /app voyage:latest --entrypoint voyage voyage:
 
 - `voyage/cli.py:1956-1967` vs `:1976-1990` (finalize) / `:1847-1865` (run) / `:1874-1933` (generate); `:771-776` (same-namespace handoff); `:137-142` (getattr masking).
 - Not-a-duplicate: 109 (stop→finalize `skip_bad` crash + augment absence — console flags never named); 147 (generate→finalize namespace drop — different call site: new-namespace build vs same-namespace passthrough); 115 (soak/benchmark CUDA preflight — different flags).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live — stop namespace
+  keys had no `verbose`/`no_color`, and `stop --finalize --verbose`
+  exited 2 (unrecognized arguments).
+- Wrote failing test first (joint with 109:
+  `tests/test_cli_group_a.py::test_stop_parser_offers_full_finalize_surface`
+  parses `--verbose/--no-color/--skip-bad/--min-fps` on `stop`): red.
+- Fixed with candidate 1, folded into 109's structural hunk (same
+  lines, one review).
+
+## Resolution: FIXED (folded into 109's hunk)
+
+- `voyage/cli.py:594-601` (`_add_stop_parser`): `_add_console_args(stop)`
+  added alongside `--skip-bad` + `_add_augment_args(stop)` — `stop` is
+  no longer the only finalizing verb without console flags, and
+  `cmd_finalize`'s `get_console(args)` picks them up with no further
+  change (same-namespace handoff).
+- The 109 augment consideration (candidate 2 there) landed too, so the
+  stop-finalize surface now matches `finalize` fully: skip + sfx +
+  augment + console.
+- Test evidence: `stop --finalize --verbose` parses; flags default off.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

@@ -67,3 +67,29 @@ grep -rn "pytest.mark" tests/ | head -n 20
   `scripts/mypy-scope.sh` collapse → scripts-owning track; (d) cache
   hygiene (post-gate `git status --porcelain` guard) → gates-owning
   track. None of (a)–(d) is actionable from `tests/` alone.
+
+## Progress log (2026-09-30, Group D pass)
+
+- Owned follow-up (b, first half) landed: `slow` marker registered in
+  `pyproject.toml` (`slow: load-sensitive or multi-second tests`, with a
+  comment pinning tail-marking as residual). Additive one-liner, disjoint
+  from the batch-7 coverage/gates hunks — no suite behavior changes until
+  a test actually carries the marker.
+- Rest re-verified, still outside scope: lockfile typo untouched
+  (forbidden); tomli note untouched; gates/build mypy-scope split
+  re-confirmed intentional per 092 (scripts frozen); caches still
+  gitignored-present (root paths, outside scope); `.dockerignore`
+  coverage re-confirmed (069 landed: `.hypothesis/` + `.coverage` +
+  `coverage.xml` explicit).
+
+## Resolution (2026-09-30, Group D pass)
+
+- Partially resolved: `slow` marker registered; tail marking stays open.
+- Files changed: `pyproject.toml` (markers list + comment only). Gate
+  evidence: `--markers` lists `slow`; `-m "not slow"` selects the full
+  set; qualification file 14/14 in-container. DESIGN proposals: none.
+  Residuals: (a) lock typo + tomli note → lock track w/068; (b) SLOW-tail
+  marking (Pilot suites — `test_tui_app.py` alone is 33 tests/34s — ffmpeg
+  pairwise/concat incl. dirty `test_media_robustness_rank2.py`,
+  multi-commit runs) → pyproject+tests track; (c) mypy-scope collapse →
+  scripts track; (d) cache guard → gates track.

@@ -44,7 +44,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             width=config.video.width,
             height=config.video.height,
             fps=config.video.fps,
-            skip_bad=args.skip_bad,
+            # getattr: the stop --finalize handoff reuses the stop-parser
+            # namespace (issue 109) — a missing flag must read as off,
+            # never AttributeError after the status already flipped.
+            skip_bad=getattr(args, "skip_bad", False),
             min_free_space_gib=config.min_free_space_gib,
             sample_rate=config.audio.sample_rate,
             channels=config.audio.channels,

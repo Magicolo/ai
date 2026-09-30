@@ -74,10 +74,23 @@ from a CUDA run except wall time.
 
 ## Refs
 
-- In-tree: `voyage/workers/augment_worker.py:127-150,356-394`;
-  `voyage/augment.py:43-50,238-263` (device constants + planner).
-- Not-a-duplicate: 047 is reload-per-call + full-batch stack (load/compute
-  shape); 157 is preset knob + fan-out + batch-peak interaction; 158 is SFX
-  `cuda:1` presence gating (different stage, fail-loud direction). This file is
-  placement *visibility* on the documented CPU fallback — the one facet neither
-  names.
+ - In-tree: `voyage/workers/augment_worker.py:127-150,356-394`;
+   `voyage/augment.py:43-50,238-263` (device constants + planner).
+ - Not-a-duplicate: 047 is reload-per-call + full-batch stack (load/compute
+   shape); 157 is preset knob + fan-out + batch-peak interaction; 158 is SFX
+   `cuda:1` presence gating (different stage, fail-loud direction). This file is
+   placement *visibility* on the documented CPU fallback — the one facet neither
+   names.
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read: `_resolve_device` (`voyage/workers/augment_worker.py:~169-180`) returned CPU with no signal, and the module had zero logging/print hits. TDD: warn-once + silence legs of `tests/test_e2_augment_worker_157_193.py` failed pre-fix (missing `_DEVICE_FALLBACK_WARNED`, no stderr), green post-fix. Note: `augment_worker.py` is not in the brief's OWN-FILES list but the brief assigns this file (and 157's worker half) to Group E2 — hunks kept to the cited function only. One toolchain touch: the new `print` needed the house per-file `T201` entry for `augment_worker.py` in `pyproject.toml` (worker-module convention, following `video_causvid`/`video_ltxv`/`video_longlive`).
+
+## Resolution
+
+- Verdict: FIXED in `voyage/workers/augment_worker.py`.
+- Change: CPU fallback prints one stderr line naming `preferred → CPU` (`_DEVICE_FALLBACK_WARNED` once-per-process flag — per-chunk spam would bury it, since `_prepare_model` resolves per chunk); zero behavior change (same device returned). The `strict`/fail-loud path (candidate 2) deliberately NOT added — YAGNI: the planner (`augment_devices`) owns the GPU gate, and no caller asked for it.
+- Files changed: `voyage/workers/augment_worker.py`, `pyproject.toml` (one T201 per-file-ignore line) (+ warn legs in `tests/test_e2_augment_worker_157_193.py`).
+- Test evidence (in-container `voyage:latest`, CPU-only, stubbed torch): fallback warns once with `cuda:0` + `cpu` named, second call silent, CUDA path silent. Ruff + format + mypy strict clean (incl. the new pyproject entry — `ruff check` green).
+- DESIGN proposal (quoted text only, for the DESIGN owner — augment track): "Documented CPU fallbacks stay loud: `_resolve_device` emits one per-process stderr line naming the requested device and the CPU execution, so plan-vs-execution placement mismatches diagnose in one line."
+- Residuals: none in this file.

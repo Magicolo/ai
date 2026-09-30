@@ -76,10 +76,51 @@ whose dominant variable is unrecorded.
   `voyage/media.py:699-751` (`plan_augmentation` — the resolved plan worth
   recording); `voyage/bench.py:24-37` (`format_report` renders whatever setup
   it is given).
-- Not-a-duplicate: 060 is the §104 GPU/setup-field list as of its sweep (thin
+ - Not-a-duplicate: 060 is the §104 GPU/setup-field list as of its sweep (thin
   env, stdout-only artifacts) — the floors did not exist then and are a new
   axis, not another §104 row; 051 is timing-math shape (means, no percentiles);
   154~163 is the SFX/augment *target* gap (which workers get benchmarked),
   deduped per brief — this file is the *setup-record* gap for the already-
   benchmarked finalize path. Fix jointly with 060's env work if convenient,
   but the floors axis is independently missing.
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified premise — `_benchmark_env` has
+  moved to `voyage/cli_observe.py:30-64` (issue-080 split; now 8 machine
+  facts incl. driver/compute_cap/revisions) and the geometry half lives in
+  `_video_geometry_setup` (`:103-118`); neither records the presentation
+  floors, the resolved `out_*` plan, or `needs_reencode/needs_minterpolate`
+  (confirmed by read — no `min_fps`/`out_w`/`needs_` keys at any of the
+  three setup spread sites `:177-184`, `:223-230`, `:280-286`). The floors
+  exist at the finalize call path (`config.augment`), so the data is
+  available but unrecorded. Verdict: CONFIRMED — media-owned half done
+  here, CLI spread is residual (`voyage/cli_observe.py` is outside this
+  group's scope).
+- TDD: `tests/test_e1_media_augment.py` 194 section written first — both
+  tests failed pre-fix (`presentation_setup_facts` did not exist), green
+  post-fix.
+
+## Resolution
+
+- Added the pure media-owned half in `voyage/media.py:891-918`:
+  `presentation_setup_facts(plan, *, min_fps, min_width, min_height)` —
+  floor triple as given plus the resolved `out_w/out_h/out_fps` and
+  `needs_reencode/needs_minterpolate` as a JSON-able dict, with an explicit
+  HOOK note naming the `cli_observe.py` spread sites for the owning track.
+- Files changed: `voyage/media.py` only (+ new tests in
+  `tests/test_e1_media_augment.py`). Per-file gates green in-container
+  (`voyage:latest`, CPU-only): ruff check + format-check + PLR2004 +
+  mypy strict; E1 + neighbors green (see 096 log for the full list).
+- Residual for the `cli_observe.py` owner: spread `presentation_setup_facts`
+  (resolved from `config.augment` + the finalize `plan_augmentation`, or
+  record the triple + plan at the finalize call site) into `_benchmark_env`
+  or alongside `_video_geometry_setup` at all three setup sites
+  (`cmd_benchmark` video/audio + end-to-end, `cmd_soak`), and pair with
+  091's BENCHMARKING re-baseline so pre/post-floor reports are visibly
+  incomparable.
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Every §104 setup block records the presentation floors
+  > (`min_fps/min_width/min_height`) plus the resolved
+  > (`out_w/out_h/out_fps`, `needs_reencode/needs_minterpolate`), so
+  > re-encode and stream-copy reports are never silently compared."

@@ -35,3 +35,16 @@ Static (deterministic): `grep -n "fsync\|flush" Voyage/voyage/workers/video_comm
 
 - `Voyage/voyage/workers/video_common.py:239-249`; `Voyage/voyage/concepts.py:251-260`; `Voyage/voyage/atomic.py:23-58`; DESIGN §27.1.
 - Adjacent, not overlapping: 101 (ledger/metrics/concepts *append* durability — this file is the recovery-*tape* write it never mentions); 129 (longlive `recovery.pt` bare `torch.save` — the worse sibling: no atomicity at all; fix together, keep both).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read: `write_tape_atomic` (`voyage/workers/video_common.py:269-279`) was `write_text` + `replace` with zero fsync (`'fsync' in src == False`, matching the filed evidence). No concurrent agent had touched the function (their pruning hunks are docstring/constants/derive additions elsewhere in the file — disjoint). TDD: `tests/test_e2_tape_fsync_122.py` written first, 2/3 failed pre-fix (`DID NOT RAISE OSError` on the fault-injection test, zero fsync calls observed), 3/3 green post-fix.
+
+## Resolution
+
+- Verdict: FIXED in `voyage/workers/video_common.py` (shared helper, so both callers — causvid `:843`, ltxv — inherit it with no per-worker edits, per fix candidate 1).
+- Change: `write_tape_atomic` now opens the `.tmp` sibling explicitly, writes + `flush` + `os.fsync(fileno())` before `os.replace`, then `fsync_dir(tape_path.parent)` after — mirroring the `concepts._append_vector` contract the issue cites. A failed fsync raises before the rename, preserving the previous tape. Top-level `import os` + `from voyage.atomic import fsync_dir` added (cycle-free: `voyage.atomic` is stdlib-only; the module docstring's import-contract line updated to name it).
+- Files changed: `voyage/workers/video_common.py` only (plus new `tests/test_e2_tape_fsync_122.py`).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 3 passed (round-trip, fsync-observed via monkeypatched `os.fsync` + `fsync_dir`, fault-injection atomicity); existing suites unaffected (`test_causvid_worker`, `test_generate_blocks_request`, `test_longlive*` green — full-scope re-verified at the end of the pass). Ruff + format + mypy strict clean on both files.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §27.1 resume path): "Recovery tapes (`recovery.pt`, JSON content) are rename-atomic and durable: the temp file is fsynced before the rename and the directory fsynced after (`video_common.write_tape_atomic`), so the latest tape — the one a restart needs — survives OS crash / power loss, not just process crashes."
+- Residuals: none in this file. The `.mp4` anchor durability next to the tape is 172's (closed by run-file pruning — see that file); the derive-target `derive_tail_from_segment_video` tmp+replace in the same module carries no fsync — flagged to the pruning owner as follow-up, not widened here.

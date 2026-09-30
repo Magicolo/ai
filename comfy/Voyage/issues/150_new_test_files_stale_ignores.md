@@ -163,3 +163,40 @@ sed -n '115,120p' Voyage/pyproject.toml
 - `Voyage/voyage/vision/metrics.py:12` (typed-side contrast)
 - Issues 033 (gate 4/88) / 034 (stale/wrong-code ignores)
 - Preserved track result: `ses_f0fbea3bbffe0HlTFo2fwHJi5B`, TRACK C NEW FINDING 1.
+
+## Progress log (2026-09-30, Group D pass)
+
+- Classified every ignore with ad-hoc in-container `mypy` (the authority;
+  none of these files is in the `gates.sh:28` list): 014 → 10 unused;
+  029 → 4 unused; 030 → 7 unused (`_ltxv_session` 6 + `_longlive_session`
+  1) + 2 used ModuleType stubs (`:212,214`); director → `:229` unused +
+  5 used (`:260,261,295,332,333`). All 22 stale ones deleted.
+- 014 scaffold replaced with the real `LongLiveStreamSession(...)`
+  constructor (assignment-only, CPU-safe — same ten values, no
+  private-member poking; precedent: the 030 cluster already constructs
+  this way). 029/030 `__new__` scaffolds kept: both real constructors
+  load CUDA/heavy models, so the scaffold is load-bearing and the bare
+  assignments are authority-clean.
+- The 2 remaining ModuleType ignores (merged `:683,685`) kept as
+  documented dormant suppressions: ruff B010 forbids the `setattr`
+  alternative, and they fire only once the file enters the mypy gate
+  (033). Director's 5 used ignores left verbatim. `metrics.probe`
+  (`:802`, ad-hoc attr-defined, same call the issue logged as clean at
+  old 032:118) needs a voyage-side export — out of scope, noted.
+- Divergence noted: host pyright resolves `torch` and flags the 029/030
+  `_torch` assignments, while project-config mypy (`follow_imports=skip`)
+  types them `Any` — in-container mypy is the authority per AGENTS.md §11.
+- Applied in `tests/test_perf_regressions.py` (post-088-fold single site;
+  original paths above) + `tests/test_director_models_dir.py`.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Resolved in scope: 22 stale suppressions gone; 2 documented dormant +
+  5 used-correct remain, each justified in place.
+- Files changed: `tests/test_perf_regressions.py` (fold + deletions +
+  014 constructor + 2 documented ignores), `tests/test_director_models_dir.py`
+  (`:229` deletion). Gate evidence: 64/64 (45 merged + 19 director)
+  in-container; `ruff check` + `ruff format --check` clean on both;
+  ad-hoc `mypy` reports zero errors on any changed line. DESIGN proposals:
+  none. Residuals: `gates.sh` conversion queue (scripts track, 033
+  prescription); `:802` probe export (voyage-side pass).

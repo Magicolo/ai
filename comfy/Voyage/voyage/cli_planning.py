@@ -29,14 +29,38 @@ def parse_duration(raw: str) -> float:
     """Human-readable duration -> seconds (e.g. '5s', '90', '1m30s', '2m').
 
     Accepts hours (`1h`), fractional (`2.5m`, `1.5h`), combined
-    (`1h2m3.5s`), bare (`90`) and whitespace-padded values. Signed
-    numbers parse so negatives reach the positivity error below
-    instead of the regex error. Rounds up to whole segments downstream
-    (`segments_for_duration`), so the video never runs short.
+    (`1h2m3.5s`), bare (`90`) and whitespace-padded values. A single
+    leading `-` parses so negatives reach the positivity error below
+    instead of the regex error; signs anywhere else are rejected (issue
+    112: `2m-30s` as silent subtraction is a typo, not arithmetic).
+    A bare trailing number after a unit is rejected too (`1h30` binds 30
+    to seconds — almost never the intent; write `1h30m`). Interior
+    whitespace is rejected with the no-spaces rule named. Rounds up to
+    whole segments downstream (`segments_for_duration`), so the video
+    never runs short.
     """
-    match = _DURATION_PATTERN.fullmatch(raw.strip())
+    text = raw.strip()
+    if any(character.isspace() for character in text):
+        raise ValueError(
+            f"invalid duration {raw!r} (no spaces allowed; examples: {_DURATION_EXAMPLES})"
+        )
+    body = text[1:] if text.startswith("-") else text
+    if "-" in body or "+" in body:
+        raise ValueError(
+            f"invalid duration {raw!r} "
+            f"(mixed signs are not supported; examples: {_DURATION_EXAMPLES})"
+        )
+    match = _DURATION_PATTERN.fullmatch(text)
     if match is None or not any(match.groupdict().values()):
         raise ValueError(f"invalid duration {raw!r} (examples: {_DURATION_EXAMPLES})")
+    if (match.group("hours") is not None or match.group("minutes") is not None) and re.search(
+        r"\d$", text
+    ):
+        raise ValueError(
+            f"invalid duration {raw!r} (a trailing number after h/m needs its own unit, "
+            f"e.g. '1h30m'; bare seconds only without a unit, e.g. '90'; "
+            f"examples: {_DURATION_EXAMPLES})"
+        )
     total = 0.0
     for name, scale in (("hours", 3600.0), ("minutes", 60.0), ("seconds", 1.0)):
         value = match.group(name)

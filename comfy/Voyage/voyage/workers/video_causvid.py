@@ -12,7 +12,9 @@ including rollout 0**), then
 Config comes from the repo's ``configs/wan_causal_dmd.yaml`` @ pin via
 omegaconf; the checkpoint strict-loads ``['generator']`` from
 ``causvid/autoregressive_checkpoint/model.pt`` into a resident
-``InferencePipeline(config, device="cuda").to(cuda, bf16)``.
+``InferencePipeline(config, device).to(device, bf16)`` on the session
+device (issue 124 — every placement site threads `device`, never bare
+`"cuda"`).
 
 Deliberate deviations from the script (each documented where it happens):
 
@@ -483,10 +485,26 @@ def _vae_encode_slice(vae: Any, video: Any, overlap_frames: int, dtype: Any) -> 
     [0,1] → [-1,1], transpose into the vae's [B,C,T,H,W] layout, encode.
     Yields one latent frame; the caller cats the raw
     ``latents[:, -(overlap-1):]`` tail beside it.
+
+    Overlap 1 is the degenerate case (issue 128): ``end`` is 0, and
+    ``video[:, -1:0, :]`` selects nothing (negative start, zero stop,
+    positive step) — an empty window that fails deep inside the VAE or,
+    worse, poisons `start_latents`. Take the last frame explicitly so the
+    slice agrees with `reencode_window_frames(1) == 1`.
     """
+    if overlap_frames < 1:
+        raise ValueError(f"CausVid overlap frames must be positive (got {overlap_frames})")
     end = -4 * (overlap_frames - 1)
-    start = end - 1
-    window = video[:, start:end, :]
+    if end == 0:
+        window = video[:, -1:, :]
+    else:
+        start = end - 1
+        window = video[:, start:end, :]
+    if int(window.shape[1]) < 1:
+        raise ValueError(
+            f"CausVid tail slice is empty for overlap {overlap_frames} "
+            "(refusing to encode a zero-frame window)"
+        )
     scaled = (window * 2.0 - 1.0).transpose(2, 1).to(dtype)
     return _vae_encode_window(vae, scaled, dtype)
 
@@ -559,8 +577,8 @@ class CausvidSession:
         weights = require_weight_files(models_dir)
         torch.set_grad_enabled(False)
         print("loading CausVid pipeline (bf16) ...", file=sys.stderr)
-        pipeline = InferencePipeline(config, device="cuda")
-        pipeline.to(device="cuda", dtype=torch.bfloat16)
+        pipeline = InferencePipeline(config, device=self._device)
+        pipeline.to(device=self._device, dtype=torch.bfloat16)
         checkpoint = weights["causvid DMD checkpoint"]
         print(f"loading CausVid generator {checkpoint} ...", file=sys.stderr)
         # 005: sha256 against the download manifest first, then
@@ -617,7 +635,7 @@ class CausvidSession:
         pipeline = self._pipeline
         gc.collect()
         torch.cuda.empty_cache()
-        pipeline.text_encoder.to("cuda")
+        pipeline.text_encoder.to(self._device)
         try:
             return [pipeline.text_encoder([prompt]) for prompt in prompts]
         finally:
@@ -987,6 +1005,12 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
 
     if not torch.cuda.is_available():
         raise RuntimeError("video_causvid requires a CUDA GPU")
+    device_index = video_common.cuda_device_index(device)
+    if device_index >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"video_causvid device {device!r} is out of range "
+            f"({torch.cuda.device_count()} CUDA device(s) visible)"
+        )
     started = time.monotonic()
     _INIT_PARAMS.update(
         {
@@ -1000,8 +1024,8 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     _SESSION = _build_session()
     assert _SESSION is not None
     session = _SESSION
-    name = torch.cuda.get_device_name(0)
-    free_gib, total_gib = torch.cuda.mem_get_info()
+    name = torch.cuda.get_device_name(device)
+    free_gib, total_gib = torch.cuda.mem_get_info(device)
     return {
         "status": "READY",
         "backend": RECOVERY_PROFILE,
@@ -1024,7 +1048,8 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     ready = _SESSION is not None
     info: dict[str, Any] = {"status": "READY" if ready else "IDLE"}
     if torch.cuda.is_available():
-        free_gib, total_gib = torch.cuda.mem_get_info()
+        device = str(_INIT_PARAMS.get("device", "cuda:0"))
+        free_gib, total_gib = torch.cuda.mem_get_info(device)
         info["vram_free_gib"] = round(free_gib / 1024**3, 1)
         info["vram_total_gib"] = round(total_gib / 1024**3, 1)
     return info
@@ -1102,14 +1127,16 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             generated = rollout.decoded
             committed = int(novel.shape[0])
 
+    benchmark_device = video_common.cuda_device_index(str(_INIT_PARAMS.get("device", "cuda:0")))
+    device_arg = video_common.torch_device_arg(benchmark_device)
     try:
         outcome = video_common.run_benchmark_harness(
             warmup,
             measured,
             "voyage-causvid-bench-",
             probe,
-            reset_peak_memory=torch.cuda.reset_peak_memory_stats,
-            read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+            reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
+            read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
         )
     finally:
         session._start_latents = saved_start

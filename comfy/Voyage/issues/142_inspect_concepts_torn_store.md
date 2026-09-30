@@ -118,3 +118,28 @@ $ sed -n '550,556p;2069,2074p' voyage/cli.py
 - 2026-09-30: filed by Track A sweep; live re-verified via Read (concurrent uncommitted edits
   noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`,
   `config/persistence/rpc/supervisor` — citations are as-read values above).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live with moved code (CLI split landed since filing):
+  `cmd_inspect` concepts path is now `cli_observe.py:332-337`
+  (`ConceptStore(...).records()` with no try/except); the constructor is
+  still a bare `read_text().splitlines()` + `model_validate_json` per line
+  (`concepts.py:141-144`, no torn-line guard). Scoreboard path
+  (`cli_observe.py:303-330`) now isinstance-guards metrics/deltas with a
+  `no-visual` fallback, but `scoreboard_rows` itself is unguarded.
+- Fix candidates 1-2/4 are code (`cli_observe.py`, `concepts.py` — not
+  owned), so the Group-C fix is candidate 3 (docs): added a lock-free
+  best-effort sentence to the `docs/OPERATIONS.md` monitoring section
+  (`inspect`/`status`/`scoreboard` degrade to `unknown`/`--`/`no-visual`,
+  exit 0, never traceback on a torn tail — stated as the contract).
+- Files changed: `docs/OPERATIONS.md` (two lines).
+
+## Resolution
+
+- Docs: best-effort-view contract stated; code untouched.
+- Residual (code-owning track): wrap the inspect-verb store/metric loads
+  fail-soft + torn-tail tolerance in `ConceptStore` (or a shared helper
+  with `logrotate.iter_metric_files`) + the truncated-tail regression
+  tests from the issue. Note: the OPERATIONS sentence now promises exit-0
+  degradation — the code must be brought to meet it.

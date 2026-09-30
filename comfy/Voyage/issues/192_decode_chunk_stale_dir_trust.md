@@ -64,8 +64,44 @@ upscales/interpolates a 2-frame chunk it planned as 1 frame.
 
 ## Refs
 
-- In-tree: `voyage/augment.py:136-175,266-281` (`run_augment_chunks` — the future
+ - In-tree: `voyage/augment.py:136-175,266-281` (`run_augment_chunks` — the future
   caller); `tests/test_augment_runner.py:217-263`.
 - Not-a-duplicate: 046 is the linear-rescan *cost* (seek shape, same function,
   different facet — cost vs correctness); 047 is worker-side reload/stack;
   157 is preset/fanout/batch-peak. None names the stale-dir glob trust.
+
+## Progress log
+
+- 2026-09-30 (Group E1): live-evaluated premise FIRST — the entry half is
+  already landed: `voyage/augment.py:173-179` rejects a non-fresh
+  `dest_dir` with `MediaError` before ffmpeg spawns (the docstring-only
+  premise is stale; some Track D follow-up landed candidate 1's entry
+  check). The post-decode half was still open: over/under-delivery past
+  the glob was silently accepted. Verdict: PARTLY FIXED already —
+  completed the remainder in `voyage/augment.py`.
+- TDD: `tests/test_e1_media_augment.py` 192 section written first — the
+  pre-seed test passed pre-fix (characterization pin of the landed entry
+  check), the count-mismatch test failed pre-fix (2 delivered for 4
+  planned accepted silently), both green post-fix. One neighbor ordering
+  clash caught live: the pre-existing
+  `test_ffmpeg_decode_chunk_zero_byte_frame_raises` (1 empty frame of 4)
+  expects the empty-frame error, so the empty check runs before the new
+  count check — re-verified green.
+
+## Resolution
+
+- Added the post-decode count assertion in
+  `voyage/augment.py:ffmpeg_decode_chunk` (`:221-227`): `len(frames) !=
+  count` raises `MediaError` naming the window and the expected count;
+  docstring extended (`:161-168`) to state both guards.
+- Files changed: `voyage/augment.py` only (+ new tests in
+  `tests/test_e1_media_augment.py`). Per-file gates green in-container
+  (`voyage:latest`, CPU-only): ruff check + format-check + mypy strict;
+  E1 + `test_augment_runner` + neighbors green (see 096 log for the full
+  neighbor list).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> `ffmpeg_decode_chunk` fails loud on both stale-input shapes: a
+  > non-fresh dest dir raises before the spawn, and a post-decode frame
+  > count mismatch raises after it — a chunk never silently carries
+  > another window's frames."
+- Residuals: none.

@@ -13,4 +13,4 @@ voyage_build_image voyage:latest Dockerfile
 # Same cache-hygiene contract as gates.sh: caches stay out of the tree in
 # container-local /tmp (the baked /app is read-only for the runtime user).
 docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" \
-  voyage:latest bash -c "ruff check . && ruff format --check . && mypy voyage && python -m pytest -q"
+  voyage:latest bash -c "ruff check . && ruff format --check . && mypy voyage && python -m pytest -q -m 'not gpu'"

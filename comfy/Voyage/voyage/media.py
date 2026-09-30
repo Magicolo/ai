@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -62,6 +62,13 @@ MIN_SLICE_PIECE_SECONDS = 0.05
 #: slice (two at a take joint); 128 is orders of magnitude above legitimate
 #: while capping ffmpeg spawns when the ledger degrades.
 MAX_SLICES_PER_WINDOW = 128
+
+#: Tolerance when estimating frame counts from duration, frames (issue 096).
+#: Container durations round to milliseconds, so a 29-frame @32fps file can
+#: probe as 28.99 estimated frames — one frame of slack keeps the
+#: `nb_frames == 0` fallback from false-failing healthy files while still
+#: rejecting genuinely short ones.
+DURATION_FRAME_ESTIMATE_SLACK_FRAMES = 1.0
 
 
 def av_drift_seconds(video_duration: float, audio_duration: float) -> float:
@@ -171,15 +178,28 @@ def validate_video(
         )
     rate = str(video.get("avg_frame_rate", "0/1"))
     num, _, den = rate.partition("/")
-    actual_fps = float(num) / float(den or 1) if num else 0.0
+    try:
+        actual_fps = float(num) / float(den or 1) if num else 0.0
+    except (ValueError, ZeroDivisionError):
+        raise MediaError(f"unparseable fps in {path}: {rate}") from None
     if abs(actual_fps - fps) > FPS_MATCH_TOLERANCE:
         raise MediaError(f"fps mismatch in {path}: {actual_fps} != {fps}")
-    frames = int(video.get("nb_frames", 0) or 0)
-    if frames < min_frames and frames != 0:
-        raise MediaError(f"too few frames in {path}: {frames}")
+    try:
+        frames = int(video.get("nb_frames", 0) or 0)
+    except (ValueError, TypeError):
+        frames = 0  # containers that omit the count (mkv "N/A") read as unknown
     duration = float(info.get("format", {}).get("duration", 0.0) or 0.0)
     if duration <= 0:
         raise MediaError(f"non-positive duration in {path}")
+    if frames == 0:
+        # Unknown count: gate on the duration-derived estimate instead of
+        # skipping the check (issue 096) — a genuinely long file passes, a
+        # truncated one still fails.
+        estimate = duration * actual_fps
+        if estimate < min_frames - DURATION_FRAME_ESTIMATE_SLACK_FRAMES:
+            raise MediaError(f"too few frames in {path}: {frames}")
+    elif frames < min_frames:
+        raise MediaError(f"too few frames in {path}: {frames}")
     return {"frames": frames, "duration": duration, "fps": actual_fps}
 
 
@@ -269,6 +289,11 @@ def slice_take(
     )
     if proc.returncode != 0:
         raise MediaError(f"take slice failed for {take_path}: {proc.stderr[-2000:]}")
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise MediaError(
+            f"take slice produced empty output for {take_path} "
+            f"(start={start_seconds:.6f}, duration={duration_seconds:.6f})"
+        )
     return dest
 
 
@@ -339,6 +364,8 @@ def assemble_segment_audio(
         )
         if proc.returncode != 0:
             raise MediaError(f"slice copy failed: {proc.stderr[-2000:]}")
+        if not dest.exists() or dest.stat().st_size == 0:
+            raise MediaError(f"slice copy produced empty output for {slices[0]}")
         return dest
     durations = [float(probe(s).get("format", {}).get("duration", 0.0) or 0.0) for s in slices]
     if any(d <= 0 for d in durations):
@@ -446,6 +473,19 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
         raise MediaError(f"segment {name} has non-positive media duration")
     check_av_alignment(video_duration, audio_duration, name)
     return frames, video_duration, audio_duration
+
+
+def _check_segment_committed(segment: Path) -> None:
+    """Existence probe + full verification for one committed segment.
+
+    Split out so the `skip_bad` triage loop below never raises inside its
+    own `try` (the loop catches `MediaError` to skip — a raise in the
+    `try` body would read as self-caught).
+    """
+    for artifact in ("video.mp4", "audio.wav"):
+        if not (segment / artifact).exists():
+            raise MediaError(f"segment {segment.name} missing {artifact}")
+    _verify_segment(segment)
 
 
 def _segment_timeline(usable: list[Path], fps: int) -> tuple[list[float], list[float], float]:
@@ -848,6 +888,35 @@ def plan_augmentation(
     )
 
 
+def presentation_setup_facts(
+    plan: AugmentPlan,
+    *,
+    min_fps: int | None,
+    min_width: int | None,
+    min_height: int | None,
+) -> dict[str, object]:
+    """§104 setup facts for the finalize presentation floors (issue 194).
+
+    Pure: the floor triple as given plus the resolved presentation plan,
+    so benchmark/soak reports can record the dominant finalize variable
+    instead of leaving re-encode-vs-stream-copy unexplained. HOOK FOR THE
+    OBSERVE TRACK (`voyage/cli_observe.py` is out of this change's scope):
+    spread these facts into `_benchmark_env()` (or alongside
+    `_video_geometry_setup()`) at the `cmd_benchmark`/`cmd_soak` setup
+    sites so every §104 setup block carries them.
+    """
+    return {
+        "min_fps": min_fps,
+        "min_width": min_width,
+        "min_height": min_height,
+        "out_w": plan.out_w,
+        "out_h": plan.out_h,
+        "out_fps": plan.out_fps,
+        "needs_reencode": plan.needs_reencode,
+        "needs_minterpolate": plan.needs_minterpolate,
+    }
+
+
 def _probe_video_geometry(info: dict[str, Any]) -> tuple[int, int]:
     """Source WxH from ffprobe info; (0, 0) when absent/unparseable.
 
@@ -1073,11 +1142,11 @@ class ResolvedFinalizeSettings:
 def resolve_finalize_settings(
     *,
     options: FinalizeOptions | None,
-    skip_bad: bool,
-    sample_rate: int,
-    channels: int,
-    overlap_fraction: float,
-    overlap_cap_seconds: float,
+    skip_bad: bool | None = None,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+    overlap_fraction: float | None = None,
+    overlap_cap_seconds: float | None = None,
     min_fps: int | None,
     min_width: int | None,
     min_height: int | None,
@@ -1086,27 +1155,43 @@ def resolve_finalize_settings(
 ) -> ResolvedFinalizeSettings:
     """Resolve the scalar/`options=` split into one settings struct (pure).
 
-    No filesystem, no ffmpeg: `finalize_run` calls this first, then runs
-    the §53 preflight + encode off the result. Extracted (not duplicated)
-    so the shim and the canonical path can never drift.
+    One uniform rule for every knob (issue 190): an explicit scalar wins
+    over `options`, `None` means "use the `options` value" (0 disables a
+    floor axis — the 24fps `PRESENTATION_MIN_FPS` still applies downstream
+    in `plan_augmentation`). No filesystem, no ffmpeg: `finalize_run`
+    calls this first, then runs the §53 preflight + encode off the result.
+    Extracted (not duplicated) so the shim and the canonical path can
+    never drift.
     """
-    settings = (
-        options
-        if options is not None
-        else FinalizeOptions(
-            skip_bad=skip_bad,
-            sample_rate=sample_rate,
-            channels=channels,
-            overlap_fraction=overlap_fraction,
-            overlap_cap_seconds=overlap_cap_seconds,
-            joint_style="hard-splice" if overlap_fraction <= 0 else "blend",
+    if options is None:
+        effective_overlap = (
+            FinalizeOptions.overlap_fraction if overlap_fraction is None else overlap_fraction
+        )
+        settings = FinalizeOptions(
+            skip_bad=False if skip_bad is None else skip_bad,
+            sample_rate=48000 if sample_rate is None else sample_rate,
+            channels=2 if channels is None else channels,
+            overlap_fraction=effective_overlap,
+            overlap_cap_seconds=0.5 if overlap_cap_seconds is None else overlap_cap_seconds,
+            joint_style="hard-splice" if effective_overlap <= 0 else "blend",
             min_fps=AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
             min_width=AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
             min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
             crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
             preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
         )
-    )
+    else:
+        settings = options
+        if skip_bad is not None:
+            settings = replace(settings, skip_bad=skip_bad)
+        if sample_rate is not None:
+            settings = replace(settings, sample_rate=sample_rate)
+        if channels is not None:
+            settings = replace(settings, channels=channels)
+        if overlap_fraction is not None:
+            settings = replace(settings, overlap_fraction=overlap_fraction)
+        if overlap_cap_seconds is not None:
+            settings = replace(settings, overlap_cap_seconds=overlap_cap_seconds)
     return ResolvedFinalizeSettings(
         settings=settings,
         min_fps=min_fps if min_fps is not None else settings.min_fps,
@@ -1123,12 +1208,12 @@ def finalize_run(
     width: int = 768,
     height: int = 432,
     fps: int = 24,
-    skip_bad: bool = False,
+    skip_bad: bool | None = None,
     min_free_space_gib: float = 0.0,
-    sample_rate: int = 48000,
-    channels: int = 2,
-    overlap_fraction: float = 0.10,
-    overlap_cap_seconds: float = 0.5,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+    overlap_fraction: float | None = None,
+    overlap_cap_seconds: float | None = None,
     min_fps: int | None = None,
     min_width: int | None = None,
     min_height: int | None = None,
@@ -1142,10 +1227,30 @@ def finalize_run(
     `max(requested, floors, 24fps)` for fps and `max(target, floors)`
     per axis for geometry, so backend-native segments (CausVid
     832x480@16, LTXV 768x512@24) ship at >= 1280x720@32 by default.
-    Explicit `min_*`/`crf`/`preset` scalars override `options` when both
-    are given; `None` means "use the options value" (which defaults to
-    32/1280/720 floors and crf 15 + veryfast); pass 0 to disable a floor
-    axis (the 24fps `PRESENTATION_MIN_FPS` still applies).
+    One uniform knob rule (issue 190): an explicit scalar wins over
+    `options`, `None` means "use the `options` value" (which defaults to
+    32/1280/720 floors, crf 15 + veryfast, blend joints at 0.10 overlap);
+    pass 0 to disable a floor axis (the 24fps `PRESENTATION_MIN_FPS`
+    still applies). An explicit `overlap_fraction=0` behaves as a hard
+    splice (the blend falls back to concat below the audibility floor).
+
+    Native-geometry runs (presentation already matches) stream-copy the
+    committed videos with zero video re-encodes (issue 031 fast path);
+    anything the plan flags (`needs_reencode`) takes a single
+    concat-demuxer + vf encode (issues 050: minterpolate-when-lifting +
+    scale/pad/fps, one libx264 pass over the originals — no intermediate
+    per-segment parts). Then mux audio, validate against the presentation
+    box/fps, atomically publish, and append a `finalize_completed` event
+    (effective crf/preset + `parts_encode_ms`/`audio_blend_ms`/
+    `final_encode_ms`) to `logs/metrics.jsonl` for soak trending. With
+    skip_bad, corrupt segments are skipped with a warning instead of
+    aborting the whole finalize — input triage only (issues 138/188):
+    missing artifacts, checksum/metrics/alignment failures, and numbering
+    gaps each print a `finalize: skipping ...` line and continue, while
+    the post-assembly `validate_video` stays strict (a corrupt stage
+    still aborts even under skip_bad). A positive `min_free_space_gib`
+    runs the §53 preflight first so a full disk fails fast instead of
+    mid-encode.
 
     Native-geometry runs (presentation already matches) stream-copy the
     committed videos with zero video re-encodes (issue 031 fast path);
@@ -1204,14 +1309,21 @@ def finalize_run(
     committed = [d for d in segment_dirs if (d / paths.DONE_MARKER).exists()]
     if not committed:
         raise MediaError(f"no committed segments in {run_dir}")
-    for segment in committed:
-        if not (segment / "video.mp4").exists():
-            raise MediaError(f"segment {segment.name} missing video.mp4")
-        if not (segment / "audio.wav").exists():
-            raise MediaError(f"segment {segment.name} missing audio.wav")
 
-    # §56 steps 4-6 per segment, before any encoding work.
-    if not settings.skip_bad:
+    # §56 steps 4-6 per segment, before any encoding work. skip_bad is
+    # input triage (issues 138/188): missing artifacts fold into the same
+    # skippable loop as checksum/metrics/alignment failures, and numbering
+    # gaps warn instead of vanishing silently — while the post-assembly
+    # validate_video below stays strict under both settings.
+    if settings.skip_bad:
+        for position, segment in enumerate(committed):
+            if segment.name != f"{position:06d}":
+                print(
+                    "finalize: skipping segment numbering gap: "
+                    f"expected {position:06d}, found {segment.name}"
+                )
+                break
+    else:
         for position, segment in enumerate(committed):
             if segment.name != f"{position:06d}":
                 raise MediaError(
@@ -1220,7 +1332,7 @@ def finalize_run(
     usable: list[Path] = []
     for segment in committed:
         try:
-            _verify_segment(segment)
+            _check_segment_committed(segment)
         except MediaError as exc:
             if not settings.skip_bad:
                 raise

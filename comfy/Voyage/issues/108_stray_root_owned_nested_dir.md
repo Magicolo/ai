@@ -18,3 +18,22 @@
   2. Optional: extend the 089-proposed post-gate cleanliness check with `find . -user root -not -path "./output/*"` so container-created residue fails loudly instead of sitting git-invisible.
   3. Do NOT add an empty-dir placeholder (no `.gitkeep` policy in this repo) — removal is the fix.
 - **Refs:** `Voyage/issues/089_test_hygiene_lock_markers.md` (in-tree residue class); `Voyage/issues/090_scripts_containers_cleanup.md` (dockerignore gaps); DESIGN §140 "Containers run as the host user (issue 053 follow-up)" (the rollout this residue likely predates).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: ALREADY ABSENT — `rmdir Voyage/Voyage` on host →
+  "No such file or directory" (exit 1); `find Voyage -maxdepth 2 -name
+  Voyage` returns only the tree root itself; `ls Voyage/` shows no nested
+  dir. A concurrent agent (or the 053-follow-up rollout) already removed
+  it; no ownership block was hit because there is nothing to remove.
+- No `rmdir` was needed and none was forced (contract: only if empty —
+  vacuously satisfied).
+- Recurrence guard (my scope): 167 added `Voyage/` to both
+  `.dockerignore` and `.gitignore`, so a future misdirected output there
+  stays uncommitted and out of the build context.
+- Files changed: none.
+
+## Resolution
+
+- Closed (residue gone, guard in place via 167). Residual: none (the
+  089-proposed post-gate root-ownership check stays with 089).

@@ -95,9 +95,21 @@ prompts and `🎵 music:` update, no SFX line ever appears.
 
 ## Refs
 
-- `Voyage/voyage/supervisor.py:1380-1436`; `Voyage/voyage/console.py:204-258`;
-  `Voyage/voyage/tui.py:243-272`; `Voyage/docs/OPERATIONS.md:21-28`;
-  `Voyage/DESIGN.md:7105-7118` (three-caption slice log).
-- Adjacent, not overlapping: 028 (console contract shape); 061
-  (status verb gaps); 113 (TUI progress content — progress bar, not
-  caption families).
+ - `Voyage/voyage/supervisor.py:1380-1436`; `Voyage/voyage/console.py:204-258`;
+   `Voyage/voyage/tui.py:243-272`; `Voyage/docs/OPERATIONS.md:21-28`;
+   `Voyage/DESIGN.md:7105-7118` (three-caption slice log).
+ - Adjacent, not overlapping: 028 (console contract shape); 061
+   (status verb gaps); 113 (TUI progress content — progress bar, not
+   caption families).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read (line numbers shifted slightly post-080 split): `voyage/supervisor.py:1874` emits `"audio_sfx_caption"` in the plan dict (the dict half of the DESIGN promise — landed); `voyage/console.py:244` renders `audio_caption`/beats/bpm only (`grep sfx console.py` → no hits); `voyage/tui.py:257` posts the `🎵 music:` line only (`grep sfx_caption tui.py` → no hits); `docs/OPERATIONS.md` still documents the two-caption status quo. Both renderers (`console.py`, `tui.py`) and the finalize-side `sfx_finalize.py` are out of this group's scope (console/tui explicitly, sfx_finalize hot-concurrent) — and no worker-side change can print a string the renderers never read — so this is logged as a residual with exact file:line, no code touched.
+
+## Resolution
+
+- Verdict: RESIDUAL — fully verified, not ownable from this group's files (`voyage/workers/*`, `voyage/audio/*`, `voyage/vision/*`, `voyage/bench.py`, `voyage/doctor.py` contain no render path that could surface the caption; the plan dict already carries it).
+- Files changed: none (this issue file only).
+- Test evidence: live `grep`/`sed` verification 2026-09-30 (see log above); no test added — the pin belongs to the renderer owner (`tests/test_console.py`-style plan-dict → rendered-text tests for both renderers, present/absent/empty × verbose/compact).
+- DESIGN proposal (quoted text only, for the DESIGN owner — three-caption doctrine): "Console `_segment_plan_info` surfaces `audio_sfx_caption` alongside the music caption so the drift is visible per segment — dict half landed (`supervisor.py`), render half open in `console.py` (`segment_plan`, after the `music:` line) and `tui.py` (after the `🎵 music:` post), plus the `OPERATIONS.md` runbook line."
+- Residuals (for the console/TUI owner, precise): `voyage/console.py` `segment_plan` (~:244-248): emit the SFX line after `music:` (always-print, `-` placeholder on pre-SFX runs, per fix candidate 1); `voyage/tui.py` (~:257): `🔔 sfx:` post with the same fallback (candidate 2); `Voyage/docs/OPERATIONS.md:23-25`: extend to the SFX caption once both render.

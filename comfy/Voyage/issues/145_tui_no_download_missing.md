@@ -52,3 +52,30 @@ print('no_download' in vars(ns), getattr(ns, 'no_download', '<MISSING→False>')
 ## Refs
 
 - `voyage/tui_state.py:252-310`; `voyage/cli.py:1912-1916` + `:1334`; `_add_sfx_args` explicit-default precedent.
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live — `no_download`
+  absent from the TUI namespace, `getattr(..., False)` silently
+  allowing downloads.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_tui_namespace_carries_no_download_opt_out`):
+  red (`TypeError: unexpected keyword argument 'no_download'`).
+- Fixed with the "Better" candidate (real checkbox, not just an
+  explicit default), jointly with 182's opt-out.
+
+## Resolution: FIXED
+
+- `voyage/tui_state.py`: new `GenerateFormState.no_download`
+  (default `False`), `FIELD_HELP["no_download"]`, save/load round-trip
+  entries, and `to_generate_namespace` pass-through (`:110`, `:156`,
+  `:358`, `:529`, `:594`).
+- `voyage/tui.py`: new `flag-no-download` checkbox
+  (`Verify only (fail instead of downloading models)`) wired in
+  `_form_fields` + `_read_form` (`:684-689`, `:794`).
+- The Pilot-pinned seam test (`tests/test_cli_tui_split.py`, in
+  scope) updated: 7 flags, count 25, both new ids pinned.
+- Test evidence: default-False + True-passthrough pinned; save/load
+  round-trip suite still green.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

@@ -57,3 +57,26 @@ sed -n '18,28p' Voyage/scripts/gates.sh  # test_tui_app.py absent from the mypy 
 
 - `Voyage/tests/test_tui_app.py:532,717`; `Voyage/scripts/gates.sh:28`; `Voyage/pyproject.toml:119`.
 - Not-a-duplicate: 034 (names `:532` only — `:717` never appears); 150 (five files, this file not among them; the `:118`-clean-control note shows the filer checked per-file — this file was never checked); 033 (gate 4/88 scope — the scope this instance falls outside).
+
+## Progress log (2026-09-30, Group D pass)
+
+- Re-verified live plus one new finding: ad-hoc in-container `mypy` on
+  the file reports `:532` as **wrong-code** (`[union-attr]` covering a
+  genuine `[attr-defined]` — the ignore suppresses nothing AND the error
+  stands), while `:717` is used-correct. So the file carried one stale
+  and one live suppression, not two live ones.
+- Fixed both at the source per candidate 1, with `Any` instead of the
+  real `VoyageApp` type: a module-level app import would break the file's
+  `importorskip("textual")` collection guard, and `Any` matches the
+  existing `_click_generate_when_ready(pilot: Any, app: Any)` precedent.
+  Both ignores removed; zero suppressions remain in the file.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Resolved: the ignore factory instance is gone (`object` → `Any` on both
+  helpers).
+- Files changed: `tests/test_tui_app.py` (2 annotations + 2 deletions).
+  Gate evidence: full file 33/33 in-container; ad-hoc `mypy` 0 errors
+  (was 2); `ruff check` + `ruff format --check` clean; `grep "type:
+  ignore"` empty. DESIGN proposals: none. Residuals: none (the factory
+  pattern is documented by the precedent, not by new policy).

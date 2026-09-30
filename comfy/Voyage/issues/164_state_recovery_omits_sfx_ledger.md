@@ -102,5 +102,25 @@ invariant states.
 - `Voyage/docs/STATE_AND_RECOVERY.md:3-35`; `Voyage/voyage/sfx_finalize.py:48-62,141-229`;
   `Voyage/voyage/cli.py:883-929`.
 - Adjacent, not overlapping: 101 (ledger fsync durability); 054
-  (ledger race); 098 (orphan-scan gaps — invariant 7's checker, not
-  the missing invariant 9).
+   (ledger race); 098 (orphan-scan gaps — invariant 7's checker, not
+   the missing invariant 9).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live. `docs/STATE_AND_RECOVERY.md:3-26` lists
+  invariants 1-8 with zero sfx/ledger hits; live `sfx_finalize.py:56`
+  (`SFX_LEDGER_NAME`), `:231` (`validate_sfx_ledger`, absent-ledger
+  clean) and the wiring in `cli_validate.py:254-256` (module split moved
+  it from `cli.py:923-929` since filing) confirm the ninth enforced check.
+- Fix: added invariant 9 ("SFX ledger tiles the timeline.
+  `audio/sfx/sfx.jsonl` + stems tile `[0, timeline)` (checked read-only
+  by `validate_sfx_ledger`); absent ledger is clean ...") with path
+  pointers, per fix candidate 1-2.
+- Files changed: `docs/STATE_AND_RECOVERY.md`.
+- Gates: docs-only.
+
+## Resolution
+
+- Done. Residual: the optional docs-vs-validate assertion (every
+  `errors.extend(...)` source has a named invariant) is left for the
+  validate-owning track.

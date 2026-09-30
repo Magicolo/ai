@@ -76,3 +76,23 @@ missing AWQ snapshot, not the cataloged 8B).
   (the MODELS catalog, which 065 never cites); 091 proposes `SFX.md`/`AUGMENT.md`
   operator docs (feature guides, not catalog rows); 146 is the `models list`
   printout (CLI surface, which already lists both director backends correctly).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: premise PARTIALLY fixed already — the AWQ section exists live
+  (`docs/MODELS.md:81-89`, added by a concurrent agent) but carried no
+  literal repo/revision/license (only "pinned snapshot in registry").
+- Enriched the row with literals verified live in code:
+  `registry_records.py:101-119` (`QWEN4B_AWQ_HF_REPO = "Qwen/Qwen3-4B-AWQ"`,
+  `QWEN4B_AWQ_HF_REVISION = "74d4bd2bd4bff9cafc9345221320bffb08b406a3"`,
+  `QWEN4B_AWQ_LICENSE = "Apache 2.0"` + license URL) and the selection rule
+  (`models_ensure.py:124-129`: non-cpu device → `director-qwen4b-awq`).
+  Also recorded that the AWQ spec bundles the shared MiniLM snapshot
+  (`model_registry.py:628`) so operators do not double-provision embeddings.
+- Files changed: `docs/MODELS.md` (AWQ section only).
+- Gates: docs-only.
+
+## Resolution
+
+- Done. Residual: none (the 065-mirror-test extension from fix candidate 3
+  is left for the test-owning track).

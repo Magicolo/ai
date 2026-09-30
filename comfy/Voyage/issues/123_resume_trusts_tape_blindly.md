@@ -45,3 +45,54 @@ cp <seg>/video_tail.mp4 /tmp/t.mp4 && printf '\x00' | dd of=/tmp/t.mp4 bs=1 seek
 
 - `Voyage/voyage/workers/video_ltxv.py:241-302,669-719`; `Voyage/voyage/workers/video_causvid.py:271-370,870-897`; `Voyage/voyage/workers/video_longlive.py:496-563,1195-1205`; DESIGN §§5.3, 5.4, 27.1.
 - Adjacent, not overlapping: 006 (supervisor trusts worker *frame counts* — this file is worker-side trust of *tape contents*); 059 (concept-vector dangling detector — the analogous fail-loud precedent); 122 (tape *write* durability — this file is tape *read* verification); 134 (causvid *unreadable*-anchor fallback silence — this file is *readable*-but-corrupt adoption).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (tree reads + `voyage:latest`
+  probes): ltxv still stores `conditioning_tail_sha256` (`video_ltxv.py`
+  build path) while `parse_recovery_tape` checks existence only; causvid
+  keeps its `latent_shape` session check (the good precedent); longlive
+  `resume_from_tape` indexes taped tensors with zero shape/dtype checks;
+  no size gate anywhere (171's probe: 3 GiB sparse `.pt` ACCEPTED).
+  Premise confirmed on all three legs.
+- TDD: wrote `tests/test_tape_trust_123_171.py` first — collection error
+  (helpers absent) before the fix, 8 passed after.
+- Fix (shared-contract delivery, candidate 3): new
+  `verify_conditioning_tail_sha(segment_dir, tape)` in
+  `voyage/workers/video_common.py` — recomputes the taped sha when both
+  keys are present (streaming `voyage.hashing.sha256_file`, CPU-only),
+  `ValueError` on mismatch, no-op when the tape carries no hash (pruning
+  records the would-be path with nothing to hash) or the tail is absent
+  (the derive path materializes it — absence is not corruption). Plus a
+  supervisor discovery leg (owned hunk): `_latest_recovery_tape` now runs
+  every candidate through `_tape_tail_sha_matches` (same semantics) and
+  skips mismatches to the next-newest tape with a `recovery_tape_skipped`
+  metric — torn/non-JSON tapes still return True (adopt), so 139/197's
+  territory is never masked.
+- Gates (in-container): new tests + `test_recovery` +
+  `test_supervisor_hardening` + `test_video_common` + `test_tail_derive` +
+  `test_state_integrity` = 81 passed; `ruff check` + `ruff format --check`
+  + `mypy` on `voyage/supervisor.py` + `voyage/workers/video_common.py`
+  clean. Supervisor diff re-checked (disjoint hunks only).
+
+## Resolution
+
+- Verdict: FIXED at the shared + supervisor-discovery layers. Files
+  changed: `voyage/workers/video_common.py` (`verify_conditioning_tail_sha`
+  + 171's `MAX_RECOVERY_TAPE_BYTES`/`check_recovery_tape_size`),
+  `voyage/supervisor.py` (`_tape_tail_sha_matches` + discovery skip),
+  `tests/test_tape_trust_123_171.py` (new: match/corrupt/noop pins).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §27.1, after
+  the resume description, add: "Resume re-verifies the taped conditioning
+  tail: when the tape carries `conditioning_tail_sha256`, discovery
+  recomputes it and skips to the next-newest tape on mismatch
+  (metric-visible) — a truncated tail degrades to an older anchor instead
+  of silently conditioning the next segment on garbage."
+- Residuals (other files, not touched per scope): wire
+  `verify_conditioning_tail_sha` into `video_ltxv.py:283-302`
+  (`parse_recovery_tape`) + `:712-719` (`resume_from_tape`) and
+  `video_causvid.py:341-370` + `:870-897`; port causvid's `:878-887`
+  `latent_shape` session check to `video_longlive.py:496-563`
+  (`resume_from_tape`) plus dtype/profile-geometry compare, and add
+  width/height/fps compare to ltxv's parse (values already ride in the
+  tape) — the shared helper makes each call site a 3-line change.

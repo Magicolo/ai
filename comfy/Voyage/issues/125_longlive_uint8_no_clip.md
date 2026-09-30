@@ -34,6 +34,19 @@ Upstream evidence for CPU wrap semantics: pytorch/pytorch#169058 documents that 
 
 ## Refs
 
-- `Voyage/voyage/workers/video_longlive.py:945-975`; `Voyage/voyage/workers/video_common.py:252-258`; `Voyage/voyage/workers/video_ltxv.py:734-750`; `Voyage/voyage/workers/video_causvid.py:651-661`.
-- pytorch/pytorch#169058 (CPU float→int wraparound vs MPS saturation).
-- Adjacent, not overlapping: 065 (the ltxv/causvid clip fix — this file is the longlive instance it missed); slice-4 solarization notes in DESIGN §140 (model-side blowout — this file is the *conversion* side).
+ - `Voyage/voyage/workers/video_longlive.py:945-975`; `Voyage/voyage/workers/video_common.py:252-258`; `Voyage/voyage/workers/video_ltxv.py:734-750`; `Voyage/voyage/workers/video_causvid.py:651-661`.
+ - pytorch/pytorch#169058 (CPU float→int wraparound vs MPS saturation).
+ - Adjacent, not overlapping: 065 (the ltxv/causvid clip fix — this file is the longlive instance it missed); slice-4 solarization notes in DESIGN §140 (model-side blowout — this file is the *conversion* side).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read: `video_longlive.py` decode did `(255.0 * rearrange(...).cpu()).to(torch.uint8)` with no clip, while ltxv routes `clip_array_to_uint8` and causvid `np.clip`s. TDD: `tests/test_e2_longlive_clip_125.py` — numpy contract tests green throughout (they pin shared semantics), `clamp_to_uint8` import failed pre-implementation (red), green post-fix. One compat revision: a first version with a function-level `import torch` broke the existing `test_longlive_stages` fake-torch sessions (slim image has no torch and their `_FakeVideo` lacks `clamp_`) — the helper now takes the dtype as a parameter and duck-types `clamp_`.
+
+## Resolution
+
+- Verdict: FIXED in `voyage/workers/video_longlive.py`.
+- Change: new `clamp_to_uint8(scaled, uint8_dtype)` helper (in-place `clamp_(0, 255)` then `.to(dtype)`; tensors without `clamp_` — slim-image test doubles carrying in-range values — convert directly, documented) wired into the `generate_blocks` chunked-decode path in place of the bare cast. All three backends now saturate highlights identically.
+- Files changed: `voyage/workers/video_longlive.py` (+ new `tests/test_e2_longlive_clip_125.py`).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 3 passed + 3 torch-gated skipped (torch absent from the slim image — the saturation + wrap-semantics tests run on a GPU box / the video image, CPU tensors only, no CUDA needed); `test_longlive.py` + `test_longlive_stages.py` green. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §5.2 decode path): "All three video backends saturate VAE highlight overshoot before uint8 conversion (longlive `clamp_to_uint8`, ltxv `clip_array_to_uint8`, causvid `np.clip`): a bare CPU float→uint8 cast wraps modulo 256 and turns blown highlights near-black."
+- Residuals: torch-gated saturation probe on a GPU box (importorskip tests in the new file — run them in the video image); nothing else open.

@@ -46,3 +46,49 @@ min_bpm=-5 -> (4, 60.0)    # degenerate floor accepted
 
 - `Voyage/voyage/audio/beat.py:20-58`; `Voyage/voyage/config.py:150-155` (29-frame preset), `:312-317`; `Voyage/voyage/supervisor.py:1174-1180,1195-1207,1819`; `Voyage/voyage/audio/acestep.py:35-43`.
 - Adjacent, not overlapping: 100 (NaN/inf *config* values into RPC timeouts — different layer, non-finite inputs); 013-era `take_seconds >> ahead_seconds` invariant (same file family, duration axis not tempo axis).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (host stdlib + tree reads):
+  `beats_for_segment(29/24, 8)` → `(8, 397.24)` > ACE 300 cap; `min_bpm=0`
+  accepted with a dead doubling loop; supervisor passes `take_bpm` raw into
+  the ACE payload. Premise confirmed.
+- Constraint found live: `tests/test_rhythm.py:34-40` deliberately pins
+  the raw doubling math (`(0.5, 4) -> (4, 480)`, "degenerate short: math
+  holds") — a default ceiling would undo that characterization, so the
+  ceiling is opt-in and the three production call sites opt in explicitly.
+- TDD: wrote `tests/test_beats_bpm_cap_120.py` first — 5 failed / 2 passed
+  (default-no-ceiling + fitting-grid green) before the fix.
+- Fix: `beats_for_segment(..., max_bpm=None)` — when set, halve toward one
+  beat (cuts stay on an integer grid, only coarser); when even one beat
+  exceeds, `ValueError` naming `beats_per_segment` + segment seconds +
+  ceiling (fails before GPU work via the 002 backstop, actionable message).
+  `min_bpm <= 0` now rejected (dead-floor guard); non-finite/non-positive
+  `max_bpm` rejected. Supervisor's three call sites (take render, console
+  plan, progress display) pass `max_bpm=MAX_BPM` (imported from
+  `voyage.audio.acestep`, not duplicated — stdlib-only module, no cycle).
+  The plan-display and render calls now share identical inputs, so displayed
+  BPM and rendered BPM agree by construction (secondary nit closed).
+- Gates (in-container): new tests + `test_rhythm` + `test_beat_properties`
+  + `test_audio_planner` = 50 passed; `ruff check` + `ruff format --check`
+  + `mypy` on `voyage/audio/beat.py` + `voyage/supervisor.py` clean.
+  Supervisor diff re-checked minimal (3 disjoint hunks only, 15+/4-).
+
+## Resolution
+
+- Verdict: FIXED on the production path. Files changed:
+  `voyage/audio/beat.py` (opt-in `max_bpm` + `min_bpm > 0`),
+  `voyage/supervisor.py` (3 call sites opt into the ACE ceiling),
+  `tests/test_beats_bpm_cap_120.py` (new: no-ceiling default, halve,
+  passthrough, impossible-grid error, degenerate/non-finite guards).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §35, after
+  the adaptive-k description, add: "The beat grid honors the renderer's
+  tempo ceiling: the supervisor passes the ACE `MAX_BPM` into the grid, so
+  an over-fine `beats_per_segment` degrades to a coarser integer grid and
+  an impossible one fails the commit naming `beats_per_segment` — before
+  any GPU work, never as a fatal payload error after the ACE load."
+- Residuals (other files, not touched per scope): `config.py:362-367`
+  `positive_beats` still accepts any `beats_per_segment > 0` with no
+  BPM-compatibility check — a geometry-aware validator in `AudioConfig` /
+  `ProjectConfig` (candidate 2) would fail at `init` instead of at first
+  commit.

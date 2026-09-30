@@ -96,10 +96,92 @@ def report_document(
     Why a second shape, not a format change: `format_report` output is
     stdout prose (existing tests pin its lines). This dict is the machine
     artifact the CLI tees to `logs/benchmark-<target>-<ts>.json` so reruns
-    stay comparable without hand-copying stdout. Callers must keep values
+    stay comparable without hand-copying terminal output. Callers must keep values
     JSON-serializable (plain setup/metric dicts already are).
     """
     return {"title": title, "setup": dict(setup), "measured": dict(metrics)}
+
+
+def sfx_benchmark_setup(
+    *,
+    model_size: str,
+    sfx_workers: int,
+    device: str,
+    warmup: int,
+    measured: int,
+) -> dict[str, object]:
+    """Setup block for the future `benchmark sfx` branch (issues 154/163).
+
+    Records the two knobs the numbers must discriminate (model-size
+    ladder × `--sfx-workers` sharding) plus the harness counts — the CLI
+    branch threads this into `format_report`/`report_document` exactly
+    like the video/audio branches thread theirs.
+    """
+    return {
+        "backend": "mmaudio",
+        "model_size": model_size,
+        "sfx_workers": sfx_workers,
+        "device": device,
+        "warmup": warmup,
+        "measured": measured,
+    }
+
+
+def augment_benchmark_setup(
+    *,
+    chunk_frames: int,
+    upscale_factor: int,
+    crf: int,
+    preset: str,
+    device: str,
+    warmup: int,
+    measured: int,
+) -> dict[str, object]:
+    """Setup block for the future `benchmark augment` branch (issue 154).
+
+    Records the chunk + quality knobs (chunk size, upscale factor, CRF,
+    preset) the augment ladder must discriminate — same shape contract
+    as `sfx_benchmark_setup` above.
+    """
+    return {
+        "backend": "augment",
+        "chunk_frames": chunk_frames,
+        "upscale_factor": upscale_factor,
+        "crf": crf,
+        "preset": preset,
+        "device": device,
+        "warmup": warmup,
+        "measured": measured,
+    }
+
+
+def summarize_sfx_windows(windows: list[dict[str, object]]) -> dict[str, object]:
+    """Soak-section aggregation over plain SFX window records (issue 163).
+
+    Pure over caller-supplied records (`wall_seconds` + `audio_seconds`
+    per window) so the soak SFX section stays a post-run pass with no
+    extra renders: the CLI collects the records from stems + ledger and
+    merges this dict into the soak metrics. Empty input is zero, never
+    a ZeroDivisionError (the `validate_benchmark_counts` lesson).
+    """
+    walls = [
+        sample
+        for record in windows
+        if (sample := _finite_float(record.get("wall_seconds"))) is not None
+    ]
+    audio = [
+        sample
+        for record in windows
+        if (sample := _finite_float(record.get("audio_seconds"))) is not None
+    ]
+    total_wall = sum(walls)
+    total_audio = sum(audio)
+    return {
+        "windows": len(windows),
+        "mean_wall_seconds": (total_wall / len(walls)) if walls else 0.0,
+        "total_audio_seconds": total_audio,
+        "audio_seconds_per_wall_second": (total_audio / total_wall) if total_wall else 0.0,
+    }
 
 
 def summarize_gauges(events: list[dict[str, Any]]) -> dict[str, Any]:

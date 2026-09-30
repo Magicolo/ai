@@ -62,3 +62,24 @@ future default shifts do not re-break foreign suites.
 - AGENTS.md §12 ("Every behavior change updates DESIGN.md (+ AGENTS.md if
   non-obvious)"); §87 docs-tree contract.
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §12.
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: premise FIXED already by a concurrent agent — `README.md:62-64`
+  live reads "renders native 768x512 @ 24 fps; finalize lifts to
+  >=1280x720 @ >=32 fps via the augmentation floors (see docs/AUGMENT.md;
+  --no-augment keeps native geometry)". Fix candidate (a) is done.
+- Live sweep `rg -n "768.?512|1280|24 ?fps|32 ?fps|min-fps|min-resolution|no-augment"
+  README.md docs/` confirms floors documented in README:62-64,93,131,
+  OPERATIONS:174,219-223, AUGMENT (full file), BENCHMARKING:49-53.
+- One residual of the same class found in owned docs: `AUGMENT.md:124`
+  still said fake testsrc "(320x180-class)" (live preset is 768x432
+  fake-432p, `config.py:167-179`) — fixed to "(768x432 fake-432p)".
+- Files changed: `docs/AUGMENT.md` (one line).
+
+## Resolution
+
+- README geometry drift: no action (already correct).
+- `docs/AUGMENT.md:124`: fake-geometry label corrected to the live preset.
+- No DESIGN change needed (design already records the floors entry).
+- Residual: none in this file's scope (BACKENDS fake cell is 159's fix).

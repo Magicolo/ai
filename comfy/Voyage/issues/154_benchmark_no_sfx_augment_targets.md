@@ -34,5 +34,17 @@ Deterministic CLI: `voyage benchmark sfx --run <dir>` → `error: argument bench
 
 ## Refs
 
-- `Voyage/voyage/cli.py:1425-1527,1956-2032`; `Voyage/voyage/workers/sfx_mmaudio.py:254-332`; `Voyage/voyage/workers/sfx.py:85-115`; `Voyage/voyage/bench.py`; DESIGN §104 (benchmarks).
-- Adjacent, not overlapping: 051 (report content once a probe runs); 060 (env/artifacts for existing targets); 059 (gauge aggregation); 091 (benchmark docs).
+ - `Voyage/voyage/cli.py:1425-1527,1956-2032`; `Voyage/voyage/workers/sfx_mmaudio.py:254-332`; `Voyage/voyage/workers/sfx.py:85-115`; `Voyage/voyage/bench.py`; DESIGN §104 (benchmarks).
+ - Adjacent, not overlapping: 051 (report content once a probe runs); 060 (env/artifacts for existing targets); 059 (gauge aggregation); 091 (benchmark docs).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read (post-080 split the CLI surface moved: parser choices at `voyage/cli.py:643-646` `["video", "audio", "end-to-end"]`, branches in `voyage/cli_observe.py:161-239` — still no sfx/augment; `handle_benchmark` present on both SFX workers; zero `benchmark` hits in `augment.py`/`augment_worker.py`). Per the keep/fold map this file owns the CLI-target half and 163 keeps the soak half — but `cli.py`/`cli_observe.py` are out of this group's scope, so the CLI legs are residuals and the `bench.py` shared shapes (mine) are implemented here, jointly with 163. TDD: `tests/test_e2_bench_sfx_augment_154_163.py` — collection failed pre-implementation, 4/4 green post-fix.
+
+## Resolution
+
+- Verdict: SHARED-SHAPES IMPLEMENTED in `voyage/bench.py`; CLI-target + augment-worker-op legs RESIDUAL (below).
+- Changes (`voyage/bench.py`, pure, CPU-only): `sfx_benchmark_setup(model_size, sfx_workers, device, warmup, measured)` (records the two knobs future numbers must discriminate), `augment_benchmark_setup(chunk_frames, upscale_factor, crf, preset, device, warmup, measured)` (chunk + quality knobs incl. the 157 preset), `summarize_sfx_windows(windows)` (soak-section aggregation over plain `{wall_seconds, audio_seconds}` records; empty → zeros, non-finite/bool-safe via the module's `_finite_float`). New `tests/test_e2_bench_sfx_augment_154_163.py`.
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 4 passed; `test_benchmark.py` green. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §104): "Benchmark setup blocks record the discriminating knobs per target (SFX: `model_size` × `sfx_workers`; augment: chunk size × upscale factor × CRF × preset), and the soak SFX section aggregates plain window records post-run — no extra renders."
+- Residuals (out of scope, precise — for the CLI owner): (1) `voyage/cli.py:643-646`: add `"sfx"` (+ `"augment"`) to `benchmark_target` choices + help/`docs/BENCHMARKING.md`; (2) `voyage/cli_observe.py:161-198`: `cmd_benchmark` sfx branch (resolve `config.sfx.backend`, start the SFX worker via the supervisor `SFX_WORKER_MODULES`-class map, `call("benchmark", ...)`, `format_report`/`report_document` with `sfx_benchmark_setup`); note the supervisor currently exposes NO SFX worker handle (`grep _sfx supervisor.py/backends.py` → only caption strings — a supervisor seam is needed first); (3) `benchmark augment` additionally needs a `handle_benchmark`-shaped entry in `augment_worker.py` (zero `benchmark` hits today) plus orchestration-level chunk reporting — `augment.py` is E1's; (4) choices-pin test so future workers cannot ship headless benchmarks (fix candidate 3, CLI-side).

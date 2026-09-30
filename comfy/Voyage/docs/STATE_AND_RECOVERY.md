@@ -23,6 +23,15 @@
    fails validation — a leftover means an interrupted commit to inspect.
 8. **Tapes never cross numerics.** `recovery.pt` records its `fp8|bf16`
    profile; resume refuses cross-numeric tapes.
+9. **SFX ledger tiles the timeline.** `audio/sfx/sfx.jsonl` + stems tile
+   `[0, timeline)` (checked read-only by `validate_sfx_ledger`); an absent
+   ledger is clean (SFX is an optional finalize-time pass / pre-SFX runs).
+
+Provenance note: `manifest.timeline` records the source hint
+(backend-native fps/geometry, e.g. `final_width 768` / `final_height 432`)
+— not the shipped presentation, which finalize lifts to the
+`[augment]` floors (≥32 fps, ≥1280×720) unless disabled. Read shipped
+geometry off the artifact (or `docs/AUGMENT.md`), never the manifest.
 
 ## Crash scenarios
 

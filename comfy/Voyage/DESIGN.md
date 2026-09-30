@@ -306,6 +306,8 @@ The current LongLive implementation remains documented below as the reference pe
 
 ## 5.2 LongLive 2.0
 
+> As-built (batch-8-2026-09-30, issue 125): all three video backends saturate VAE highlight overshoot before uint8 conversion (longlive `clamp_to_uint8`, ltxv `clip_array_to_uint8`, causvid `np.clip`) — a bare float→uint8 cast wraps modulo 256 and turns blown highlights near-black.
+
 Use the current LongLive repository:
 
 - GitHub: https://github.com/NVlabs/LongLive
@@ -565,6 +567,9 @@ Stream A code change was needed. All Stream A live evidence below is at 768x512;
 ---
 
 ## 5.4 CausVid backend
+
+> As-built (batch-8-2026-09-30, issue 124): video worker sessions place every model shard on their configured `device` (causvid threads it through pipeline build, T5 shuttle, noise, and telemetry); the shared `video_common.cuda_device_index` parse is the single home and `init` fails fast on out-of-range indexes.
+> As-built (batch-8-2026-09-30, issue 128): the causvid tail-slice re-encode never builds an empty window — overlap 1 takes the last frame explicitly (agreeing with the window-size accounting); non-positive overlaps and empty slices fail loud at the slice site.
 
 ### Upstream sources
 
@@ -1626,6 +1631,8 @@ The worker must reject invalid JSON and retry generation rather than returning m
 
 # 20. Director prompt design
 
+> As-built (batch-8-2026-09-30, issues 136/168): prefetch telemetry has three outcomes — hit, miss, and invalidated (a ready proposal discarded by fresh inspect amendments or by the drift-cadence hold, logged as `director_prefetch_invalidated` with the reason); the reported hit-rate is `hit / (hit + miss)` with invalidated counted separately as the speculative-waste signal (the §140 prefetch paragraph names both discard conditions).
+
 The director system prompt should clearly state:
 
 - it is an autonomous audiovisual art director;
@@ -1656,6 +1663,8 @@ It should not receive an ever-growing raw transcript.
 ---
 
 # 21. Concept novelty memory
+
+> As-built (batch-8-2026-09-30, issue 117): the token-set fallback is script-aware (`[^\W_]+` word runs) — non-Latin concepts tokenize to non-empty sets and score genuine Jaccard values; the embedding path remains authoritative for non-Latin text and the fallback only decides when no embedding backend is available.
 
 The novelty system is independent of the director.
 
@@ -1966,6 +1975,10 @@ On worker restart, regenerate embeddings from text.
 ---
 
 # 27. Video recovery model
+
+> As-built (batch-8-2026-09-30, issue 122): recovery tapes (`recovery.pt`, JSON content) are rename-atomic and durable — the temp file is fsynced before the rename and the directory fsynced after (`video_common.write_tape_atomic`), so the latest tape survives OS crash / power loss, not just process crashes.
+> As-built (batch-8-2026-09-30, issue 123): resume re-verifies the taped conditioning tail — when the tape carries `conditioning_tail_sha256`, discovery recomputes it and skips to the next-newest tape on mismatch (metric-visible); a truncated tail degrades to an older anchor instead of conditioning the next segment on garbage.
+> As-built (batch-8-2026-09-30, issue 171): tape paths carry a byte bound (`1 GiB`, ~100× a legitimate tape) — the commit gate rejects oversized reports and discovery skips them to the next-newest tape, both metric-visible; a runaway or hostile tape fails before the first restart, never inside `torch.load`.
 
 The video worker must persist a **recovery tail** at every segment commit.
 
@@ -2319,6 +2332,9 @@ Audio should be mapped to the same logical timebase.
 
 # 35. Audio timeline
 
+> As-built (batch-8-2026-09-30, issue 120): the beat grid honors the renderer's tempo ceiling — the supervisor passes the ACE `MAX_BPM` into the grid, so an over-fine `beats_per_segment` degrades to a coarser integer grid and an impossible one fails the commit naming `beats_per_segment`, before any GPU work.
+> As-built (batch-8-2026-09-30, issue 121): take quantization uses round-half-to-even — exact-half segment ratios can plan short (a 45 s take on 18 s segments plans 36 s), chaining extra takes; prefer ceil or round-half-up when the rhythm pins are renegotiated (fix deferred, documented here).
+
 The audio segmenter should be independent of video block size.
 
 Recommended initial audio generation cadence:
@@ -2370,6 +2386,8 @@ The director should modify audio state independently of visual transition streng
 ---
 
 # 37. ACE-Step continuation strategy
+
+> As-built (batch-8-2026-09-30, issue 155): ACE take durations validate both halves — finite within `(0, MAX_TAKE_SECONDS]` (120 s, 2× the largest legitimate 60 s take); absurd values fail in validation, never after minutes of DiT render (mirrors the SFX `MAX_WINDOW_SECONDS` bound).
 
 The audio worker should hide ACE-Step-specific continuation details behind:
 
@@ -2578,6 +2596,8 @@ This gives the LLM a reusable temporal grammar.
 
 # 43. Visual controller feedback metrics
 
+> As-built (batch-8-2026-09-30, issue 180): all six MEASURED metrics steer — each out-of-band metric appends exactly one corrective amendment to the next segment's middle-layer text (palette blowout → palette restraint, boundary spike → single-shot continuity), thresholded against the charter's bands.
+
 These metrics are initially optional but the architecture should reserve fields for them.
 
 Suggested normalized metrics:
@@ -2623,6 +2643,9 @@ Do not make the first version depend on a VLM for basic operation.
 ---
 
 # 44. Visual inspector phase
+
+> As-built (batch-8-2026-09-30, issue 126): probe-derived frame estimates are best-effort — non-finite probe data yields no estimate (full-decode fallback), over-requested frame counts clamp to the decoded total (metrics never describe duplicated frames), and degenerate sample geometry fails as `MediaError`.
+> As-built (batch-8-2026-09-30, issue 140): the visual inspector never writes inside committed segment dirs — the single-frame VLM view goes to `logs/inspect/<segment>.png` (or a temp dir), so segment dirs stay exactly the checksummed artifacts (residual: the supervisor-side move stays with its owner).
 
 When implemented, the inspector should operate asynchronously after segment commit.
 
@@ -2968,6 +2991,9 @@ The supervisor must not allow a final metadata write to fail because the disk wa
 
 # 54. Media validation
 
+> As-built (batch-8-2026-09-30, issue 096): `validate_video` treats an unparseable `avg_frame_rate` as an fps mismatch (`MediaError`), and an unknown frame count (`nb_frames == 0` or unparseable) as a duration-derived estimate (`duration × fps ≥ min_frames − 1`) rather than a pass.
+> As-built (batch-8-2026-09-30, issue 098): `validate_run` orphan-scans every atomic-write location — `segments/`, `novelty/`, `audio/`, and top-level run-root `*.partial` staging — so "no orphans" means no crashed-commit residue anywhere, including the state file's own staging (residual: two-line patch at `cli_validate.py` with the split-tree owner).
+
 Every generated media artifact must be validated before commit.
 
 For video:
@@ -3032,6 +3058,10 @@ Capture stderr and include the relevant last lines in `MediaError`.
 # 56. Finalization
 
 > As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_*` aliases the augment CRF ladder; `resolve_finalize_settings()` is the single scalar/options= contract (768/432/24 defaults retained for the zero-floor stream-copy fast path); `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`).
+> As-built (batch-8-2026-09-30, issue 138): `finalize --skip-bad` is input triage with a record — missing artifacts, checksum/metrics/alignment failures, and numbering gaps are each skipped with a `finalize: skipping ...` warning naming the segment; the post-assembly presentation check stays strict, so a corrupt stage still aborts the finalize.
+> As-built (batch-8-2026-09-30, issue 152): finalize audio joins are single-graph — each stem/window is read once through one chained adelay+amix filter invocation (O(N) I/O, one spawn), never re-encoded N−1 times through a left fold; soak trends join wall-clock vs timeline length to prove the scaling (residual: SFX-pass owner).
+> As-built (batch-8-2026-09-30, issue 188): numbering gaps are the fourth skippable leg — strict raises, lenient warns (`finalize: skipping segment numbering gap: ...`) and ships the sorted survivors.
+> As-built (batch-8-2026-09-30, issue 190): `finalize_run` knob precedence is uniform — an explicit scalar wins over `options` for every parameter and `None` means use `options`; an explicit `overlap_fraction=0` behaves as a hard splice whichever path built the settings.
 
 The final output is produced only by:
 
@@ -3101,6 +3131,11 @@ The finalizer must report the exact transform it applied.
 # 58. CLI specification
 
 > As-built (batch-7-2026-09-30, issue 080): `voyage/cli.py` is now a 735-line seam (parsers + `__all__` re-export surface) over 10 verb-group modules (`cli_paths`/`cli_planning`/`cli_core`/`cli_run_ops`/`cli_models`/`cli_status`/`cli_validate`/`cli_finalize`/`cli_generate`/`cli_observe`, each ≤365L); cross-verb calls and test-patched leaves resolve through the `voyage.cli` namespace at call time via function-level imports (seam-dispatch rule); verb modules never bind seam names from home modules.
+> As-built (batch-8-2026-09-30, Group A issues 109/179): the `stop --finalize` surface matches `finalize` — `--skip-bad` plus shared augment and console args, so `stop` is no longer the only finalizing verb without console flags.
+> As-built (batch-8-2026-09-30, Group A issue 110): `generate` runs a pre-init override gate — it renders the exact TOML `cmd_init` would write, validates it, and dry-runs `apply_draft_overrides` before touching the directory (exit 2 on bad numeric overrides).
+> As-built (batch-8-2026-09-30, Group A issue 112): `parse_duration` rejects mixed signs, bare trailing numbers after h/m (with a did-you-mean hint), and interior whitespace — one grammar shared by CLI and TUI.
+> As-built (batch-8-2026-09-30, Group A issues 116/148): `_effective_run_id` strips the winning value and `_run_dir_for` defers to it, so check, use, and TUI agree (`" boba "` lands in `output/boba/` on both surfaces); explicit `--output` still wins.
+> As-built (batch-8-2026-09-30, Group A issues 143/185/149): `cmd_init` validates output presence, run-id, non-blank style, int seed, and backend registry membership — all before the first `mkdir`, each an exit-2 error; `generate --help` names the `output/<name>` default.
 
 The first stable command set should be:
 
@@ -4221,6 +4256,9 @@ Use modern Python.
 
 # 82. Type design rules
 
+> As-built (batch-8-2026-09-30, issue 118): worker/RPC boundaries validate wire types exactly (`checked_request` discipline — presence plus exact type, bools never satisfy int) and raise `TypeError` before any coercion; `None`, numeric strings, truncated floats, and `"false"` strings never execute with invented values.
+> As-built (batch-8-2026-09-30, issue 119): contract models validate value domains at parse time, not just ordering — metric bands and style/audio/transition scalars are unit-bounded where the inspector compares 0..1 metrics against them, so one bad director decision fails loudly at validation instead of silently biasing every segment.
+
 Backend-specific code should not leak into supervisor types.
 
 Bad:
@@ -5035,6 +5073,11 @@ Do not tune production settings before the development profile is operational.
 ---
 
 # 104. Benchmarking protocol
+
+> As-built (batch-8-2026-09-30, issue 154): benchmark setup blocks record the discriminating knobs per target (SFX: `model_size` × `sfx_workers`; augment: chunk size × upscale factor × CRF × preset), and the soak SFX section aggregates plain window records post-run — no extra renders.
+> As-built (batch-8-2026-09-30, issue 163): soak reports carry an SFX section (window render mean, join/mix rollup via `summarize_sfx_windows`, ledger verdict) collected as a post-run pass over stems + ledger; the end-to-end throwaway stays music-only behind the existing `no_sfx` gate.
+> As-built (batch-8-2026-09-30, issue 194): every §104 setup block records the presentation floors (`min_fps/min_width/min_height`) plus the resolved output (`out_w/out_h/out_fps`, `needs_reencode/needs_minterpolate`), so re-encode and stream-copy reports are never silently compared.
+> As-built (batch-8-2026-09-30, Group A issue 115): `benchmark` (video/audio) and `soak` fast-fail with the actionable CUDA message when the CUDA stack is absent — workers never start; the end-to-end target stays guard-free by construction (hardcoded fake backend).
 
 Every benchmark must specify:
 
@@ -7953,3 +7996,15 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   `tests/conftest.py` scaffold drops the root dup. Gates: ruff +
   format + mypy strict clean; 1483 passed, 5 skipped, 1 known TUI
   Pilot load flake (passes in isolation).
+
+## Batch 8 (2026-09-30) — worker/audio/augment/TUI as-builts (ambiguous-header notes folded here per append-only rule)
+
+- Worker init (batch-8-2026-09-30, issue 127): every worker `init` rejects unknown fields as `TypeError` (INVALID_PAYLOAD, fatal) naming the key and the known set — a mistyped model id fails at startup instead of booting defaults (landed in `sfx_mmaudio` + `audio_acestep`; the `director.py` leg stays with its owner).
+- Augment worker (batch-8-2026-09-30, issue 157): OOM-split paths call `empty_cache` unconditionally (no-op without CUDA) — allocator relief never depends on device presence (preset knob + fan-out contract stay with the `augment.py` owner).
+- Augment weights (batch-8-2026-09-30, issue 166): until the full upstream FILM port + SRVGG anime-6B loader land, `augment_enabled` stays opt-in-gated so default CUDA runs stop fetching weights the spike loaders structurally reject; the weight↔loader round-trip contract test pins the port's completion.
+- Audio fast paths (batch-8-2026-09-30, issue 189): every audio fast path verifies its output — `slice_take` and the single-slice assembly copy reject empty outputs at creation, so a degenerate slice fails at slice time, never three call levels up.
+- SFX bounds (batch-8-2026-09-30, issue 191): SFX segment bounds search the video stream (`codec_type == video`, the house idiom) and fail loud (`MediaError`) on zero-duration bounds — every later junction caption shifts otherwise (residual: `sfx_finalize.py` owner).
+- Augment decode (batch-8-2026-09-30, issue 192): `ffmpeg_decode_chunk` fails loud on both stale-input shapes — a non-fresh dest dir raises before the spawn, and a post-decode frame-count mismatch raises after it.
+- Augment device (batch-8-2026-09-30, issue 193): documented CPU fallbacks stay loud — `_resolve_device` emits one per-process stderr line naming the requested device and the CPU execution, so plan-vs-execution placement mismatches diagnose in one line.
+- TUI audio floor (batch-8-2026-09-30, Group A issue 111): the form rejects `take_seconds` at or below the audio-ahead window (floor read from `AudioConfig`, no restated literal); blank stays valid.
+- TUI namespace parity (batch-8-2026-09-30, Group A issues 145/182/147): `no_download` and `no_sfx` checkboxes ride `to_generate_namespace`, and `generate --verbose/--no-color` (plus the TUI sink) ride the finalize namespace — the TUI no longer silently drops what the CLI honors.

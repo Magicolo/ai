@@ -225,6 +225,13 @@ def summarize_prefetch_outcome(events: list[dict[str, Any]]) -> dict[str, float 
     with no prefetch events (never 0/0). Lives beside the emitter (not in
     the CLI) so the aggregation and the event names cannot drift apart;
     the soak report renders the returned mapping as-is.
+
+    Third outcome (issues 136 + 168): `director_prefetch_invalidated`
+    events (ready proposals discarded by amendments or drift-hold) are
+    deliberately NOT counted here — neither hit nor miss — so the rate
+    stays `hit / (hit + miss)` by construction and the return shape stays
+    frozen. Count `invalidated` separately from the raw event stream when
+    the soak report needs the waste signal.
     """
     hits = sum(1 for event in events if event.get("event") == "director_prefetch_hit")
     misses = sum(1 for event in events if event.get("event") == "director_prefetch_miss")
@@ -517,12 +524,14 @@ class Supervisor:
             return str(absolute_path)
 
     def _checked_tape_path(self, tape: str, segment_id: str) -> str:
-        """Validate a worker-reported recovery path (issues 006, 016).
+        """Validate a worker-reported recovery path (issues 006, 016, 171).
 
         Returns the resolved absolute wire path. Anything escaping the run
         dir, pointing at a non-regular file (missing, directory, socket,
-        fifo, …), or hiding behind a symlink fails fast with MediaError
-        instead of burning restart budget on doomed resume/rebuild calls.
+        fifo, …), hiding behind a symlink, or implausibly large (issue 171:
+        legitimate tapes are MBs — a GB-scale `.pt` OOMs `torch.load` and
+        burns the restart budget) fails fast with MediaError instead of
+        burning restart budget on doomed resume/rebuild calls.
         `resolve()` first so `segments/evil.pt -> /etc/passwd` cannot pass
         the lexical gate; `is_file()` (not `exists()`) so directories fail
         here with MediaError instead of IsADirectoryError downstream.
@@ -547,6 +556,19 @@ class Supervisor:
         if not resolved.is_file():
             raise MediaError(
                 f"segment {segment_id}: worker recovery path is not a regular file: {candidate}"
+            )
+        from voyage.workers.video_common import MAX_RECOVERY_TAPE_BYTES
+
+        try:
+            tape_bytes = resolved.stat().st_size
+        except OSError as exc:
+            raise MediaError(
+                f"segment {segment_id}: worker recovery path is unreadable: {candidate}"
+            ) from exc
+        if tape_bytes > MAX_RECOVERY_TAPE_BYTES:
+            raise MediaError(
+                f"segment {segment_id}: worker recovery path has implausible tape size "
+                f"{tape_bytes} bytes (>{MAX_RECOVERY_TAPE_BYTES}): {candidate}"
             )
         return str(resolved)
 
@@ -783,10 +805,10 @@ class Supervisor:
                     )
                     continue
                 try:
-                    empty_tape = resolved_tape.stat().st_size == 0
+                    tape_bytes = resolved_tape.stat().st_size
                 except OSError:
-                    empty_tape = True
-                if empty_tape:
+                    tape_bytes = 0
+                if tape_bytes == 0:
                     # Torn write (crash between torch.save and DONE, issue
                     # 139): a 0-byte tape deserializes nowhere, so skip to
                     # the next-newest tape instead of burning the shared
@@ -800,8 +822,68 @@ class Supervisor:
                         }
                     )
                     continue
+                from voyage.workers.video_common import MAX_RECOVERY_TAPE_BYTES
+
+                if tape_bytes > MAX_RECOVERY_TAPE_BYTES:
+                    # Implausible size (issue 171): a GB-scale `.pt` OOMs
+                    # `torch.load` and burns the restart budget — skip to
+                    # the next-newest tape, metric-visible.
+                    self._log_metric(
+                        {
+                            "event": "recovery_tape_skipped",
+                            "segment_id": segment.name,
+                            "reason": f"implausible size {tape_bytes} bytes",
+                        }
+                    )
+                    continue
+                if not self._tape_tail_sha_matches(segment, resolved_tape):
+                    # Corrupt conditioning tail (issue 123): the taped sha
+                    # no longer matches the tail file — skip to the
+                    # next-newest tape, metric-visible.
+                    self._log_metric(
+                        {
+                            "event": "recovery_tape_skipped",
+                            "segment_id": segment.name,
+                            "reason": "conditioning tail sha mismatch",
+                        }
+                    )
+                    continue
                 return tape
         return None
+
+    @staticmethod
+    def _tape_tail_sha_matches(segment: Path, resolved_tape: Path) -> bool:
+        """Best-effort taped-tail check for one discovery candidate (123).
+
+        JSON tapes (ltxv/causvid) may carry `conditioning_tail_sha256` +
+        `conditioning_tail_path`: recompute and compare, so a truncated
+        tail degrades to an older tape instead of silently anchoring the
+        next segment on garbage. Returns True (adopt) whenever the tape
+        carries no hash, the tail file is absent (the derive path
+        materializes it — absence is not corruption), or the tape is not
+        JSON at all (torch `.pt` longlive tapes, torn JSON — 139/197's
+        territory, never masked here): only a clean parse with both keys
+        present and a present-but-mismatched tail returns False.
+        """
+        try:
+            raw = json.loads(resolved_tape.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        if not isinstance(raw, dict):
+            return True
+        digest = raw.get("conditioning_tail_sha256")
+        raw_path = raw.get("conditioning_tail_path")
+        if not isinstance(digest, str) or not digest or not isinstance(raw_path, str):
+            return True
+        tail_path = Path(raw_path)
+        if not tail_path.is_absolute():
+            tail_path = segment / tail_path
+        if not tail_path.is_file():
+            return True
+        try:
+            return sha256_file(tail_path) == digest
+        except OSError:
+            return True
 
     def _resume_video_worker(self, segment_id: str) -> None:
         """Rebuild video causal context from the latest tape (DESIGN §27.1).
@@ -1036,12 +1118,28 @@ class Supervisor:
         self._prefetch_future = executor.submit(_call)
         self._prefetch_submitted_at = time.monotonic()
 
-    def _take_prefetch(self, number: int, segment_id: str) -> dict[str, Any] | None:
+    def _take_prefetch(
+        self,
+        number: int,
+        segment_id: str,
+        *,
+        invalidated: bool = False,
+        invalidation_reason: str = "",
+    ) -> dict[str, Any] | None:
         """Consume the prefetched raw proposal when it targets this segment.
 
         Hit = future done with a dict result (used as the accept loop's
         first candidate, still fully validated). Anything else is a miss:
         the next commit decides synchronously. Stale targets are dropped.
+
+        `invalidated` is the third outcome (issues 136 + 168): the caller
+        knows the proposal cannot be used — fresh inspect amendments
+        postdate the prefetch payload, or the drift-cadence hold returns
+        before the accept loop — so a ready future logs
+        `director_prefetch_invalidated` (with `reason`) instead of `hit`
+        and is dropped. Without it the soak hit-rate measures "prefetch
+        was ready", not "prefetch was used", diverging exactly when the
+        inspector or the cadence is doing work.
         """
         future, target = self._prefetch_future, self._prefetch_target
         self._prefetch_future = None
@@ -1086,6 +1184,16 @@ class Supervisor:
                 {
                     "event": "director_prefetch_miss",
                     "segment_id": segment_id,
+                    "prefetch_age_ms": prefetch_age_ms,
+                }
+            )
+            return None
+        if invalidated:
+            self._log_metric(
+                {
+                    "event": "director_prefetch_invalidated",
+                    "segment_id": segment_id,
+                    "reason": invalidation_reason or "discarded",
                     "prefetch_age_ms": prefetch_age_ms,
                 }
             )
@@ -1575,10 +1683,15 @@ class Supervisor:
         seed = audio_seed(config.seed, number, len(planner.takes))
         # Beat grid: the take BPM derives from this segment's duration so
         # cuts land on beats (adaptive k: 4 → 8 → 16 … until BPM >= 60).
-        # ACE treats tempo as a hint, so alignment is approximate.
+        # ACE treats tempo as a hint, so alignment is approximate. The grid
+        # opts into the ACE tempo ceiling (issue 120): an over-fine grid
+        # halves toward one beat here, and an impossible one raises naming
+        # `beats_per_segment` — before the ACE load, not as a fatal payload
+        # error after it.
+        from voyage.audio.acestep import MAX_BPM
         from voyage.audio.beat import beats_for_segment
 
-        beats, grid_bpm = beats_for_segment(duration, audio_cfg.beats_per_segment)
+        beats, grid_bpm = beats_for_segment(duration, audio_cfg.beats_per_segment, max_bpm=MAX_BPM)
         take_bpm = int(round(grid_bpm))
         # A clamped-short take (issue 094 below) can leave this segment
         # uncovered — re-plan boundedly so coverage extends with another
@@ -1829,6 +1942,7 @@ class Supervisor:
         drift_hold: bool,
     ) -> dict[str, Any]:
         """Console plan dict: decision + prompts shown before the render."""
+        from voyage.audio.acestep import MAX_BPM
         from voyage.audio.beat import beats_for_segment
 
         planned_frames = video_payload.get("frames", config.video.segment_frames)
@@ -1841,7 +1955,9 @@ class Supervisor:
             config.audio.music_style,
         )
         energy = min(1.0, max(0.0, decision.audio.energy))
-        beats, grid_bpm = beats_for_segment(planned_duration, config.audio.beats_per_segment)
+        beats, grid_bpm = beats_for_segment(
+            planned_duration, config.audio.beats_per_segment, max_bpm=MAX_BPM
+        )
         seeds = video_payload.get("seeds", [video_payload.get("seed", 0)])
         cuts = video_payload.get("scene_cuts", [])
         return {
@@ -1913,15 +2029,25 @@ class Supervisor:
                 config, number, style_spec
             )
         stage_seconds["inspect"] = round(time.monotonic() - inspect_started, 3)
-        # Prefetched raw proposal (computed during the previous segment's
-        # render window). Usable only without fresh inspect amendments —
-        # those postdate the prefetch payload.
-        prefetched_raw = self._take_prefetch(number, segment_id)
-        if amendments:
-            prefetched_raw = None
-        prefetch_hit = prefetched_raw is not None
+        # Both discard conditions are known before consumption (issues
+        # 136 + 168): fresh inspect amendments postdate the prefetch
+        # payload, and the drift-cadence hold returns before the accept
+        # loop — so a ready-but-unusable proposal logs `invalidated`
+        # instead of `hit`, and the soak rate measures use, not readiness.
         drift_every = max(1, config.voyage.drift_every_n_segments)
         drift_hold = number % drift_every != 0
+        invalidation_reasons = [
+            reason
+            for reason, dead in (("amendments", bool(amendments)), ("drift_hold", drift_hold))
+            if dead
+        ]
+        prefetched_raw = self._take_prefetch(
+            number,
+            segment_id,
+            invalidated=bool(invalidation_reasons),
+            invalidation_reason="+".join(invalidation_reasons),
+        )
+        prefetch_hit = prefetched_raw is not None
         director_started = time.monotonic()
         with self._stage("director", config.director.backend):
             decision, director_tokens = self._accept_director_decision(
@@ -2449,9 +2575,12 @@ class Supervisor:
         self._rotate_worker_logs()
         self._gap_ms["rotate_ms"] += (time.monotonic() - rotate_started) * 1000.0
         if self._progress is not None:
+            from voyage.audio.acestep import MAX_BPM
             from voyage.audio.beat import beats_for_segment
 
-            beats, grid_bpm = beats_for_segment(duration, config.audio.beats_per_segment)
+            beats, grid_bpm = beats_for_segment(
+                duration, config.audio.beats_per_segment, max_bpm=MAX_BPM
+            )
             self._progress.segment_done(
                 {
                     "number": number,

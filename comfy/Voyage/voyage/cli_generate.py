@@ -22,9 +22,54 @@ from voyage.cli_planning import (
     _require_cuda_stack,
     segments_for_duration,
 )
-from voyage.config import apply_draft_overrides
+from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml
 from voyage.errors import DiskSpaceError
 from voyage.persistence import read_state
+
+
+def _pre_init_override_gate(args: argparse.Namespace, run_id: str, style: str, seed: int) -> int:
+    """Dry-run the override resolution against the preset config (110).
+
+    Renders the exact TOML `cmd_init` would write and applies the same
+    overrides the post-init path applies — pure, no directory touched.
+    Returns 0 when the overrides resolve, else prints the error and
+    returns 2. Any exception shape here (ValidationError from the model
+    validators, ValueError from unknown presets) maps to exit 2, exactly
+    like the post-init gate it guards.
+    """
+    import tomllib
+
+    try:
+        preset_config = ProjectConfig.model_validate(
+            tomllib.loads(
+                default_config_toml(
+                    run_id,
+                    style,
+                    seed,
+                    video_backend=args.backend,
+                    director_backend=args.director,
+                    director_device=getattr(args, "director_device", None) or "cuda:1",
+                )
+            )
+        )
+        apply_draft_overrides(
+            preset_config,
+            draft=args.draft,
+            director=args.director,
+            director_device=getattr(args, "director_device", None),
+            blocks=args.blocks,
+            take_seconds=args.take_seconds,
+            quantization=args.quantization,
+            beats_per_segment=args.beats_per_segment,
+            drift_every_n_segments=args.drift_every_n,
+            music_caption=getattr(args, "music_caption", None),
+            video_caption=getattr(args, "video_caption", None),
+            **_augment_overrides(args),
+        )
+    except (ValidationError, ValueError) as exc:
+        print(f"error: invalid numeric override: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -57,6 +102,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # (payloads, takes, slices) must be absolute or they double up.
     output = Path(args.output) if args.output else Path("output") / run_id
     run_dir = resolve_run_dir(str(output))
+    # Validate-before-mutate (issue 110): numeric overrides are pure config
+    # math knowable before the first byte is written, so gate them against
+    # the preset-resolved config BEFORE cmd_init. A bad override exits 2
+    # with no orphan run dir for the retry to trip over. Blank styles skip
+    # the gate — cmd_init reports those itself, litter-free since 143/185.
+    style_value = getattr(args, "style", None)
+    seed_value = getattr(args, "seed", None)
+    if (
+        isinstance(style_value, str)
+        and style_value.strip()
+        and isinstance(seed_value, int)
+        and not isinstance(seed_value, bool)
+    ):
+        gate_code = _pre_init_override_gate(args, run_id, style_value, seed_value)
+        if gate_code != 0:
+            return gate_code
     init_args = argparse.Namespace(
         output=str(run_dir),
         run_id=run_id,
@@ -210,6 +271,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
             min_fps=getattr(args, "min_fps", None),
             min_resolution=getattr(args, "min_resolution", None),
             no_augment=bool(getattr(args, "no_augment", False)),
+            # Console context rides both child stages (issue 147): the run
+            # call above already forwards these three, the finalize call
+            # dropped them — so generate --verbose went silent exactly
+            # when the final video assembled.
+            verbose=console.verbose,
+            no_color=getattr(args, "no_color", False),
+            progress_sink=sink,
         )
     )
     if final_code != 0:

@@ -52,3 +52,25 @@ print(Path('output') / _effective_run_id(ns))   # output/boba (right)
 ## Refs
 
 - `voyage/tui.py:971-973` vs `voyage/cli.py:129-134` + `:1249-1255`; `tests/test_generate.py:322-346` (name-wins-over-run-id CLI precedent).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live — divergent
+  namespace resolved to `output/legacy` in the TUI vs `output/boba`
+  via `_effective_run_id`.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_tui_run_dir_for_honors_name_over_run_id`):
+  red (legacy dir returned).
+- Fixed with the one-liner candidate.
+
+## Resolution: FIXED
+
+- `voyage/tui.py:987-995` (`_run_dir_for`): uses
+  `_effective_run_id(args)` (function-level import from
+  `voyage.cli_paths` — stdlib-only, no cycle) instead of
+  `args.run_id`; explicit `--output` still wins. Exactly one function
+  now decides which name wins.
+- Test evidence: divergent `run_id`/`name` resolves to
+  `output/<name>`; explicit output untouched.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

@@ -52,3 +52,29 @@ ns = to_generate_namespace(s)            # ...and only cmd_generate rejects it (
 ## Refs
 
 - Issue 110 (the runtime half: post-init exit 2 + orphan dir); issue 100 (the `nan/inf` precedent — finiteness landed, the domain floor did not); `voyage/config.py:266-271` (`take_seconds`/`ahead_seconds` semantics).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live —
+  `field_errors(GenerateFormState(style='x', name='t', take_seconds='5'))`
+  returned `{}` while the runtime requires `> 20.0`.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_tui_rejects_take_seconds_at_or_below_ahead_window`):
+  red on the `5` and `20` cases.
+- Fixed at field level with the 024 single-source treatment.
+
+## Resolution: FIXED
+
+- `voyage/tui_state.py:236-258` (`field_errors`): after the existing
+  finite/positive checks, `take_seconds` is rejected at or below the
+  resolved floor read from `AudioConfig.model_fields["ahead_seconds"]`
+  `.default` — no restated `20.0` literal; blank stays valid (Unset
+  path untouched). Message names the concrete threshold:
+  `take-seconds must exceed the audio-ahead window (20.0s), got '5'`.
+- Test evidence: pins at/below/above the floor + blank-valid; full
+  `test_cli_group_a.py` 17 passed; `test_tui_state.py`,
+  `test_tui_absent_defaults_023.py` green.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none. (Stored-TOML `[audio] ahead_seconds` tuning affects
+  existing runs only — new runs always render the default, which is
+  what the form validates against.)

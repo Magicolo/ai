@@ -49,6 +49,13 @@ _device = "cuda:0"
 _upstream_cache_dir: Path | None = None
 """Dedicated CWD for upstream ACE-Step relative writes (DESIGN §37, below)."""
 
+_INIT_STR_KEYS = ("models_dir", "device")
+"""`init` fields this worker records (issue 127).
+
+Anything else is a caller typo — reject it before any side effect
+(including the CWD redirect below) instead of booting defaults.
+"""
+
 
 def _redirect_upstream_writes() -> Path:
     """Point CWD at a dedicated tmp dir so upstream relative writes miss the run dir.
@@ -164,6 +171,9 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     library call) so upstream relative writes land in a tmp dir, never in
     the run (see `_redirect_upstream_writes`).
     """
+    unknown = sorted(set(payload) - set(_INIT_STR_KEYS))
+    if unknown:
+        raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(_INIT_STR_KEYS)})")
     _redirect_upstream_writes()
     global _models_dir, _device
     if "models_dir" in payload and not isinstance(payload["models_dir"], str):

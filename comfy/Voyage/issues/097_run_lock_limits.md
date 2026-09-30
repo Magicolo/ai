@@ -89,3 +89,31 @@ Stdlib fact checks (no container needed): `BlockingIOError` subclasses `OSError`
 - Python `fcntl.flock`: https://docs.python.org/3/library/fcntl.html#fcntl.flock ; `errno.EAGAIN` vs `ENOSYS`: https://docs.python.org/3/library/errno.html
 - `BlockingIOError` subclasses `OSError`: https://docs.python.org/3/library/exceptions.html#BlockingIOError
 - DESIGN §31 (atomic writes) + issue 004 (single-writer lock — this function is its implementation).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live against current tree before any fix.
+  Static: `voyage/supervisor.py:437-443` discriminates `errno` (`EWOULDBLOCK`/
+  `EAGAIN` → contention message, everything else re-raised raw); `:475-504`
+  `_read_lock_holder` parses the pid and liveness-checks via `os.kill(pid, 0)`
+  (`ProcessLookupError` → `"unknown"`, `PermissionError` → names the pid,
+  torn/empty/non-numeric/non-positive → `"unknown"`); `:461-473` unlinks the
+  lockfile on clean exit only while it still names this process (pid-guarded,
+  best-effort, never raises). Behavioral probes in `voyage:latest`
+  (`docker run --rm -v $PWD:/app -w /app voyage:latest`, CPU-only):
+  `OSError(ENOSYS)` from stubbed `fcntl.flock` propagates raw
+  (`errno == ENOSYS`, no `FatalWorkerError`, no "locked by pid"); stale pid
+  `42424242` reads back `"unknown"`; lockfile absent after a clean-exit
+  commit. All three legs of this issue are already covered — no code written.
+
+## Resolution
+
+- Verdict: FOLDED into 004. No code, no tests: batch-2's 004 fix
+  (`voyage/supervisor.py:437-473` + `:475-504`) covers leg 1 (EWOULDBLOCK-only
+  contention message, exotic-FS errors propagate raw), leg 2 (liveness-checked
+  holder read — a dead pid reports `"unknown"` instead of naming a phantom),
+  and leg 3 (pid-guarded unlink on clean exit — no stale pid file survives a
+  clean commit). Residual race honestly documented in the 004 code comment
+  (contender arriving between the guard read and `unlink` splits onto a fresh
+  inode — the lock itself stays correct). No DESIGN change (004's §31/§72
+  coverage stands).

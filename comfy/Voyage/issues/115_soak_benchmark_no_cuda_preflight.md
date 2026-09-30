@@ -53,3 +53,31 @@ $ grep -n "_require_cuda_stack\|_warn_if_no_cuda" voyage/cli.py
 ## Refs
 
 - Issue 021 (set membership — the other half); `tests/test_tui_app.py:863-897` (fast-fail test pattern to mirror); `Voyage/scripts/run.sh` (auto-selects the video image for CUDA backends — the mitigation that makes this low rather than medium).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified by source read on the
+  split tree — `cmd_benchmark`/`cmd_soak` (now
+  `voyage/cli_observe.py`) still had zero `_require_cuda_stack` hits.
+- Wrote failing tests first (benchmark-video + soak on an ltxv run
+  with torch stubbed absent and an exploding `Supervisor`): both red
+  (workers started past the missing stack).
+- Fixed with the issue's two-liner at both call sites.
+
+## Resolution: FIXED
+
+- `voyage/cli_observe.py:20` (new top-level `_require_cuda_stack`
+  import — cycle-free: `cli_planning` imports only backends/config),
+  `:180` (`cmd_benchmark` video/audio branch, after `_load_run`) and
+  `:282` (`cmd_soak`, after `_load_run`, before the rule line so a
+  doomed run never prints a healthy-looking header): return 1 with the
+  actionable CUDA message, workers never start.
+- The end-to-end benchmark target stays guard-free by construction
+  (hardcoded `backend="fake"`); `_warn_if_no_cuda` intentionally not
+  added (run-parity is require-only; soak's CUDA-device-no-GPU warning
+  stays a generate/run concern).
+- Test evidence: `test_benchmark_video_fast_fails_without_cuda_stack`
+  + `test_soak_fast_fails_without_cuda_stack` green (exit 1, `CUDA` on
+  stderr, `Supervisor` untouched).
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

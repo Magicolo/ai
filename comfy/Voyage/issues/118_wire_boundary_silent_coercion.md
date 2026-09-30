@@ -62,3 +62,44 @@ print(R.from_payload({**base,'prompt':'hi','seed':1,'profile_stages':'false'}, w
 
 - `Voyage/voyage/workers/video_common.py:81-138`; `Voyage/voyage/workers/loop.py:144-183` (the strict precedent + `validate_benchmark_counts`).
 - Adjacent, not overlapping: 007 (top-level error taxonomy — this is element-level, inside the "validated" struct); 084 (structural collapse proposal — this file is the behavior it would fix); 060 (benchmark counts — validated *values*, not *types*).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`, CPU-only):
+  all six coercion rows reproduced (`('None', '123')`, `(5, 1)`, `(True,
+  False)`, profile `True`, geometry `1`/`512`/`10`). Premise confirmed.
+- TDD: wrote `tests/test_wire_boundary_118.py` first — 12 failed / 1 passed
+  (valid payloads green) before the fix.
+- Fix in `voyage/workers/video_common.py`: new `_strict_element`
+  (TypeVar-typed, `checked_request` discipline: exact type, bools never
+  satisfy int) + `_strict_optional_int` (int-or-None geometry); applied to
+  prompts (`str`), seeds (`int`), scene_cuts/`scene_cut` (`bool`),
+  width/height (int-or-None incl. the backend defaults), `profile_stages`
+  (`bool`). Single-block `scene_cut` now validated instead of `bool()`.
+  `frames`/`prompt_plan_hash` handling deliberately untouched (already
+  bool-guarded / str-checked — minimal diff).
+- Gates (in-container): new tests + `test_generate_blocks_request` +
+  `test_video_common` + `test_backends_adapter` + `test_adapter_contract` +
+  `test_causvid_worker` + `test_ltxv` + `test_longlive` +
+  `test_fake_backends` = 133 passed; `ruff check` + `ruff format --check` +
+  `mypy voyage/workers/video_common.py` clean. (Host LSP `T|bool` complaint
+  on the return was a false positive — container mypy strict passes.)
+
+## Resolution
+
+- Verdict: FIXED at the `GenerateBlocksRequest.from_payload` layer. Files
+  changed: `voyage/workers/video_common.py` (strict helpers + 6 call-site
+  swaps), `tests/test_wire_boundary_118.py` (new: 12 rejection pins + valid
+  multi/single payloads).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §82 (or the
+  §45 worker-boundary contract), add: "Worker/RPC boundaries validate wire
+  types exactly (`checked_request` discipline: presence plus exact type,
+  bools never satisfy int) and raise `TypeError` before any coercion —
+  `None`, numeric strings, truncated floats and `"false"` strings never
+  execute with invented values."
+- Residuals (other files, not touched per scope): per-worker scalar
+  benchmark knobs (`warmup`/`measured` via bare `int(...)` in `video.py`,
+  `audio.py`, `sfx.py`, `director.py`, `audio_acestep.py`, `sfx_mmaudio.py`,
+  `video_ltxv.py`, `video_causvid.py`, `video_longlive.py`) still coerce —
+  route them through strict int validation (candidate 4, natural home is
+  084's `_validators.py`).

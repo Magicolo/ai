@@ -105,3 +105,32 @@ $ sed -n '817,825p' voyage/cli.py
 - 2026-09-30: filed by Track A sweep; live re-verified via Read (concurrent uncommitted edits
   noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py` — citations are
   as-read values above).
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified premise — `voyage/supervisor.py:1782-1817`
+  still extracts `prev_dir / "inspect_frame.png"` (`:1787`) with no cleanup,
+  no sha registration, and no tmp-dir staging; the `visual` merge now goes
+  through the segment manifest (`update_manifest_metrics`, `:1758-1764`, a
+  concurrent migration) but the PNG path is untouched by it. Verdict:
+  CONFIRMED, but NOT ownable — the fix (extract to `logs/inspect/` or tmp,
+  or delete-after-read) lives entirely in `voyage/supervisor.py`, outside
+  this group's file scope. No media/augment-owned half exists
+  (`_verify_segment` flagging the PNG would convert a hygiene gap into a
+  validation failure on every inspected run — the wrong direction). Per
+  contract, logged as residual; no code changed.
+
+## Resolution
+
+- Residual for the `supervisor.py` owner — preferred fix per the issue's
+  candidate 1: extract to `logs/inspect/<segment>.png` (or a
+  `TemporaryDirectory` passed into `_inspect_frame_view`) and log the path
+  in the `segment_inspected` metric; else candidate 2 (delete-after-read).
+  Coordinate with the 098 owner: whichever location is chosen must be
+  covered by (or explicitly excluded from) the orphan scan, or the next
+  strict scan flags every inspected segment.
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> The visual inspector never writes inside committed segment dirs: the
+  > single-frame VLM view goes to `logs/inspect/<segment>.png` (or a temp
+  > dir), so segment dirs stay exactly the checksummed artifacts."
+- Files changed: this issue file only (log appended; original above intact).

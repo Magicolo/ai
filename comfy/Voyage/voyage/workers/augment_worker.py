@@ -1,4 +1,4 @@
-"""GPU augment runner: Real-ESRGAN upscale + FILM interpolate (Track D spike).
+"""GPU augment runner: Real-ESRGAN upscale + FILM interpolate (Track D spike, DESIGN §§56-57).
 
 QUARANTINE (issue 083): this module is a spike stand-in, not the shipped
 augment path — `FilmNetMini` cannot load official `film_net` weights
@@ -166,16 +166,35 @@ def inference_precision(device_name: str) -> str:
     return "fp16" if device_name.startswith("cuda") else "fp32"
 
 
+_DEVICE_FALLBACK_WARNED = False
+"""Whether the CPU-fallback line below already fired (warn once, not per chunk)."""
+
+
 def _resolve_device(preferred: str) -> Any:
     """torch.device for `preferred`, falling back to CPU when CUDA is unavailable.
 
     Why fallback instead of fail-loud: the spike stays end-to-end runnable
     on CPU-only boxes (slow but exact); callers that need the GPU gate on
     `augment_devices` / nvidia-smi instead.
+
+    The fallback warns once per process on stderr (issue 193): plan dumps
+    stamp `cuda:0`/`cuda:1` while execution silently lands on CPU, and
+    without a line anywhere the stall mis-triages as "model slow" instead
+    of "torch without CUDA".
     """
+    import sys
+
     import torch
 
     if preferred.startswith("cuda") and not torch.cuda.is_available():
+        global _DEVICE_FALLBACK_WARNED
+        if not _DEVICE_FALLBACK_WARNED:
+            _DEVICE_FALLBACK_WARNED = True
+            print(
+                f"augment_worker: {preferred} requested but CUDA is unavailable — "
+                "running on CPU (slow; gate on `augment_devices` for GPU work)",
+                file=sys.stderr,
+            )
         return torch.device("cpu")
     return torch.device(preferred)
 
@@ -511,8 +530,10 @@ def _run_stacked(forward: Callable[[Any], Any], stacked: Any) -> list[Any]:
         if "out of memory" not in str(exc).lower() or int(stacked.shape[0]) <= 1:
             raise
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Unconditional (issue 157): `empty_cache` is a no-op without
+        # CUDA, so the old `is_available` guard bought nothing and
+        # skipped relief on CPU-OOM recursion.
+        torch.cuda.empty_cache()
         half = int(stacked.shape[0]) // 2
         return [
             *_run_stacked(forward, stacked[0:half]),
@@ -551,8 +572,9 @@ def _run_frame_batches(
         if "out of memory" not in str(exc).lower():
             raise
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Unconditional (issue 157): same no-op-without-CUDA rationale
+        # as `_run_stacked` above — never skip relief on the split path.
+        torch.cuda.empty_cache()
         half = len(frame_tensors) // 2
         return [
             *_run_frame_batches(forward, frame_tensors[:half], torch_device, dtype),

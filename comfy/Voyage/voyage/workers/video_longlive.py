@@ -1,4 +1,4 @@
-"""LongLive 2.0 video worker: `python -m voyage.workers.video_longlive`.
+"""LongLive 2.0 video worker: `python -m voyage.workers.video_longlive` (DESIGN §§5.2/22/27).
 
 Runs ONLY in the CUDA worker image (`worker/Dockerfile.video`): Python 3.10,
 torch 2.8/cu128, LongLive@6b36d20, flash-attn 2 (mandatory — upstream
@@ -127,6 +127,24 @@ def apply_scene_cut_prefix(prompt: str, scene_cut: bool) -> str:
     if scene_cut and not prompt.startswith(SCENE_CUT_PREFIX):
         return SCENE_CUT_PREFIX + prompt
     return prompt
+
+
+def clamp_to_uint8(scaled: Any, uint8_dtype: Any) -> Any:
+    """Saturate a float ~[0, 255] CPU tensor to uint8 (issue 125).
+
+    VAE decoders overshoot [0, 1] on highlights, so the scaled values
+    overshoot 255 — and a bare CPU `.to(uint8)` wraps modulo 256
+    (1.01 × 255 = 257.55 → ~1, near-black). Clamp first so highlights
+    saturate, matching the ltxv (`video_common.clip_array_to_uint8`)
+    and causvid (`np.clip`) write paths. The dtype rides in as a
+    parameter (callers pass their torch handle's `uint8`, never a module
+    import), and tensors without `clamp_` (slim-image test doubles
+    carrying in-range values) convert directly.
+    """
+    clamp = getattr(scaled, "clamp_", None)
+    if clamp is not None:
+        clamp(0, 255)
+    return scaled.to(uint8_dtype)
 
 
 _STAGE_NAMES: tuple[str, ...] = (
@@ -988,8 +1006,9 @@ class LongLiveSession:
                         generated = pipe.vae.decode_to_pixel_chunk(
                             chunk, use_cache=False, chunk_size=int(chunk.shape[1])
                         )
-                    video_chunk = (255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu()).to(
-                        torch.uint8
+                    video_chunk = clamp_to_uint8(
+                        255.0 * rearrange(generated, "b t c h w -> b t h w c").cpu(),
+                        torch.uint8,
                     )
                     pipe.vae.model.clear_cache()
                     del generated
@@ -1085,8 +1104,8 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
         }
     )
     _SESSION = _build_session()
-    name = torch.cuda.get_device_name(0)
-    free_gib, total_gib = torch.cuda.mem_get_info()
+    name = torch.cuda.get_device_name(device)
+    free_gib, total_gib = torch.cuda.mem_get_info(device)
     return {
         "status": "READY",
         "backend": profile,
@@ -1102,7 +1121,8 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     ready = _SESSION is not None
     info: dict[str, Any] = {"status": "READY" if ready else "IDLE"}
     if torch.cuda.is_available():
-        free_gib, total_gib = torch.cuda.mem_get_info()
+        device = str(_INIT_PARAMS.get("device", "cuda:0"))
+        free_gib, total_gib = torch.cuda.mem_get_info(device)
         info["vram_free_gib"] = round(free_gib / 1024**3, 1)
         info["vram_total_gib"] = round(total_gib / 1024**3, 1)
     return info
@@ -1180,13 +1200,15 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(stages, dict):
                 stage_splits.append({str(name): float(value) for name, value in stages.items()})
 
+    benchmark_device = video_common.cuda_device_index(str(_INIT_PARAMS.get("device", "cuda:0")))
+    device_arg = video_common.torch_device_arg(benchmark_device)
     outcome = video_common.run_benchmark_harness(
         warmup,
         measured,
         "voyage-bench-",
         probe,
-        reset_peak_memory=torch.cuda.reset_peak_memory_stats,
-        read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+        reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
+        read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
     )
     walls = outcome.wall_seconds
     peaks = outcome.peak_gib

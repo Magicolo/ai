@@ -4,7 +4,7 @@ Fake backend behind the same `generate_sfx` contract as the real
 MMAudio worker (`sfx_mmaudio`): renders deterministic seeded noise so
 the finalize-time windowing/sharding/mix path is genuine with no GPU,
 no weights, no network. No `torch` import at module scope or lazily —
-the hard GPU ban (§12) holds trivially here.
+the hard GPU ban (DESIGN §12) holds trivially here.
 """
 
 from __future__ import annotations

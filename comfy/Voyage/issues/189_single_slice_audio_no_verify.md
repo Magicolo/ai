@@ -75,8 +75,43 @@ without raising; feed it as a single-slice window through `build_final_audio` �
 - In-tree: `voyage/media.py:160-198,228-312,598-600`; `voyage/augment.py:169-174,
   211-212` (precedent); `voyage/media.py:441-446` (`_audio_duration_seconds`,
   where the failure lands today).
-- Not-a-duplicate: 102 is concat quoting/RAM/preflight-fs (staging location,
+ - Not-a-duplicate: 102 is concat quoting/RAM/preflight-fs (staging location,
   not per-slice verification); 043 is whole-file RAM at publish; 095 is
   fade-absorption length compensation (multi-slice correctness, not single-slice
   verification); 050 is video double-encode. None names the single-slice
   verification gap.
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified all three legs — `slice_take`
+  (`voyage/media.py:238-272` as-read) returned `dest` on exit-0 with no
+  check; `assemble_segment_audio` single-slice copy (`:327-342`) likewise;
+  `build_final_audio` single-slice `replace` (`:696-697`) likewise. No
+  concurrent hunks in these regions. Verdict: CONFIRMED, ownable in
+  `voyage/media.py`.
+- TDD: `tests/test_e1_media_augment.py` 189 section written first — both
+  empty-exit-0 tests failed pre-fix (empty path returned silently), the
+  positive control passed pre/post; all green post-fix.
+
+## Resolution
+
+- Fixed at the narrowest primitive + one defense-in-depth layer
+  (issue candidates 1 + 2): `slice_take` rejects a missing/zero-byte
+  `dest` after exit-0 with `MediaError` naming take/start/duration
+  (`voyage/media.py:293-297`, mirroring `ffmpeg_encode_chunk`'s
+  `produced empty output` wording); the `assemble_segment_audio`
+  single-slice branch rejects an empty copy output (`:367-368`). Leg 3
+  (`build_final_audio` single-slice `replace`) is covered by construction:
+  every slice in that window comes from `_cached_slice_take` → `slice_take`
+  (now verified) or a copy of a verified slice — a `replace` cannot empty
+  a file, so no third check was added (documented here instead of probed
+  redundantly per window).
+- Files changed: `voyage/media.py` only (+ new tests in
+  `tests/test_e1_media_augment.py`). Per-file gates green in-container
+  (see 096 log for the full gate + neighbor list).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Every audio fast path verifies its output: `slice_take` and the
+  > single-slice assembly copy reject empty outputs at creation, so a
+  > degenerate slice fails at slice time — never three call levels up in
+  > `_blend_pair` under a `final_blend_NN.wav` temp name."
+- Residuals: none.

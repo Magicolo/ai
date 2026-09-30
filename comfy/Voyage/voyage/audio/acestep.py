@@ -30,6 +30,14 @@ PLANNER_MODEL = "acestep-5Hz-lm-0.6B"
 PROJECT_SUBDIR = "acestep"
 MIN_DURATION_SECONDS = 1.0
 """ACE-Step rejects anything below 1.0s (the floor zoomy hit in §10)."""
+MAX_TAKE_SECONDS = 120.0
+"""Render ceiling (issue 155): takes are 30-60 s by design, so anything
+past 2x the largest legitimate take is a caller bug (misplaced
+milliseconds, swapped args, benchmark typo) — fail it in validation,
+not after minutes of DiT render. Mirrors the SFX sibling's
+`MAX_WINDOW_SECONDS` bound (same physical quantity, same fail-fast
+doctrine); the ACE ceiling is wider because takes (not windows) are
+the unit here."""
 VALID_TASK_TYPES = ("text2music", "repaint")
 """ACE-Step generation modes used by the voyage (fresh take vs continuation)."""
 MIN_BPM = 1
@@ -44,14 +52,23 @@ def validate_bpm(bpm: int | None) -> None:
 
 
 def validate_duration_seconds(duration_seconds: float) -> None:
-    """Reject non-positive/non-finite durations (issue 063).
+    """Reject non-positive/non-finite/absurd durations (issues 063, 155).
 
     Positive-but-short values still hit the ACE 1.0 s floor in
     `render_take` (an upstream requirement, not a silent coercion);
-    zero/negative/NaN/inf are caller bugs and fail here instead.
+    zero/negative/NaN/inf are caller bugs and fail here instead — as
+    are takes past `MAX_TAKE_SECONDS`, which would otherwise die deep
+    in GPU/ffmpeg after minutes of render.
     """
-    if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
-        raise ValueError(f"duration_seconds must be finite and > 0 (got {duration_seconds})")
+    if (
+        not math.isfinite(duration_seconds)
+        or duration_seconds <= 0.0
+        or duration_seconds > MAX_TAKE_SECONDS
+    ):
+        raise ValueError(
+            f"duration_seconds must be finite within (0, {MAX_TAKE_SECONDS}] "
+            f"(got {duration_seconds})"
+        )
 
 
 def validate_task_type(task_type: str) -> None:

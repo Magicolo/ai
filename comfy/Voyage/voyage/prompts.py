@@ -125,6 +125,16 @@ def feedback_amendments(measured: dict[str, float], style: StyleSpec) -> list[st
         and similarity < style.style_similarity_min
     ):
         amendments.append("strictly in the charter style, signature palette and linework")
+    palette = measured.get("palette_distance")
+    if palette is not None and math.isfinite(palette) and palette > style.palette_distance_max:
+        amendments.append("muted restrained palette, no blown highlights")
+    boundary = measured.get("scene_boundary_strength")
+    if (
+        boundary is not None
+        and math.isfinite(boundary)
+        and boundary > style.scene_boundary_strength_max
+    ):
+        amendments.append("single continuous shot, no cuts")
     return amendments
 
 

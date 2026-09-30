@@ -64,3 +64,31 @@ print(ns.no_sfx, ns.sfx_backend, ns.sfx_workers)  # False None 1 — user cannot
 
 - `voyage/tui_state.py:89-115,302-309`; `voyage/cli.py:1773-1811` (six flags), `:1015-1036` (finalize gate the TUI always takes).
 - Not-a-duplicate: 145 (`--no-download` absent — different flag, same parity class; coordinate the help text); 022 (caption pins silently dropped between generate→run — different handoff, music/video family); 154/163 (benchmark/soak SFX axes — harness, not TUI); 158 (two-worker cuda:1 hardcode — worker placement, not form surface).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live — 18-field form,
+  six hardcoded SFX namespace lines, no field/help/reader.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_tui_namespace_carries_sfx_opt_out`):
+  red (`TypeError: unexpected keyword argument 'no_sfx'`).
+- Fixed with minimum candidate 1 (explicit `no_sfx` checkbox +
+  pass-through), jointly with 145's checkbox.
+
+## Resolution: FIXED (minimum scope)
+
+- `voyage/tui_state.py`: new `GenerateFormState.no_sfx` (default
+  `False`), `FIELD_HELP["no_sfx"]` (names that backend/device/model
+  overrides stay CLI-only), save/load round-trip, namespace
+  pass-through replacing the hardcoded `no_sfx=False`.
+- `voyage/tui.py`: new `flag-no-sfx` checkbox (`Skip the
+  finalize-time SFX pass`) wired in `_form_fields` + `_read_form`.
+- The full six-field SFX section (candidate 2) is deliberately NOT
+  built: the missing opt-out was the load-bearing gap (metered/GPU-poor
+  boxes); overrides remain CLI-only and the help text says so.
+- Test evidence: default-False + True-passthrough pinned; seam test
+  updated (7 flags, count 25).
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: full SFX override fields (backend/caption/device/
+  model-size/workers) as a future TUI section — logged here, not
+  built (YAGNI: no request yet, CLI covers it).

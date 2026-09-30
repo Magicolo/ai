@@ -57,3 +57,31 @@ time_to_first_output([])    # IndexError
 ## Refs
 
 - `Voyage/tests/test_qualification.py:51-63` (REQUIRED_GPU_FIELDS), `:122-164` (`summarize_run`), `:200-242` (existing math/dry-run tests); `Voyage/scripts/qualify.sh:29`; `Voyage/issues/060_*`, `064_*`, `105_*` (adjacent harness issues, disjoint lines).
+
+## Progress log (2026-09-30, Group D pass)
+
+- TDD red first (in-container): 4 new tests failed as filed —
+  `steady_state_mean([20.0])` ZeroDivisionError, `time_to_first_output([])`
+  IndexError, `seconds_per_wall_second(48, 24, 0.0)` ZeroDivisionError,
+  single-segment `summarize_run` ZeroDivisionError at `boundary_mean`.
+  (Found in red phase: `steady_state_ratio([])` crashed on its own `[0]`
+  read before the mean's guard — guarded at its top too.)
+- Guards landed: empty input → `ValueError("no segments…")` on all three
+  helpers; single-sample mean returns the sample (ratio then 1.0);
+  `wall_seconds <= 0` → `ValueError`; `summarize_run` reports
+  `within_mean`/`boundary_mean`/`boundary_ratio` None with verdict
+  `"N/A (single segment)"` (< 2 segments) or `"N/A (no frame pairs)"`
+  (degenerate sampling); docstring documents the contracts next to the
+  existing `FileNotFoundError` note.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Resolved: smoke-leg (1-segment) and zero-commit runs report instead of
+  crashing.
+- Files changed: `tests/test_qualification.py` (4 new tests + 4 guards +
+  docstring). Gate evidence: file 14/14 in-container (incl. a 1-segment
+  fake-backend summarize); `ruff check` + `ruff format --check` clean;
+  ad-hoc `mypy` clean on all new hunks (5 remaining errors are
+  pre-existing numpy-`Any` alias complaints on untouched lines — file is
+  outside the `gates.sh` mypy list). DESIGN proposals: none (harness-only).
+  Residuals: none.

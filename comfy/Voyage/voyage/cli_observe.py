@@ -17,6 +17,7 @@ from pathlib import Path
 from voyage import paths
 from voyage.cli_core import _load_run, get_console
 from voyage.cli_paths import _run_dir_arg
+from voyage.cli_planning import _require_cuda_stack
 from voyage.cli_status import _read_all_metric_events
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
@@ -173,6 +174,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             return 2
         run_dir = _run_dir_arg(args.run)
         config, _digest = _load_run(run_dir)
+        # Same fast-fail run/generate gate (issue 115): a CUDA backend
+        # without torch dies late at worker init otherwise — for soak,
+        # after the rule header, looking healthy until the first crash.
+        if not _require_cuda_stack(config):
+            return 1
         worker_name = target
         setup: dict[str, object] = {
             "backend": (config.video.backend if target == "video" else config.audio.backend),
@@ -271,6 +277,10 @@ def cmd_soak(args: argparse.Namespace) -> int:
         )
         return 2
     config, _digest = _load_run(run_dir)
+    # Same fast-fail run/generate gate (issue 115): checked before the
+    # rule line so a doomed run never prints a healthy-looking header.
+    if not _require_cuda_stack(config):
+        return 1
     console = get_console(args)
     console.rule(f"voyage soak · {segments} segments")
     committed = Supervisor(run_dir, config, progress=RichSegmentProgress(console)).run_segments(

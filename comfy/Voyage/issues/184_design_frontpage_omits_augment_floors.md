@@ -59,3 +59,30 @@ rg -n "min_fps|Min fps" Voyage/voyage/tui_state.py | head -8
 
 - `Voyage/DESIGN.md:6865` vs `voyage/tui.py:638-657,84-98` + `voyage/tui_state.py:83-85,112-113,226-243`.
 - Not-a-duplicate: 133 (17 claims incl. TUI `min_fps` help/validation as VERIFIED-HOLD — inventory prose never checked); 135 (§5.3 geometry addendum — different section); 042 (README geometry vs floors — different doc); 159/160 (BACKENDS/OPERATIONS tables — different files).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live (DESIGN.md not owned — verify-only, proposal
+  below as quoted text). Live numbers drifted from the filing: the
+  inventory sentence is now at `DESIGN.md:7136` ("... Blocks, Take
+  seconds, Beats, Drift, Seed, 5 checkboxes; run-id + output + ...");
+  the two live rows are at `voyage/tui.py:638-657` (`Min fps` with
+  `FIELD_HELP["min_fps"]`, `Min resolution` with
+  `FIELD_HELP["min_resolution"]`), state defaults at
+  `tui_state.py:112-113` (`"32"`/`"1280x720"`). Omission confirmed.
+- Adjacent fix in owned docs: the same omission existed in
+  `docs/OPERATIONS.md:96` (form-fields list) — amended to "Blocks, Take
+  seconds, Beats, Drift, Min fps, Min resolution, Seed ..." with the
+  floor defaults noted.
+- Files changed: `docs/OPERATIONS.md` (DESIGN.md untouched).
+
+## Resolution
+
+- OPERATIONS form-field list fixed. Proposed DESIGN text for the owner:
+  "Amend the `:7136` inventory clause to '... Beats, Drift, Min fps, Min
+  resolution, Seed, 5 checkboxes ...' with a dated note (augment-floor
+  slice added the two rows after this entry). Optionally point at
+  `FIELD_WIDGET_IDS` (`tui.py:84-98`) as the live inventory single
+  source."
+- Residual: none in this file's scope (no test change — row-count tests
+  already enumerate the live form).

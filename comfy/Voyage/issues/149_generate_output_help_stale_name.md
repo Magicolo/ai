@@ -49,3 +49,26 @@ docker run --rm -v "$PWD/Voyage:/app" -w /app voyage:latest \
 ## Refs
 
 - `voyage/cli.py:1893-1899`; `voyage/cli.py:129-134` (`_effective_run_id`); `tests/test_generate.py:296-395`.
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live — help still read
+  `default output/<run-id>` (now `voyage/cli.py:528`) while routing,
+  TUI help, and tests all speak `<name>`.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_generate_output_help_names_name_default`):
+  red on the top-level help (subcommand help needed — first version of
+  the test asserted on the wrong help surface, fixed to
+  `generate --help`).
+- Fixed with the one-word candidate (legacy alias stays documented on
+  the `--run-id`/`--name` flags themselves).
+
+## Resolution: FIXED
+
+- `voyage/cli.py:528`: `help="run directory (default output/<name>)"`.
+  `init --output` (required, no default) and `run --run` wording
+  untouched, as specified.
+- Test evidence: `generate --help` output pins the new spelling
+  alongside the existing routing tests.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from voyage.atomic import atomic_write_json, fsync_dir
+from voyage.atomic import JsonValue, atomic_write_json, fsync_dir
 from voyage.config import ProjectConfig
 
 if TYPE_CHECKING:
@@ -151,11 +151,14 @@ def required_specs(
     return required
 
 
-def _read_manifest_keys(models_dir: Path) -> dict[str, Any] | None:
+def _read_manifest_keys(models_dir: Path) -> dict[str, JsonValue] | None:
     """Manifest mapping, `{}` when absent, `None` when torn (never overwrite).
 
     A torn file is `validate_run`'s territory (it recomputes checksums and
     reports); the repair must not blindly replace bytes it cannot parse.
+    Values are `JsonValue`-typed (issue 035): the manifest is JSON-shaped
+    by construction, so the repair's merge targets stay inside the typed
+    boundary instead of bare `Any`.
     """
     manifest_path = models_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -164,7 +167,9 @@ def _read_manifest_keys(models_dir: Path) -> dict[str, Any] | None:
         raw: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return raw if isinstance(raw, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    return {str(key): value for key, value in raw.items()}
 
 
 def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:

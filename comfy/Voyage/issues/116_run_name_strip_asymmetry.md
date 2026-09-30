@@ -46,3 +46,29 @@ print(repr(to_generate_namespace(GenerateFormState(style='x', name=' foo ')).nam
 ## Refs
 
 - Issue 008 (traversal guard — the check this asymmetry sits inside); issue 023 (TUI/CLI absent-vs-default parity — same family of "two surfaces, two behaviors" findings).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live —
+  `_effective_run_id(name=' foo ')` → `' foo '` while the TUI produced
+  `'foo'`.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_effective_run_id_strips_padding_on_both_surfaces`):
+  red on the CLI side.
+- Fixed with the one-line candidate, plus missing-attribute tolerance.
+
+## Resolution: FIXED
+
+- `voyage/cli_paths.py:70-84` (`_effective_run_id`): strips the winning
+  value, so check (`is_flat_folder_name`, which strips), use, and TUI
+  all agree — `" boba "` lands in `output/boba/` on both surfaces.
+  Also tolerates a missing `run_id` attribute (returns `""` so
+  `_check_run_id` reports exit 2 instead of `AttributeError` — half of
+  185's missing-attribute class closed here).
+- Pre-existing chartered `" foo "` runs resolve post-fix to `foo`:
+  accepted one-way rename, documented here (no migration — padded
+  charters were never reachable from the TUI).
+- Test evidence: CLI+TUI parity pinned in the new test;
+  `test_generate_name_*` routing tests still green.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

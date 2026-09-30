@@ -93,3 +93,32 @@ Static (deterministic): set `drift_every_n_segments=2`, arrange a ready prefetch
 ## Investigation log
 
 - 2026-09-30: filed by the 168-177 tails sweep; re-verified live via Read/Grep (concurrent uncommitted edits noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`, `voyage/config.py`, `voyage/persistence.py`, `voyage/rpc.py`, `voyage/supervisor.py` — citations are as-read values above).
+
+## Progress log (Group B resolution, 2026-09-30)
+
+- Re-verified live first (host reads + `voyage:latest` probes): hit log at
+  consumption, hold return before any `prefetched_raw` reference, local
+  `prefetch_hit=True` on held segments while the accept loop never ran.
+  Premise confirmed. Resolved together with 136 via one shared
+  implementation (candidate 1: fold drift into the same third-outcome fix).
+- TDD: `tests/test_prefetch_invalidated_136_168.py` — 3 failed / 1 passed
+  pre-fix; the drift-hold e2e (`drift_every_n_segments=2`, segment 000001
+  hold with ready prefetch) went hit → invalidated.
+- Fix: identical shared code as 136 (see that file's log): `_take_prefetch`
+  `invalidated` third outcome + `_propose_segment` computing `drift_hold`
+  BEFORE consumption and passing `reason="drift_hold"` (or
+  `"amendments+drift_hold"` when both fire). Consuming-while-invalidated
+  also clears the stale future explicitly — a skipped future would target
+  the wrong segment next commit anyway.
+- Gates shared with 136 (in-container): 31 passed; `ruff check` + `ruff
+  format --check` + `mypy voyage/supervisor.py` clean.
+
+## Resolution
+
+- Verdict: FIXED, shared with 136. Files changed: `voyage/supervisor.py`
+  (same hunks as 136), `tests/test_prefetch_invalidated_136_168.py`
+  (dedicated drift-hold e2e).
+- DESIGN proposal: same §20/§140 text as 136's (covers both discard
+  conditions — no separate wording needed).
+- Residuals: none beyond 136's (summarize-shape extension needs the
+  summary-test owner's sign-off).

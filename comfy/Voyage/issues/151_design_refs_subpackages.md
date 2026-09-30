@@ -182,3 +182,42 @@ for f in voyage/*.py voyage/workers/*.py voyage/audio/*.py; do head -n 15 "$f" |
 - Issue 037 (top-level DESIGN-refs sweep — same rule, narrower glob)
 - AGENTS.md §12 ("every module docstring states purpose + DESIGN § ref")
 - Preserved track result: `ses_f0fbea3bbffe0HlTFo2fwHJi5B`, TRACK C NEW FINDING 2.
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: 1 of 6 already fixed (`video_common.py:14` now carries
+  "DESIGN §§5.3-5.4" — concurrent agent); 5 remaining confirmed live
+  (headers re-read 2026-09-30, `grep -c DESIGN` on first 15 lines = 0).
+- Fixes (docstring one-liners only, DESIGN sections traced live):
+  - `augment_worker.py:1` → "(Track D spike, DESIGN §§56-57)" (mirrors
+    `voyage/augment.py:3`, the shipped orchestration's own ref).
+  - `sfx.py:8` → "(DESIGN §12)" (bare `§12` normalized; GPU-ban section).
+  - `sfx_mmaudio.py:7,10` → "(DESIGN §104)" + "(DESIGN §12)" (bare refs
+    normalized; matches the body's own "DESIGN §40" residency cites).
+  - `video_longlive.py:1` → "(DESIGN §§5.2/22/27)" (backend spec §5.2 +
+    the body's six cites: §22 stream session, §27/§27.1 rebuild, §140
+    VRAM note).
+  - `audio/planner.py:1` → "(DESIGN §§35/40)" (prefix added, numbers kept;
+    matches sibling `beat.py` §35 + `acestep.py` §37 family).
+  - Fold-in (same class, batch-7 files postdating this issue):
+    `workers/_resident.py:1` → "(issue 084, DESIGN §40)" (resident-stack
+    sequential residency, matches `sfx_mmaudio.py:133`); 
+    `workers/_validators.py:1` → "(issue 084, DESIGN §§45-46)" (backs
+    `checked_request`/`validate_*`, mirroring `loop.py:5-6`).
+- Verified non-targets left alone: `loop.py` (007 = error taxonomy,
+  MATCHES), `_resident`/`_validators` (084 = triplicated validators,
+  MATCHES), `augment_worker.py:3` (083 = media/augment split, MATCHES),
+  `sfx_mmaudio.py:42` (084, MATCHES), `planner.py:49` (016 path guard,
+  plausible MATCH).
+- Files changed: 7 headers (no body lines touched).
+- Gates: `ruff check` + `ruff format --check` + `mypy` clean on all 8
+  files (in-container `voyage:latest`); extended sweep
+  `for f in voyage/*.py voyage/workers/*.py voyage/audio/*.py; do head -n
+  15 "$f" | grep -q DESIGN || echo "$f"; done` now reports zero
+  header misses.
+
+## Resolution
+
+- Done. Extended sweep reports zero header misses across
+  `voyage/*.py` + `voyage/workers/*.py` + `voyage/audio/*.py`
+  (`video_ltxv.py:10` carries DESIGN §5.3 — verified, no residual).

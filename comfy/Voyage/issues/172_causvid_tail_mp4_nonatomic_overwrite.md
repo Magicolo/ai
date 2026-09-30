@@ -73,8 +73,20 @@ Static (deterministic): read `:808-811` — no temp sibling between the encode a
 
 - In-tree: `voyage/workers/video_causvid.py:701-738` (the silent consumer of the torn file), `:808-832`; `voyage/workers/video_ltxv.py:633-683`; `voyage/workers/video_common.py:239-267` (`write_tape_atomic` + `save_mp4` side by side — the atomicity gap is visible in one screen); DESIGN §5.4 (tail anchor + documented-approximation resume).
 - Neighbor issues — not a duplicate of 122 (JSON *tape* durability — this file is the `.mp4` *anchor* the tape checksums), 129 (longlive `.pt` non-atomicity — different backend, different file), 134 (the silent *consumer* of the torn anchor — this file is the *producer* that tears it; 134 stays valid if anchors never tear, and vice versa), 101 (ledger/metrics append durability — never mentions anchors).
-- External: same atomic-save rationale 129 cites (write-to-temp then rename so a crash never leaves a half-written file); `os.replace` atomicity: https://docs.python.org/3/library/os.html#os.replace
+ - External: same atomic-save rationale 129 cites (write-to-temp then rename so a crash never leaves a half-written file); `os.replace` atomicity: https://docs.python.org/3/library/os.html#os.replace
 
 ## Investigation log
 
 - 2026-09-30: filed by the 168-177 tails sweep; re-verified live via Read/Grep (concurrent uncommitted edits noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`, `voyage/config.py`, `voyage/persistence.py`, `voyage/rpc.py`, `voyage/supervisor.py` — citations are as-read values above).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first against the CURRENT tree. Premise REFUTED as-written: the cited producer site no longer exists — run-file pruning (committed `34c0a29`, "12 files/segment to 5") removed the generate-time `video_tail.mp4` write from `CausvidSession.generate_blocks` (live `voyage/workers/video_causvid.py:~820-843`: `_save_mp4(video_frames, output_path)` then tape-only; the `tail_window`/`_save_mp4(tail)`/`sha256` lines are gone) and from ltxv (chain tails unlinked after commit). The new anchor path — `video_common.derive_tail_from_segment_video` (tmp sibling + `replace`, `:418-443`) + `ensure_conditioning_tail` adoption — is atomic-rename by construction, so a crash leaves the previous anchor or an orphan temp, never a torn live anchor. The start-latents consumer (`_materialize_resume_start`) and 134's silent-fallback analysis are unchanged in shape but no longer fed by an in-place streaming encode.
+
+## Resolution
+
+- Verdict: RESIDUAL / CLOSED-BY-CONCURRENT-WORK — no code touched (the fix this file proposes is already the tree's behavior via pruning, in a stronger form: no anchor write at all at generate time).
+- Files changed: none (this issue file only).
+- Test evidence: live reads 2026-09-30 (cites above) + `git log --oneline` showing `34c0a29` as HEAD; no test added — there is no producer site left to fault-inject.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§5.3-5.4): "Run-file pruning removed the generate-time tail-anchor write: the tape records the would-be `video_tail.mp4` path and resume derives it on demand from the sibling segment video (atomic tmp+rename), so the torn-anchor window this file described no longer exists."
+- Residuals (follow-up pointer, not widened here): the derive path's `dest_tmp.replace(dest_tail)` carries no fsync (file or dir) — the 122-class remainder for the pruning owner, one `fsync_dir` from the contract 122 just landed in `write_tape_atomic`.

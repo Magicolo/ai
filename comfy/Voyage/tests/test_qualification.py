@@ -71,23 +71,50 @@ Frame = NDArray[np.uint8]
 
 
 def time_to_first_output(elapsed_seconds: list[float]) -> float:
-    """Wall time of the first segment (includes model load + warm-up)."""
+    """Wall time of the first segment (includes model load + warm-up).
+
+    Raises ValueError on empty input (a fresh/failed run with zero commits
+    reports instead of IndexError — issue 132).
+    """
+    if not elapsed_seconds:
+        raise ValueError("no segments: time_to_first_output needs at least one elapsed time")
     return elapsed_seconds[0]
 
 
 def steady_state_mean(elapsed_seconds: list[float]) -> float:
-    """Mean per-segment wall with the first (warm-up) segment excluded."""
+    """Mean per-segment wall with the first (warm-up) segment excluded.
+
+    A single-segment (smoke) run has no post-warm-up sample, so the lone
+    value doubles as the mean (making steady_state_ratio 1.0) instead of
+    dividing by zero; empty input is a ValueError like above (issue 132).
+    """
+    if not elapsed_seconds:
+        raise ValueError("no segments: steady_state_mean needs at least one elapsed time")
     measured = elapsed_seconds[1:]
+    if not measured:
+        return elapsed_seconds[0]
     return sum(measured) / len(measured)
 
 
 def steady_state_ratio(elapsed_seconds: list[float]) -> float:
-    """First-segment wall over steady-state mean (>= 1; ~1 means no warm-up cost)."""
+    """First-segment wall over steady-state mean (>= 1; ~1 means no warm-up cost).
+
+    Empty input is a ValueError (not IndexError): the `[0]` read below
+    would crash before the mean's own guard runs (issue 132).
+    """
+    if not elapsed_seconds:
+        raise ValueError("no segments: steady_state_ratio needs at least one elapsed time")
     return elapsed_seconds[0] / steady_state_mean(elapsed_seconds)
 
 
 def seconds_per_wall_second(frames: int, fps: int, wall_seconds: float) -> float:
-    """Novel generated seconds per wall second (throughput, higher is better)."""
+    """Novel generated seconds per wall second (throughput, higher is better).
+
+    Raises ValueError on non-positive wall_seconds — a zero coarse-timer
+    reading divided by zero before (issue 132).
+    """
+    if wall_seconds <= 0:
+        raise ValueError(f"wall_seconds must be positive (got {wall_seconds})")
     return (frames / fps) / wall_seconds
 
 
@@ -124,7 +151,11 @@ def summarize_run(run_dir: Path | str, samples_per_segment: int = 5) -> dict[str
 
     Reads `segment_committed` metric events for stage timing, then samples
     each committed segment video for within/boundary continuity stats.
-    Raises FileNotFoundError when a segment video is missing.
+    Raises FileNotFoundError when a segment video is missing. A
+    single-segment (smoke) run — or any run whose frame sampling yields no
+    pairs — reports `within_mean`/`boundary_mean`/`boundary_ratio` as None
+    with verdict "N/A (single segment)" instead of ZeroDivisionError
+    (issue 132).
     """
     run_path = Path(run_dir)
     metrics_path = run_path / paths.LOGS_DIRNAME / "metrics.jsonl"
@@ -151,8 +182,21 @@ def summarize_run(run_dir: Path | str, samples_per_segment: int = 5) -> dict[str
         mean_abs_diff(tails[previous], heads[current])
         for previous, current in pairwise(segment_ids)
     ]
-    within_mean = sum(within_diffs) / len(within_diffs)
-    boundary_mean = sum(boundary_diffs) / len(boundary_diffs)
+    within_mean: float | None = sum(within_diffs) / len(within_diffs) if within_diffs else None
+    boundary_mean: float | None = (
+        sum(boundary_diffs) / len(boundary_diffs) if boundary_diffs else None
+    )
+    continuity: dict[str, Any]
+    if within_mean is not None and boundary_mean is not None:
+        continuity = boundary_verdict(within_mean, boundary_mean)
+    else:
+        continuity = {
+            "within_mean": within_mean,
+            "boundary_mean": boundary_mean,
+            "boundary_ratio": None,
+            "limit": BOUNDARY_RATIO_LIMIT,
+            "verdict": ("N/A (single segment)" if len(segment_ids) < 2 else "N/A (no frame pairs)"),
+        }
     return {
         "segments": segment_ids,
         "segment_elapsed_s": elapsed,
@@ -160,7 +204,7 @@ def summarize_run(run_dir: Path | str, samples_per_segment: int = 5) -> dict[str
         "time_to_first_output_s": time_to_first_output(elapsed),
         "steady_state_mean_s": steady_state_mean(elapsed),
         "steady_state_ratio": steady_state_ratio(elapsed),
-        "continuity": boundary_verdict(within_mean, boundary_mean),
+        "continuity": continuity,
     }
 
 
@@ -204,8 +248,30 @@ def test_steady_state_math() -> None:
     assert steady_state_ratio(elapsed) == 3.0
 
 
+def test_steady_state_mean_single_segment_returns_the_sample() -> None:
+    """One-segment (smoke) runs have no post-warm-up sample (issue 132)."""
+    assert steady_state_mean([20.0]) == 20.0
+    assert steady_state_ratio([20.0]) == 1.0
+
+
+def test_empty_elapsed_raises_value_error_not_index_or_zero_division() -> None:
+    """Zero-commit runs report, never IndexError/ZeroDivisionError (issue 132)."""
+    with pytest.raises(ValueError, match="no segments"):
+        time_to_first_output([])
+    with pytest.raises(ValueError, match="no segments"):
+        steady_state_mean([])
+    with pytest.raises(ValueError, match="no segments"):
+        steady_state_ratio([])
+
+
 def test_seconds_per_wall_second_math() -> None:
     assert seconds_per_wall_second(48, 24, 120.0) == 2.0 / 120.0
+
+
+def test_seconds_per_wall_second_zero_wall_raises_value_error() -> None:
+    """A zero coarse-timer reading reports, never ZeroDivisionError (issue 132)."""
+    with pytest.raises(ValueError, match="wall_seconds"):
+        seconds_per_wall_second(48, 24, 0.0)
 
 
 def test_mean_abs_diff_properties() -> None:
@@ -221,6 +287,24 @@ def test_boundary_verdict_pass_and_fail() -> None:
     failing = boundary_verdict(0.01, 0.10)
     assert failing["verdict"] == "FAIL"
     assert failing["boundary_ratio"] == 10.0
+
+
+def test_fake_single_segment_summarize_reports_no_boundary(tmp_path: Path) -> None:
+    """Smoke-leg runs summarize with boundary_* None, never ZeroDivisionError (issue 132)."""
+    run_dir = tmp_path / "run"
+    initialize_run_directory(run_dir, run_id="qualification")
+    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
+    assert validate_run(run_dir) == []
+    summary = summarize_run(run_dir)
+    assert summary["segments"] == ["000000"]
+    assert summary["steady_state_mean_s"] == summary["time_to_first_output_s"]
+    assert summary["steady_state_ratio"] == 1.0
+    continuity = summary["continuity"]
+    assert continuity["within_mean"] is not None and continuity["within_mean"] >= 0
+    assert continuity["boundary_mean"] is None
+    assert continuity["boundary_ratio"] is None
+    assert continuity["verdict"] == "N/A (single segment)"
 
 
 def test_fake_three_segment_dry_run(tmp_path: Path) -> None:

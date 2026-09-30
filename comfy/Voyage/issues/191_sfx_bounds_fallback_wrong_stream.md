@@ -86,10 +86,22 @@ success. The fix is two lines plus a warning, and the precedent
 
 ## Refs
 
-- In-tree: `voyage/sfx_finalize.py:135-177,293` (plan consumes bounds);
-  `voyage/media.py:363-384,754-771`; `DESIGN` three-caption doctrine (junction
-  windows).
-- Not-a-duplicate: 003 is A/V alignment budgets; 138 is finalize skip legs
-  (segment-level, not caption-bound legs); 153 is stem cache/unlink/truncate
-  (render reuse, not bounds planning); 126 is vision-metric edge inputs (different
-  module, different crash class).
+ - In-tree: `voyage/sfx_finalize.py:135-177,293` (plan consumes bounds);
+   `voyage/media.py:363-384,754-771`; `DESIGN` three-caption doctrine (junction
+   windows).
+ - Not-a-duplicate: 003 is A/V alignment budgets; 138 is finalize skip legs
+   (segment-level, not caption-bound legs); 153 is stem cache/unlink/truncate
+   (render reuse, not bounds planning); 126 is vision-metric edge inputs (different
+   module, different crash class).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. BOTH premises CONFIRMED as-read: `voyage/sfx_finalize.py:~162-171` reads `probe(segment / "video.mp4").get("streams", [{}])` → `streams[0]` with no `codec_type` filter (tree-unique — every other probe reader searches `codec_type == "video"`), and on total probe failure appends `(cursor, cursor + 0.0, "")` without advancing the cursor (verified against live file; zero-duration tiling shifts every downstream caption). `sfx_finalize.py` is hot-concurrent and explicitly out of this group's scope — logged as residual with exact lines, no code touched.
+
+## Resolution
+
+- Verdict: RESIDUAL — fully verified, not ownable from this group's files (the bounds planner lives entirely in `sfx_finalize.py`; no worker/audio/vision/bench/doctor seam can fix a wrong-stream read or a silent zero-tile).
+- Files changed: none (this issue file only).
+- Test evidence: live reads 2026-09-30 (cites above); no test added — the pins (audio-first listing → video `nb_frames`; all-unprobable → loud instead of zero-tiling; `fps > 0` validation at both functions) belong to the sfx_finalize owner with the module's probe stubs.
+- DESIGN proposal (quoted text only, for the DESIGN owner — three-caption doctrine): "SFX segment bounds search the video stream (`codec_type == video`, the house idiom) and fail loud (`MediaError`, matching `_segment_timeline`) on zero-duration bounds — every later junction caption shifts otherwise, defeating the pass while reporting success."
+- Residuals (for the sfx_finalize owner, precise): (1) `voyage/sfx_finalize.py:~162-164`: replace `streams[0]` with the `_probe_video_geometry` `next(... codec_type == "video" ...)` idiom; (2) zero-duration bound → `MediaError` (or at minimum a segment-naming warning — silent tiling is the current behavior); (3) validate `fps > 0` at `segment_sfx_bounds` + `_segment_timeline` entries (currently `ZeroDivisionError` vs silent-zero split).

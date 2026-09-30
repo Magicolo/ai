@@ -52,3 +52,55 @@ Static (deterministic): enable `[experimental] visual_inspector`, run two segmen
 - `Voyage/voyage/supervisor.py:179-196,709-792,913-930,1467-1473`; DESIGN §44 (inspector), §20 (prefetch).
 - Adjacent, not overlapping: 030 (prefetch shutdown hang — different method, different failure); 033-adjacent `summarize_prefetch_outcome` shape (aggregation — this file is the *emission* ordering that feeds it); 107 (pipeline-docs omission — documentation, not the metric).
 - Web rationale: hermes-cashew `metrics.py` `record_prefetch_cancelled` ("prefetch work invalidated before its next expensive stage") — the invalidated-as-third-outcome precedent.
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (host reads):
+  `director_prefetch_hit` logged at `:1093-1100` before return, discard at
+  `:2028-2031` after the event, `summarize_prefetch_outcome` counts raw
+  hits with no amendments awareness. Premise confirmed. Overlap check with
+  168 (drift-hold discard, different trigger one call deeper): resolved
+  together with one shared implementation, logged separately here.
+- TDD: wrote `tests/test_prefetch_invalidated_136_168.py` first — 3 failed
+  / 1 passed (usable-hit pin green) before the fix. Fake testsrc was
+  probed live to yield amendments deterministically (segment 000000:
+  `['gentle continuous motion throughout the shot', 'gradual visible
+  transformation unfolding across the shot']`), so the 136 e2e is a true
+  red-to-green (hit pre-fix, invalidated post-fix).
+- Fix (candidate 1+2 combined): `_take_prefetch(..., *,
+  invalidated=False, invalidation_reason="")` — a ready-but-unusable
+  proposal logs `director_prefetch_invalidated` (with `reason` +
+  `prefetch_age_ms`) instead of `hit` and is dropped; `_propose_segment`
+  computes both discard conditions (amendments, drift-hold) BEFORE
+  consumption and passes them in. `summarize_prefetch_outcome` return
+  shape deliberately FROZEN (exact-dict pins in
+  `tests/test_prefetch_summary.py:22,43`): invalidated events are neither
+  hit nor miss, so the rate stays `hit / (hit + miss)` by construction —
+  only the docstring names the third outcome.
+- Gates (in-container): new tests + `test_prefetch_summary` +
+  `test_prefetch_shutdown` + `test_generation_stack` + `test_commit_split`
+  = 31 passed; `ruff check` + `ruff format --check` + `mypy
+  voyage/supervisor.py` clean. Supervisor diff re-checked (disjoint hunks
+  only).
+
+## Resolution
+
+- Verdict: FIXED, shared with 168. Files changed: `voyage/supervisor.py`
+  (`_take_prefetch` third outcome, `_propose_segment` consume-after-decide
+  reorder, summarize docstring), `tests/test_prefetch_invalidated_136_168.py`
+  (new: usable-hit pin, invalidated unit pin, 168 drift-hold e2e, 136
+  amendments e2e).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §20
+  (prefetch), add: "Prefetch telemetry has three outcomes — hit, miss, and
+  invalidated (a ready proposal discarded by fresh inspect amendments or
+  by the drift-cadence hold, logged as `director_prefetch_invalidated`
+  with the reason). The reported hit-rate is `hit / (hit + miss)`;
+  invalidated is counted separately as the speculative-waste signal."
+  And in the §140 prefetch paragraph, name both discard conditions
+  (amendments + drift-hold) per 168's candidate 4.
+- Residuals: extending `summarize_prefetch_outcome`'s returned dict with a
+  `prefetch_invalidated` count needs `tests/test_prefetch_summary.py`
+  expectation updates (another pass's pins) — until then count the event
+  from the raw stream; `_accept_director_decision`'s `prefetch_pending =
+  ... and not amendments` stays as belt-and-braces (now unreachable via
+  the propose path, harmless).

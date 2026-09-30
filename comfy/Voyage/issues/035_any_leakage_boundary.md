@@ -117,3 +117,35 @@ own plan.
   probe output recorded above). DESIGN proposals: none. Residuals:
   full 035 scope (ANN401 326, boundary `dict[str, Any]` at
   rpc.py:327-329, scoreboard/model_registry/models_ensure sites).
+
+## Progress log (2026-09-30, Group D pass)
+
+- `call()` migration blocked (verified live, no edit): `supervisor.py:648`
+  (`payload: dict[str, object]`), `:1383` (`audio_payload`), `:1599`
+  (`payload`) all hold non-JSON-shaped dicts, and `supervisor.py` carries
+  concurrent uncommitted edits — dict invariance would redden the gate at
+  those call sites. `rpc.py:281-287` (`raw_stdout`/`readable: Any` fd
+  juggling) cannot narrow by construction. Scoreboard leg is residual:
+  `voyage/scoreboard.py` has concurrent edits and is explicitly out of
+  scope for this pass.
+- Landed the first greenable step in `voyage/models_ensure.py`:
+  `_read_manifest_keys` now returns `dict[str, JsonValue] | None`
+  (import from `voyage.atomic`, explicit `str(key)` narrowing instead of
+  aliasing the raw dict). Callers (`_repair_manifest`, `atomic_write_json`)
+  accept it without complaint — verified, not assumed.
+- Registry builders (`_record_*` → `dict[str, Any]`, 27 hits) and the
+  `snapshot_kwargs`/`file_kwargs` `dict[str, Any]` sites stay: consumed
+  across modules incl. dirty ones, not greenable in isolation.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Partially resolved: one alias hunk landed (`models_ensure`
+  `_read_manifest_keys` → `JsonValue`-valued). `call()` → scoreboard →
+  registry order stands behind it: `call()` needs the supervisor
+  `dict[str, object]` call sites converted first (dirty file, other pass);
+  scoreboard needs its concurrent edits to land.
+- Files changed: `voyage/models_ensure.py` (JsonValue import + return-type
+  narrowing + docstring). Gate evidence: `ruff check` + `ruff format
+  --check` clean; `mypy voyage` clean (63 files); `test_generate_ensure.py`
+  22 passed in-container. DESIGN proposals: none. Residuals: `call()`
+  signature, scoreboard dicts, registry builders/kwargs.

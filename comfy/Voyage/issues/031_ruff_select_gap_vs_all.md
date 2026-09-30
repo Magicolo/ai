@@ -112,3 +112,30 @@ enforcing.
   foreign in-flight files — see 032 log). DESIGN proposals: none.
   Residuals: entire adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
   still dark; counts re-baselined above.
+
+## Progress log (2026-09-30, Group D pass)
+
+- Re-verified live in-container (`voyage:latest`): `ruff check --select PERF .`
+  → **11 hits** (was 10): `tests/test_tui_app.py:720` (PERF401),
+  `voyage/cli_observe.py:352` (PERF203), `voyage/cli_validate.py:223,229`
+  (PERF401), `voyage/concepts.py:431` (PERF203),
+  `voyage/models_ensure.py:222` (PERF401), `voyage/supervisor.py:591,663`,
+  `voyage/workers/director.py:390,517`, `voyage/workers/video_longlive.py:348`.
+  `ruff check --select N --statistics .` → **39** (N806 34 + N802 4 + N818 1,
+  unchanged shape). `ruff check --select PT --statistics .` → **85**
+  (PT011 42 + PT018 41 + PT013 1 + PT012 1, unchanged shape).
+- Retry order PERF → N → PT (batch-7 prescription): PERF is red (11 hits
+  across cli_observe/cli_validate/concepts/models_ensure/dirty-supervisor/
+  workers — loop restructuring across dirty + foreign files, out of scope),
+  so N and PT were probed for counts only and the adoption stops: **no
+  family is green in isolation, no `select` change**.
+- `pyproject.toml:70` select confirmed unchanged (16 families).
+
+## Resolution (2026-09-30, Group D pass)
+
+- Document-only: gap stays policy; as-read counts re-baselined above
+  (PERF 10→11, N 39, PT 85). Next pass retries PERF first once the owning
+  files settle.
+- Files changed: none for 031. Gate evidence: `select` untouched.
+  DESIGN proposals: none. Residuals: full adoption list (ANN, D,
+  PLR2004-full, PT, S, PERF, N) still dark.

@@ -20,3 +20,27 @@
   3. Echo the admitted path too (`qualify: GPU idle (0 MiB held) — proceeding`) so silent-abort regressions are visible.
   4. Gate: run the gate on an idle GPU (real `nvidia-smi`, zero compute apps) and assert exit 0 past the gate; run with `PATH` lacking `nvidia-smi` and assert exit 4 with a message.
 - **Refs:** `Voyage/issues/064_qualify_sh_fragile_gate_paths_no_artifact.md` (overlapping file, opposite mechanism — fix once, keep both as record); `Voyage/scripts/qualify.sh:16-21`; repo GPU-contention rule (AGENTS.md §11).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live and reproduced. `qualify.sh:90-91` still pipes
+  through `grep -oE '[0-9]+'`; host repro
+  `bash -c 'set -euo pipefail; held_mib="$(printf "" | grep -oE "[0-9]+" |
+  awk ...)"'` → exit 1 with no output (the `echo` never runs), exactly as
+  filed. Note: batch-7 already landed the fail-closed `command -v
+  nvidia-smi || exit 4` (`:83-89`) — this fix completes the gate.
+- Fix (scripts/ only): replaced the grep+awk extract with an awk-only
+  digit summation (`for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) s += $i`),
+  which exits 0 on empty input, and added the admitted-path echo
+  (`qualify: GPU idle (N MiB held) — proceeding`).
+- Verified on host: empty input → `held=[0]` exit 0 (was exit 1);
+  `"123 MiB\n456 MiB"` → `held=[579]` exit 0 (sums correctly, MiB suffix
+  ignored).
+- Files changed: `scripts/qualify.sh`.
+- Gates: `bash -n scripts/qualify.sh` clean (no GPU box probed — the
+  comparison logic is unchanged, only the extraction exit status).
+
+## Resolution
+
+- Done. Residual: live idle-GPU assertion (exit 0 past the gate on a real
+  box) left for the next qualification run — see `reports/video-backends.md`.

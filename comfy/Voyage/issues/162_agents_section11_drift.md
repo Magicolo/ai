@@ -93,3 +93,39 @@ running anything.
   `Voyage/voyage/media.py:670-677,736`; `Voyage/voyage/cli.py:1773-1817,1992-2008`.
 - Companion: 160 (OPERATIONS console-flags omission — the runbook half
   of the same drift).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live, AGENTS.md UNTOUCHED per contract
+  (orchestrator-owned). `AGENTS.md:428` still reads verbatim "ffmpeg
+  finalize to 768x432@24fps, 12-command CLI. Phase 0 skeleton done
+  2026-09-21 (task groups A-D, G-partial, I, J, K-unit): ... Next: Phase
+  1 group E (LongLive adapter)." All four drift legs verified:
+  (1) floors `config.py:438-440` (32/1280/720) + `media.py:767,773-775`
+  contradict :428 in the same section as the augment-floors bullet;
+  (2) 15 live verbs (`--help`) vs "12-command"; (3) longlive2/ltxv/causvid
+  + acestep/qwen/mmaudio all ship (no stubs); (4) console-flag sites are
+  run/generate/finalize/sfx/soak (`cli.py:499,560,617,636,671`).
+- Files changed: none.
+
+## Resolution
+
+- No edit applied (out of scope). Exact proposed replacement bullet text
+  for the orchestrator (drop-in for the `:428` bullet's stale half,
+  keeping the ownership/state sentences):
+- "is the autonomous infinite audiovisual voyage: supervisor +
+  JSONL-RPC workers (video/audio/director), transactional segments
+  (`segments/NNNNNN/` + DONE marker), ffmpeg finalize to >=32fps +
+  >=1280x720 by default (`AugmentConfig`, `--min-fps`/`--min-resolution`/
+  `--no-augment`; `0` disables a floor axis, 24 fps presentation floor
+  always applies). Backends shipped: video longlive2/ltxv (default)/causvid
+  + audio acestep + director qwen (Qwen3-4B-AWQ on cuda:1, 8B bf16 on CPU
+  opt-out) + finalize-time MMAudio SFX + FILM/Real-ESRGAN augment;
+  15-command CLI incl. `generate`/`sfx`/`benchmark`/`soak`/`inspect`
+  (console flags on run/generate/finalize/sfx/soak only). Fake backends
+  render real testsrc/sine media so commit/validate/finalize paths are
+  genuine."
+- And for `:433` (console-flags list): "align with the live
+  `_add_console_args` call sites (run/generate/finalize/sfx/soak) — or
+  delete the verb list and point at OPERATIONS (after 160 lands)."
+- Residual: orchestrator application (this file is the record).

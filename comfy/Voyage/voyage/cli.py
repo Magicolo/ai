@@ -525,7 +525,7 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         default=None,
         help="run name (primary spelling; wins over --run-id, same flat folder rule)",
     )
-    gen.add_argument("--output", default=None, help="run directory (default output/<run-id>)")
+    gen.add_argument("--output", default=None, help="run directory (default output/<name>)")
     gen.add_argument("--seed", type=int, default=0, help="master seed for the run")
     gen.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     gen.add_argument(
@@ -591,7 +591,14 @@ def _add_stop_parser(sub: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="run the finalizer inline after requesting stop",
     )
+    stop.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="skip corrupt segments with a warning instead of aborting",
+    )
     _add_sfx_args(stop)
+    _add_augment_args(stop)
+    _add_console_args(stop)
     stop.set_defaults(func=cmd_stop)
 
 

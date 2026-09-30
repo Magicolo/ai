@@ -52,4 +52,22 @@ rm Voyage/Voyage/state.json  # leave the dir as found (108 owns the rmdir)
 - `Voyage/.dockerignore:1-19`; `Voyage/.gitignore:1-16`; `Voyage/Voyage/` (directory)
 - `Voyage/issues/069_dockerignore_gaps.md` (context-bloat gaps — no `Voyage/` line); `Voyage/issues/108_stray_root_owned_nested_dir.md` (residue dir — no ignore rule)
 
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live. Both files had zero `Voyage/` entries (only
+  header-comment mentions); `output/` entries present at
+  `.dockerignore:6` / `.gitignore:6` as the mirror template.
+- Fix: added `Voyage/` (one line each, literal directory entry —
+  mirroring `output/`, no glob broadening per fix candidate 3).
+- Verified: `git check-ignore -v Voyage/state.json Voyage/Voyage` →
+  both match `comfy/Voyage/.gitignore:7:Voyage/` (check run from the
+  Voyage dir; rule is root-relative in the committed path).
+- Files changed: `.dockerignore`, `.gitignore`.
+- Gates: n/a (ignore files; verified via check-ignore, not a build).
+
+## Resolution
+
+- Done. Residual: none (context-size A/B via `docker build` left
+  unmeasured — the rule mirrors the proven `output/` entry).
+
 (End of file)

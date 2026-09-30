@@ -47,5 +47,18 @@ for overlap in (1, 2, 3):
 
 ## Refs
 
-- `Voyage/voyage/workers/video_causvid.py:125-135,166-176,449-479,688-699`.
-- Adjacent, not overlapping: 124 (same file, device placement — different subsystem); 064-era tail-length loudness (short-*anchor* detection — this file is the *slice arithmetic* producing emptiness, not the anchor length).
+ - `Voyage/voyage/workers/video_causvid.py:125-135,166-176,449-479,688-699`.
+ - Adjacent, not overlapping: 124 (same file, device placement — different subsystem); 064-era tail-length loudness (short-*anchor* detection — this file is the *slice arithmetic* producing emptiness, not the anchor length).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read: `end = -4*(1-1) = 0`, `start = -1`, `video[:, -1:0, :]` empty; `reencode_window_frames(1) == 1` contradicts the slice. TDD: `tests/test_e2_causvid_overlap_128.py` (numpy-backed fake tensor — basic slicing identical in torch — plus stub VAE asserting non-empty windows) — 2 failed pre-fix (empty-window encode, no rejection of 0), 4/4 green post-fix.
+
+## Resolution
+
+- Verdict: FIXED in `voyage/workers/video_causvid.py::_vae_encode_slice` (the function that owns the slicing arithmetic).
+- Change: `overlap_frames < 1` → `ValueError` (fail-loud, no asserts per the issue-045 discipline); `end == 0` (overlap 1) takes `video[:, -1:, :]` explicitly so the slice agrees with `reencode_window_frames(1) == 1`; any still-empty window raises `ValueError` at the slice site (same spirit as the `_advance_start_latents` shape guard). Overlap 3+ paths byte-unchanged.
+- Files changed: `voyage/workers/video_causvid.py` (+ new `tests/test_e2_causvid_overlap_128.py`, incl. a marker test proving the last frame's values reach the encoder).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 4 passed; `test_causvid_worker` (43) green. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §5.4 causvid continuation): "The tail-slice re-encode never builds an empty window: overlap 1 takes the last frame explicitly (agreeing with the window-size accounting), non-positive overlaps and empty slices fail loud at the slice site."
+- Residuals (logged, not implemented): fix candidate 2 (unify the block value — `handle_init` validates against constant `NUM_FRAME_PER_BLOCK` while the session validates against the config file's `num_frame_per_block`) is left as-is: reading the config at init would need omegaconf on the RPC boundary, and the session check already owns correctness. An `overlap=1` + custom `num_frame_per_block=1` config now works instead of silently emptying (this fix); any other init/session disagreement still surfaces at session build, fail-loud.

@@ -114,4 +114,37 @@ scanned roots: segments/, novelty/ only -> both MISSED
 - Not a duplicate of 095 (integrity coverage vs residue detection — complementary, both touch `validate_run`).
 - `voyage/cli.py:855-873` (patterns + collector), `:914-918` (roots — the two missing lines).
 - `voyage/atomic.py:37-58` (every `atomic_write_*` stages `*.partial` in `destination.parent` — including root and `audio/`).
-- Issue 058 (orphan scan origin — segments + novelty only); Phase 6 slice A (validate recomputes + orphan-scans).
+ - Issue 058 (orphan scan origin — segments + novelty only); Phase 6 slice A (validate recomputes + orphan-scans).
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified premise — the orphan scan has
+  moved to `voyage/cli_validate.py:173-242` (issue-080 split; re-exports via
+  `voyage/cli.py`), but the gap is unchanged: roots are still
+  `segments_root` + `run_dir / "novelty"` only (`:238-239`), `audio/` and
+  run root unscanned. A concurrent agent is actively migrating this file
+  (manifest-migration hunks in the working tree). Verdict: CONFIRMED, but
+  NOT ownable — the entire fix (two added roots at `:238-239`) lives in
+  `voyage/cli_validate.py`, outside this group's file scope
+  (`voyage/media.py`, `voyage/augment.py` + own tests/issues). No
+  media/augment-owned half exists (the collector helper itself is fine —
+  only the call-site roots are missing). Per contract, logged as residual;
+  no code changed, no tests added (a failing test against another group's
+  function would be left red in-tree).
+
+## Resolution
+
+- Residual for the `cli_validate.py` owner — exact patch (two lines at
+  `voyage/cli_validate.py:238-239`):
+  `orphans.extend(_collect_transient_orphans(run_dir / "audio", run_dir))`
+  plus a root-level `*.partial` pass scoped to top-level files only (so
+  the recursive `segments/` + `novelty/` + `audio/` hits are not
+  double-counted), keeping `logs/` rotation siblings excluded per the
+  issue's fix candidate 1, with the regression tests from candidate 3
+  (`audio/` + root fixtures flagged; dated `logs/` sibling not flagged).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> `validate_run` orphan-scans every atomic-write location — `segments/`,
+  > `novelty/`, `audio/`, and top-level run-root `*.partial` staging — so
+  > 'no orphans' means no crashed-commit residue anywhere, including the
+  > state file's own staging."
+- Files changed: this issue file only (log appended; original above intact).

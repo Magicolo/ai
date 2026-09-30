@@ -118,3 +118,50 @@ $ sed -n '324,360p;1042,1044p;1113,1115p' voyage/media.py
 - 2026-09-30: filed by Track A sweep; live re-verified via Read (concurrent uncommitted edits
   noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py` — citations are
   as-read values above).
+
+## Progress log
+
+- 2026-09-30 (Group E1, joint reader of 138 + resolver of 188): live
+  re-verified all three legs — leg 1 existence probe unconditional
+  (`voyage/media.py:1207-1211` as-read), leg 2 `_verify_segment` the only
+  skip-gated leg, leg 3 post-assembly `validate_video` now a single call
+  (`:1380`, fast/re-encode paths unified since the issue was filed).
+  Correction to this file's §"Why": the numbering-gap check is NOT strict
+  under skip_bad — 188 is right and the "stays strict" line here is
+  inverted (the guard is `if not settings.skip_bad`). Verdict: CONFIRMED;
+  both regions ownable in `voyage/media.py`, landed once (cross-ref 188).
+- TDD: `tests/test_e1_media_augment.py` 138/188 sections written first —
+  lenient leg-1 (missing audio/video) + lenient gap tests failed pre-fix
+  (aborted instead of skipping), strict tests passed pre-fix
+  (characterization pins); all 5 green post-fix.
+
+## Resolution
+
+- Single chosen contract (resolving 188's strict-vs-lenient question):
+  **lenient-with-record**: under `skip_bad=True`, missing artifacts fold
+  into the skippable triage (`finalize: skipping <seg> (...)`, same line
+  shape as leg 2) and numbering gaps print
+  `finalize: skipping segment numbering gap: expected X, found Y` and
+  continue — never silent. Under `skip_bad=False`, every leg raises as
+  before. Leg 3 (post-assembly `validate_video`) stays STRICT under both
+  settings — `skip_bad` is input triage, not output validation — now stated
+  in the `finalize_run` docstring. Leg-1 probe extracted to
+  `_check_segment_committed` (`voyage/media.py:478-488`) so the triage loop
+  never raises inside its own `try` (TRY301). Strict-mode order note: the
+  numbering check now precedes per-segment verification (both raise
+  `MediaError` either way; no test pinned the old order).
+- Files changed: `voyage/media.py` (`:478-488` helper, `:1313-1342`
+  triage, docstring contract) + new tests in
+  `tests/test_e1_media_augment.py`. Per-file gates green in-container
+  (`voyage:latest`, CPU-only): ruff check + format-check + PLR2004 +
+  mypy strict; 20/20 E1 + neighbors green (see 096 log for the full
+  neighbor list; pre-existing `test_finalize_skip_bad_finalizes_rest`
+  still passes unchanged).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> `finalize --skip-bad` is input triage with a record: missing
+  > artifacts, checksum/metrics/alignment failures, and numbering gaps are
+  > each skipped with a `finalize: skipping ...` warning naming the
+  > segment; the post-assembly presentation check stays strict, so a
+  > corrupt stage still aborts the finalize."
+- Residuals: none in this file's scope. 188's file carries the same
+  contract by cross-reference; 109 (CLI plumbing) stays with its owner.

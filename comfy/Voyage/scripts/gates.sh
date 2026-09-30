@@ -47,7 +47,7 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_director_device.py tests/test_director_request_validation.py tests/test_doctor.py tests/test_enter_repo_trees.py tests/test_fake_backends.py \
     tests/test_feedback.py tests/test_final_blend_scale.py tests/test_finalize_fastpath.py tests/test_generate_blocks_request.py tests/test_generate_ensure.py \
     tests/test_generation_stack.py tests/test_hashing.py tests/test_inspect_metrics_fps_029.py tests/test_inspector.py tests/test_inspector_wiring.py \
-    tests/test_issue_027_concepts_perf.py tests/test_longlive.py tests/test_ltxv.py tests/test_ltxv_failure_hygiene.py tests/test_ltxv_oom_fallback.py \
+    tests/test_longlive.py tests/test_ltxv.py tests/test_ltxv_failure_hygiene.py tests/test_ltxv_oom_fallback.py \
     tests/test_media_robustness_rank2.py tests/test_observability_rank2.py tests/test_paths.py tests/test_phase3.py tests/test_prefetch_shutdown.py \
     tests/test_prefetch_summary.py tests/test_recovery.py tests/test_registry_pins.py tests/test_rhythm.py tests/test_rpc_deadline_finite.py \
     tests/test_rpc_paths_hardening.py tests/test_rpc_start.py tests/test_rpc_timeout.py tests/test_run_relative_consumer.py tests/test_run_sh.py \

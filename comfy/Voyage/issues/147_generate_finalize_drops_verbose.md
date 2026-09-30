@@ -56,3 +56,30 @@ print(vars(get_console(ns)))  # {'verbose': False, 'no_color': False} — always
 ## Refs
 
 - `voyage/cli.py:1300-1301` (console build) vs `:1358-1377` (run forward) vs `:1390-1408` (finalize drop); issue 145 (same `getattr`-masks-omission pattern).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live on the split tree —
+  the finalize namespace (now `voyage/cli_generate.py:199-214`)
+  carried run/output/skip/sfx/augment keys but no console keys, while
+  the sibling run call forwarded all three.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_generate_finalize_inherits_console_flags`,
+  namespace capture on a real fake-backend generate): red (attrs
+  missing).
+- Fixed with the first candidate (mirror the sibling call).
+
+## Resolution: FIXED
+
+- `voyage/cli_generate.py:236-242`: the finalize namespace now carries
+  `verbose=console.verbose`, `no_color=...`, `progress_sink=sink` —
+  symmetric with the `cmd_run` call above it, so `generate --verbose`
+  stays verbose through assembly and `--no-color`/TUI-sink apply to
+  the final stage too.
+- `cmd_finalize` needed no change (`get_console` already reads both
+  flags; extra `progress_sink` key is inert there today and reserved
+  for future console-aware finalize work).
+- Test evidence: capture asserts both flags ride the finalize
+  namespace on a full fake generate (exit 0).
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

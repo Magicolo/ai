@@ -1,4 +1,4 @@
-"""Shared worker validators (issue 084).
+"""Shared worker validators (issue 084, DESIGN §§45-46).
 
 Single home for the triplicated worker validators: audio/SFX
 `validate_sample_rate` + `validate_channels` were identical in three

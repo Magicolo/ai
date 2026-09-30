@@ -55,3 +55,40 @@ print(StyleSpec(prompt='x', motion_energy_min=5.0, motion_energy_max=6.0).motion
 
 - `Voyage/voyage/models.py:36-103,118-162`; `Voyage/voyage/config.py:333-338` (energy precedent); `Voyage/voyage/audio/acestep.py:35-43` (BPM bounds precedent); DESIGN §82.
 - Adjacent, not overlapping: 091 (`PromptStage` range *ordering* — this file is the *value domains*); 026 (prompt staging truncation — consumer side); 084 (validator consolidation — structural home for these checks).
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`, CPU-only):
+  all five junk constructions accepted without error. Premise confirmed.
+  Also swept existing constructors (`tests/`, `voyage/director.py`,
+  supervisor `StyleSpec(prompt=...)`) — all in-domain, no collateral.
+- TDD: wrote `tests/test_models_ranges_119.py` first — 5 failed / 2 passed
+  before the fix.
+- Fix in `voyage/models.py` (all `mode="after"` validators, each with a
+  why-docstring): `StyleSpec.values_in_domain` (three metric bands +
+  `style_similarity_min` + `surrealism`/`transition_smoothness` all [0,1];
+  NaN fails the chained comparison, inf fails the upper bound),
+  `DirectorAudioPlan.values_in_domain` (`energy` [0,1], `tempo_bpm > 0`),
+  `TransitionPlan.values_in_domain` (strength [0,1], duration finite ≥ 0),
+  `ArtifactRef.path_and_size_sane` (non-blank path, `bytes >= 0`),
+  `PromptStage.block_range_ordered` extended (`block_start >= 0`; 091 check
+  kept). `RunState.fps`/`audio_buffer_seconds` deliberately untouched per
+  the documented legacy tolerance.
+- Gates (in-container): new tests + `test_feedback` + `test_phase3` +
+  `test_three_captions` + `test_unit` + `test_surface_rank2` +
+  `test_inspector_wiring` + `test_commit_split` + `test_stage_a_telemetry` +
+  `test_supervisor_av_align` = 110 passed; `ruff check` + `ruff format
+  --check` + `mypy voyage/models.py` clean.
+
+## Resolution
+
+- Verdict: FIXED. Files changed: `voyage/models.py` (5 validators + `math`
+  import), `tests/test_models_ranges_119.py` (new: 6 rejection/acceptance
+  pins).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §82 (schema
+  contract), add: "Contract models validate value domains at parse time,
+  not just ordering: metric bands and style/audio/transition scalars are
+  unit-bounded where the inspector compares 0..1 metrics against them, so
+  one bad director decision fails loudly at validation instead of silently
+  biasing every segment."
+- Residuals: none in scope (`RunState` legacy tolerance kept by design).

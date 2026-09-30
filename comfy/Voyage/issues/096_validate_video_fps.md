@@ -88,4 +88,50 @@ def _probe_video_fps(info: dict[str, Any]) -> float:
 - Overlaps with 018 (error-taxonomy family — raw `ZeroDivisionError` escaping `MediaError`) — ownership stays here (fps/frames quirks).
 - `voyage/media.py:101-126` (unguarded) vs `:128-141` (guarded sibling — the pattern to copy).
 - Python truthiness — non-empty `"0"` is truthy, so `if num` does not catch `"0"`: https://docs.python.org/3/library/stdtypes.html#truth-value-testing
-- `float("0")/float("0")` → `ZeroDivisionError`: https://docs.python.org/3/library/exceptions.html#ZeroDivisionError
+ - `float("0")/float("0")` → `ZeroDivisionError`: https://docs.python.org/3/library/exceptions.html#ZeroDivisionError
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified premise against current tree —
+  `voyage/media.py:166-203` still unguarded (`ZeroDivisionError` on `"0/0"`
+  reproduced in-container before the fix) with the `frames != 0` carve-out
+  intact; sibling `_probe_video_fps` still guarded. No concurrent hunks in
+  this region (concurrent manifest migration touched `_verify_segment` /
+  `_segment_timeline` only — disjoint). Verdict: CONFIRMED, ownable in
+  `voyage/media.py`.
+- TDD: `tests/test_e1_media_augment.py` 096 section written first — 4 tests
+  failed pre-fix (`ZeroDivisionError` live; `nb_frames "0"` short-duration
+  passed instead of raising; `"N/A"` raised `ValueError`), all green post-fix.
+
+## Resolution
+
+- Implemented issue fix candidate 1 + 2 in `voyage/media.py:166-203`:
+  fps parse wrapped in `try/except (ValueError, ZeroDivisionError)` raising
+  `MediaError(f"unparseable fps in {path}: {rate}")`; `nb_frames` parse
+  failure (`"N/A"`) reads as unknown (0) instead of escaping `ValueError`;
+  `frames == 0` now gates on the duration-derived estimate
+  (`duration * actual_fps < min_frames - 1.0` raises) via new named constant
+  `DURATION_FRAME_ESTIMATE_SLACK_FRAMES = 1.0` (`:71`) instead of skipping
+  the check. Duration check moved above the frames gate (a file with no
+  duration cannot produce a meaningful estimate).
+- Note: with the default `min_frames=1` the gate stays lenient for any
+  positive-duration file (same outcomes as before); the teeth are for
+  `min_frames > 1` callers, where a 0-count file with genuinely sufficient
+  duration now *correctly passes* (1.2 s @30fps ≈ 36 frames ≥ 29) instead of
+  passing vacuously — the carve-out is narrowed, not just inverted.
+- Files changed: `voyage/media.py` only (+ new tests in
+  `tests/test_e1_media_augment.py`). Per-file gates green in-container
+  (`voyage:latest`, CPU-only): ruff check + format-check + PLR2004 +
+  mypy strict on `voyage/media.py` + the test module; 20/20 E1 tests pass;
+  neighbors green (`test_state_integrity`, `test_finalize_fastpath`,
+  `test_media_augment_unified_083`, `test_augment_runner`,
+  `test_integration`, `test_final_blend_scale`, `test_media_memory`,
+  `test_generation_stack`, `test_failure_policy`, `test_tui_state`,
+  `test_sfx_finalize`, `test_augment_plan/config`, `test_cli_validate_handoff`).
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> `validate_video` treats an unparseable `avg_frame_rate` as an fps
+  > mismatch (`MediaError`), and an unknown frame count (`nb_frames == 0`
+  > or unparseable) as a duration-derived estimate
+  > (`duration × fps ≥ min_frames − 1`) rather than a pass."
+- Residuals: none. Overlap with 018 noted — the taxonomy escape is closed
+  at this site; 018's remaining scope (if any) stays with its owner.

@@ -66,7 +66,19 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
 
 ## Refs
 
-- `Voyage/voyage/workers/augment_worker.py:9-19,301-330`; `Voyage/voyage/model_registry.py:284-330,943-972`; `Voyage/voyage/models_ensure.py:93-105,181`
-- safetensors-as-pickle-alternative rationale (https://huggingface.co/docs/diffusers/main/en/using-diffusers/using_safetensors); ESRGAN RRDBNet architecture family (https://github.com/xinntao/Real-ESRGAN)
+ - `Voyage/voyage/workers/augment_worker.py:9-19,301-330`; `Voyage/voyage/model_registry.py:284-330,943-972`; `Voyage/voyage/models_ensure.py:93-105,181`
+ - safetensors-as-pickle-alternative rationale (https://huggingface.co/docs/diffusers/main/en/using-diffusers/using_safetensors); ESRGAN RRDBNet architecture family (https://github.com/xinntao/Real-ESRGAN)
 
-(End of file)
+ (End of file)
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read on every leg: `augment_worker.py:1-12` still declares the spike quarantine (RRDBNet = x4 family, anime_6B SRVGG "needs its own loader — follow-up"; `FilmNetMini` shape-mismatch → `ModelCompatibilityError`); `_load_rrdb_net`/`_load_film_net` still `strict=True` (074 landed only the loader *mechanics* — suffix branch, size/manifest pre-checks — not the shape contract); `model_registry.py` still pins `film` + `realesrgan-anime` weights; `models_ensure.py:83` defaults `augment_enabled=True` with the film+realesrgan extend at `:105-113`. `model_registry.py` + `models_ensure.py` are out of this group's scope and the port itself (full FILM + SRVGG loader) is a GPU-box task — so this is logged as a residual with exact state, no code touched. No caller consumes the weights in production (caller grep still empty outside the worker + tests), so severity stays MEDIUM.
+
+## Resolution
+
+- Verdict: RESIDUAL — fully verified, not ownable from this group's files (registry specs, ensure defaults, and the upstream port are all outside `workers/*` + `audio/*` + `vision/*` + `bench.py` + `doctor.py`).
+- Files changed: none (this issue file only).
+- Test evidence: live reads 2026-09-30 (cites above); no test added — the contract test (fix candidate 3: every `film`/`realesrgan-anime` FileSpec round-trips through its loader) must fail until the port lands, and a knowingly-failing test is not a gate asset. Existing `test_augment_weight_loading` pins the current `ModelCompatibilityError` behavior.
+- DESIGN proposal (quoted text only, for the DESIGN owner — augment track): "Until the full upstream FILM port + SRVGG anime-6B loader land, `augment_enabled` should default opt-in-gated (or ensure gated on loader readiness) so default CUDA runs stop fetching weights the spike loaders structurally reject; the weight↔loader round-trip contract test pins the port's completion."
+- Residuals (for the registry/augment owners, precise): (1) land the FILM port + SRVGG loader, re-verify both pinned weights load; (2) `voyage/models_ensure.py:83,105-113`: flip/gate the `augment_enabled` default meanwhile; (3) add the FileSpec round-trip contract test with the port.

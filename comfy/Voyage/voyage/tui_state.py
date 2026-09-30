@@ -107,6 +107,10 @@ FIELD_HELP = {
     "min_fps": "Floor output fps at finalize (untouched/32 = stored config; 0 disables).",
     "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1280x720" '
     '(untouched/1280x720 = stored config; "0" disables).',
+    "no_download": "Fail instead of downloading missing models (verify only). "
+    "Off by default — checked runs never touch the network for weights.",
+    "no_sfx": "Skip the finalize-time SFX pass even when [sfx] is configured. "
+    "Off by default — SFX backend/device overrides stay CLI-only.",
 }
 
 
@@ -149,6 +153,8 @@ class GenerateFormState:
     min_resolution: str = "1280x720"
     verbose: bool = False
     no_color: bool = False
+    no_download: bool = False
+    no_sfx: bool = False
 
 
 def textual_available() -> bool:
@@ -233,6 +239,23 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
                 errors["take_seconds"] = (
                     f"take-seconds must be a positive finite number, got {state.take_seconds!r}"
                 )
+            else:
+                # Domain floor (issue 111): the runtime requires
+                # take_seconds > ahead_seconds (AudioConfig validator) —
+                # a field-valid form must never promise a Generate that
+                # exits 2. Single-sourced from the model default (issue
+                # 024), never a restated literal; blank stays valid.
+                from voyage.config import AudioConfig
+
+                ahead_window = AudioConfig.model_fields["ahead_seconds"].default
+                ahead_floor = (
+                    float(ahead_window) if isinstance(ahead_window, (int, float)) else 20.0
+                )
+                if take <= ahead_floor:
+                    errors["take_seconds"] = (
+                        "take-seconds must exceed the audio-ahead window "
+                        f"({ahead_floor}s), got {state.take_seconds!r}"
+                    )
     if state.quantization not in QUANTIZATIONS:
         errors["quantization"] = (
             f"quantization must be one of {', '.join(QUANTIZATIONS)}, got {state.quantization!r}"
@@ -328,9 +351,14 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         no_augment=False,
         verbose=state.verbose,
         no_color=state.no_color,
+        # Verify-only + SFX opt-out (issues 145/182): explicit form
+        # checkboxes, so the TUI namespace always satisfies cmd_generate
+        # AND the user can decline downloads or the heavy SFX pass.
+        # SFX backend/device/model overrides stay CLI-only (see help).
+        no_download=state.no_download,
         # Finalize-time SFX pass-through (the generate parser defaults;
         # kept explicit so the TUI namespace always satisfies cmd_finalize).
-        no_sfx=False,
+        no_sfx=state.no_sfx,
         sfx_backend=None,
         sfx_caption=None,
         sfx_device=None,
@@ -498,6 +526,8 @@ def save_last_settings(state: GenerateFormState, path: Path | None = None) -> No
             f"min_resolution = {_toml_string(state.min_resolution)}",
             f"verbose = {'true' if state.verbose else 'false'}",
             f"no_color = {'true' if state.no_color else 'false'}",
+            f"no_download = {'true' if state.no_download else 'false'}",
+            f"no_sfx = {'true' if state.no_sfx else 'false'}",
         ]
         resolved.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError:
@@ -561,6 +591,8 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
         min_resolution=_string_field(parsed, "min_resolution", defaults.min_resolution),
         verbose=_boolean_field(parsed, "verbose", defaults.verbose),
         no_color=_boolean_field(parsed, "no_color", defaults.no_color),
+        no_download=_boolean_field(parsed, "no_download", defaults.no_download),
+        no_sfx=_boolean_field(parsed, "no_sfx", defaults.no_sfx),
     )
 
 

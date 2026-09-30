@@ -44,5 +44,44 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
 
 ## Refs
 
-- `Voyage/voyage/sfx_finalize.py:372-413`; `Voyage/voyage/media.py:249-312,441-496,643-647`; DESIGN §56 (finalize), §40 (SFX pass).
+ - `Voyage/voyage/sfx_finalize.py:372-413`; `Voyage/voyage/media.py:249-312,441-496,643-647`; DESIGN §56 (finalize), §40 (SFX pass).
 - Adjacent, not overlapping: 050 (video double-encode — different stage); 043 (whole-MP4 publish RAM); 095 (fade absorption — same blends, length correctness not count); 031 (slice memo — take slicing, not bed joins).
+
+## Progress log
+
+- 2026-09-30 (Group E1): live re-verified premise FIRST per contract —
+  `render_sfx_bed` still left-folds (`sfx_finalize.py:487-491`,
+  `stems[0]` accum + `sfx_blend_*.wav` steps, single-stem fast path at
+  `:470-486`) and `build_final_audio` still folds identically
+  (`voyage/media.py` accum/`final_blend_*.wav` loop); no batch-5/6 or
+  concurrent change to either fold (concurrent `sfx_finalize.py` hunks are
+  manifest-caption reads only — disjoint but the file is hot). Checked for
+  an ownable `media.py` slice: the two folds' restructure (single-graph
+  join or checkpointed intermediates) changes blend topology/timeline
+  exactness and the primary site (`sfx_finalize.py:487-491`) is explicitly
+  out of scope (concurrent hot). The safe media-side micro-wins
+  (duration-memo through `_blend_pair`, intermediate reuse) would touch
+  the foreign call signature or tmpdir lifecycle for a LOW-teeth gain on
+  a MEDIUM perf issue — wrong trade. Verdict: CONFIRMED, no ownable
+  media.py leg; logged as precise residual per contract. No code changed.
+
+## Resolution
+
+- Residual for the SFX-pass owner — fix spec (issue candidates 1 + 3):
+  replace the `accum → _blend_pair → step` left-fold in `render_sfx_bed`
+  (`sfx_finalize.py:487-491`) with a single ffmpeg filter chain over the
+  N stems (chained adelay + amix with the same manual-fade recipe, or the
+  `fade < 0.1` concat precedent generalized) so each stem is read once —
+  O(N) I/O, one spawn — with a 3-window byte-parity test (fold vs
+  single-graph) and an N-window spawn-count pin (≤ 2); emit per-blend
+  wall seconds so soak trends fold cost vs timeline length. Same shape
+  applies to `build_final_audio`'s fold (`voyage/media.py` accum loop) —
+  coordinate both, since a music+SFX finalize pays the quadratic twice.
+  Quantified scale (unchanged from the issue): 10-min final ≈ 85 windows
+  ≈ 84 blends, last blend re-reading ~600 s of accum to append 8 s.
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Finalize audio joins are single-graph: each stem/window is read once
+  > through one chained adelay+amix filter invocation (O(N) I/O, one
+  > spawn), never re-encoded N−1 times through a left fold. Soak trends
+  > join wall-clock vs timeline length to prove the scaling."
+- Files changed: this issue file only (log appended; original above intact).

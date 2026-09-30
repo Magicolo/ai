@@ -682,6 +682,18 @@ class VoyageApp(App[None]):
             id="flag-skip-bad",
         )
         yield Checkbox(
+            "Verify only (fail instead of downloading models)",
+            value=self.initial_state.no_download,
+            id="flag-no-download",
+            tooltip=FIELD_HELP["no_download"],
+        )
+        yield Checkbox(
+            "Skip the finalize-time SFX pass",
+            value=self.initial_state.no_sfx,
+            id="flag-no-sfx",
+            tooltip=FIELD_HELP["no_sfx"],
+        )
+        yield Checkbox(
             "Verbose console lines behind the TUI",
             value=self.initial_state.verbose,
             id="flag-verbose",
@@ -779,6 +791,8 @@ class VoyageApp(App[None]):
             min_resolution=_read_text_field(self, "#field-min-resolution"),
             verbose=_read_flag_field(self, "#flag-verbose"),
             no_color=_read_flag_field(self, "#flag-no-color"),
+            no_download=_read_flag_field(self, "#flag-no-download"),
+            no_sfx=_read_flag_field(self, "#flag-no-sfx"),
         )
 
     def _apply_field_errors(self, errors: dict[str, str]) -> None:
@@ -971,7 +985,13 @@ class VoyageApp(App[None]):
             pass
 
     def _run_dir_for(self, args: argparse.Namespace) -> Path:
-        output = args.output or str(Path("output") / args.run_id)
+        # Single source (issue 148/024): --name wins via _effective_run_id,
+        # exactly like cmd_generate's default-dir derivation — reading
+        # args.run_id directly strands the watcher in output/<run-id> while
+        # generate writes output/<name> the moment the two differ.
+        from voyage.cli_paths import _effective_run_id
+
+        output = args.output or str(Path("output") / _effective_run_id(args))
         return Path(output).resolve()
 
     def _generate_in_thread(self, namespace: argparse.Namespace, run_dir: Path, total: int) -> None:

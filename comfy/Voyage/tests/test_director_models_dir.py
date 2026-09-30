@@ -226,7 +226,7 @@ def test_handle_init_records_models_dir(monkeypatch: pytest.MonkeyPatch) -> None
     director_worker.handle_init({"backend": "qwen"})
     assert director_worker._CONFIG["models_dir"] == "/vol/models"
     with pytest.raises(TypeError, match="models_dir"):
-        director_worker.handle_init({"models_dir": 123})  # type: ignore[dict-item]
+        director_worker.handle_init({"models_dir": 123})
 
 
 def _stub_torch_and_transformers(monkeypatch: pytest.MonkeyPatch, seen: dict[str, str]) -> None:

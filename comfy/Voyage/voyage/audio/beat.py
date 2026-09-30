@@ -37,12 +37,22 @@ def beats_for_segment(
     segment_seconds: float,
     base_beats: int = 4,
     min_bpm: float = MIN_BPM,
+    max_bpm: float | None = None,
 ) -> tuple[int, float]:
     """Beats in this segment and the implied take BPM.
 
     Returns ``(beats, bpm)`` with ``bpm = beats * 60 / segment_seconds``
     and ``beats`` the smallest doubling of ``base_beats`` whose BPM
     reaches ``min_bpm``. Raises ValueError on non-positive durations.
+
+    The ceiling is opt-in (issue 120): the committed-behavior pins in
+    `test_rhythm.py` document the raw doubling math, so callers that feed
+    a renderer with a tempo cap (ACE-Step rejects BPM > 300) pass
+    `max_bpm` explicitly. A grid above the ceiling halves toward one beat
+    (cuts stay on an integer grid, only coarser); a segment so short even
+    one beat exceeds the cap raises ValueError naming `beats_per_segment`
+    — a config error that must fail before any GPU work, not as a fatal
+    payload error after the ACE load.
     """
     _require_finite(segment_seconds, "segment duration")
     _require_finite(min_bpm, "minimum tempo")
@@ -50,11 +60,28 @@ def beats_for_segment(
         raise ValueError(f"segment duration must be positive (got {segment_seconds})")
     if base_beats <= 0:
         raise ValueError(f"base beats must be positive (got {base_beats})")
+    if min_bpm <= 0:
+        raise ValueError(f"minimum tempo must be positive (got {min_bpm})")
+    ceiling: float | None = None
+    if max_bpm is not None:
+        _require_finite(max_bpm, "maximum tempo")
+        if max_bpm <= 0:
+            raise ValueError(f"maximum tempo must be positive (got {max_bpm})")
+        ceiling = max_bpm
     beats = base_beats
     bpm = beats * 60.0 / segment_seconds
     while bpm < min_bpm:
         beats *= 2
         bpm = beats * 60.0 / segment_seconds
+    while ceiling is not None and bpm > ceiling and beats > 1:
+        beats //= 2
+        bpm = beats * 60.0 / segment_seconds
+    if ceiling is not None and bpm > ceiling:
+        raise ValueError(
+            f"beats_per_segment={base_beats} implies {bpm:.0f} BPM for a "
+            f"{segment_seconds:.3f} s segment, above the {ceiling:.0f} BPM "
+            "render ceiling — lower beats_per_segment or lengthen segments"
+        )
     return beats, bpm
 
 
@@ -65,6 +92,14 @@ def quantize_take_seconds(take_seconds: float, segment_seconds: float) -> float:
     and therefore every beat-grid downbeat — on a segment boundary, so
     segment cuts stay on the grid across take joints. Raises ValueError
     on non-positive inputs.
+
+    Tie rule (issue 121, pinned by `tests/test_beat_quantize_ties_121.py`
+    and `tests/test_rhythm.py:66-67`): the snap uses round-half-to-even,
+    so exact-half ratios can plan SHORT (`45 s / 18 s = 2.5 → 2 → 36 s`).
+    Over-coverage is trimmed by the finalize slice walk, but shortfall
+    chains extra takes (extra GPU swaps) with no diagnostic. Prefer ceil
+    or round-half-up if those pins are ever renegotiated — until then the
+    supervisor's 094 clamp contains the per-take damage.
     """
     _require_finite(take_seconds, "take length")
     _require_finite(segment_seconds, "segment duration")

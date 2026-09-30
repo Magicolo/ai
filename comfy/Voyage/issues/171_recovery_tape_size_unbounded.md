@@ -79,6 +79,48 @@ $ rg -n "st_size|stat\(\)|getsize|MAX_TAPE|tape_size" voyage/supervisor.py voyag
 - Neighbor issues — not a duplicate of 006 (frame-count ceiling + path containment — no byte bound), 016 (symlink/TOCTOU *shape* of the same gate — no size dimension), 122/129 (tape *write* durability/atomicity), 123 (tape *content* checksum/shape — pre-load byte bound is a different, cheaper layer), 139 (discovery validation — this file is the *size* dimension across commit, discovery, and worker-load gates).
 - External: CWE-400 uncontrolled resource consumption (same class 006 cited for `frames=10**9` — this is its byte-size sibling): https://cwe.mitre.org/data/definitions/400.html
 
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`, CPU-only):
+  a sparse 3 GiB `.pt` passes `_checked_tape_path` (ACCEPTED), and `rg`
+  finds no `st_size`/`MAX_TAPE` gate on any tape path (commit, discovery,
+  worker load, resume/rebuild). Premise confirmed.
+- TDD: wrote `tests/test_tape_trust_123_171.py` first — collection error
+  before the fix, 8 passed after (shared file with 123).
+- Fix: `MAX_RECOVERY_TAPE_BYTES = 1 GiB` (~100× legitimate ~7 MB tapes,
+  per DESIGN §22 — no false-positive surface) + `check_recovery_tape_size`
+  in `voyage/workers/video_common.py` (one `stat`, `ValueError` naming
+  re-render-from-seed); enforced at both supervisor gates (owned hunks):
+  `_checked_tape_path` rejects with `MediaError` (zero restarts spent),
+  `_latest_recovery_tape` skips oversized candidates to the next-newest
+  tape with a `recovery_tape_skipped` metric (mirrors the 139 torn-write
+  skip pattern). `stat(follow_symlinks)` on the resolved path — the gates
+  resolve-and-confine first per 016, so the size read is on the confined
+  file.
+- Gates (in-container): shared with 123 — 81 passed; `ruff check` +
+  `ruff format --check` + `mypy` on `voyage/supervisor.py` +
+  `voyage/workers/video_common.py` clean.
+
+## Resolution
+
+- Verdict: FIXED at the commit + discovery gates. Files changed:
+  `voyage/workers/video_common.py` (constant + helper),
+  `voyage/supervisor.py` (commit-gate reject + discovery skip),
+  `tests/test_tape_trust_123_171.py` (new: helper accept/reject,
+  commit-gate `MediaError`, discovery skip + metric).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §27
+  (recovery tapes), add: "Tape paths carry a byte bound (`1 GiB`, ~100× a
+  legitimate tape): the commit gate rejects oversized reports and discovery
+  skips them to the next-newest tape, both metric-visible — a runaway or
+  hostile tape fails before the first restart, never inside `torch.load`."
+- Residuals (other files, not touched per scope): enforce the same cap in
+  `video_longlive.py:1173-1192` (`_load_recovery_tape`, before
+  `torch.load(handle, ...)` — defense in depth, the worker image must not
+  rely on supervisor checks) via `check_recovery_tape_size`; long-term,
+  fold size + shape + hash into one `verify_tape_for_resume` in
+  `video_common` (123's candidate-3 home) so the three workers plus both
+  supervisor gates share one contract.
+
 ## Investigation log
 
 - 2026-09-30: filed by the 168-177 tails sweep; gate probe run live in `voyage:latest` CPU-only per task brief; code citations are as-read values (concurrent uncommitted edits noted in `voyage/supervisor.py` among others).

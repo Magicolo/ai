@@ -46,15 +46,21 @@ async def _click_generate_when_ready(pilot: Any, app: Any) -> None:
     not enough under load; `pilot.click` returns False (instead of
     raising) when the click lands on another widget, and every caller
     used to ignore that — a lost click looks exactly like a hung run.
-    Poll until the click lands.
+    Poll until the click lands. OutOfBounds (target still off-screen
+    while the scheduled scroll applies — e.g. after form-growth changes
+    in tui.py) retries the same way instead of failing the first poll.
     """
+    from textual.pilot import OutOfBounds
     from textual.widgets import Button
 
     for _ in range(100):
         app.query_one("#button-generate", Button).scroll_visible()
         await pilot.pause(0.05)
-        if await pilot.click("#button-generate"):
-            return
+        try:
+            if await pilot.click("#button-generate"):
+                return
+        except OutOfBounds:
+            continue
     raise AssertionError("generate button never became clickable")
 
 
@@ -147,6 +153,13 @@ def test_backend_select_is_visible_with_default_and_affordance() -> None:
 
 
 def test_backend_select_is_operable() -> None:
+    """The backend dropdown operates via the keyboard overlay (issue 131).
+
+    Focus + enter opens the Select overlay, down + enter commits the next
+    option, and the form reader plus the GPU-warning line follow the
+    committed value — the overlay open/commit path the old programmatic
+    `.value` assignment wrote past.
+    """
     import asyncio
 
     VoyageApp = _require_app()
@@ -159,11 +172,23 @@ def test_backend_select_is_operable() -> None:
         app = VoyageApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            app.query_one("#field-backend", Select).value = "fake"
+            backend = app.query_one("#field-backend", Select)
+            initial = str(backend.value)
+            app.set_focus(backend)
             await pilot.pause()
-            assert app._read_form().backend == "fake"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert backend.expanded
+            await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not backend.expanded
+            committed = str(backend.value)
+            assert committed != initial
+            assert app._read_form().backend == committed
             reporter = getattr(tui_state_module, "gpu_warning", None)
-            expected = str(reporter("fake")) if callable(reporter) else ""
+            expected = str(reporter(committed)) if callable(reporter) else ""
             assert str(app.query_one("#gpu-warning", Static).content) == expected
 
     asyncio.run(_run())
@@ -528,8 +553,8 @@ def test_focus_and_invalid_keep_geometry_constant() -> None:
 
     VoyageApp = _require_app()
 
-    async def _snapshot(app: object) -> dict[str, int]:
-        rows = app.query(".field-row")  # type: ignore[union-attr]
+    async def _snapshot(app: Any) -> dict[str, int]:
+        rows = app.query(".field-row")
         sizes = {}
         for index, row in enumerate(rows):
             widget = row.query("*").last()
@@ -709,12 +734,12 @@ def test_base_exception_in_worker_restores_form(
     asyncio.run(_run())
 
 
-def _form_svg_rows(app: object, tmp_path: Path) -> list[str]:
+def _form_svg_rows(app: Any, tmp_path: Path) -> list[str]:
     """Render the running app to SVG and return its text rows (stripped)."""
     import re
 
     path = tmp_path / "form.svg"
-    app.save_screenshot(str(path))  # type: ignore[attr-defined]
+    app.save_screenshot(str(path))
     rows: list[str] = []
     for match in re.findall(r"<text[^>]*>(.*?)</text>", path.read_text()):
         rows.append(re.sub(r"<[^>]+>", "", match).replace("&#160;", " "))
@@ -730,8 +755,17 @@ def test_select_values_render_in_form_text(tmp_path: Path) -> None:
     async def _run() -> None:
         app = VoyageApp()
         async with app.run_test(size=(120, 60)) as pilot:
-            await pilot.pause(0.3)
-            text = "\n".join(_form_svg_rows(app, tmp_path))
+            # Poll for the render (issue 130): a single 0.3 s pause is not
+            # enough under load — the three Select widgets may not have
+            # finished their first paint. Same poll-until-landed shape as
+            # _click_generate_when_ready above; the final asserts still fail
+            # loudly on a truly blank render.
+            text = ""
+            for _ in range(25):
+                await pilot.pause(0.2)
+                text = "\n".join(_form_svg_rows(app, tmp_path))
+                if "ltxv" in text and "qwen" in text and "fp8" in text:
+                    break
             assert "ltxv" in text
             assert "qwen" in text
             assert "fp8" in text
@@ -929,8 +963,17 @@ def test_run_head_ticks_elapsed_while_running(
                 await pilot.pause(0.05)
             assert app._generation_running
             assert any("starting" in line for line in app.run_history)
-            await pilot.pause(2.5)
-            head = str(app.query_one("#run-head", Static).content)
+            # Poll for the heartbeat tick (issue 130): the head ticks on a
+            # 1.0 s set_interval, so one 2.5 s pause allows barely two ticks
+            # with zero scheduling slack — a starved interval under load
+            # fails the test with no retry. Poll up to ~10 s instead; the
+            # final assert still fails loudly when the ticker is dead.
+            head = ""
+            for _ in range(20):
+                await pilot.pause(0.5)
+                head = str(app.query_one("#run-head", Static).content)
+                if "elapsed" in head:
+                    break
             assert "elapsed" in head
             release.set()
             for _ in range(200):

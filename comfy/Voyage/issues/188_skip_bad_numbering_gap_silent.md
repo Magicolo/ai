@@ -75,7 +75,45 @@ off sorted order, not names, so the gap is invisible in the artifact too.
 
 - In-tree: `voyage/media.py:921-952` (`committed` discovery, gap check, skip loop);
   `voyage/media.py:363-384` (`_segment_timeline` order-dependence).
-- Not-a-duplicate: 138 files legs 1 (existence probe), 2 (`_verify_segment`), 3
+ - Not-a-duplicate: 138 files legs 1 (existence probe), 2 (`_verify_segment`), 3
   (post-assembly `validate_video`) and explicitly mislabels this fourth leg as
   strict — this file covers only the numbering-gap leg and the misdescription.
   109 is CLI plumbing for the flag; 098 is orphan-scan coverage, not numbering.
+
+## Progress log
+
+- 2026-09-30 (Group E1, resolver of 188 + joint reader of 138): live
+  re-verified — the gap check is `if not settings.skip_bad:` (silent
+  accept under lenient, exactly as this file says; 138's "stays strict"
+  line is inverted and corrected in 138's log). Chose the contract:
+  **lenient-with-record** (this file's fix candidate 1): under
+  `skip_bad=True` the gap warns and continues; strict still raises. Landed
+  once in `voyage/media.py` together with 138's legs 1–3 (see 138's log).
+- TDD: gap strict test passed pre-fix (pin), gap lenient test failed
+  pre-fix (aborted? no — it succeeded *silently*; the test failed on the
+  missing warning), both green post-fix with the warning asserted via
+  capsys.
+
+## Resolution
+
+- Implemented in `voyage/media.py:1313-1331`: lenient path prints
+  `finalize: skipping segment numbering gap: expected 000001, found
+  000002` (first gap only, then continues over the sorted segments —
+  downstream `_segment_timeline` keys off order, so no other change
+  needed); strict path raises unchanged. 138's "stays strict" line is
+  corrected by cross-reference here (138's own file untouched by me
+  except its appended log — no edits to another file's original text
+  beyond the allowed append).
+- Files changed: `voyage/media.py` + new tests in
+  `tests/test_e1_media_augment.py` (shared with 138). Per-file gates
+  green in-container (see 096 log). No structured metric event added
+  (both files' candidate-3 asks) — stdout warning matches the existing
+  leg-2 `print` idiom (`voyage/media.py` carries the T201 exemption);
+  a metrics event is proposed below instead of half-wiring a schema here.
+- DESIGN proposal (quoted text only, not applied — DESIGN.md untouched):
+  "> Numbering gaps are the fourth skippable leg: strict raises, lenient
+  > warns (`finalize: skipping segment numbering gap: ...`) and ships the
+  > sorted survivors. A future slice may add skipped/gapped segment ids to
+  > the `finalize_completed` metric event so `status`/`scoreboard` show
+  > what shipped."
+- Residuals: none.

@@ -109,6 +109,7 @@ ignore = [
 "voyage/workers/video_causvid.py" = ["BLE", "TRY004", "S101", "T201"]
 "voyage/workers/video_longlive.py" = ["TRY004", "S101", "T201", "RUF100"]
 "voyage/workers/video_ltxv.py" = ["TRY004", "TRY301", "S101", "T201", "RUF100"]
+"voyage/workers/augment_worker.py" = ["T201"]
 "voyage/workers/audio_acestep.py" = ["TRY004"]
 "tests/test_observability.py" = ["RUF100"]
 "tests/test_backend_registry.py" = ["SIM300"]
@@ -178,6 +179,11 @@ addopts = "-p no:cacheprovider --strict-markers"
 markers = [
   "gpu: requires GPU model workers",
   "endurance: long-running stability tests",
+  # Issue 089: registered so the SLOW tail (Pilot suites, ffmpeg
+  # pairwise/concat, multi-commit runs) can be marked and deselected with
+  # `-m "not slow"`. No test carries it yet — tail marking is the residual
+  # below, kept out so this registration changes no suite behavior.
+  "slow: load-sensitive or multi-second tests",
 ]
 
 [tool.coverage.run]

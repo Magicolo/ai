@@ -55,3 +55,33 @@ print(parse_duration('2m-30s'))  # 90.0 — sign arithmetic, not a typo error
 ## Refs
 
 - `voyage/cli.py:1076-1095` (docstring documents the sign rationale — the mixed-sign hole is its unconsidered consequence); `tui_state.py:69-70` (`FIELD_HELP["duration"]` — examples live here too, update both or single-source them).
+
+## Progress log
+
+- 2026-09-30 (Group A): all three behaviors re-verified live
+  (`2m-30s` → 90.0, `1h-30m` → 1800.0, `1h30` → 3630.0,
+  `1m 30s` → invalid without naming the rule).
+- Wrote failing tests first (three tests: mixed signs, bare trailing,
+  interior space): all red.
+- Fixed with rejection + actionable hints (no silent re-interpretation
+  anywhere; interior spaces stay rejected but named).
+
+## Resolution: FIXED
+
+- `voyage/cli_planning.py:28-78` (`parse_duration`): a sign anywhere
+  except a single leading `-` is now `invalid duration (mixed signs are
+  not supported; …)` — leading-negative input still reaches the
+  positivity error, preserving the documented rationale and the
+  existing `-5s` test; a trailing bare number after h/m is now
+  `invalid duration (a trailing number after h/m needs its own unit,
+  e.g. '1h30m'; …)` with a did-you-mean hint; interior whitespace is
+  now `invalid duration (no spaces allowed; …)`.
+- One grammar, both surfaces: TUI `field_errors`/`plan_counts` call the
+  same function, so the fix covers CLI and TUI with no second edit.
+- Test evidence: `test_parse_duration_rejects_mixed_signs`,
+  `test_parse_duration_rejects_bare_trailing_number`,
+  `test_parse_duration_interior_space_names_the_rule` green alongside
+  the pre-existing documented-forms/positivity tests.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none. (`FIELD_HELP["duration"]` examples remain valid;
+  no help-text change needed since nothing newly accepted exists.)

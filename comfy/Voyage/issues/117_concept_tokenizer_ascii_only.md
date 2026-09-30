@@ -59,3 +59,39 @@ print(token_set_similarity('霧の港', 'ガラスの砂漠'))  # 1.0
 
 - `Voyage/voyage/concepts.py:43-62` (tokenizer + canonicalize + Jaccard); `:270-297` (`check_novel` fallback); DESIGN §§21, 74.
 - Adjacent, not overlapping: 103 (`_embed_texts` garbage bypass — embedding side); 059 (dangling vector rows — storage side). Neither touches the tokenizer regex.
+
+## Progress log
+
+- 2026-09-30 (Group B): re-verified live first (`voyage:latest`, CPU-only):
+  `tokenize('霧の港 ガラスの砂漠 港')` → `[]`, `canonicalize` → `''`,
+  `token_set_similarity` → `1.0`, accents → fragments. Premise confirmed.
+- TDD: wrote `tests/test_concepts_unicode_117.py` first — 4 failed / 1 passed
+  (ascii pin green) before the fix.
+- Fix: `_WORD` `[a-z0-9]+` → `[^\W_]+` (letters + digits, any script;
+  `_` stays a separator as before) with a why-comment at
+  `voyage/concepts.py:43-50`. Deliberately did NOT touch the both-empty
+  branch: the reflexive property (`test_similarity_is_reflexive`, any drawn
+  text scores 1.0 against itself) plus the `("", "") == 1.0` pin would break
+  for tokenless inputs, and with the Unicode pattern the branch is
+  unreachable for real concepts (any letter/digit in any script yields
+  tokens) — the tokenizer was the whole defect.
+- Gates (in-container): new tests + `test_similarity_properties` +
+  `test_concept_integrity` + `test_concepts_pruning` +
+  `test_issue_027_concepts_perf` = 34 passed; `ruff check` + `ruff format
+  --check` + `mypy voyage/concepts.py` clean.
+
+## Resolution
+
+- Verdict: FIXED. Files changed: `voyage/concepts.py` (one-line pattern +
+  comment), `tests/test_concepts_unicode_117.py` (new: CJK nonempty,
+  distinct-CJK `< 0.85`, CJK canonicalize nonempty, accented whole words,
+  ASCII pins).
+- DESIGN proposal (quoted text only, for the DESIGN owner): in §21, after
+  the token-fallback description, add: "The token-set fallback is
+  script-aware (`[^\W_]+` word runs): non-Latin concepts tokenize to
+  non-empty sets and score genuine Jaccard values. The embedding path
+  remains authoritative for non-Latin text — the fallback only decides when
+  no embedding backend is available."
+- Residuals: none. Candidate 2 (both-empty → 0.0) explicitly rejected —
+  breaks the reflexive property pin; candidate 4 partially adopted as the
+  DESIGN note above.

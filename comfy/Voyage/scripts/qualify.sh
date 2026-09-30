@@ -88,11 +88,12 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   exit 4
 fi
 held_mib="$(nvidia-smi --query-compute-apps=used_memory --format=csv,noheader 2>/dev/null \
-  | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
+  | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) s += $i} END {print s + 0}')"
 if [ "$held_mib" -gt 2048 ]; then
   echo "qualify: GPU busy (${held_mib} MiB held) — backing off, run later" >&2
   exit 3
 fi
+echo "qualify: GPU idle (${held_mib} MiB held) — proceeding" >&2
 # Absolute-path enforcement (issue 064 leg b): the codebase invariant is
 # absolute voyage paths (cli.resolve_run_dir); a relative dir reproduces
 # the doubling stall documented twice in reports/video-backends.md.

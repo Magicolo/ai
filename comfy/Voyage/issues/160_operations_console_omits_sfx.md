@@ -81,4 +81,22 @@ Dynamic: `voyage sfx --help` shows `--verbose`/`--no-color`;
 
 - `Voyage/docs/OPERATIONS.md:39-41`; `Voyage/voyage/cli.py:145-156,1870,1931,1935-1953,1988,2007,2042`.
 - Adjacent, not overlapping: 028 (console contract — output shape, not
-  the verb allow-list); 063 (stream-split/timing — renderer internals).
+   the verb allow-list); 063 (stream-split/timing — renderer internals).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live. `docs/OPERATIONS.md:39-41` listed only
+  run/generate/finalize/soak; live `_add_console_args` call sites
+  (`grep -n`) are run (`cli.py:499`), generate (`:560`), finalize
+  (`:617`), sfx (`:636`), soak (`:671`) — five verbs (module split
+  moved the lines since filing; helper still adds exactly
+  `--verbose`/`--no-color`).
+- Fix: sentence amended to "`run`, `generate`, `finalize`, `sfx`, and
+  `soak` only — ..." (one word, negative list untouched and accurate).
+- Files changed: `docs/OPERATIONS.md`.
+- Gates: docs-only.
+
+## Resolution
+
+- Done. Residual: none (the optional docs-vs-parser assertion was not
+  added — YAGNI for a one-word fix; 165's gate covers pointer drift).

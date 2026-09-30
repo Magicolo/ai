@@ -57,3 +57,39 @@ sed -n '670p;736p' Voyage/voyage/media.py  # 24 floor + max() formula
 ## Refs
 
 - `Voyage/DESIGN.md:5815-5856,6718-6734,7514-7538`; `Voyage/voyage/media.py:670-736`; `Voyage/voyage/cli.py:1765-1789,1814,1863,1932`; `Voyage/tests/test_console.py:248-262` (050 pin); `Voyage/issues/050_*` (behavior side), `092_*` (other docs).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: all 4 drifts CONFIRMED live (DESIGN.md not owned — verify-only,
+  proposals below as quoted text).
+- DRIFT 1 confirmed: `docker run --rm ... voyage:latest <verb> --help |
+  grep -c "verbose|no-color"` → run 4 / generate 4 / finalize 3 / soak 3 /
+  sfx 3, status 0 / validate 0 / benchmark 0 / inspect 0. DESIGN:7000-7001
+  still lists all eight. (Note: `sfx` also parses the flags — see 160.)
+- DRIFT 2 confirmed: `--help` verb set =
+  {init,doctor,models,run,generate,status,pause,resume,stop,validate,finalize,sfx,benchmark,soak,inspect}
+  (15); DESIGN:6102 still says "all 12 commands".
+- DRIFT 3 confirmed: `media.py:833 out_fps = max(requested, floor,
+  PRESENTATION_MIN_FPS)` with `:767 PRESENTATION_MIN_FPS = 24` and the
+  code docstring `:809-815` admitting "0 disables the new 32fps floor, not
+  the shipped-video guarantee". CausVid (fps 16) with floors 0 still lifts
+  16→24. CLI help text for the flags lives in `cli*.py` (not owned).
+- DRIFT 4 confirmed: fake preset is 768x432@24 (`config.py:167-179`) while
+  default floors ship 1280x720@32 — the Phase-0 "pass-through" note is stale.
+- Files changed: none (DESIGN.md is orchestrator-owned).
+
+## Resolution
+
+- No edit applied (out of scope). Proposed DESIGN text for the owner:
+- 1. Console entry: "reduce the verb list to `run`, `generate`,
+  `finalize`, `sfx`, `soak` (the five that parse the flags), with a
+  pointer to 050 for why `status` rejects them."
+- 2. Phase-0 entry: "annotate '12 commands (15 as of 2026-09-30:
+  +sfx/benchmark/soak)' and strike/annotate the fake pass-through note
+  with the augment default shift."
+- 3. Augment entry + CLI help: "qualify '`0` disables' → '`0` disables
+  the 32 fps / 1280x720 floors; sources below 24 fps are still lifted to
+  the 24 fps presentation floor' (matches the code docstring's own
+  wording)."
+- Residual: CLI help overclaim (`cli*.py` augment-flag help) belongs to
+  the CLI-owning track.

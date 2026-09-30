@@ -37,7 +37,7 @@ Colors/animation engage only on a real TTY with `rich` installed
 (`rich>=13.7` is a core dependency, pinned into the worker images that
 install with `--no-deps`); pipes and tests get identical plain words.
 `--verbose` / `--no-color` are honored on `run`, `generate`,
-`finalize`, and `soak` only — `status`, `validate`, `benchmark`, and
+`finalize`, `sfx`, and `soak` only — `status`, `validate`, `benchmark`, and
 `inspect` print plain text and do not accept those flags.
 
 ## Interactive launcher TUI (bare `voyage`)
@@ -93,9 +93,10 @@ appended (e.g. the CUDA-stack reason), never a stuck view.
   `deterministic` holds the style.
 - Quantization — DiT weight precision; `bf16` keeps highlights clean
   at ~+4.5 GB VRAM.
-- Blocks, Take seconds, Beats, Drift, Seed (empty = preset
-  defaults: 1 block; 45 s takes above the 20 s audio-ahead window;
-  4 beats doubling to hold >=60 BPM; drift every segment; seed 0)
+- Blocks, Take seconds, Beats, Drift, Min fps, Min resolution, Seed
+  (empty = preset defaults: 1 block; 45 s takes above the 20 s audio-ahead window;
+  4 beats doubling to hold >=60 BPM; drift every segment; finalize floors
+  32 fps / 1280×720; seed 0)
   plus draft / force / skip-bad / verbose / no-color checkboxes.
 
 Invalid fields get flagged (`field-invalid`: red-tinted background on
@@ -228,6 +229,9 @@ effects under the music afterwards unless `--no-sfx` (pins
   audio buffer, workers, slowest stages, free storage.
 - `inspect scoreboard` — per-segment table: frames, stage seconds,
   visual metrics with deltas, view paths.
+- `inspect`/`status`/`scoreboard` are lock-free best-effort views: they may
+  run any time, even mid-commit, and degrade to `unknown`/`--`/`no-visual`
+  cells (exit 0) rather than tracing on a torn tail.
 - `inspect metrics` — event count + last 5 `metrics.jsonl` events.
 - Every commit logs a `resource_gauges` event (RSS peak, disk free,
   worker VRAM) — the input to `soak` trend reports.

@@ -6,6 +6,7 @@ no tensors, no embedding vectors — artifact references only.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -38,6 +39,20 @@ class ArtifactRef(BaseModel):
     sha256: str | None = None
     bytes: int | None = None
 
+    @model_validator(mode="after")
+    def path_and_size_sane(self) -> ArtifactRef:
+        """Reject empty paths and negative sizes (issue 119).
+
+        Why: an empty path + negative byte count persist into segment
+        metadata and bias every downstream consumer — fail the one bad
+        parse loudly instead.
+        """
+        if not self.path.strip():
+            raise ValueError("artifact path must be non-empty")
+        if self.bytes is not None and self.bytes < 0:
+            raise ValueError(f"artifact bytes must be >= 0 (got {self.bytes})")
+        return self
+
 
 class PromptStage(BaseModel):
     stage: int
@@ -56,6 +71,8 @@ class PromptStage(BaseModel):
             raise ValueError(
                 f"block_end must be >= block_start (got {self.block_start}..{self.block_end})"
             )
+        if self.block_start < 0:
+            raise ValueError(f"block_start must be >= 0 (got {self.block_start})")
         return self
 
 
@@ -80,6 +97,13 @@ class StyleSpec(BaseModel):
     style_similarity_min: float = 0.60
     surrealism: float = 0.70
     transition_smoothness: float = 0.90
+    # Ceilings for the two §43 metrics the feedback loop steers on
+    # (issue 180): palette blowout and scene-cut instability. Defaults
+    # match the director-context bands (`director.py`
+    # `format_measured_context`), so the MEASURED flags and the steering
+    # agree out of the box; overridable per charter like every other band.
+    palette_distance_max: float = 0.30
+    scene_boundary_strength_max: float = 0.30
 
     @model_validator(mode="after")
     def bands_ordered(self) -> StyleSpec:
@@ -100,6 +124,35 @@ class StyleSpec(BaseModel):
                 raise ValueError(
                     f"{maximum_name} must be >= {minimum_name} (got {minimum}..{maximum})"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def values_in_domain(self) -> StyleSpec:
+        """Reject out-of-domain calibration values (issue 119).
+
+        Why: the inspector compares 0..1 metrics against these bands — an
+        ordered-but-out-of-domain band (e.g. `5.0..6.0`) reads BELOW
+        forever, and `style_similarity_min=99` flags every segment as
+        style collapse. The model layer is the single source everything
+        else trusts, so fail here, not per segment. NaN fails the chained
+        comparison automatically; inf fails the upper bound.
+        """
+        for field_name in (
+            "motion_energy_min",
+            "motion_energy_max",
+            "visual_complexity_min",
+            "visual_complexity_max",
+            "semantic_drift_min",
+            "semantic_drift_max",
+            "style_similarity_min",
+            "surrealism",
+            "transition_smoothness",
+            "palette_distance_max",
+            "scene_boundary_strength_max",
+        ):
+            value = getattr(self, field_name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be within [0, 1] (got {value})")
         return self
 
 
@@ -125,6 +178,26 @@ class TransitionPlan(BaseModel):
     estimated_duration_seconds: float = 64.0
     intermediate_stages: list[str] = Field(default_factory=list)
     major_transition: bool = False
+
+    @model_validator(mode="after")
+    def values_in_domain(self) -> TransitionPlan:
+        """Reject out-of-domain narrative knobs (issue 119).
+
+        Why: a negative duration flows into timeline math and a wild
+        strength into prompt staging — fail the parse, not the segment.
+        """
+        if not 0.0 <= self.transition_strength <= 1.0:
+            raise ValueError(
+                f"transition_strength must be within [0, 1] (got {self.transition_strength})"
+            )
+        if not math.isfinite(self.estimated_duration_seconds) or (
+            self.estimated_duration_seconds < 0.0
+        ):
+            raise ValueError(
+                "estimated_duration_seconds must be finite and >= 0 "
+                f"(got {self.estimated_duration_seconds})"
+            )
+        return self
 
 
 class DirectorDestination(BaseModel):
@@ -160,6 +233,20 @@ class DirectorAudioPlan(BaseModel):
     texture: str = ""
     environment: list[str] = Field(default_factory=list)
     sfx_caption: str = ""
+
+    @model_validator(mode="after")
+    def values_in_domain(self) -> DirectorAudioPlan:
+        """Reject out-of-domain music knobs (issue 119).
+
+        Why: energy feeds `bpm_for_energy` and the fake worker's 0..1
+        validator; a negative tempo flows toward ACE payloads — mirror the
+        `AudioConfig.energy` 0..1 precedent at the contract layer.
+        """
+        if not 0.0 <= self.energy <= 1.0:
+            raise ValueError(f"energy must be within [0, 1] (got {self.energy})")
+        if self.tempo_bpm <= 0:
+            raise ValueError(f"tempo_bpm must be positive (got {self.tempo_bpm})")
+        return self
 
 
 class DirectorNovelty(BaseModel):

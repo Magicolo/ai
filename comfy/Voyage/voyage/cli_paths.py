@@ -68,8 +68,17 @@ def _check_run_id(run_id: str) -> int:
 
 
 def _effective_run_id(args: argparse.Namespace) -> str:
-    """Run name for init/generate: --name wins, --run-id is the legacy alias."""
+    """Run name for init/generate: --name wins, --run-id is the legacy alias.
+
+    Strips padding (issue 116): `is_flat_folder_name` validates the
+    stripped value, and the TUI strips before building its namespace, so
+    the accessor strips too — all three agree, and a pasted `" boba "`
+    lands in `output/boba/` on both surfaces. A missing/blank `--name`
+    falls back to `--run-id` (also stripped); both missing yields ""
+    so `_check_run_id` reports exit 2 instead of an AttributeError.
+    """
     named = getattr(args, "name", None)
-    if isinstance(named, str) and named != "":
-        return named
-    return str(args.run_id)
+    if isinstance(named, str) and named.strip() != "":
+        return named.strip()
+    fallback = getattr(args, "run_id", "")
+    return fallback.strip() if isinstance(fallback, str) else str(fallback)

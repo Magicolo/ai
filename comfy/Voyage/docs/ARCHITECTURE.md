@@ -30,10 +30,19 @@
 
 ## Commit pipeline (per segment)
 
+[inspect previous segment + amendments →]
 director `decide` → staged prompt plan → video `generate_blocks` →
 audio coverage (slow loop: keep/render/repaint takes) → `validate_video`
 + `validate_audio` + A/V drift check (±0.6 s) → metadata + `sha256.json`
 → `DONE` → state advance → `resource_gauges` event.
+
+The bracketed inspect stage runs only when `[experimental]
+visual_inspector` is on: it samples the previous segment's committed
+video, merges measured metrics into the director context, and applies
+`feedback_amendments` post-validation pre-style-check — amendments
+invalidate the prefetched proposal. Failures degrade to
+`inspect_skipped` and never block the commit (see `docs/BACKENDS.md`
+inspector backend and DESIGN §44).
 
 Validation failures abort the commit *before* `DONE` exists, so the next
 run reuses the same segment number and overwrites the media in place.

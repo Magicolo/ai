@@ -22,3 +22,26 @@
   3. Gate: `grep -c "not gpu" scripts/build.sh` == 1, plus the existing `test_run_sh.py` suite stays green.
 - **Overlaps with:** 090 (common.sh proposal — the durable home for this fix); 089 (markers registered — this file is the build-gate half it does not cover).
 - **Refs:** `Voyage/issues/089_test_hygiene_lock_markers.md` (markers registered, slow tail unmarked — this file is the build-gate half it does not cover); `Voyage/issues/090_scripts_containers_cleanup.md` (common.sh proposal — the durable home for this fix); `Voyage/tests/test_acestep_contract.py:83-99`.
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live on both legs. `scripts/test.sh:9-12` still says
+  "no in-tree gpu tests exist yet" while
+  `tests/test_acestep_contract.py:83` carries `@pytest.mark.gpu`
+  (collect-and-skip); `scripts/build.sh:16` still runs bare
+  `python -m pytest -q` (no deselect); `gates.sh` + `test.sh` deselect;
+  `build-video.sh` is smoke-only (no pytest — correctly out of scope).
+- Fixes (scripts/ only): (1) `build.sh:16` pytest invocation gained
+  `-m 'not gpu'` (matches test.sh/gates.sh; `grep -c "not gpu"
+  scripts/build.sh` == 1); (2) `test.sh` comment rewritten to "in-tree
+  gpu tests always skip without CUDA/weights; deselected so gates never
+  pay for them".
+- Files changed: `scripts/build.sh`, `scripts/test.sh`.
+- Gates: `bash -n` clean on both; `test_run_sh.py` + `test_console.py`
+  green in-container (22 passed) — no pytest-behavior change for the
+  current always-skip gpu test.
+
+## Resolution
+
+- Done. Residual: the shared-deselect consolidation (common.sh variable)
+  stays with 090's proposal — not folded here.

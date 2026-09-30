@@ -62,3 +62,40 @@ grep -n "_sha256\|getattr(tui_state" voyage/model_registry.py voyage/tui.py test
   Recommended order per the issue (highest safety first): items 1+2+5+6
   (pure deletes/inlines), then 3+4 (shim removal), then the `__init__` /
   `bench.py` disposition. Gate each with `gates.sh` green.
+
+## Progress log (2026-09-30, Group D pass)
+
+- All 7 premises re-verified live (host reads, tree as-read): (1)
+  `LongLiveBackend`/`AceStepBackend` still `NotImplementedError`
+  placeholders at `voyage/fake_backends.py:186/200` with zero importers
+  outside that file — holds. (2) `_sha256` still at
+  `voyage/model_registry.py:351` (`__all__`) / `:383` (def), pinned by
+  `tests/test_hashing.py:47` — holds. (3) `getattr` shims still at
+  `voyage/tui.py:165,186,198` — holds, and `tui.py` gained concurrent
+  uncommitted edits mid-pass (checkbox additions), so it is doubly out of
+  scope. (4) `LAST_SETTINGS_PATH` still at `voyage/tui_state.py:66` +
+  docstring `:9` + pin `tests/test_tui_state.py:50` — holds, same
+  concurrent-edit collision. (5) `_check_run_id` cites drifted under the
+  cli split (now an import at `voyage/cli.py:48` + `__all__` string at
+  `:172`; the `:118-122/:1249` anchors are stale) — `cli.py` not owned.
+  (6) **Refuted**: the only `1e-9` left in `voyage/` is the constant def
+  itself (`backends.py:94`) plus its docstring mention (`:108`) — no
+  re-literal anywhere; the cli split already removed the duplication. (7)
+  `voyage/workers/__init__.py` is docstring-only (no code list — the
+  "stale list" premise is a doc gap at most); `audio`/`vision`
+  `__init__.py` are 1-line pointers as described; `bench.py` is 150L,
+  disposition still open.
+- No code change: (1) needs `fake_backends.py` (not owned); (2) needs a
+  `model_registry.py` deletion, which exceeds this pass's alias-hunks-only
+  scope on that file, and the test pins cannot move first; (3)(4) collide
+  with concurrent edits; (5)(7) need their owning passes.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Not resolved here — returned with precise per-item scoping above (one
+  refutation: item 6 already fixed by the cli split).
+- Files changed: none for 086. Gate evidence: n/a. DESIGN proposals: none.
+  Residuals: items 1+2 (fake-backends / registry passes, with their test
+  pins), 3+4 (tui passes after the concurrent feature work lands), 5
+  (cli pass, cites need re-anchoring post-split), 7 (`__init__`/bench
+  disposition).

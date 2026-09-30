@@ -46,5 +46,21 @@ video_causvid.py:973-974 / video_ltxv.py:777-778 / video_longlive.py:1051-1052:
 
 ## Refs
 
-- `Voyage/voyage/workers/video_causvid.py:516-576,589-614,973-999`; `Voyage/voyage/workers/video_ltxv.py:757-799`; `Voyage/voyage/workers/video_longlive.py:1016-1071`; `Voyage/voyage/config.py:100-114` (per-backend `device` fields).
-- Adjacent, not overlapping: 021 (CLI *registry* CUDA sets — this file is worker *placement* strings); 074 (augment loader formats — untouched); the ltxv `_encode` device fix noted in `video_ltxv.py:403-405` (the precedent to port).
+ - `Voyage/voyage/workers/video_causvid.py:516-576,589-614,973-999`; `Voyage/voyage/workers/video_ltxv.py:757-799`; `Voyage/voyage/workers/video_longlive.py:1016-1071`; `Voyage/voyage/config.py:100-114` (per-backend `device` fields).
+ - Adjacent, not overlapping: 021 (CLI *registry* CUDA sets — this file is worker *placement* strings); 074 (augment loader formats — untouched); the ltxv `_encode` device fix noted in `video_ltxv.py:403-405` (the precedent to port).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read on all four placement sites (`InferencePipeline(config, device="cuda")`, `.to(device="cuda")`, T5 shuttle `.to("cuda")` ×2) and all three telemetry sites. `grep self._device` showed store + noise-only uses, zero placement. TDD: `tests/test_e2_causvid_device_124.py` written first — collection failed pre-fix (helper missing), placement tests failed pre-fix; green post-fix.
+
+## Resolution
+
+- Verdict: FIXED where ownable (causvid + longlive — both in Group E2 scope); ltxv leg logged as residual below.
+- Changes:
+  - `voyage/workers/video_common.py`: new pure helpers `cuda_device_index(device)` (`"cuda:N" → N`, bare `"cuda" → 0`, ValueError on non-CUDA — single home so all workers parse identically) and `torch_device_arg(index)` (`()` on 0, `(N,)` otherwise — device 0 keeps the exact zero-arg call shape the worker test fakes pin; only non-zero sessions route explicitly).
+  - `voyage/workers/video_causvid.py`: `InferencePipeline(config, device=self._device)` + `.to(device=self._device)`; T5 shuttle `.to(self._device)` (park-back on CPU unchanged); `handle_init` fail-fasts when the index exceeds `torch.cuda.device_count()`; `handle_init`/`handle_health` telemetry device-indexed (`get_device_name(device)` / `mem_get_info(device)`, health reads `_INIT_PARAMS` device); benchmark peak callbacks routed via `torch_device_arg`. Module docstring updated to the threaded shape.
+  - `voyage/workers/video_longlive.py`: placement already threaded `self._device` (verified — no change needed); `handle_init`/`handle_health`/benchmark telemetry indexed the same way.
+- Files changed: `voyage/workers/video_common.py`, `voyage/workers/video_causvid.py`, `voyage/workers/video_longlive.py` (+ new `tests/test_e2_causvid_device_124.py`). One review-driven revision during the pass: an initial `session._device_index` attribute broke the existing `test_causvid_worker` `__new__`-built sessions — replaced with the `_INIT_PARAMS` source (consistent with longlive); a first explicit-always peak-arg broke zero-arg test fakes — the `torch_device_arg` compat shape resolved it with all existing tests green.
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 8 passed (cuda:1 shuttle placement incl. bare-`cuda` absence, cuda:0 unchanged, index parse/reject, device-arg shape); `test_causvid_worker` (43), `test_longlive*`, `test_worker_perf_rank2` (minus 2 pre-existing foreign failures — verified failing with my files stashed, caused by concurrent uncommitted `augment.py` edits) green. Torch-execution probe needs a GPU box (CPU-only container here): `init {"device": "cuda:1"}` → nvidia-smi residency + init-report naming still open for a GPU owner. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §5.4 worker placement): "Video worker sessions place every model shard on their configured `device` (causvid threads it through pipeline build, T5 shuttle, noise, and telemetry; longlive telemetry and benchmark peaks are device-indexed). The shared `video_common.cuda_device_index` parse is the single home; `init` fails fast on out-of-range indexes."
+- Residuals (out of scope, precise): `voyage/workers/video_ltxv.py:940-941` (`get_device_name(0)` + `mem_get_info()`), `:959` (health, no device arg), `:1049-1050` (benchmark `reset_peak_memory_stats` + `max_memory_allocated` device-default) — same hardcoded-0 cluster, needs the ltxv owner to port the `torch_device_arg` pattern (video_ltxv.py is concurrent-hot, explicitly out of this group's scope).

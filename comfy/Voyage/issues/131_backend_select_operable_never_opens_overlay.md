@@ -46,3 +46,24 @@ grep -n 'press(' Voyage/tests/test_tui_app.py
 ## Refs
 
 - `Voyage/tests/test_tui_app.py:129-169`; `Voyage/voyage/tui.py:283-285,842-844`; DESIGN §140 2026-09-25 liveness pass (blank dropdowns); `Voyage/issues/113_*`, `114_*` (adjacent TUI surfaces, no overlap).
+
+## Progress log (2026-09-30, Group D pass)
+
+- Premises re-verified live: programmatic `.value` set at old `:162`,
+  zero `enter`/`space`/`down`/`up` presses in the file — as filed.
+- Fix candidate 1 proven feasible first (ephemeral in-container probes,
+  never committed): focus + `enter` mounts `SelectOverlay`
+  (`expanded True`); `down` + `enter` commits `ltxv` → `longlive2` with
+  `_read_form().backend` following. No rename fallback needed.
+- Test rewritten to drive that path: focus `#field-backend`, open the
+  overlay (assert `expanded`), navigate, commit (assert dismissed +
+  value changed, order-agnostic), then the pre-existing form-reader and
+  `#gpu-warning` asserts run against the committed value.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Resolved: the test now operates the dropdown it names.
+- Files changed: `tests/test_tui_app.py` (`test_backend_select_is_operable`
+  rewritten; name kept — it finally earns it). Gate evidence: test passes
+  in-container; full file 33/33; `ruff check` + `ruff format --check`
+  clean. DESIGN proposals: none. Residuals: none.

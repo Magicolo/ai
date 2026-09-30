@@ -109,3 +109,25 @@ $ sed -n '676,678p;808,810p' voyage/media.py
 - 2026-09-30: filed by Track A sweep; live re-verified via Read (concurrent uncommitted edits
   noted in `voyage/cli.py`, `voyage/tui_state.py`, `tests/test_generate.py`,
   `config/persistence/rpc/supervisor` — citations are as-read values above).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live. `persistence.py:23-24` still
+  `FINAL_VIDEO_WIDTH = 768` / `FINAL_VIDEO_HEIGHT = 432`, stamped at
+  `:53-56`; `media.py:773-775` floors are 32/1280/720 and `config.py:438-440`
+  `AugmentConfig` defaults match (line numbers drifted slightly from the
+  filing — values identical).
+- Fix candidates 1-2 are code (`persistence.py` — not owned), so the
+  Group-C fix is candidate 3 (docs): added a "Provenance note" to
+  `docs/STATE_AND_RECOVERY.md` stating `manifest.timeline` is the source
+  hint, not the shipped presentation (read shipped geometry off the
+  artifact / `docs/AUGMENT.md`).
+- Files changed: `docs/STATE_AND_RECOVERY.md` (provenance note only).
+
+## Resolution
+
+- Docs: provenance note added; manifest constants untouched.
+- Residual (code-owning track): record the effective presentation contract
+  at init (`min_fps/min_width/min_height` + `final_geometry` slot filled by
+  finalize) or reword the keys to `native_hint_*`, plus the
+  `build_manifest`-reflects-floors regression test from the issue.

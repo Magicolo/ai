@@ -5,9 +5,9 @@ the finalize-time SFX pass (three-caption doctrine: the caption is the
 director's SFX family). Same resident-stack discipline as the ACE-Step
 worker — lazy init (process starts while video owns the GPU), `evict_gpu`
 before the music stack loads, benchmark with VRAM peaks for the 2060
-ladder (§104).
+ladder (DESIGN §104).
 
-GPU ban (§12): `torch`/`mmaudio` only load inside functions via
+GPU ban (DESIGN §12): `torch`/`mmaudio` only load inside functions via
 `voyage.audio.mmaudio_sfx`, never at module scope.
 """
 
@@ -49,6 +49,14 @@ _stack: SfxStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
 _model_size = "large_44k_v2"
+
+_INIT_STR_KEYS = ("models_dir", "device", "model_size")
+"""`init` fields this worker records (issue 127).
+
+Anything else is a caller typo (`model_is`, `backemd`, `model_dir`) —
+reject it at startup instead of booting defaults with the pinned
+weights silently unused.
+"""
 
 
 def _require_torch() -> None:
@@ -138,6 +146,9 @@ def _require_stack() -> SfxStack:
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     """Record where/how the MMAudio stack will load (no GPU touched here)."""
     global _models_dir, _device, _model_size
+    unknown = sorted(set(payload) - set(_INIT_STR_KEYS))
+    if unknown:
+        raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(_INIT_STR_KEYS)})")
     if "models_dir" in payload and not isinstance(payload["models_dir"], str):
         raise TypeError(
             f"init field 'models_dir' must be str, got {type(payload['models_dir']).__name__}"

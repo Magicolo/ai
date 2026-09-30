@@ -45,3 +45,28 @@ grep -n "pause(0.3)\|pause(2.5)" Voyage/tests/test_tui_app.py
 ## Refs
 
 - `Voyage/tests/test_tui_app.py:42-65` (093 poll precedent); `Voyage/voyage/tui.py:943-949` (1.0 s interval); `Voyage/issues/088_*` (fold rationale, no budget named); AGENTS.md §11 (093-Pilot click-True + 30 s budgets).
+
+## Progress log (2026-09-30, Group D pass)
+
+- Premises re-verified live (host reads, tree as-read): single
+  `pause(0.3)` at `:733`, single `pause(2.5)` at `:932` — both as filed.
+- Both waits converted to poll-until-landed (file's own idiom):
+  SVG render 25×0.2s (~5s budget, breaks early) and heartbeat 20×0.5s
+  (~10s budget); the final asserts still fail loudly on a truly blank
+  render / dead ticker.
+- Adjacent hardening (same family, same file): `_click_generate_when_ready`
+  now tolerates `OutOfBounds` per poll iteration. Cause (live, mid-pass):
+  a concurrent agent added two checkboxes to `voyage/tui.py`, pushing the
+  Generate button below the fold at test sizes — under box load the
+  scheduled `scroll_visible` had not applied when `pilot.click` ran, and
+  the raise (unlike a `False` miss) escaped the helper. 100-try budget and
+  fail-loud `AssertionError` unchanged.
+
+## Resolution (2026-09-30, Group D pass)
+
+- Resolved: both fixed sleeps poll; click helper survives the raise.
+- Files changed: `tests/test_tui_app.py` (SVG poll, heartbeat poll,
+  helper `try/except OutOfBounds`). Gate evidence: full file 33/33
+  in-container (34.29s); `ruff check` + `ruff format --check` clean.
+  DESIGN proposals: none. Residuals: none in 130's scope (the helper is
+  shared with the 093 lesson — noted, not changed beyond the tolerance).

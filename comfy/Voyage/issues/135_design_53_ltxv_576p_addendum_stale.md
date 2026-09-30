@@ -41,3 +41,28 @@ grep -n -A4 '"ltxv": BackendRecord' Voyage/voyage/config.py  # live: 768x512 ltx
 
 - `Voyage/DESIGN.md:500-550` (§5.3 verdict + accounting + addendum), `:6638-6646` + `:6791-6792` (revert + probe verdict), `:6539` (presets at 768x512); `Voyage/voyage/config.py:117-204`; `Voyage/voyage/workers/video_ltxv.py:56-58,811,858-859`.
 - Adjacent, not overlapping: 092 (docs batch — §5.1/§§56-57/§87, never §5.3:545-550); 042/065 (README/INSTALL geometry-downloads, not DESIGN §5.3).
+
+## Progress log (Group C, 2026-09-30)
+
+- Verdict: CONFIRMED live (DESIGN.md not owned — verify-only, proposal
+  below as quoted text). Live line numbers drifted from the filing:
+  addendum now at `DESIGN.md:556-561` ("the `ltxv` preset in `config.py`
+  was moved 768x512 → **1024x576** (`ltxv-576p`) ... All Stream A live
+  evidence below is at 768x512; a 1024x576 render ... still needs its own
+  VRAM/throughput probe"); revert now at `:6910-6919` ("Resolution: ltxv
+  preset stays 768x512 ... Native 1024x576 was tried and reverted the
+  same day: the forward needs ~15.6 GB ... beyond the 16 GB card").
+- Live code agrees with the revert: `config.py:197-204` =
+  `"ltxv": BackendRecord(profile="ltxv-512p", width=768, height=512, ...)`.
+- Files changed: none (DESIGN.md is orchestrator-owned).
+
+## Resolution
+
+- No edit applied (out of scope). Proposed DESIGN text for the owner:
+  "Strike the §5.3 addendum in place: keep one line of history
+  ('1024x576 tried 2026-09-24, reverted — forward needs ~15.6 GB, see
+  §140 rhythm-cut note') and restore the normative sentence to 768x512
+  (`ltxv-512p`), matching config + the probe verdict. Leave the §140 log
+  untouched. Gate: `rg -n '576p|1024x576' DESIGN.md` shows only
+  historical/log contexts after the fix."
+- Residual: none in this file's scope.

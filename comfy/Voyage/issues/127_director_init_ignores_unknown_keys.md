@@ -49,5 +49,18 @@ print({k: payload[k] for k in INIT_STR_KEYS if k in payload})  # {} — everythi
 
 ## Refs
 
-- `Voyage/voyage/workers/director.py:43-52,100-105,457-470`; `Voyage/voyage/workers/audio_acestep.py:79-97`; `Voyage/voyage/workers/sfx_mmaudio.py:77-101`.
-- Adjacent, not overlapping: 075-era reload-on-id-change (resident-stack correctness — this file is *which id gets recorded*); 084 (structural collapse — the shared-helper home, not this behavior).
+ - `Voyage/voyage/workers/director.py:43-52,100-105,457-470`; `Voyage/voyage/workers/audio_acestep.py:79-97`; `Voyage/voyage/workers/sfx_mmaudio.py:77-101`.
+ - Adjacent, not overlapping: 075-era reload-on-id-change (resident-stack correctness — this file is *which id gets recorded*); 084 (structural collapse — the shared-helper home, not this behavior).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read for all three workers: `director.py:591-595` iterates `INIT_STR_KEYS` membership in payload (never the reverse — unknown keys cannot raise by construction, READY returned unconditionally); `audio_acestep.py` and `sfx_mmaudio.py` had the identical record-if-known pattern. Per the task brief ("if the fix fits your worker files do it, else residual"): the two Group E2 workers are fixed here; `director.py` is out of scope (owned by another track) and logged as residual. TDD: `tests/test_e2_worker_init_strict_127.py` — 2 failed pre-fix, 5/5 green post-fix (incl. globals-restore fixture so sibling tests keep defaults).
+
+## Resolution
+
+- Verdict: FIXED in the two Group E2 workers; director leg RESIDUAL (below).
+- Changes: `_INIT_STR_KEYS` tuples + unknown-key `TypeError` (naming the key and the known set) in `voyage/workers/sfx_mmaudio.py` (`models_dir/device/model_size`) and `voyage/workers/audio_acestep.py` (`models_dir/device`). ACE validation runs BEFORE `_redirect_upstream_writes`, so a typo fails with zero side effects (CWD untouched — pinned by test).
+- Files changed: `voyage/workers/sfx_mmaudio.py`, `voyage/workers/audio_acestep.py` (+ new `tests/test_e2_worker_init_strict_127.py`). Existing `test_audio_workers`, `test_sfx_contract`, and the concurrent `test_audio_acestep_cwd` all green (the ACE reorder is side-effect compatible).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 5 passed. Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — worker discipline §12): "Every worker `init` rejects unknown fields as `TypeError` (INVALID_PAYLOAD, fatal) naming the key and the known set — a mistyped model id fails at startup instead of booting defaults."
+- Residuals (out of scope, precise): `voyage/workers/director.py:45-52` (`INIT_STR_KEYS`) + `:591-595` (`handle_init` loop) need the identical `unknown = set(payload) - set(INIT_STR_KEYS)` guard — the dangerous pairs from the filing (`model_id` vs `model`/`modelid`/`qwen_model_id`, `models_dir` vs `model_dir`/`models_path` defeating the 2026-09-29 /models snapshot resolution) are still silent there. Suggested home per fix candidate 2 (`_validators.py` shared `strict_init_update`) belongs to the 084 owner; the per-worker pattern landed here ports verbatim.

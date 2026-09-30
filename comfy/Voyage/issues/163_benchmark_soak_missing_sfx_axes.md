@@ -103,8 +103,20 @@ time it by hand — no harness reproduces the number.
 
 ## Refs
 
-- `Voyage/voyage/cli.py:1382-1407,1431-1456,1459-1527,1547-1576,1773-1817,1992-2032,2035-2043`;
-  `Voyage/voyage/bench.py:40-56`; `Voyage/voyage/workers/sfx.py:25,85,137`;
-  `Voyage/voyage/workers/sfx_mmaudio.py:254,372`.
-- Adjacent, not overlapping: 051 (bench report shape); 059 (gauges
-  VRAM); 060 (benchmark env).
+ - `Voyage/voyage/cli.py:1382-1407,1431-1456,1459-1527,1547-1576,1773-1817,1992-2032,2035-2043`;
+   `Voyage/voyage/bench.py:40-56`; `Voyage/voyage/workers/sfx.py:25,85,137`;
+   `Voyage/voyage/workers/sfx_mmaudio.py:254,372`.
+ - Adjacent, not overlapping: 051 (bench report shape); 059 (gauges
+   VRAM); 060 (benchmark env).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first jointly with 154 (same filing, keep/fold: 154 owns the CLI-target half, this file the soak-only remainder). Premise CONFIRMED as-read post-080 split: `voyage/cli.py:643-646` (choices), `voyage/cli_observe.py:161-239` (`cmd_benchmark` video/audio + e2e, no SFX), `:259-298` (`cmd_soak` stages + gauges + prefetch + validate, no SFX), `bench.summarize_gauges` RSS/disk + per-worker VRAM only. The `bench.py` soak-side shapes (mine) are implemented; all CLI/soak-verb legs are residuals.
+
+## Resolution
+
+- Verdict: SOAK-SIDE SHAPES IMPLEMENTED in `voyage/bench.py` (shared with 154 — see that file); soak-verb legs RESIDUAL (below).
+- Changes: `summarize_sfx_windows` (soak SFX section aggregation over plain window records — the post-run pass fix candidate 2 needs, with no extra renders) + `sfx_benchmark_setup` (carries `model_size` + `sfx_workers` for the branch) live in `voyage/bench.py`, tested by `tests/test_e2_bench_sfx_augment_154_163.py` (4 passed, CPU-only, `voyage:latest`).
+- Test evidence: shared with 154 (same test file); `test_benchmark.py` green; ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §104/§68): "Soak reports carry an SFX section (window render mean, join/mix rollup via `summarize_sfx_windows`, ledger verdict) collected as a post-run pass over stems + ledger — no extra renders; the end-to-end throwaway stays music-only behind the existing `no_sfx` gate unless the SFX pass is explicitly included."
+- Residuals (out of scope, precise — for the CLI owner): (1) `voyage/cli_observe.py:259-298` (`cmd_soak`): add the SFX section (window render mean via `summarize_sfx_windows` over `audio/sfx/` stems + `sfx.jsonl`, plus a `validate_sfx_ledger` verdict); (2) e2e SFX inclusion decision behind `no_sfx`; (3) `choices`-pin test covering the full target list (154 residual 4). No supervisor SFX handle exists yet (see 154) — both residuals block on that seam.

@@ -58,3 +58,32 @@ sed -n '170,200p' Voyage/voyage/cli.py
 ## Refs
 
 - `voyage/cli.py:170-200`; issue 143 (same mkdirs, invalid-value trigger — this file is the missing-attribute trigger); issue 109 (same direct-vs-getattr holdout shape on the stop path); issue 022 (hand-built-namespace contract tests as the fix pattern).
+
+## Progress log
+
+- 2026-09-30 (Group A): premise re-verified live on the split tree
+  (`cmd_init` now `voyage/cli_run_ops.py:35-78`): namespace without
+  `style` raised `AttributeError` after creating `run/`+`segments/`+
+  `logs/`. Also confirmed `args.output`/`args.force` were direct reads.
+- Wrote failing test first
+  (`tests/test_cli_group_a.py::test_cmd_init_missing_attributes_exit_without_litter`,
+  missing-style and missing-seed cases): red (`AttributeError` +
+  litter; the test itself needed one fix — the shared `base` dict
+  initially carried `seed`, masking the missing-seed case).
+- Fixed with candidates 1+2 in the same hunk as 143 (one review).
+
+## Resolution: FIXED (folded into 143's hunk)
+
+- `voyage/cli_run_ops.py:35-63`: `output`/`force`/`style`/`seed` all
+  read via `getattr` with explicit exit-2 errors before the first
+  `mkdir` (missing/blank output, blank style, non-int seed); `backend`
+  via `getattr`-or-default plus registry-membership check. The only
+  remaining direct read is `args.run_id` inside `_effective_run_id`,
+  which is now itself `getattr`-tolerant (see 116).
+- `default_config_toml` now receives the validated locals
+  (`style_value`, `seed_value`, cast `backend`) instead of re-reading
+  `args` — one read per input, validated once.
+- Test evidence: each missing attribute asserts exit 2 AND
+  `not run_dir.exists()`.
+- Gates: `ruff check` + `ruff format --check` + `mypy strict` green.
+- Residuals: none.

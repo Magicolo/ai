@@ -33,5 +33,18 @@ CPU-only (no GPU needed): `from voyage.audio.acestep import validate_duration_se
 
 ## Refs
 
-- `Voyage/voyage/audio/acestep.py:31-60,126-155`; `Voyage/voyage/audio/mmaudio_sfx.py:60-86`; `Voyage/voyage/config.py:290-357`; `Voyage/voyage/workers/audio_acestep.py:134-214`; DESIGN §37 (ACE), three-caption doctrine (SFX windows).
-- Adjacent, not overlapping: 063-class validators (bottom half — this file is the missing top); 100 (NaN/inf into select); 104 (slice-loop spawn storm); 013 (take/ahead swap-per-segment floor).
+ - `Voyage/voyage/audio/acestep.py:31-60,126-155`; `Voyage/voyage/audio/mmaudio_sfx.py:60-86`; `Voyage/voyage/config.py:290-357`; `Voyage/voyage/workers/audio_acestep.py:134-214`; DESIGN §37 (ACE), three-caption doctrine (SFX windows).
+ - Adjacent, not overlapping: 063-class validators (bottom half — this file is the missing top); 100 (NaN/inf into select); 104 (slice-loop spawn storm); 013 (take/ahead swap-per-segment floor).
+
+## Progress log
+
+- 2026-09-30 (Group E2): evaluated live first. Premise CONFIRMED as-read: ACE `validate_duration_seconds` rejected only bottom (finite + > 0) while the SFX sibling caps at 60 s; `AudioConfig.non_negative` (`config.py:348-353`) has no max; both workers' benchmark probes take unbounded overrides. No test in the tree used ≥120 s durations (grep over acestep/planner/worker/test files — empty), so a 120 s ceiling (2× the largest legitimate 60 s take, per fix candidate 1) has no false-positive surface. TDD: `tests/test_e2_ace_ceiling_155.py` — collection failed pre-implementation (`MAX_TAKE_SECONDS` missing), 5/5 green post-fix.
+
+## Resolution
+
+- Verdict: FIXED at the validator (`voyage/audio/acestep.py` — the audio half of this group); config-level ceiling RESIDUAL (below). The worker benchmark leg (candidate 3) is inherited, not separate: both `handle_benchmark` paths funnel through `validate_duration_seconds` (`audio_acestep` via `handle_generate_audio`, `sfx_mmaudio` directly), so a 2-hour benchmark override now fails in validation.
+- Changes: `MAX_TAKE_SECONDS = 120.0` + three-way check (`not finite or <= 0 or > MAX`) in `validate_duration_seconds`, same message shape as the SFX sibling.
+- Files changed: `voyage/audio/acestep.py` (+ new `tests/test_e2_ace_ceiling_155.py`: absurd rejected, boundary MAX/MAX+ε, legitimate 1-60 s pass, bottom half unchanged, SFX parity).
+- Test evidence (in-container `voyage:latest`, CPU-only): new file 5 passed; `test_acestep_contract` + `test_audio_workers` + `test_audio_request_validation` + `test_audio_planner` + `test_audio_take_ahead_guard` green (51 passed, 1 skipped). Ruff + format + mypy strict clean.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §37): "ACE take durations validate both halves: finite within `(0, MAX_TAKE_SECONDS]` (120 s, 2× the largest legitimate 60 s take) — absurd values fail in validation, never after minutes of DiT render. Mirrors the SFX `MAX_WINDOW_SECONDS` bound."
+- Residuals (out of scope, precise): `voyage/config.py:348-353` (`AudioConfig.non_negative` covering `take_seconds`/`ahead_seconds`/`crossfade_seconds`, plus `DraftConfig.non_negative` at `:594-599`) still has no upper bound — a `take_seconds=1e6` TOML typo passes `load_config` and only fails at render. Needs the config owner to add a `field_validator` upper bound (same constant family).
