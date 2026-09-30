@@ -63,8 +63,8 @@ def test_beats_for_segment_rejects_non_finite() -> None:
 @pytest.mark.parametrize(
     ("take_seconds", "segment_seconds", "expected"),
     [
-        (45.0, 2.0, 44.0),  # 22.5 segments rounds to 22
-        (45.0, 4.0, 44.0),  # 11.25 segments rounds to 11
+        (45.0, 2.0, 46.0),  # 22.5 segments ceils to 23 (issue 121: never plan short)
+        (45.0, 4.0, 48.0),  # 11.25 segments ceils to 12 (issue 121: never plan short)
         (45.0, 5.04, 45.36),  # 8.93 rounds to 9 cold-start segments
         (1.0, 4.0, 4.0),  # min one segment
         (4.0, 2.0, 4.0),  # already aligned
@@ -99,7 +99,7 @@ def test_planner_quantizes_fresh_takes_to_segment_grid() -> None:
     plan = planner.plan(0.0, "ambient", 11, 0)
     assert plan.action == "render"
     assert plan.take is not None
-    assert plan.take.duration == pytest.approx(44.0)
+    assert plan.take.duration == pytest.approx(46.0)
 
 
 def test_planner_without_segment_seconds_keeps_legacy_length() -> None:

@@ -175,3 +175,63 @@ print(q(45.0, 15.0))   # 45.0 exact — unaffected (control case)
   literal) and `tests/test_beat_quantize_ties_121.py:28-37`, plus the
   candidate-3 plan-site assertion in `voyage/audio/planner.py`
   (`_fresh_take`, after `:240`). Needs the rhythm-test owner's sign-off.
+
+## Progress log (2026-09-30, close-out pass — LANDED)
+
+- Atomicity check first (`git status/diff`, root `/home/goulade/Projects/ai`):
+  tree carries concurrent uncommitted hunks in OTHER files
+  (`cli_observe.py` metrics extraction, `model_registry.py` JsonValue
+  typing, `supervisor.py`, `augment_worker.py`, three issue files), but
+  all four 121 target regions were foreign-hunk-free: `git diff HEAD --
+  comfy/Voyage/voyage/audio/beat.py comfy/Voyage/voyage/audio/planner.py
+  comfy/Voyage/tests/test_rhythm.py
+  comfy/Voyage/tests/test_beat_quantize_ties_121.py` showed only this
+  pass's edits (verified before landing). Contract condition met — landed.
+- TDD red (in-container `voyage:latest`, CPU-only, no host pip): updated
+  the pins first, watched fail against the old `round()` —
+  `test_rhythm[45-2-46]`, `test_rhythm[45-4-48]`,
+  `test_planner_quantizes_fresh_takes_to_segment_grid`,
+  `test_exact_half_ratio_ceils_up`,
+  `test_quantized_take_never_plans_short` = 5 failed, 22 passed.
+- Fix: `beat.py:quantize_take_seconds` →
+  `multiples = max(1, math.ceil(take_seconds / segment_seconds))`
+  (`math` already imported) + docstring tie rule rewritten to ceil
+  (never plans short; `45/18 = 2.5 → 3 → 54 s`); `planner.py:_fresh_take`
+  gains the candidate-3 plan-site guard (`duration <= ahead_seconds`
+  raises ValueError naming the swap cost + issue 121); pins updated in
+  the SAME edit set: `test_rhythm.py:66` `(45,2) 44.0 → 46.0`
+  ("22.5 ceils to 23"), `:67` `(45,4) 44.0 → 48.0` ("11.25 ceils to
+  12"), `:102` `44.0 → 46.0`; `test_beat_quantize_ties_121.py` rewritten
+  from CHARACTERIZATION to ceil pins (`45/18 → 54.0`, `3.5 → 4` same
+  value new rule) + new `test_quantized_take_never_plans_short`
+  (`q >= 45` on all three operating points). `:122` `AudioTake`
+  hand-built `duration=44.0` left untouched (arbitrary ledger-roundtrip
+  fixture, not a quantization pin — changing it would be churn).
+- TDD green: `test_rhythm + test_beat_quantize_ties_121 +
+  test_beat_properties + test_audio_planner + test_audio_take_ahead_guard`
+  = 55 passed in-container. Scoped quality: `ruff check` clean,
+  `ruff format --check` clean (4 files), `mypy
+  voyage/audio/beat.py voyage/audio/planner.py` clean.
+- Full `./Voyage/scripts/gates.sh`: 1714 passed, 10 skipped, 4 failed —
+  all 4 foreign to this scope (verified by diff scope + failure
+  signature): `test_tui_app::test_mid_run_progress_reaches_log_before_completion`
+  (known TUI Pilot load-flake, shared-box), plus 3×
+  `test_worker_perf_rank2` `test_047_*` asserting `augment_worker.py`
+  source shapes (`half`/`gc.collect`/`_run_frame_batches`) while a
+  concurrent agent holds a 391-line uncommitted `augment_worker.py`
+  rewrite. No failure touches beat/planner/rhythm.
+
+## Resolution (2026-09-30, close-out pass)
+
+- Verdict: FIXED (landed, uncommitted per contract — no commit).
+  Files changed: `voyage/audio/beat.py` (ceil + docstring),
+  `voyage/audio/planner.py` (plan-site `duration > ahead_seconds`
+  guard), `tests/test_rhythm.py` (3 pins),
+  `tests/test_beat_quantize_ties_121.py` (ceil rewrite + no-shorten
+  invariant). DESIGN proposals: none (Group B §35 proposal is now
+  implemented — DESIGN owner may close it as done).
+- Evidence: TDD red 5-failed → green 55-passed (lines above); scoped
+  ruff + format + mypy clean; full gates 1714/4-foreign.
+- Residuals: none for 121. Note for reviewers: the full-gate 4 failures
+  belong to the concurrent `augment_worker.py` rewrite + TUI flake —
+  do not revert this fix to chase them; re-run gates on an idle box.

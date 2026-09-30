@@ -35,7 +35,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from voyage.atomic import JsonValue, atomic_write_json, fsync_dir
 from voyage.config import ProjectConfig
@@ -164,7 +164,7 @@ def _read_manifest_keys(models_dir: Path) -> dict[str, JsonValue] | None:
     if not manifest_path.is_file():
         return {}
     try:
-        raw: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(raw, dict):

@@ -244,3 +244,115 @@ own plan.
   return + `rows` local (invariance probe on file); `snapshot_kwargs` /
   `file_kwargs`; `raw: Any` + merge-internal `record` (`json.loads`
   idiom); `raw_stdout`/`readable` (fd juggling).
+
+## Progress log (2026-09-30, this pass — remainder in recorded order)
+
+- Pre-flight: `git status`/`git diff` (repo root `ai/`, paths
+  `comfy/Voyage/...`) showed concurrent-agent uncommitted hunks in
+  `voyage/supervisor.py` (issue 081 prefetch move:
+  `summarize_prefetch_outcome` → `voyage/supervisor_prefetch.py` +
+  re-export, plus `supervisor_proposal`/`cli_observe`/`audio/*` tracks)
+  and new untracked `voyage/supervisor_prefetch.py` +
+  `voyage/cli_inspect_metrics.py`. No foreign hunks in the
+  `model_registry.py`/`models_ensure.py`/`scoreboard.py` target regions;
+  `supervisor.py` foreign hunk is at a different region from the
+  `JsonValue` sites below — left intact, re-read before every edit,
+  hunks minimal, never undid foreign work. `voyage/rpc.py` clean.
+- Leg 1, `rpc.py:327-329 call()` → `RpcPayload`: BLOCKED, probed live
+  then reverted (no edit landed). Changing payload to `RpcPayload`
+  reddens `voyage/supervisor.py:631`
+  (`dict(payload)` with `dict[str, object]` → `SupportsKeysAndGetItem`
+  mismatch) and `voyage/supervisor.py:1182`
+  (`{"texts": texts}` with `list[str]` vs `list[JsonValue]` invariance).
+  `list[str]`/`dict[str,str]` literals are never assignable to
+  `dict[str, JsonValue]` (list/dict invariance) — every call site would
+  need an explicit `RpcPayload` annotation or cast, incl. foreign lines.
+  Return stays `dict[str, Any]` (narrowing `response.result` would need
+  a cast; `WorkerRequest`/`WorkerResponse` in `voyage/models.py:315-330`
+  stay `dict[str, Any]` — out of scope). `raw_stdout`/`readable: Any`
+  (`rpc.py:281,284`) stay by construction (fd juggling).
+- Leg 2, supervisor `dict[str, object]` → `JsonValue`: SKIPPED/BLOCKED,
+  no edit landed for payload/return types. `_call_with_restart`
+  (`supervisor.py:590-598`, payload `:596`, return `:598`),
+  `_with_audio_gpu` (`:1470-1475`, payload `:1473`, return `:1475`),
+  `payload` (`:1694`), `gauges` (`:850`), `_log_metric` (`:574`),
+  `extra` (`:1238`) form one invariant chain: inline
+  `dict[str,str]` (`{"recovery_path": ...}`) and `list[str]` payloads
+  fail against `dict[str, JsonValue]`, and `RpcPayload` fails against
+  `dict[str, object]` consumers (`_log_metric`) — coordinated
+  re-annotation of every producer + consumer plus `list[JsonValue]`
+  reshaping, touching hot/foreign regions. Recorded as still-blocked.
+- Leg 3, `scoreboard.py:114,118 scoreboard_rows` return: BLOCKED,
+  probed live then reverted (no edit landed). Changing return + `rows`
+  to `list[dict[str, JsonValue]]` reddens `:187`
+  (`dict[str, list[str] | int | dict[str, float] | ...]` vs
+  `dict[str, JsonValue]`): `stages.get` (`dict[str, float]`), `current`/
+  `deltas` (`dict[str, float]`), `errors` (`list[str]`) are
+  invariant-blocked from `JsonValue` nesting; fixing needs
+  `JsonValue`-valued locals + `isinstance` re-narrowing for the
+  arithmetic (code change, not annotation-only) in a hot file.
+- Leg 4, hub `**kwargs` (`model_registry.py:953,963`): BLOCKED, probed
+  live then reverted (no edit landed). `snapshot_kwargs` →
+  `dict[str, JsonValue]` reddens `:960` with 11 errors
+  (`**dict[str, JsonValue]` vs `str`/`str | None`/`str | Path | None`/
+  `list[str] | str | None`/etc.): the `JsonValue` union is too wide for
+  the hub signatures, and `allow_patterns list[str]` already fails the
+  `list[JsonValue]` invariance. Stays `dict[str, Any]` (Any defeats
+  both checks by design).
+- Leg 5, `json.loads` idiom sites: MIGRATED where local + mypy-clean
+  (annotation-only, no behavior change — `Any` → `JsonValue` on the
+  `json.loads` temporary, `isinstance(..., dict)` narrows the union to
+  `dict[str, JsonValue]`; downstream `.get`/`isinstance` guards
+  unchanged):
+  `model_registry.py:423` (`verify_checkpoint_against_manifest loaded`),
+  `:462,:464` (`_merge_manifest_record record` +
+  `loaded` — `record` was the last `dict[str, Any]` in the merge path,
+  return was already `JsonValue`), `:1035`
+  (`_manifest_hash_mismatches loaded`); `scoreboard.py:78` (`event`);
+  `models_ensure.py:167` (`raw` + dropped now-unused `Any` import);
+  `supervisor.py:795` (`raw`), `:1861` (`existing`), `:1868`
+  (`recorded`) + `JsonValue` import (`:32`). All verified per-file
+  then full-tree (below). Stay by design: `atomic.py:97,110,118`
+  (`atomic_write_json`/`read_json` — docstring records the tried +
+  reverted widening: manifests hold `dict[str, object]`);
+  `rpc.py:281,284` (fd juggling, above).
+
+## Resolution (2026-09-30, this pass)
+
+- Verdict: PARTIALLY RESOLVED — `json.loads` narrowings landed (7
+  sites across 4 files); `call()` + supervisor `dict[str, object]` +
+  `scoreboard_rows` return + hub kwargs recorded still-blocked with
+  live probe evidence (above).
+- Files changed: `voyage/model_registry.py` (3 `loaded: JsonValue` +
+  `record: dict[str, JsonValue]`), `voyage/models_ensure.py` (`raw:
+  JsonValue` + `Any` import removal), `voyage/scoreboard.py` (`event:
+  JsonValue`), `voyage/supervisor.py` (`JsonValue` import + `raw` /
+  `existing` / `recorded: JsonValue`). `voyage/rpc.py` probed but
+  reverted — no change. No test files changed (annotation-only; TDD
+  n/a — gate evidence below instead, per contract). Foreign hunks
+  (`supervisor.py` 081 prefetch move + `audio/*`/`cli_observe`/issues
+  tracks, untracked `supervisor_prefetch.py`/`cli_inspect_metrics.py`)
+  left intact; own hunks are disjoint regions.
+- Gate evidence (in-container `voyage:latest`, CPU-only, no host pip):
+  scoped `ruff check` + `ruff format --check` + `mypy` clean on all 5
+  touched/probed files (`model_registry`/`models_ensure`/`scoreboard`/
+  `supervisor`/`rpc`); `mypy voyage` clean (67 source files, incl.
+  concurrent `supervisor_prefetch.py`); `ruff format --check .` clean
+  (257 files); `pytest -m 'not gpu' tests/test_scoreboard.py
+  tests/test_generate_ensure.py tests/test_registry_pins.py
+  tests/test_backend_registry.py` — 53 passed. Full-tree `ruff check .`
+  is RED from pre-existing committed `voyage/workers/augment_worker.py`
+  E501/B905 (29 errors, batch-10 SRVGG loader content — out of scope,
+  never touched, not caused by this pass); own scope is green.
+  DESIGN proposals: none (annotation-only, no behavior change).
+- Residuals (exact, post-edit line numbers): `voyage/rpc.py:327-329`
+  (`call()` payload/return) + `:281,:284` (`raw_stdout`/`readable`);
+  `voyage/supervisor.py:590-598` (`_call_with_restart`), `:1470-1475`
+  (`_with_audio_gpu`), `:1694` (`payload`), `:850` (`gauges`),
+  `:574` (`_log_metric`), `:1238` (`extra`), plus `dict[str, Any]`
+  `:271` (`video_init`), `:293` (`audio_init`), `:330`, `:1045`,
+  `:1071`, `:1189`, `:1273`, `:1325`, `:1933`, `:1937`, `:2172`,
+  `:2493`, `:2163`; `voyage/scoreboard.py:114,118`
+  (`scoreboard_rows` return + `rows`); `voyage/model_registry.py:953,963`
+  (`snapshot_kwargs`/`file_kwargs`); `voyage/atomic.py:97,110,118`
+  (write/read sides, by design).

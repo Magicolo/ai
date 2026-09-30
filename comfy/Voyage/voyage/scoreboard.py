@@ -75,7 +75,7 @@ def _stages_by_segment(run_dir: Path) -> dict[str, dict[str, float]]:
             if not line:
                 continue
             try:
-                event = json.loads(line)
+                event: JsonValue = json.loads(line)
             except ValueError:
                 continue
             if not isinstance(event, dict) or event.get("event") != "segment_committed":

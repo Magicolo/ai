@@ -29,7 +29,7 @@ from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 from voyage import paths
-from voyage.atomic import atomic_write_bytes, atomic_write_json
+from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
 from voyage.concepts import ConceptStore
@@ -86,6 +86,9 @@ from voyage.segment_manifest import (
     load_segment_manifest,
     update_manifest_metrics,
     write_segment_manifest,
+)
+from voyage.supervisor_prefetch import (
+    summarize_prefetch_outcome as summarize_prefetch_outcome,
 )
 from voyage.supervisor_proposal import (
     _token_counts as _token_counts,
@@ -226,32 +229,8 @@ class CoveredAudio(NamedTuple):
     take_reason: str
 
 
-def summarize_prefetch_outcome(events: list[dict[str, Any]]) -> dict[str, float | int | None]:
-    """Aggregate director-prefetch hit/miss events (issue 033).
-
-    Pure reader over metrics/log events — the commit path already emits
-    `director_prefetch_hit/miss` per segment; this turns them into the hit
-    rate the soak report needs before any prefetch restructuring is
-    considered (candidate 3: measure first). `prefetch_hit_rate` is None
-    with no prefetch events (never 0/0). Lives beside the emitter (not in
-    the CLI) so the aggregation and the event names cannot drift apart;
-    the soak report renders the returned mapping as-is.
-
-    Third outcome (issues 136 + 168): `director_prefetch_invalidated`
-    events (ready proposals discarded by amendments or drift-hold) are
-    deliberately NOT counted here — neither hit nor miss — so the rate
-    stays `hit / (hit + miss)` by construction and the return shape stays
-    frozen. Count `invalidated` separately from the raw event stream when
-    the soak report needs the waste signal.
-    """
-    hits = sum(1 for event in events if event.get("event") == "director_prefetch_hit")
-    misses = sum(1 for event in events if event.get("event") == "director_prefetch_miss")
-    total = hits + misses
-    return {
-        "prefetch_hits": hits,
-        "prefetch_misses": misses,
-        "prefetch_hit_rate": (hits / total) if total else None,
-    }
+# Prefetch-outcome aggregation lives in `voyage.supervisor_prefetch`
+# (issue 081; re-exported at the top so existing importers keep working).
 
 
 def audio_worker_module(backend: str) -> str:
@@ -813,7 +792,7 @@ class Supervisor:
         present and a present-but-mismatched tail returns False.
         """
         try:
-            raw = json.loads(resolved_tape.read_text(encoding="utf-8"))
+            raw: JsonValue = json.loads(resolved_tape.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return True
         if not isinstance(raw, dict):
@@ -1879,12 +1858,14 @@ class Supervisor:
                 merged["visual"] = visual
                 update_manifest_metrics(prev_dir, merged)
             else:
-                existing = json.loads((prev_dir / "metrics.json").read_text(encoding="utf-8"))
+                existing: JsonValue = json.loads(
+                    (prev_dir / "metrics.json").read_text(encoding="utf-8")
+                )
                 if isinstance(existing, dict):
                     atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
                     try:
                         legacy = prev_dir / "sha256.json"
-                        recorded = json.loads(legacy.read_text(encoding="utf-8"))
+                        recorded: JsonValue = json.loads(legacy.read_text(encoding="utf-8"))
                         if isinstance(recorded, dict) and "metrics.json" in recorded:
                             recorded["metrics.json"] = sha256_file(prev_dir / "metrics.json")
                             atomic_write_json(legacy, recorded)

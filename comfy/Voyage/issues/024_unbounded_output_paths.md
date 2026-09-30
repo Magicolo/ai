@@ -168,3 +168,87 @@ grep -n "resolve()" voyage/cli.py   # every unbounded sink
   unless `--force`) belongs to the CLI owner with a test migration
   (every tmp_path init would need `--force`); (2) new test module for
   the 033 mypy-scope list once committed.
+
+## Progress log (2026-09-30, follow-up evaluation — warn-only vs hard error)
+
+- Follow-up evaluated live against the batch-10 evidence (read-only;
+  no behavior change): `voyage/cli_paths.py:97-127`
+  (`is_outside_output_dir` pure `relative_to` predicate +
+  `warn_if_outside_output_dir` warn-only returning Bool);
+  `voyage/cli_run_ops.py:54-59` (`cmd_init` warns on `--output`,
+  then `mkdir(parents=True)`); `voyage/cli_generate.py:108-109,262-267`
+  (run dir via the `cmd_init` funnel, `--final-video` warns only when
+  explicit); `voyage/cli_finalize.py:36-39,124-129` (finalize
+  `--output` + sfx explicit `--output` warn; `--video` read-only never
+  warned, derived defaults never warned).
+- Batch-10 premise re-confirmed in-container (`voyage:latest`,
+  CPU-only): `output_root()` tracks the cwd (`/app/output`);
+  `is_outside_output_dir('output/run')` False,
+  `is_outside_output_dir('/tmp/vdemo')` True with a stderr warning and
+  a True return; `tests/test_output_containment.py` + 
+  `tests/test_cli_hardening.py` 51/51 green; per-file `ruff check` +
+  `format --check` + `mypy` green on all 5 scope files (unchanged).
+- Hard-error migration cost (why path (a) is out of scope and over
+  the >3-break rule): `--force` today means exactly "allow init into
+  a non-empty directory" (`voyage/cli.py:289` init, `:530` generate —
+  outside this task's file scope, as are `docs/OPERATIONS.md` and
+  every test module but `test_output_containment.py`). Broadening it
+  to also mean "allow outside `./output/`" is a breaking contract
+  change needing parser help-text + OPERATIONS + test migration.
+  `finalize` (`cli.py:612-625`) and `sfx` (`cli.py:628-644`) have NO
+  `--force` flag at all, so a `--force`-gated error is unimplementable
+  there without new parser surface — and an ungated error breaks the
+  documented `finalize --run /tmp/vdemo --output /tmp/vdemo/final.mp4`
+  publish flow (`README.md:81`) with no escape. Call sites that assert
+  exit 0 on outside-tree targets without `--force` and would flip to
+  exit 2 under a hard error include `test_cli_hardening.py`
+  (`_init_fake_run` x9 on `tmp_path/"run"`, `test_init_accepts_absolute_output`
+  on `tmp_path/"sub"/"run"`, `test_init_then_run_with_relative_paths`
+  on `rel-run` outside `tmp_path/output`), `test_generate.py`
+  (`_generate_args(tmp_path/"run")` end-to-end + nonempty-guard),
+  `test_generation_stack.py:233-251`
+  (`generate --output tmp_path/"run"` asserts exit 0 + `final.mp4`),
+  `test_generate_ensure.py:297-301` (same shape),
+  `test_cli_group_a.py` (3 `main init` + 2 direct `cmd_init` on
+  `tmp_path/"run"`), `test_cli_run_ops_pruning.py:28-36` (2 direct
+  `cmd_init`), `test_cli_validate_handoff.py:116`,
+  `test_sfx_finalize.py:145-159` (parser accepts `/tmp/x.mp4`) —
+  far above the >3-unrelated-break threshold. No TDD red was written:
+  no behavior changes, so no failing test was needed.
+
+## Resolution (2026-09-30, follow-up evaluation)
+
+- Verdict: decided-not-changed (warn-only is the binding accepted
+  behavior; the error-upgrade follow-up is closed). Files changed:
+  this issue file only (append-only; no `voyage/` or `tests/` edits).
+- Accepted behavior (exact enumeration — all legal, all exit 0):
+  (1) `init --output` outside `./output/` (absolute `/tmp/vdemo`,
+  `tmp_path/run`, relative `rel-run` resolving outside) warns on
+  stderr and proceeds — documented `/tmp/vdemo` quickstart +
+  tmp_path test isolation, and the path is user-explicit so the typo
+  guard is the warning; (2) `generate --output` outside warns via the
+  `cmd_init` funnel and proceeds — same reason, pinned by
+  exit-0 end-to-end tests; (3) `generate --final-video` outside warns
+  (explicit only) and proceeds — user-explicit publish path;
+  (4) `finalize --output` outside warns and proceeds — the README
+  publish flow has no `--force` escape to gate on; (5) `sfx --output`
+  explicit-outside warns and proceeds, `--video` (read-only) never
+  warns, derived defaults beside the input never warn; (6) targets
+  under `./output/` (TUI `output/<name>`, generate defaults,
+  contained inits) stay quiet; (7) `--run-id`/`--name` traversal
+  (`../`, slashes, reserved names) stays a hard error (exit 2, no
+  writes) — the display-name guard has no legitimate absolute-path
+  use, unlike write targets. `--force` keeps its single narrow meaning
+  ("allow init into a non-empty directory") and is NOT an
+  outside-tree escape.
+- Test evidence: `test_output_containment.py` 6 + `test_cli_hardening.py`
+  45 = 51 passed (in-container `voyage:latest`, CPU-only); per-file
+  `ruff check` + `ruff format --check` + `mypy` green on
+  `cli_paths.py`/`cli_run_ops.py`/`cli_generate.py`/`cli_finalize.py`/
+  `test_output_containment.py` (all unchanged).
+- DESIGN proposal (quoted, one line, for §58):
+  "Outside-tree `--output`/`--final-video`/`--output` (finalize/sfx) targets are legal and warn on stderr; only `--run-id`/`--name` traversal is a hard error (exit 2)."
+- Residuals: none open on this issue — the upgrade is rejected, not
+  deferred. A future revisit requires a CLI-owner migration proposal
+  (new or redefined flag + parser help + OPERATIONS contract + every
+  tmp_path/finalize publish-path migration) and is out of scope here.

@@ -139,5 +139,89 @@ is folded as their tracker (not deleted) until the remaining splits land.
   module follows the existing DESIGN §59 scoreboard contract and the
   issue-080 verb-module seam convention; a future split index could
   list `cli_scoreboard.py` alongside the other `cli_*` fragments."
-  Residuals: tracker table above (supervisor/media/workers/test
-  splits still open under their owners).
+   Residuals: tracker table above (supervisor/media/workers/test
+   splits still open under their owners).
+
+## Progress log (2026-09-30, two-extraction pass — cli_inspect_metrics + supervisor_prefetch)
+
+- Re-measured host `wc -l` (this pass, after both extractions):
+  `supervisor.py` 2686, `media.py` 1631, `video_longlive.py` 1346,
+  `model_registry.py` 1264, `video_causvid.py` 1226,
+  `video_ltxv.py` 1159, `tui.py` 1146, `config.py` 1037,
+  `cli_observe.py` 734, `cli.py` 745 (seam, stable point),
+  new `cli_inspect_metrics.py` 31, `cli_scoreboard.py` 54,
+  new `supervisor_prefetch.py` 43, `supervisor_proposal.py` 91.
+- Tree discipline per §9: `git diff --name-only` on the four target
+  files was empty before every edit; concurrent tracks hold
+  uncommitted foreign hunks in `audio/beat.py`, `audio/planner.py`,
+  `model_registry.py`, `tests/test_rhythm.py`,
+  `tests/test_beat_quantize_ties_121.py`,
+  `tests/test_augment_contract_166.py`, `issues/024_*` — all left
+  intact, none inside either extraction region (verified: supervisor
+  diff shows only the facade + deletion).
+- Landed (1) `cli_observe.py` 741→734 + new `cli_inspect_metrics.py`
+  31L: the `cmd_inspect -- metrics` branch moved verbatim into
+  `render_inspect_metrics` (DESIGN §59; top-level imports from
+  `cli_status`/`logrotate` preserved, no patched leaves so no
+  call-time freeze needed); `cmd_inspect` keeps its name and
+  delegates (080 seam `cli.cmd_inspect is cli_observe.cmd_inspect`
+  holds); the now-unused `iter_metric_files` top import was deleted
+  (zero importers from `cli_observe`, verified via rg).
+  TDD: `tests/test_cli_inspect_metrics.py` written first (4 tests:
+  empty run, rotated-files count + span, last-five trim, seam
+  delegation) — watched fail on collection (`ModuleNotFoundError`),
+  then green after the move. One format catch on the way (ruff
+  wanted two `def` lines joined) — fixed, all green after.
+- Landed (2) `supervisor.py` 2707→2686 + new
+  `supervisor_prefetch.py` 43L: `summarize_prefetch_outcome`
+  moved verbatim (docstring incl. 136/168 third-outcome note);
+  `supervisor.py` carries the explicit-`as` facade re-export
+  (mypy single-source pattern from the proposal pass) + a move
+  comment at the old site. Routing (`VIDEO/AUDIO_WORKER_MODULES`,
+  `STREAMING_VIDEO_BACKENDS` — issue 023's area) deliberately STAYS.
+  TDD: `tests/test_supervisor_prefetch_helpers.py` written first (5
+  tests: facade single-source, empty, mixed, invalidated-excluded,
+  all-miss) — `ModuleNotFoundError` red, then green. The
+  invalidated-exclusion pin is new coverage (old suite never
+  asserted it).
+- Skipped (3) test-file cluster fold: max TWO reached; remaining
+  088 clusters (adapter triple, augment quad, audio validators, TUI
+  trio, video-worker quartet, finalize/commit merges, leftover
+  singletons) stay open — one per pass with the same discipline.
+
+## Resolution (2026-09-30, two-extraction pass)
+
+- Verdict: PARTIALLY RESOLVED — two extractions landed
+  (`cli_observe.py` 741→734 + new `cli_inspect_metrics.py` 31;
+  `supervisor.py` 2707→2686 + new `supervisor_prefetch.py` 43).
+- Files changed: `voyage/cli_inspect_metrics.py` (new),
+  `voyage/cli_observe.py` (branch → delegation, unused import
+  dropped), `tests/test_cli_inspect_metrics.py` (new, 4 tests),
+  `voyage/supervisor_prefetch.py` (new),
+  `voyage/supervisor.py` (facade re-export + block → move
+  comment, net −21L),
+  `tests/test_supervisor_prefetch_helpers.py` (new, 5 tests).
+  Gate evidence: in-container `mypy` strict + `ruff check` +
+  `ruff format --check` clean on all 6; 58 tests green for (1)
+  (`test_cli_inspect_metrics`, `test_cli_scoreboard`,
+  `test_cli_split`, `test_inspect_metrics_fps_029`,
+  `test_issue_142_inspect_failsoft`, `test_scoreboard` = 33 +
+  `test_cli_benchmark_sfx_augment` + `test_observability_rank2` =
+  25) and 77 for (2) (`test_supervisor_prefetch_helpers`,
+  `test_prefetch_summary`, `test_prefetch_shutdown`,
+  `test_three_captions`, `test_sfx_contract` = 31 +
+  `test_failure_policy` + `test_commit_hardening` +
+  `test_generation_stack` + `test_supervisor_lifecycle` = 46),
+  all CPU-only.
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: both new
+  modules follow existing contracts (DESIGN §59 inspect views;
+  DESIGN §§73/68 supervisor lifecycle + soak) and the issue-080
+  verb-module / issue-081 move-verbatim + re-export + agreement-test
+  conventions; a future split index could list
+  `cli_inspect_metrics.py` alongside the other `cli_*` fragments
+  and `supervisor_prefetch.py` alongside `supervisor_proposal.py`."
+  Residuals: supervisor commit/augment-helper remainder, `media.py`
+  workers/media surface (open since batch 4), registry per-family
+  tables (082 residual), video-worker splits, then test-file
+  clusters per 088 — each a future single-group pass.

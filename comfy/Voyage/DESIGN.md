@@ -2334,6 +2334,7 @@ Audio should be mapped to the same logical timebase.
 
 > As-built (batch-8-2026-09-30, issue 120): the beat grid honors the renderer's tempo ceiling — the supervisor passes the ACE `MAX_BPM` into the grid, so an over-fine `beats_per_segment` degrades to a coarser integer grid and an impossible one fails the commit naming `beats_per_segment`, before any GPU work.
 > As-built (batch-8-2026-09-30, issue 121): take quantization uses round-half-to-even — exact-half segment ratios can plan short (a 45 s take on 18 s segments plans 36 s), chaining extra takes; prefer ceil or round-half-up when the rhythm pins are renegotiated (fix deferred, documented here).
+> As-built (batch-11-2026-09-30, issue 121): take quantization now uses ceil — never plans short (`45/18 = 2.5 → 3 → 54 s`); `planner._fresh_take` carries the plan-site `duration > ahead_seconds` guard; rhythm/beat-tie pins updated in the same commit.
 
 The audio segmenter should be independent of video block size.
 
@@ -3063,6 +3064,7 @@ Capture stderr and include the relevant last lines in `MediaError`.
 > As-built (batch-8-2026-09-30, issue 188): numbering gaps are the fourth skippable leg — strict raises, lenient warns (`finalize: skipping segment numbering gap: ...`) and ships the sorted survivors.
 > As-built (batch-8-2026-09-30, issue 190): `finalize_run` knob precedence is uniform — an explicit scalar wins over `options` for every parameter and `None` means use `options`; an explicit `overlap_fraction=0` behaves as a hard splice whichever path built the settings.
 > As-built (batch-10-2026-09-30, issue 166): the Real-ESRGAN anime-6B weight loads strict into the upstream-named RRDB builder at its measured depth (6 body blocks) and upscales end to end; the augmentation floor is executable for upscale. FILM stays fail-loud until the full upstream port lands — default CUDA runs still fetch a FILM weight no loader accepts.
+> As-built (batch-11-2026-09-30, issue 166): both pinned augment weights now strict-load and run end to end — Real-ESRGAN anime-6B upscales and FILM interpolates (fp16 on CUDA, fp32 on CPU, OOM-halving preserved) — so the augmentation floors are executable; the remaining step is wiring finalize weights→loader, plus a live-GPU fp16 numeric and quality eyeball the next time a CUDA box is available.
 
 The final output is produced only by:
 
@@ -3138,6 +3140,7 @@ The finalizer must report the exact transform it applied.
 > As-built (batch-8-2026-09-30, Group A issues 116/148): `_effective_run_id` strips the winning value and `_run_dir_for` defers to it, so check, use, and TUI agree (`" boba "` lands in `output/boba/` on both surfaces); explicit `--output` still wins.
 > As-built (batch-8-2026-09-30, Group A issues 143/185/149): `cmd_init` validates output presence, run-id, non-blank style, int seed, and backend registry membership — all before the first `mkdir`, each an exit-2 error; `generate --help` names the `output/<name>` default.
 > As-built (batch-10-2026-09-30, issue 024): unbounded `--output`/`--final-video` paths warn on stderr when the resolved target escapes `./output/`; absolute outside-tree paths remain legal. `--run-id` traversal stays a hard error (exit 2).
+> As-built (batch-11-2026-09-30, issue 024): outside-tree `--output`/`--final-video`/`--output` (finalize/sfx) targets are legal and warn on stderr; only `--run-id`/`--name` traversal is a hard error (exit 2) — warn-only is the binding decided behavior, not a deferred upgrade.
 
 The first stable command set should be:
 
@@ -4262,6 +4265,7 @@ Use modern Python.
 > As-built (batch-8-2026-09-30, issue 118): worker/RPC boundaries validate wire types exactly (`checked_request` discipline — presence plus exact type, bools never satisfy int) and raise `TypeError` before any coercion; `None`, numeric strings, truncated floats, and `"false"` strings never execute with invented values.
 > As-built (batch-8-2026-09-30, issue 119): contract models validate value domains at parse time, not just ordering — metric bands and style/audio/transition scalars are unit-bounded where the inspector compares 0..1 metrics against them, so one bad director decision fails loudly at validation instead of silently biasing every segment.
 > As-built (batch-10-2026-09-30, issue 035): partial `JsonValue` migration — scoreboard `_finite_float`, all 10 registry builders, `record_builder`, `_merge_manifest_record`, `download_model` + wrappers, and `future_to_entry` are now `JsonValue`-valued; `call()` + supervisor `dict[str, object]` sites, `scoreboard_rows`, `snapshot_kwargs`/`file_kwargs`, and `json.loads` `Any` idioms remain.
+> As-built (batch-11-2026-09-30, issue 035): partial `JsonValue` remainder — `json.loads` narrowings landed (`model_registry` 3 `loaded` + `record`, `models_ensure` `raw`, `scoreboard` `event`, `supervisor` `raw`/`existing`/`recorded`); `call()` + supervisor `dict[str, object]` sites, `scoreboard_rows` return, hub `snapshot_kwargs`/`file_kwargs`, and `atomic`/`rpc` fd `Any` idioms remain (probed-blocked, invariance).
 
 Backend-specific code should not leak into supervisor types.
 
@@ -8069,3 +8073,12 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Blocked: 070 / 121.
 - Deferred: 031.
 - 086/121: no inline DESIGN change (086: zero-caller deletes, no contract change; 121: §35 tie-doc stands — see §35 batch-8 as-built, ceil switch blocked on rhythm pins).
+
+## Batch 11 (2026-09-30)
+
+- Decided: 024 (warn-only outside-tree paths legal, only run-id/name traversal hard error — binding, see §58 batch-11 as-built).
+- Fixed: 121 (ceil switch + plan-site guard, pins updated — see §35 batch-11 as-built).
+- Full: 166 (FILM port + ESRGAN leg — both weights strict-load end to end — see §56 batch-11 as-built).
+- Partial: 035 (`json.loads` narrowings landed; `call()`/supervisor/`scoreboard_rows`/hub kwargs still blocked — see §82 batch-11 as-built).
+- Progress: 036/081 (`cli_inspect_metrics.py` 31L + `supervisor_prefetch.py` 43L, move-verbatim + re-export + agreement-test, following existing conventions; no DESIGN contract change, folded here only).
+- Still-blocked: 031 (PERF 12 / N 60 / PT 111, no family green), 070 (Wan2.2 `WAN_HF_REVISION` still None, no verified bytes).

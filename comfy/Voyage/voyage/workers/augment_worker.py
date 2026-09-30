@@ -1,16 +1,15 @@
 """GPU augment runner: Real-ESRGAN upscale + FILM interpolate (Track D spike, DESIGN §§56-57).
 
-QUARANTINE (issue 083): this module is a spike stand-in, not the shipped
-augment path — `FilmNetMini` cannot load official `film_net` weights
-(shape mismatch raises `ModelCompatibilityError`) and the full upstream
-FILM port is follow-up. The orchestration (`voyage.augment`: chunk
-windows, ffmpeg chunk decode/encode, device pairing) is the shipped path
-and never imports this module; treat any vendored arch here as a
-placeholder until the full upstream FILM port lands (or this module moves
-to `experimental/` with a spike contract). Debug augment quality via the
-orchestration + registry weights first, not these stand-ins. The ESRGAN
-leg is DONE (issue 166): the pinned `RealESRGAN_x4plus_anime_6B` pth
-loads strict into the upstream-named builder below.
+QUARANTINE (issue 083): this module grew out of a spike stand-in — the
+orchestration (`voyage.augment`: chunk windows, ffmpeg chunk decode/encode,
+device pairing) is the shipped path and never imports this module; treat any
+vendored arch here as a placeholder until its upstream port lands (or this
+module moves to `experimental/` with a spike contract). Debug augment quality
+via the orchestration + registry weights first, not these vendored nets. The
+ESRGAN leg is DONE (issue 166): the pinned `RealESRGAN_x4plus_anime_6B` pth
+loads strict into the upstream-named builder below. The FILM leg is DONE
+(issue 166): the pinned `film_net_fp16.safetensors` strict-loads into the
+upstream FILM port below (extract/fuse/predict_flow, 82 keys).
 
 `torch` loads only inside functions (behind a `find_spec` guard) — never
 at module scope (supervisor section 12 GPU ban) — and weight checks run
@@ -26,11 +25,13 @@ Architectures are vendored minimal inline — do NOT import Comfy nodes
   `_build_upstream_rrdb_net` at the measured depth, while anything else
   falls back to the classic x4 residual-in-residual dense net below
   (state-dict shapes match the x4plus/UltraSharp ESRGAN family).
-- FilmNetMini: a spike stand-in flow blender with FILM's semantic
-  contract (two frames + time give the mid frame), batched as
-  `(B, 2, C, H, W)` so OOM-halving applies. Official `film_net` weights
-  will NOT load here (shape mismatch raises ModelCompatibilityError);
-  the full upstream FILM port is follow-up.
+- FilmNet: plain-torch port of the upstream FILM graph (ECCV 2022,
+  `extract` / `predict_flow` / `fuse` nesting reproduces the pinned
+  `film_net_fp16.safetensors` key layout, strict-loaded). Call shape is
+  the worker's own `(B, 2, C, H, W)` pairs + float moment so the
+  `_run_stacked` OOM-halving loop is untouched; pyramid depth clamps to
+  the input-feasible count (upstream runs 7 levels, needing sides
+  >=64px), and sides below `FILM_MIN_SIDE` fail loud.
 
 Precision is fp16 on CUDA, fp32 elsewhere. Batch inference starts full
 and halves on out-of-memory down to single items, mirroring Comfy's
@@ -74,8 +75,32 @@ _ESRGAN_WRAPPER_KEYS = ("params_ema", "params")
 ALLOWED_UPSCALE_FACTORS = (1, 2, 4)
 """Targets served from one x4 pass (4 is native; 2/1 downscale the x4 output)."""
 
-FILM_MINI_CHANNELS = 32
-"""Feature width of the spike FILM stand-in (tiny on purpose — quality is follow-up)."""
+FILM_PYRAMID_LEVELS = 7
+"""Upstream FILM depth: 7 image-pyramid levels (needs input sides >=64px)."""
+
+FILM_FUSION_LEVELS = 5
+"""Finest flow levels fused into the output (upstream default)."""
+
+FILM_SPECIALIZED_LEVELS = 3
+"""Fusion blocks with per-level widths (deeper blocks share one width)."""
+
+FILM_SUB_LEVELS = 4
+"""Feature-extractor sublevels per image level (upstream default)."""
+
+FILM_FILTERS = 64
+"""Base feature width (level widths double per sublevel: 64/128/256/512)."""
+
+FILM_FLOW_CONVS = (3, 3, 3, 3)
+"""Residual convs per flow predictor, coarse-to-fine (upstream default)."""
+
+FILM_FLOW_FILTERS = (32, 64, 128, 256)
+"""Flow predictor widths, finest-to-coarsest predictor (upstream default)."""
+
+FILM_STATE_KEYS = 82
+"""Pinned `film_net_fp16.safetensors` key count (extract/fuse/predict_flow)."""
+
+FILM_MIN_SIDE = 8
+"""Smallest frame side the FILM pyramid supports (4 levels down to 1px)."""
 
 _LOAD_ERRORS: tuple[type[BaseException], ...] = (
     RuntimeError,
@@ -103,7 +128,7 @@ drops both caches (GPU hand-off, DESIGN §40).
 """
 
 _FILM_CACHE: dict[tuple[str, str], Any] = {}
-"""Resident FILM stand-ins keyed by (weights path, device) — issue 047."""
+"""Resident FILM nets keyed by (weights path, device) — issue 047."""
 
 
 def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
@@ -440,70 +465,385 @@ def _upstream_block_count(state: dict[str, Any]) -> int | None:
 
 
 def _build_film_net() -> Any:
-    """Spike stand-in flow blender with FILM's semantic contract.
+    """Upstream FILM net (ECCV 2022 frame interpolation — issue 166).
 
-    NOT upstream FILM: a small two-scale encoder predicts a flow pair plus
-    an occlusion mask at quarter resolution, warps both inputs toward the
-    blend moment, and mixes the time blend with the warped average by the
-    mask. Same call shape (two frames + moment give the mid frame) so
-    chunk code written against it survives the full upstream port.
+    Plain-torch port of the `extract` / `predict_flow` / `fuse` graph whose
+    submodule nesting reproduces the pinned `film_net_fp16.safetensors`
+    key layout exactly (`extract.extract_sublevels.convs.i.j.conv.*`,
+    `predict_flow._predictor[s].i._convs.j.conv.*`,
+    `fuse.convs.i.j.conv.*` + `fuse.output_conv.*`), so `_load_film_net`
+    strict-loads the 82 pinned keys. No Comfy imports (worker images carry
+    no ComfyUI tree): `comfy.ops` wrappers are plain `nn.Conv2d` here,
+    which register identical state-dict keys.
+
+    Call shape is the worker's own `(B, 2, C, H, W)` pairs + float moment
+    (not upstream's split-frames call) so `interpolate_pair`,
+    `interpolate_triplet`, and the `_run_stacked` OOM-halving loop are
+    untouched. Pyramid depth clamps to the input-feasible count: upstream
+    always runs 7 levels (needs sides >=64px), while the worker's smoke
+    frames are smaller — same weights, fewer coarse levels. Sides below
+    `FILM_MIN_SIDE` fail loud (the fusion decoder needs 4 levels).
     """
+    import math
+
     import torch
     from torch import nn
     from torch.nn import functional as functional
 
-    class _FilmNetMini(nn.Module):  # type: ignore[misc]
-        """Quarter-res flow pair + mask, warp, mask-mixed time blend."""
+    # NOTE (mypy strict): same `# type: ignore[misc]` idiom as the RRDB
+    # builders above — torch resolves to Any in the slim gates image.
+    class _FilmConv(nn.Module):  # type: ignore[misc]
+        """Conv2d with optional LeakyReLU and FILM-style even-kernel padding."""
 
-        def __init__(self, channels: int = FILM_MINI_CHANNELS) -> None:
+        def __init__(
+            self, in_channels: int, out_channels: int, size: int, activation: bool = True
+        ) -> None:
             super().__init__()
-            self.encoder = nn.Sequential(
-                nn.Conv2d(6, channels, 3, 2, 1),
-                nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                nn.Conv2d(channels, 2 * channels, 3, 2, 1),
-                nn.LeakyReLU(negative_slope=0.2, inplace=True),
-                nn.Conv2d(2 * channels, 4 * channels, 3, 1, 1),
-                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+            self.even_pad = size % 2 == 0
+            self.conv = nn.Conv2d(
+                in_channels, out_channels, kernel_size=size, padding=size // 2 if size % 2 else 0
             )
-            self.flow_head = nn.Conv2d(4 * channels, 4, 3, 1, 1)
-            self.mask_head = nn.Conv2d(4 * channels, 1, 3, 1, 1)
+            self.activation = nn.LeakyReLU(0.2) if activation else None
 
-        @staticmethod
-        def _warp(frame: Any, flow: Any) -> Any:
-            grid_height = int(frame.shape[2])
-            grid_width = int(frame.shape[3])
-            axis_y, axis_x = torch.meshgrid(
-                torch.arange(grid_height, device=frame.device),
-                torch.arange(grid_width, device=frame.device),
-                indexing="ij",
-            )
-            base = torch.stack((axis_x, axis_y), -1).unsqueeze(0).to(frame.dtype)
-            sample = base + flow.permute(0, 2, 3, 1)
-            sample[..., 0] = sample[..., 0] / max(grid_width - 1, 1) * 2 - 1
-            sample[..., 1] = sample[..., 1] / max(grid_height - 1, 1) * 2 - 1
-            return functional.grid_sample(
-                frame, sample, mode="bilinear", padding_mode="border", align_corners=True
-            )
+        def forward(self, value: Any) -> Any:
+            if self.even_pad:
+                value = functional.pad(value, (0, 1, 0, 1))
+            value = self.conv(value)
+            if self.activation is not None:
+                value = self.activation(value)
+            return value
 
-        def forward(self, pairs: Any, moment: float) -> Any:
-            frame_a = pairs[:, 0]
-            frame_b = pairs[:, 1]
-            features = self.encoder(torch.cat((frame_a, frame_b), 1))
-            flows = functional.interpolate(
-                self.flow_head(features), scale_factor=4, mode="bilinear", align_corners=False
-            )
-            mask = torch.sigmoid(
+    def _warp_core(image: Any, flow: Any, grid_x: Any, grid_y: Any) -> Any:
+        dtype = image.dtype
+        height = int(flow.shape[2])
+        width = int(flow.shape[3])
+        shift_x = flow[:, 0].float() / (width * 0.5)
+        shift_y = flow[:, 1].float() / (height * 0.5)
+        grid = torch.stack(
+            [grid_x[None, None, :] + shift_x, grid_y[None, :, None] + shift_y], dim=3
+        )
+        # float sample: grid_sample in fp16 is inaccurate, so the upstream
+        # casts up for the warp and back (this is the fp16-CUDA path).
+        return functional.grid_sample(
+            image.float(), grid, mode="bilinear", padding_mode="border", align_corners=False
+        ).to(dtype)
+
+    def _build_image_pyramid(image: Any, levels: int) -> list[Any]:
+        pyramid = [image]
+        for _ in range(1, levels):
+            image = functional.avg_pool2d(image, 2, 2)
+            pyramid.append(image)
+        return pyramid
+
+    def _synthesize_flow_pyramid(residual_pyramid: list[Any]) -> list[Any]:
+        flow = residual_pyramid[-1]
+        flow_pyramid = [flow]
+        for residual in residual_pyramid[:-1][::-1]:
+            flow = (
                 functional.interpolate(
-                    self.mask_head(features), scale_factor=4, mode="bilinear", align_corners=False
+                    flow, size=residual.shape[2:4], mode="bilinear", scale_factor=None
                 )
+                .mul_(2)
+                .add_(residual)
             )
-            warped_a = self._warp(frame_a, flows[:, 0:2] * moment)
-            warped_b = self._warp(frame_b, flows[:, 2:4] * (1.0 - moment))
-            timed = warped_a * (1.0 - moment) + warped_b * moment
-            average = 0.5 * (warped_a + warped_b)
-            return timed * mask + average * (1.0 - mask)
+            flow_pyramid.append(flow)
+        flow_pyramid.reverse()
+        return flow_pyramid
 
-    return _FilmNetMini()
+    class _SubTreeExtractor(nn.Module):  # type: ignore[misc]
+        """Shared conv tower: 2 convs per sublevel, avg-pool between."""
+
+        def __init__(
+            self,
+            in_channels: int = 3,
+            channels: int = FILM_FILTERS,
+            n_layers: int = FILM_SUB_LEVELS,
+        ) -> None:
+            super().__init__()
+            convs = []
+            for index in range(n_layers):
+                out_channels = channels << index
+                convs.append(
+                    nn.Sequential(
+                        _FilmConv(in_channels, out_channels, 3),
+                        _FilmConv(out_channels, out_channels, 3),
+                    )
+                )
+                in_channels = out_channels
+            self.convs = nn.ModuleList(convs)
+
+        def forward(self, image: Any, depth: int) -> list[Any]:
+            head = image
+            pyramid = []
+            for index, layer in enumerate(self.convs):
+                head = layer(head)
+                pyramid.append(head)
+                if index < depth - 1:
+                    head = functional.avg_pool2d(head, 2, 2)
+            return pyramid
+
+    class _FeatureExtractor(nn.Module):  # type: ignore[misc]
+        """Cross-level feature pyramid (finer levels borrow coarser sublevels)."""
+
+        def __init__(
+            self,
+            in_channels: int = 3,
+            channels: int = FILM_FILTERS,
+            sub_levels: int = FILM_SUB_LEVELS,
+        ) -> None:
+            super().__init__()
+            self.extract_sublevels = _SubTreeExtractor(in_channels, channels, sub_levels)
+            self.sub_levels = sub_levels
+
+        def forward(self, image_pyramid: list[Any]) -> list[Any]:
+            sub_pyramids = [
+                self.extract_sublevels(
+                    image_pyramid[index], min(len(image_pyramid) - index, self.sub_levels)
+                )
+                for index in range(len(image_pyramid))
+            ]
+            feature_pyramid = []
+            for index in range(len(image_pyramid)):
+                features = sub_pyramids[index][0]
+                for depth in range(1, self.sub_levels):
+                    if depth <= index:
+                        features = torch.cat([features, sub_pyramids[index - depth][depth]], dim=1)
+                feature_pyramid.append(features)
+                if index >= self.sub_levels - 1:
+                    sub_pyramids[index - self.sub_levels + 1] = None
+            return feature_pyramid
+
+    class _FlowEstimator(nn.Module):  # type: ignore[misc]
+        """One pyramid level's residual-flow predictor (3x3 stack, 1x1 head)."""
+
+        def __init__(self, in_channels: int, num_convs: int, num_filters: int) -> None:
+            super().__init__()
+            self._convs = nn.ModuleList()
+            for _ in range(num_convs):
+                self._convs.append(_FilmConv(in_channels, num_filters, 3))
+                in_channels = num_filters
+            self._convs.append(_FilmConv(in_channels, num_filters // 2, 1))
+            self._convs.append(_FilmConv(num_filters // 2, 2, 1, activation=False))
+
+        def forward(self, features_a: Any, features_b: Any) -> Any:
+            net = torch.cat([features_a, features_b], dim=1)
+            for conv in self._convs:
+                net = conv(net)
+            return net
+
+    class _PyramidFlowEstimator(nn.Module):  # type: ignore[misc]
+        """Coarse-to-fine flow: shared coarsest predictor, then fine specialists."""
+
+        def __init__(
+            self,
+            filters: int = FILM_FILTERS,
+            flow_convs: tuple[int, int, int, int] = FILM_FLOW_CONVS,
+            flow_filters: tuple[int, int, int, int] = FILM_FLOW_FILTERS,
+        ) -> None:
+            super().__init__()
+            in_channels = filters << 1
+            predictors = []
+            for index in range(len(flow_convs)):
+                predictors.append(
+                    _FlowEstimator(in_channels, flow_convs[index], flow_filters[index])
+                )
+                in_channels += filters << (index + 2)
+            self._predictor = predictors[-1]
+            self._predictors = nn.ModuleList(predictors[:-1][::-1])
+
+        def forward(self, pyramid_a: list[Any], pyramid_b: list[Any], warp_fn: Any) -> list[Any]:
+            levels = len(pyramid_a)
+            flow = self._predictor(pyramid_a[-1], pyramid_b[-1])
+            residuals = [flow]
+            steps = [
+                (index, self._predictor)
+                for index in range(levels - 2, len(self._predictors) - 1, -1)
+            ]
+            steps += [
+                (len(self._predictors) - 1 - index, predictor)
+                for index, predictor in enumerate(self._predictors)
+            ]
+            for index, predictor in steps:
+                flow = functional.interpolate(
+                    flow, size=pyramid_a[index].shape[2:4], mode="bilinear"
+                ).mul_(2)
+                residual = predictor(pyramid_a[index], warp_fn(pyramid_b[index], flow))
+                residuals.append(residual)
+                flow = flow.add_(residual)
+            residuals.reverse()
+            return residuals
+
+    def _fusion_in_channels(level: int, filters: int) -> int:
+        # Per direction: multi-scale features + RGB image (3ch) + flow (2ch), doubled for both.
+        return (sum(filters << index for index in range(level)) + 3 + 2) * 2
+
+    class _Fusion(nn.Module):  # type: ignore[misc]
+        """Coarse-to-fine decoder fusing warped pyramids + scaled flows into RGB."""
+
+        def __init__(
+            self,
+            n_layers: int = FILM_SUB_LEVELS,
+            specialized_layers: int = FILM_SPECIALIZED_LEVELS,
+            filters: int = FILM_FILTERS,
+        ) -> None:
+            super().__init__()
+            self.output_conv = nn.Conv2d(filters, 3, kernel_size=1)
+            self.convs = nn.ModuleList()
+            in_channels = _fusion_in_channels(n_layers, filters)
+            increase = 0
+            for index in range(n_layers)[::-1]:
+                num_filters = (
+                    (filters << index)
+                    if index < specialized_layers
+                    else (filters << specialized_layers)
+                )
+                self.convs.append(
+                    nn.ModuleList(
+                        [
+                            _FilmConv(in_channels, num_filters, 2, activation=False),
+                            _FilmConv(in_channels + (increase or num_filters), num_filters, 3),
+                            _FilmConv(num_filters, num_filters, 3),
+                        ]
+                    )
+                )
+                in_channels = num_filters
+                increase = _fusion_in_channels(index, filters) - num_filters // 2
+
+        def forward(self, pyramid: list[Any]) -> Any:
+            net = pyramid[-1]
+            for block, layers in enumerate(self.convs):
+                index = len(self.convs) - 1 - block
+                net = layers[0](
+                    functional.interpolate(net, size=pyramid[index].shape[2:4], mode="nearest")
+                )
+                net = layers[2](layers[1](torch.cat([pyramid[index], net], dim=1)))
+            return self.output_conv(net)
+
+    def _feasible_pyramid_levels(height: int, width: int) -> int:
+        """Deepest pyramid whose smallest level stays >=1px (each level halves)."""
+        return 1 + int(math.floor(math.log2(max(min(height, width), 1))))
+
+    class _FilmNet(nn.Module):  # type: ignore[misc]
+        """FILM graph with the worker's pairs + moment call shape."""
+
+        def __init__(
+            self,
+            pyramid_levels: int = FILM_PYRAMID_LEVELS,
+            fusion_levels: int = FILM_FUSION_LEVELS,
+            specialized_levels: int = FILM_SPECIALIZED_LEVELS,
+            sub_levels: int = FILM_SUB_LEVELS,
+            filters: int = FILM_FILTERS,
+            flow_convs: tuple[int, int, int, int] = FILM_FLOW_CONVS,
+            flow_filters: tuple[int, int, int, int] = FILM_FLOW_FILTERS,
+        ) -> None:
+            super().__init__()
+            self.pyramid_levels = pyramid_levels
+            self.fusion_pyramid_levels = fusion_levels
+            self.extract = _FeatureExtractor(3, filters, sub_levels)
+            self.predict_flow = _PyramidFlowEstimator(filters, flow_convs, flow_filters)
+            self.fuse = _Fusion(sub_levels, specialized_levels, filters)
+            self._warp_grids: dict[tuple[int, int], Any] = {}
+
+        def _build_warp_grids(self, height: int, width: int, levels: int, device: Any) -> None:
+            """Pre-compute warp grids for every pyramid level of this resolution."""
+            if (height, width) in self._warp_grids:
+                return
+            self._warp_grids = {}
+            for _ in range(levels):
+                self._warp_grids[(height, width)] = (
+                    torch.linspace(
+                        -(1 - 1 / width), 1 - 1 / width, width, dtype=torch.float32, device=device
+                    ),
+                    torch.linspace(
+                        -(1 - 1 / height),
+                        1 - 1 / height,
+                        height,
+                        dtype=torch.float32,
+                        device=device,
+                    ),
+                )
+                height, width = height // 2, width // 2
+
+        def warp(self, image: Any, flow: Any) -> Any:
+            grid_x, grid_y = self._warp_grids[(int(flow.shape[2]), int(flow.shape[3]))]
+            return _warp_core(image, flow, grid_x, grid_y)
+
+        def extract_features(self, image: Any, levels: int) -> tuple[list[Any], list[Any]]:
+            """Image + feature pyramids for one frame (cacheable across pairs)."""
+            image_pyramid = _build_image_pyramid(image, levels)
+            return image_pyramid, self.extract(image_pyramid)
+
+        def forward(self, pairs: Any, moment: float = 0.5) -> Any:
+            """One mid frame per pair row at blend `moment` (matches `_run_stacked`)."""
+            height, width = int(pairs.shape[3]), int(pairs.shape[4])
+            if min(height, width) < FILM_MIN_SIDE:
+                raise ValueError(
+                    f"FILM needs frame sides >= {FILM_MIN_SIDE}px (got {height}x{width}): "
+                    "the fusion decoder runs 4 pyramid levels"
+                )
+            return self.forward_multi_timestep(pairs[:, 0], pairs[:, 1], [float(moment)])
+
+        def forward_multi_timestep(
+            self, frame_a: Any, frame_b: Any, moments: list[float], cache: Any = None
+        ) -> Any:
+            """Mid frames at each moment; flow is computed once (expects batch>=1)."""
+            height, width = int(frame_a.shape[2]), int(frame_a.shape[3])
+            levels = min(self.pyramid_levels, _feasible_pyramid_levels(height, width))
+            self._build_warp_grids(height, width, levels, frame_a.device)
+            if cache is not None and "img0" in cache:
+                image_pyr_a, feat_pyr_a = cache["img0"]
+            else:
+                image_pyr_a, feat_pyr_a = self.extract_features(frame_a, levels)
+            if cache is not None and "img1" in cache:
+                image_pyr_b, feat_pyr_b = cache["img1"]
+            else:
+                image_pyr_b, feat_pyr_b = self.extract_features(frame_b, levels)
+            fwd_flow = _synthesize_flow_pyramid(
+                self.predict_flow(feat_pyr_a, feat_pyr_b, self.warp)
+            )[: self.fusion_pyramid_levels]
+            bwd_flow = _synthesize_flow_pyramid(
+                self.predict_flow(feat_pyr_b, feat_pyr_a, self.warp)
+            )[: self.fusion_pyramid_levels]
+            fuse_levels = min(self.fusion_pyramid_levels, levels)
+            warp_targets = [
+                [
+                    torch.cat([image, features], dim=1)
+                    for image, features in zip(
+                        image_pyr_a[:fuse_levels], feat_pyr_a[:fuse_levels], strict=True
+                    )
+                ],
+                [
+                    torch.cat([image, features], dim=1)
+                    for image, features in zip(
+                        image_pyr_b[:fuse_levels], feat_pyr_b[:fuse_levels], strict=True
+                    )
+                ],
+            ]
+            del image_pyr_a, image_pyr_b, feat_pyr_a, feat_pyr_b
+            results = []
+            for step in moments:
+                bwd_scaled = [flow * step for flow in bwd_flow]
+                fwd_scaled = [flow * (1.0 - step) for flow in fwd_flow]
+                fwd_warped = [
+                    self.warp(features, flow)
+                    for features, flow in zip(warp_targets[0], bwd_scaled, strict=True)
+                ]
+                bwd_warped = [
+                    self.warp(features, flow)
+                    for features, flow in zip(warp_targets[1], fwd_scaled, strict=True)
+                ]
+                aligned = [
+                    torch.cat([forward, backward, bwd, fwd], dim=1)
+                    for forward, backward, bwd, fwd in zip(
+                        fwd_warped, bwd_warped, bwd_scaled, fwd_scaled, strict=True
+                    )
+                ]
+                del fwd_warped, bwd_warped, bwd_scaled, fwd_scaled
+                results.append(self.fuse(aligned))
+                del aligned
+            return torch.cat(results, dim=0)
+
+    return _FilmNet()
 
 
 def _load_state_dict(weights_path: Path) -> dict[str, Any]:
@@ -652,7 +992,7 @@ def _load_rrdb_net(weights_path: Path) -> Any:
 
 
 def _load_film_net(weights_path: Path) -> Any:
-    """Build the FILM stand-in and load `weights_path`; failures become ModelCompatibilityError."""
+    """Build the upstream FILM net and load `weights_path` (failures map below)."""
     from voyage.model_registry import FILM_MIN_BYTES
 
     _verify_weights_size(weights_path, "FILM", FILM_MIN_BYTES)
@@ -664,8 +1004,8 @@ def _load_film_net(weights_path: Path) -> Any:
         model.load_state_dict(state, strict=True)
     except _LOAD_ERRORS as exc:
         raise ModelCompatibilityError(
-            f"FILM weights at {weights_path} do not match the spike stand-in "
-            f"architecture (full upstream FILM port is follow-up): {exc}"
+            f"FILM weights at {weights_path} do not match the upstream FILM "
+            f"architecture (extract/fuse/predict_flow, {FILM_STATE_KEYS} keys): {exc}"
         ) from exc
     return model
 
@@ -805,7 +1145,7 @@ def interpolate_pair(
     device: str = "cuda:0",
     timings: dict[str, float] | None = None,
 ) -> Any:
-    """One mid frame between `before` and `after` at blend `moment` (FILM stand-in)."""
+    """One mid frame between `before` and `after` at blend `moment` (upstream FILM)."""
     blend = validate_blend_time(moment)
     weights_path = _require_weights(weights, "FILM")
     _require_torch()

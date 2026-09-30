@@ -2,10 +2,10 @@
 
 Contract: every `FileSpec` filename under the `film` /
 `realesrgan-anime` registry rows must resolve to a worker loader in
-`voyage.workers.augment_worker`, and the provisioned weights must behave
-as documented — the ESRGAN anime-6B `.pth` loads and upscales synthetic
-tensors, while the FILM `.safetensors` fails loud with the upstream-port
-note until the full FILM port lands (explicit remainder, not silent).
+`voyage.workers.augment_worker`, and the provisioned weights must load
+strict plus run synthetic tensors end to end — the ESRGAN anime-6B
+`.pth` upscales, the FILM `.safetensors` strict-loads its 82-key
+extract/fuse/predict_flow state and interpolates a synthetic pair.
 
 Runs torch-free in the slim gates image (mapping + stub-rejection legs);
 the provisioned legs skip loudly unless `torch` imports AND the weight
@@ -138,12 +138,59 @@ def test_esrgan_loads_provisioned_weights_and_upscales() -> None:
     assert float(outputs[0].max()) <= 1.1
 
 
-def test_film_provisioned_weights_fail_loud_with_port_note() -> None:
-    """Provisioned FILM `.safetensors` raises ModelCompatibilityError naming the port.
+def test_film_loads_provisioned_weights_strict() -> None:
+    """Provisioned FILM `.safetensors` strict-loads into the upstream port.
 
-    The full upstream FILM port (82-key extract/fuse/predict_flow net) is
-    the explicit remainder: this pins the fail-loud contract so the day
-    the port lands this leg flips to a load test deliberately, not silently.
+    The pinned `film_net_fp16.safetensors` carries the 82-key
+    extract/fuse/predict_flow state (fp16); the worker builds the
+    matching net and `load_state_dict(strict=True)` succeeds — no
+    ModelCompatibilityError. Skips (not fails) without
+    torch+safetensors+weights.
+    """
+    if not _torch_available():
+        pytest.skip("needs torch (run in voyage-video, not the slim gates image)")
+    if importlib.util.find_spec("safetensors") is None:
+        pytest.skip("needs safetensors (run in voyage-video)")
+    check = model_registry.MODEL_SPECS["film"].checks[0]
+    assert isinstance(check, RequiredFile)
+    found = _find_provisioned_weight(check.relative_path)
+    if found is None:
+        pytest.skip(f"needs provisioned weights ({check.relative_path})")
+    weights_path = found
+    augment_worker.evict_augment_models()
+    decoded = augment_worker._load_state_dict(weights_path)
+    assert len(decoded) == 82
+    assert {key.split(".")[0] for key in decoded} == {"extract", "fuse", "predict_flow"}
+    assert {str(value.dtype) for value in decoded.values()} == {"torch.float16"}
+    model = augment_worker._load_film_net(weights_path)
+    model.eval()
+    assert set(model.state_dict()) == set(decoded)
+
+
+def test_film_rejects_frames_below_min_side() -> None:
+    """Sides below FILM_MIN_SIDE fail loud (the fusion decoder needs 4 levels).
+
+    Random init, no weights: the floor lives in the forward, before any
+    model work. Upstream always runs 7 levels (needs >=64px); the worker
+    clamps depth down to 4 levels (8px) and rejects below that instead of
+    crashing deep in the pyramid.
+    """
+    if not _torch_available():
+        pytest.skip("needs torch (run in voyage-video, not the slim gates image)")
+    import torch
+
+    model = augment_worker._build_film_net()
+    model.eval()
+    with torch.no_grad(), pytest.raises(ValueError, match="frame sides"):
+        model(torch.zeros(1, 2, 3, 4, 4), 0.5)
+
+
+def test_film_interpolate_pair_synthetic_round_trip() -> None:
+    """Provisioned FILM weights interpolate a synthetic pair on CPU.
+
+    Two (3, 16, 16) gradient frames at moment 0.5 give one finite
+    (3, 16, 16) mid frame. 16px exercises the worker's small-input
+    pyramid clamp (upstream runs 7 levels, which needs >=64px).
     Skips (not fails) without torch+safetensors+weights.
     """
     if not _torch_available():
@@ -156,5 +203,16 @@ def test_film_provisioned_weights_fail_loud_with_port_note() -> None:
     if found is None:
         pytest.skip(f"needs provisioned weights ({check.relative_path})")
     weights_path = found
-    with pytest.raises(ModelCompatibilityError, match="FILM port"):
-        augment_worker._load_film_net(weights_path)
+    import torch
+
+    augment_worker.evict_augment_models()
+    rows = torch.linspace(0.0, 1.0, 16).unsqueeze(1).expand(16, 16)
+    before = torch.stack([rows, rows, rows])
+    after = torch.stack([1.0 - rows, 1.0 - rows, 1.0 - rows])
+    mid = augment_worker.interpolate_pair(before, after, weights_path, moment=0.5, device="cpu")
+    assert tuple(mid.shape) == (3, 16, 16)
+    assert bool(torch.isfinite(mid).all())
+    # The fuse head is unbounded (Comfy clamps at the pipe end); bound the
+    # overshoot instead of the exact range.
+    assert float(mid.min()) >= -0.5
+    assert float(mid.max()) <= 1.5

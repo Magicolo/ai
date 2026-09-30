@@ -146,3 +146,40 @@ Voyage/voyage/model_registry.py:~455-471 (_record_longlive2): records repo/revis
   against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
   the floating-set gate to empty. Do NOT pick the revision from the Hub
   API alone without byte verification.
+
+## Progress log (2026-09-30, close-out pass — RE-PROBE ONLY)
+
+- Probe executed live, no host pip (host `ls`, in-container
+  `voyage:latest` read-only):
+  `ls ~/.cache/voyage-models/` → 12 entries (`PixArt-XL-2-1024-MS`,
+  `Qwen3-4B-AWQ`, `Qwen3-8B`, `Qwen3.5-9B`, `acestep`,
+  `all-MiniLM-L6-v2`, `frame_interpolation`, `ltx25-gguf`, `ltxv-2b`,
+  `manifest.json`, `mmaudio`, `realesrgan`) — `wan_models/` ABSENT and
+  `longlive2/` ABSENT (both `ls` → "No such file or directory",
+  `$VOYAGE_MODELS` unset). Prune date 2026-09-24 still in effect; the
+  two entries vs the last probe (`frame_interpolation` + `realesrgan`)
+  are the augment weights, not Wan.
+- In-container value: `python3 -c "import
+  voyage.registry_records as r; print(repr(r.WAN_HF_REVISION))"` →
+  `None` (honest placeholder with pin procedure,
+  `voyage/registry_records.py:52`); `voyage/model_registry.py:551`
+  `SnapshotSpec(WAN_HF_REPO, WAN_HF_REVISION, …)` reads the constant;
+  manifest records `"wan_revision": None`
+  (`registry_records.py:503`, visible gap). Concurrent uncommitted hunks
+  in `model_registry.py` are JsonValue typing only (verified `git diff`
+  — no revision/registry-record hunks), so the probe is uncontaminated.
+- Verdict: STILL-BLOCKED — no verified bytes exist to measure a shard
+  sha256 against. Per the contract NO hash was invented (a wrong pin
+  fails every provision loudly). No code change. Gate evidence: n/a
+  (no files changed).
+
+## Resolution (2026-09-30, close-out pass)
+
+- Verdict: blocked (still-blocked with fresh probe output above). Files
+  changed: none (this issue file only). DESIGN proposals: none.
+- Residuals (exact handoff, GPU+network owner): unchanged — re-provision
+  the Wan2.2 subset at the verified main commit
+  (`HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha`), sha256 the shards
+  against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
+  `tests/test_registry_pins.py` floating-set to empty. Do NOT pick the
+  revision from the Hub API alone without byte verification.

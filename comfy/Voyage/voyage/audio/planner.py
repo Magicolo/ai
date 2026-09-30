@@ -238,6 +238,13 @@ class AudioPlanner:
             from voyage.audio.beat import quantize_take_seconds
 
             duration = quantize_take_seconds(self.take_seconds, self.segment_seconds)
+        if not duration > self.ahead_seconds:
+            raise ValueError(
+                f"quantized take duration ({duration}) must exceed ahead_seconds "
+                f"({self.ahead_seconds}): a take no longer than the audio-ahead "
+                "window forces a full video-audio GPU swap on EVERY segment — "
+                "keep take_seconds >> ahead_seconds (issue 121 plan-site guard)"
+            )
         return AudioTake(
             take_id=take_id,
             path="",

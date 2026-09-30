@@ -159,4 +159,79 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
   fp32-elsewhere, the OOM-halving call shape `(B, 2, C, H, W)` +
   `moment`, `FILM_MIN_BYTES` pre-check, and torch-free
   `NotImplementedError` when weights are absent. `models_ensure.py`
-  default-gating (candidate 2) stays with the registry owner.
+   default-gating (candidate 2) stays with the registry owner.
+
+## Progress log (2026-09-30, this pass — IMPLEMENTED, FILM leg)
+
+- TDD red first (ephemeral pytest in `voyage-video:latest`, CPU-only,
+  models volume mounted ro, no host pip): the two new FILM contract tests
+  failed as designed (`_load_film_net` on the real
+  `film_net_fp16.safetensors` → `ModelCompatibilityError` from the
+  `FilmNetMini` stand-in, full 82-key unexpected-keys list in the error),
+  4 passed. `voyage-video` carries no pytest (`pip install pytest` runs
+  ephemeral per invocation — container overlay only, host untouched);
+  slim `voyage:latest` legs skip-by-design (no torch/safetensors there).
+- Weight forensics: all 82 safetensors keys dumped live (`extract` 16 /
+  `fuse` 26 / `predict_flow` 40, every tensor fp16) and matched 1:1
+  against the host Comfy checkout's upstream port
+  (`Comfy/comfy_extras/frame_interpolation_models/film_net.py`, read-only
+  reference, never imported — worker images carry no ComfyUI tree). Every
+  in-channel (fuse 1930/2442/1162/522/202, predictors 1920/896/384/128)
+  re-derives from the ctor math, so the port is fully determined — no
+  invented shapes, no hash invented (none recorded).
+- Green after: `_build_film_net()` returns a plain-torch upstream FILM
+  port (`_FilmConv` even-pad + LeakyReLU 0.2, subtree extractor,
+  cross-level feature pyramid, 4-predictor coarse-to-fine flow, fusion
+  decoder) whose submodule nesting reproduces the pinned key layout
+  exactly, so `_load_film_net` `strict=True` succeeds on the provisioned
+  68,882,302-byte file (safetensors branch + `FILM_MIN_BYTES` floor +
+  manifest check all kept). Call shape stays the worker's own
+  `(B, 2, C, H, W)` pairs + float moment, so `interpolate_pair` /
+  `interpolate_triplet` / `_run_stacked` OOM-halving are untouched;
+  precision stays fp16-CUDA / fp32-CPU via `_prepare_model` (the warp
+  upcasts to float32 and back, as upstream). Pyramid depth clamps to the
+  input-feasible count (upstream runs 7 levels, needing sides >=64px);
+  sides below `FILM_MIN_SIDE` (8) fail loud with `ValueError`.
+  `FILM_MINI_CHANNELS` + `_FilmNetMini` deleted (zero other references
+  in-tree — verified by grep before removal).
+- Evidence (provisioned weights, CPU fp32): strict load, 82 keys with the
+  exact extract/fuse/predict_flow prefixes, all fp16 on disk; synthetic
+  16px gradient pair at moment 0.5 → mid (3, 16, 16), all finite,
+  [0.065, 0.914], 127 ms including load; endpoints deliberately NOT
+  asserted near inputs (t0-vs-before mean-abs 0.31 — the fuse head is a
+  learned blend, not an identity — so the tests pin shape/finite/loose
+  range only); triplet (B=2) both mids finite; random-init 16px →
+  (1, 3, 16, 16) (keeps the untouched `test_augment_runner` smoke green);
+  4px pair → clear `ValueError` (new floor test, torch-only, no weights).
+- Gates: slim `voyage:latest` — `ruff check` + `ruff format --check` +
+  `mypy` strict clean on both touched files; pytest 125 passed, 7
+  skipped (provisioned/torch legs skip loudly). `voyage-video` torch
+  legs: 165 passed (contract 7 + runner/weight_loading/models/config/
+  plan + rhythm/beat-ties + media-unified + e2-157_193 neighbors). The
+  `ruff format` reflow stayed inside the new hunks (diff hunks verified
+  own-scope only). CUDA fp16 executes by construction only
+  (`_prepare_model` halves; no GPU on this box).
+
+## Resolution (2026-09-30, this pass — FILM leg)
+
+- Verdict: FULL PORT (both 166 legs DONE — ESRGAN batch 10 + FILM this
+  pass; the "not executable end-to-end" premise is retired for upscale
+  AND interpolate). Files changed: `voyage/workers/augment_worker.py`
+  (FILM_* constants + ported builder + loader/docstring updates; RRDB
+  leg untouched), `tests/test_augment_contract_166.py` (fail-loud test
+  flipped to strict-load + synthetic round-trip + min-side floor), this
+  issue file. Test evidence: TDD red→green above; per-file gates green
+  in both images.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§56-57, to
+  replace the "not executable end-to-end" note): "Both pinned augment
+  weights now strict-load and run end to end — Real-ESRGAN anime-6B
+  upscales and FILM interpolates (fp16 on CUDA, fp32 on CPU, OOM-halving
+  preserved) — so the augmentation floors are executable; the remaining
+  step is wiring finalize weights→loader, plus a live-GPU fp16 numeric
+  and quality eyeball the next time a CUDA box is available."
+- Residuals: (1) `models_ensure.py` default-gating (candidate 2) stays
+  with the registry owner — default CUDA runs fetch both weights, which
+  now load; (2) no production caller wires weights→loader yet
+  (`voyage/augment.py` / `supervisor.py` never import the worker —
+  orchestration track); (3) live CUDA fp16 numeric + quality eyeball
+  open (CPU-only box here).

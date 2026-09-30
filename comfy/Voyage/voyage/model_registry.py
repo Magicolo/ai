@@ -420,7 +420,7 @@ def verify_checkpoint_against_manifest(
     manifest_path = models_dir / "manifest.json"
     recorded: str | None = None
     if manifest_path.exists():
-        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        loaded: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             entry = loaded.get(key)
             if isinstance(entry, dict):
@@ -459,9 +459,9 @@ def _merge_manifest_record(
 ) -> dict[str, JsonValue]:
     """Merge one record into models_dir/manifest.json (DESIGN §85)."""
     manifest_path = models_dir / "manifest.json"
-    record: dict[str, Any] = {}
+    record: dict[str, JsonValue] = {}
     if manifest_path.exists():
-        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        loaded: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             record = loaded
     record[key] = value
@@ -1032,7 +1032,7 @@ def _manifest_hash_mismatches(models_dir: Path, spec: ModelSpec) -> list[str]:
     if not manifest_path.is_file():
         return []
     try:
-        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        loaded: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(loaded, dict):

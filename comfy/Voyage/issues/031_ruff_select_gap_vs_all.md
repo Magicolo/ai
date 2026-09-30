@@ -213,3 +213,45 @@ enforcing.
   supervisor sites + worker/test sites clear under their owners; N
   unblocks with a test-double naming pass + a `ProposalRejected`
   rename decision; PT rides the test-structure track.
+
+## Progress log (2026-09-30, close-out pass — STILL-BLOCKED)
+
+- Handoff-site check first: `git diff HEAD --
+  comfy/Voyage/voyage/cli_observe.py` shows a concurrent foreign hunk
+  (metrics block extracted to `voyage/cli_inspect_metrics.py` +
+  `iter_metric_files` import dropped — another agent's uncommitted
+  work). The file is NOT foreign-hunk-free, so per the contract the
+  single owned `cli_observe.py` probe-error semantics site was NOT
+  touched — no edit, no drive-by. The media-probe `try/except` region
+  itself is untouched by their hunk (theirs is the `metrics` block
+  below it), but the file-level condition fails so the attempt stops.
+- Fresh counts re-probed live in-container (`voyage:latest`, CPU-only,
+  no host pip): `ruff check --select PERF --output-format concise` →
+  **12 hits** (7 PERF401 + 5 PERF203):
+  `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748`, `voyage/cli_observe.py:728` (PERF203 —
+  the owned handoff site, intentional per-file probe-error report),
+  `voyage/cli_validate.py:223,229`, `voyage/concepts.py:437`,
+  `voyage/models_ensure.py:227`, `voyage/supervisor.py:560,632`
+  (banned/foreign file), `voyage/workers/director.py:390,517`,
+  `voyage/workers/video_longlive.py:389` (concurrently dirty).
+  `ruff check --select N --statistics` → **60** (N806 38 + N801 16 +
+  N802 5 + N818 1). `ruff check --select PT --statistics` → **111**
+  (PT011 63 + PT018 45 + PT017/PT013/PT012 1 each).
+- `Voyage/pyproject.toml:70` select confirmed unchanged (16 families:
+  `E,F,I,UP,B,A,C4,DTZ,W,BLE,TRY,EM,SIM,RUF100,S101,T201`).
+  No family is green in isolation; PERF is additionally hard-blocked by
+  the 2 `supervisor.py` sites plus the concurrent `cli_observe.py`
+  hunk. No `select` change, no per-file-ignores added.
+
+## Resolution (2026-09-30, close-out pass)
+
+- Verdict: DEFERRED (record-only) — PERF 12, N 60, PT 111 as-read above.
+- Files changed: none for 031 (this issue file only). Gate evidence:
+  `select` untouched. DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; the `cli_observe.py:728` handoff stays this track's only
+  owned PERF site for the future pass — it unblocks when the file is
+  foreign-hunk-free AND the supervisor/worker/test sites clear under
+  their owners (extract the loop body to a helper to preserve per-file
+  probe-error semantics; do NOT hoist the try outside the loop).

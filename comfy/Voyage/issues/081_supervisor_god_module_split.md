@@ -109,3 +109,75 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   agreement tests. No concurrent collision met (supervisor region was
   quiet); `model_registry.py` typing hunks from another track coexist
   untouched.
+
+## Progress log (2026-09-30, prefetch-extraction pass)
+
+- Pre-checks live: `wc -l voyage/supervisor.py` → 2707 at pass
+  start (was 2701 at the proposal pass — +6 is the facade import
+  block growth, not drift); `git diff --name-only --
+  Voyage/voyage/supervisor.py` empty before BOTH edits (facade
+  import, then block deletion), so the quiet-region rule held.
+  Concurrent tracks hold uncommitted foreign hunks in
+  `audio/beat.py`, `audio/planner.py`, `model_registry.py`,
+  `tests/test_rhythm.py`, `tests/test_beat_quantize_ties_121.py`,
+  `tests/test_augment_contract_166.py` — none inside the
+  extraction region (final `git diff` on `supervisor.py` shows
+  only the facade + deletion, 8 insertions / 36 deletions across
+  both files with `cli_observe.py`).
+- TDD failing-first: wrote
+  `tests/test_supervisor_prefetch_helpers.py` (5 agreement/behavior
+  tests: facade single-source, empty, mixed, invalidated-excluded,
+  all-miss) BEFORE the new module — in-container collection failed
+  with `ModuleNotFoundError: No module named
+  'voyage.supervisor_prefetch'` (red), then created the module +
+  re-export until green.
+- Extraction: new `voyage/supervisor_prefetch.py` (43L, DESIGN
+  §§73, 68) owns `summarize_prefetch_outcome` verbatim
+  (ex-`supervisor.py:232-257`, docstring incl. the 136/168
+  third-outcome note); `supervisor.py` (2707→2686L) imports and
+  re-exports via the explicit-`as` self-alias (mypy single-source
+  pattern from the proposal pass — no follow-up fix needed this
+  time) and carries a move comment at the old site. Routing
+  (`VIDEO/AUDIO_WORKER_MODULES`, `STREAMING_VIDEO_BACKENDS` —
+  issue 023's unification area) deliberately STAYS for its owning
+  pass. `cli_observe.py:645` resolves the name through the facade
+  at call time (function-local import), so the soak report path is
+  unchanged.
+- Gate evidence (in-container `voyage:latest`, CPU-only): new
+  agreement suite 5 passed; existing importers
+  `test_prefetch_summary + test_prefetch_shutdown +
+  test_three_captions + test_sfx_contract` 26 passed (31 with the
+  new suite); commit-path neighbors `test_failure_policy +
+  test_commit_hardening + test_generation_stack +
+  test_supervisor_lifecycle` 46 passed. Per-file gates: `ruff
+  check` + `ruff format --check` + `mypy strict` clean on all 3
+  files. No full-tree `gates.sh` run (foreign hunks in
+  `model_registry.py`/audio would color it); touched-file gates +
+  the 77 related tests are the verdict.
+
+## Resolution (2026-09-30, prefetch-extraction pass)
+
+- Verdict: second single-group split landed; full god-module
+  decomposition remains open. Files changed:
+  `voyage/supervisor_prefetch.py` (new, 43L),
+  `voyage/supervisor.py` (facade re-export + block → move
+  comment, net −21L),
+  `tests/test_supervisor_prefetch_helpers.py` (new, 5
+  agreement/behavior tests incl. the first invalidated-exclusion
+  pin).
+- DESIGN proposals: "No DESIGN text change proposed: the new
+  module follows the existing DESIGN §§73/68 contract (supervisor
+  lifecycle + soak report) and the issue-081 move-verbatim +
+  re-export + agreement-test pattern; future extractions (routing
+  unification with `backends._STREAMING_BACKENDS` per issue 023,
+  gauge helpers, tape helpers, stage-timing) follow the same
+  pattern, one group per pass."
+- Residuals: full decomposition minus prefetch (commit pipeline vs
+  lifecycle vs audio-coverage per fix candidate 1;
+  `sha256_file` re-export shim; streaming-set derivation per
+  023/083; worker-module map merge; deterministic-payload compat
+  block; legacy-migration threading; `run_id` legacy) — each a
+  future single-group pass with its own agreement tests. No
+  concurrent collision met (supervisor region quiet at both
+  edits); foreign `model_registry.py`/audio/rhythm hunks coexist
+  untouched.

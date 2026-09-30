@@ -24,7 +24,6 @@ from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig, SfxConfig
 from voyage.console import RichSegmentProgress
 from voyage.errors import MediaError
-from voyage.logrotate import iter_metric_files
 from voyage.media import plan_augmentation, presentation_setup_facts
 from voyage.media import probe as media_probe
 from voyage.supervisor import Supervisor
@@ -729,13 +728,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"{name}: PROBE FAILED ({exc})")
         return 0
     if args.inspect_target == "metrics":
-        events = _read_all_metric_events(run_dir)
-        if not events:
-            print("no metrics yet")
-            return 0
-        files = iter_metric_files(run_dir)
-        print(f"{len(events)} metric events across {len(files)} files")
-        for event in events[-5:]:
-            print(f"  {event.get('event')}: {event.get('segment_id', event.get('worker', ''))}")
-        return 0
+        from voyage.cli_inspect_metrics import render_inspect_metrics
+
+        return render_inspect_metrics(run_dir)
     return 2

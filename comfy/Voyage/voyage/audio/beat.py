@@ -94,12 +94,11 @@ def quantize_take_seconds(take_seconds: float, segment_seconds: float) -> float:
     on non-positive inputs.
 
     Tie rule (issue 121, pinned by `tests/test_beat_quantize_ties_121.py`
-    and `tests/test_rhythm.py:66-67`): the snap uses round-half-to-even,
-    so exact-half ratios can plan SHORT (`45 s / 18 s = 2.5 → 2 → 36 s`).
-    Over-coverage is trimmed by the finalize slice walk, but shortfall
-    chains extra takes (extra GPU swaps) with no diagnostic. Prefer ceil
-    or round-half-up if those pins are ever renegotiated — until then the
-    supervisor's 094 clamp contains the per-take damage.
+    and `tests/test_rhythm.py:66-67`): the snap uses `math.ceil`, so it
+    never plans SHORT (`45 s / 18 s = 2.5 → 3 → 54 s`). Over-coverage is
+    trimmed by the finalize slice walk, while the old round-half-to-even
+    shortfall chained extra takes (extra GPU swaps) with no diagnostic.
+    The supervisor's 094 clamp still contains any per-take overrun.
     """
     _require_finite(take_seconds, "take length")
     _require_finite(segment_seconds, "segment duration")
@@ -107,7 +106,7 @@ def quantize_take_seconds(take_seconds: float, segment_seconds: float) -> float:
         raise ValueError(f"take length must be positive (got {take_seconds})")
     if segment_seconds <= 0:
         raise ValueError(f"segment duration must be positive (got {segment_seconds})")
-    multiples = max(1, round(take_seconds / segment_seconds))
+    multiples = max(1, math.ceil(take_seconds / segment_seconds))
     return multiples * segment_seconds
 
 
