@@ -40,3 +40,20 @@ grep -n "backend" scripts/run.sh | head -n 20
 ## Refs
 
 - Issues 054 (tests unbaked), 064 (qualify fragility), 069 (dockerignore), 092 (snapshot-vs-tree); `tests/test_run_sh.py:142`, `tests/test_qualification.py:271`
+
+## Progress log
+
+- 2026-09-30: created `scripts/lib/common.sh` (`VOYAGE_CACHE_ENV`, `voyage_user_args`, `voyage_build_image`); refactored `build.sh`/`gates.sh`/`test.sh`/`build-video.sh`/`qualify.sh` to source it (snapshot-vs-tree headers kept at call sites; `run.sh` shares constants only, not merged).
+- 2026-09-30: `run.sh` TOML sniff extended from `[video].backend` only to video/audio/sfx with CUDA-preferring selection (any CUDA backend in any of the three sections selects `voyage-video:latest`); `case` extended with `mmaudio`. Reproduced the bug first (fake/acestep and fake/fake/mmaudio both stayed slim), then verified all four combos select correctly via `VOYAGE_DRY_RUN=1`.
+- 2026-09-30: `qualify.sh` generalized to `--backend ltxv|longlive2|causvid` (default ltxv) + `--segments N` (default 3) with validation, `--help`, backend-parameterized init hint; already-present 064 legs (nvidia-smi fail-closed exit 4, absolute-path exit 2, disk preflight exit 5, `tee reports/qual-<run>-<date>.json`) kept; tail now uses `common.sh` cache env + user args.
+- Verification: `bash -n` all six scripts OK; `test_run_sh.py` 9 passed in-container (`voyage:latest`); `VOYAGE_DRY_RUN` matrix (fake/acestep→video, fake/fake/mmaudio→video, fake→slim, ltxv→video) green.
+
+## Resolution
+
+- Delivered (in-scope `Voyage/scripts/*`): `scripts/lib/common.sh` (new), `scripts/build.sh`, `scripts/gates.sh`, `scripts/test.sh`, `scripts/build-video.sh`, `scripts/run.sh` (audio/sfx sniff + `mmaudio` case), `scripts/qualify.sh` (backend/segments generalize + common.sh).
+- No Python behavior changes; no `Voyage/issues/*.md` reformatting; no commits.
+- Residuals (out of scope — `Voyage/scripts/*,docs/*,README.md` only):
+  - Fix 1 matrix half: single `gates.sh --image/--suite` matrix replacing build/test/smoke files as flags — not implemented (would break existing `build.sh`/`test.sh` references; additive flags are the safe next step).
+  - Fix 4 containers: `.dockerignore` header + `.hypothesis/.coverage/coverage.xml` gaps and `Dockerfile.video` `chmod 777→chown` — not touched (outside scope; overlaps 069/075).
+  - `run.sh` still has no `test_run_sh.py` case for the audio/sfx TOML sniff (fix 2 asked for one) — the dry-run matrix above is manual evidence; owning pass should add the case.
+  - `build-video.sh` smoke duplication vs `test_video_common`/`test_causvid_worker`/`test_ltxv` (060 half) untouched by design.

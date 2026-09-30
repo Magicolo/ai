@@ -28,17 +28,38 @@ from typing import Any, cast
 try:
     import tomllib
 except ImportError:  # Python 3.10 worker image (upstream env)
-    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+    import tomli as tomllib
+
+from voyage.cli_paths import _RESERVED_FOLDER_NAMES as _RESERVED_FOLDER_NAMES
+from voyage.cli_paths import is_flat_folder_name as _shared_flat_folder_name
 
 BACKENDS = ("ltxv", "longlive2", "causvid", "fake")
 DIRECTORS = ("qwen", "deterministic")
 QUANTIZATIONS = ("fp8", "bf16")
 
-_FALLBACK_FRAMES_PER_SEGMENT = 48
-"""Frames/segment for unknown backends (mirrors fake `segment_frames`)."""
 
-_FALLBACK_FPS = 24
-"""FPS for unknown backends (mirrors `_frames_per_segment` default)."""
+def _fake_row_frames_and_fps() -> tuple[int, int]:
+    """(segment_frames, fps) of the fake registry row, else literals.
+
+    Single source (issue 085): unknown backends plan with the fake row's
+    geometry. The literals 48/24 below are the unreachable fallback — they
+    only fire when `voyage.config` itself cannot import (config needs
+    pydantic; this module stays stdlib-only at import time, so the registry
+    read is a guarded call, not a top-level import).
+    """
+    try:
+        from voyage.config import BACKEND_REGISTRY
+
+        fake = BACKEND_REGISTRY["fake"]
+    except (ImportError, AttributeError, KeyError):
+        return 48, 24
+    if fake.segment_frames > 0 and fake.fps > 0:
+        return fake.segment_frames, fake.fps
+    return 48, 24
+
+
+_FALLBACK_FRAMES_PER_SEGMENT, _FALLBACK_FPS = _fake_row_frames_and_fps()
+"""Frames/segment + fps for unknown backends (the fake registry row)."""
 
 # Home for the last submitted TUI form (TOML). Stream B loads it at launch
 # to prefill the form and saves it on every Generate.
@@ -65,7 +86,9 @@ def _default_settings_path() -> Path:
 
 FIELD_HELP = {
     "backend": "Video backend preset (geometry + device + audio pairing). "
-    "ltxv/longlive2/causvid need the CUDA worker image + a GPU.",
+    "ltxv/longlive2/causvid need the CUDA worker image + a GPU. "
+    "longlive2 is deprecated (issue 079, kept for existing runs only) — "
+    "new runs should use ltxv.",
     "duration": "Target length, e.g. '5s', '90', '1m30s', '2m', '1h', '1h2m3.5s'. "
     "Rounds up to whole segments, so the video never runs short.",
     "style": "Human-owned style string. Required — baked into the run config and every prompt.",
@@ -150,30 +173,18 @@ def _positive_int(raw: str, field_name: str, errors: list[str]) -> int | None:
 # Windows device names can never be photo-folders on any host checkout, so
 # the TUI rejects them (case-insensitive, extension-insensitive) alongside
 # "." — initializing inside output/ itself would scatter run files among
-# every other run (issue 080). ".." stays rejected via the substring check
-# in _flat_folder_name (traversal, issue 008's class).
-# COM/LPT indices cover COM1-COM9 + LPT1-LPT9; the end is exclusive,
-# matching range().
-_WINDOWS_INDEX_FIRST = 1
-_WINDOWS_INDEX_LAST_EXCLUSIVE = 10
-
-_RESERVED_FOLDER_NAMES = frozenset(
-    {"con", "prn", "aux", "nul"}
-    | {f"com{index}" for index in range(_WINDOWS_INDEX_FIRST, _WINDOWS_INDEX_LAST_EXCLUSIVE)}
-    | {f"lpt{index}" for index in range(_WINDOWS_INDEX_FIRST, _WINDOWS_INDEX_LAST_EXCLUSIVE)}
-)
-
-
+# every other run (issue 080). The set lives once in `voyage.cli_paths`
+# (issue 085 single source — a direct import either way would cycle:
+# cli_paths is stdlib-only, so this top-level import is cycle-free while
+# `tui_state -> cli` or `cli -> tui_state` would not be).
 def _flat_folder_name(raw: str) -> bool:
-    """Whether the value is usable as a single output folder name."""
-    text = raw.strip()
-    if not text or "/" in text or "\\" in text or ".." in text:
-        return False
-    if text in (".",):
-        return False
-    if text.split(".")[0].lower() in _RESERVED_FOLDER_NAMES:
-        return False
-    return True
+    """Whether the value is usable as a single output folder name.
+
+    Thin alias over `voyage.cli_paths.is_flat_folder_name` (single source,
+    issue 085) — kept under this name for the existing TUI call sites and
+    `tests/test_tui_state.py`.
+    """
+    return _shared_flat_folder_name(raw)
 
 
 def field_errors(state: GenerateFormState) -> dict[str, str]:

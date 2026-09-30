@@ -12,14 +12,34 @@ ban (§12) holds trivially here.
 
 from __future__ import annotations
 
-import math
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from voyage.fake_backends import FakeAudioBackend
+from voyage.workers._validators import (
+    MAX_ENERGY as _SHARED_MAX_ENERGY,
+)
+from voyage.workers._validators import (
+    MIN_ENERGY as _SHARED_MIN_ENERGY,
+)
+from voyage.workers._validators import (
+    validate_channels,
+    validate_duration_seconds,
+    validate_energy,
+    validate_output_path,
+    validate_sample_rate,
+)
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
+
+__all__ = [
+    "validate_energy",
+    "validate_duration_seconds",
+    "validate_sample_rate",
+    "validate_channels",
+    "validate_output_path",
+]
 
 _backend = FakeAudioBackend()
 
@@ -31,43 +51,9 @@ BENCHMARK_CHANNELS = 2
 BENCHMARK_ENERGY = 0.5
 """Probe shape for `handle_benchmark` (§104): startup excluded, sine renders only."""
 
-MIN_ENERGY = 0.0
-MAX_ENERGY = 1.0
+MIN_ENERGY = _SHARED_MIN_ENERGY
+MAX_ENERGY = _SHARED_MAX_ENERGY
 """Director energy knob bounds: the fake backend maps it to tone frequency."""
-
-
-def validate_energy(energy: float) -> None:
-    """Reject non-finite/out-of-range director energy (issue 063 class).
-
-    Runs before any ffmpeg side effect so a bad knob fails as
-    INVALID_PAYLOAD (fatal), never as a confusing ffmpeg error.
-    """
-    if not math.isfinite(energy) or not MIN_ENERGY <= energy <= MAX_ENERGY:
-        raise ValueError(f"energy must be finite and {MIN_ENERGY}..{MAX_ENERGY} (got {energy})")
-
-
-def validate_duration_seconds(duration_seconds: float) -> None:
-    """Reject non-positive/non-finite take lengths before rendering."""
-    if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
-        raise ValueError(f"duration_seconds must be finite and > 0 (got {duration_seconds})")
-
-
-def validate_sample_rate(sample_rate: int) -> None:
-    """Reject non-positive output sample rates."""
-    if sample_rate <= 0:
-        raise ValueError(f"sample_rate must be positive (got {sample_rate})")
-
-
-def validate_channels(channels: int) -> None:
-    """Reject non-mono/stereo channel counts."""
-    if channels not in (1, 2):
-        raise ValueError(f"channels must be 1 or 2 (got {channels})")
-
-
-def validate_output_path(output_path: str) -> None:
-    """Reject empty output paths before creating parent directories."""
-    if not output_path.strip():
-        raise ValueError("output_path must be non-empty")
 
 
 def handle_health(payload: dict[str, Any]) -> dict[str, Any]:

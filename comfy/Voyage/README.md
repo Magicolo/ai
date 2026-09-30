@@ -59,7 +59,9 @@ aborts if validation fails unless `--skip-bad`):
 VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
   --style "pastel neon line-art, peaceful"
 # -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
-# ltxv (the default) renders 768x512 @ 24 fps; --backend fake needs no GPU.
+# ltxv (the default) renders native 768x512 @ 24 fps; finalize lifts to
+# >=1280x720 @ >=32 fps via the augmentation floors (see docs/AUGMENT.md;
+# --no-augment keeps native geometry). --backend fake needs no GPU.
 # --backend longlive2|causvid need their models downloaded first (see above).
 ```
 
@@ -88,6 +90,9 @@ Fast iteration: add `--draft` (640×352, 1 block/segment, 45 s takes).
 up to whole segments), `--draft`, `--director qwen|deterministic`,
 `--blocks`, `--take-seconds`, `--quantization fp8|bf16`,
 `--beats-per-segment`, `--drift-every-n`, `--final-video`, `--skip-bad`,
+`--min-fps`/`--min-resolution`/`--no-augment` (finalize floors, see
+docs/AUGMENT.md), `--music-caption`/`--video-caption`/`--sfx-caption`
+(caption pins, see docs/SFX.md), `--no-download`,
 `--verbose`/`--no-color`.
 
 Bare `voyage` (no verb) launches the interactive launcher TUI: every
@@ -122,6 +127,8 @@ pick `fake` on GPU-less boxes for CPU smoke runs.
 - `docs/STATE_AND_RECOVERY.md` — persistence invariants, crash scenarios.
 - `docs/PROMPTING.md` — style charter, novelty, staged prompts.
 - `docs/AUDIO.md` — ACE-Step slow loop, continuation, final mix.
+- `docs/SFX.md` — finalize-time video-synced effects (captions, windows, `voyage sfx`).
+- `docs/AUGMENT.md` — finalize presentation floors (≥32 fps, ≥1280×720), chunked runner.
 - `docs/OPERATIONS.md` — runbook: run/pause/resume/stop/recover/finalize.
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — benchmark/soak protocol and reports.

@@ -44,6 +44,20 @@
 - The 0.6 B planner must `initialize(offload_to_cpu=True)` or the DiT
   preflight fails. 2060-class cards cannot hold the ACE DiT — render
   audio on the 16 GB card via the standard evict/render/rebuild cycle.
+- SFX OOM at finalize: drop `[sfx] model_size` down the ladder first
+  (`large_44k_v2` needs the 4060 at 6.2 GiB; `small_44k` fits the 2060
+  at 4.6 GiB — `docs/SFX.md`), then check co-residency.
+
+## Augment worker (FILM stand-in)
+
+- `voyage/workers/augment_worker.py` is a spike, not the full upstream
+  port: `FilmNetMini` blends with FILM's semantic contract but official
+  `film_net` weights will NOT load (shape mismatch →
+  `ModelCompatibilityError`); the full FILM port is follow-up
+  (`docs/AUGMENT.md`). The compact `RealESRGAN_x4plus_anime_6B` SRVGG
+  variant likewise needs its own loader.
+- Missing `film`/`realesrgan-anime` weights raise torch-free before any
+  torch import — `models download film realesrgan-anime` + `models verify`.
 
 ## Disk full
 

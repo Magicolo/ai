@@ -58,3 +58,42 @@ can only fall; delete `run_directory_factory`-bypassing ad-hoc scaffolds.
 - AGENTS.md §12 pragmatic DRY ("tolerate ~3x duplication before
   abstracting"); pytest `tmp_path` per-test isolation docs.
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §10.
+
+## Progress log (2026-09-30, resolution pass)
+
+- As-read counts drifted: `rg -n "_init_run" tests/*.py | wc -l` → **153**
+  across **25 files** (issue said 121 / 20+); test files 116, test fns
+  1283. Growth is concurrent-track scaffolds, same pattern.
+- Premise update: every remaining `def _init_run` is already a 1–2 line
+  delegation to `initialize_run_directory` (verified via `rg -A12`) — the
+  full-body duplication the issue describes already converged
+  semantically; what remains is wrapper-per-file (distinct default
+  `run_id`s) plus one cross-module import (`test_phase2` importing
+  `test_recovery._init_run`).
+- Fix applied, TDD: wrote `tests/test_init_run_ratchet.py` first with the
+  cap at the 147 target → failed as designed (`153 exceeds the ratchet
+  147`), structural delegation test passed. Then converted, keeping
+  run_ids explicit: (1) folded `tests/test_phase2.py` (3 tests) verbatim
+  into `tests/test_recovery.py` under an 088-fold header (its `_tape_run`
+  already used recovery's helper — zero semantic change), deleted the
+  file; (2) inlined the `timings` wrapper in `test_stage_timings.py`;
+  (3) inlined the `concepts` wrapper in `test_concept_integrity.py`;
+  (4) inlined the `alignment` wrapper (def + 3 calls) in
+  `test_av_alignment_consumer.py`. Deletion safety: `test_phase2` last
+  touched 2026-09-23 (mtime + `git log -3` checked), zero importers.
+- As-left: **144 references / 21 files**, 116 test files, 1285 fns; cap
+  set to 144. New module avoids the literal needle by concatenation so it
+  never counts itself.
+- Evidence in-container (`voyage:latest`): ratchet + recovery +
+  stage-timings + concept-integrity + av-alignment → 23 passed (8.4 s);
+  the pre-existing supervisor `ConceptStore legacy_path`
+  DeprecationWarning is unrelated (voyage/ scope). `ruff check` +
+  `format --check` + `mypy` green on all touched files.
+
+## Resolution
+
+- Resolved (convergence step + ratchet landed). Residual: 144
+  references remain — continue 2–3 files per pass per the issue's own
+  cadence and lower the cap each time (never raise it); coordinate with
+  concurrent tracks adding new scaffolds (their files then fail the
+  ratchet by design — converge, don't bump the cap).

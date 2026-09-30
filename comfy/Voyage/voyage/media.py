@@ -18,6 +18,9 @@ from typing import Any, Literal
 
 from voyage import paths
 from voyage.atomic import atomic_copy
+from voyage.augment import CRF_MAXIMUM as _AUGMENT_CRF_MAXIMUM
+from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
+from voyage.augment import interpolated_frame_count as interpolated_frame_count
 from voyage.errors import DiskSpaceError, MediaError
 from voyage.hashing import sha256_file
 
@@ -25,6 +28,27 @@ from voyage.hashing import sha256_file
 #: step 6). Same budget the commit path enforces, so anything committed
 #: stays finalizable.
 AV_ALIGNMENT_TOLERANCE_SECONDS = 0.6
+
+#: Probed-vs-target fps tolerance, fps. ffprobe reports fractional container
+#: rates (30000/1001 ≈ 29.97) for nominally integer sources, so exact
+#: equality would reject healthy segments; 0.5 absorbs that rounding
+#: without masking a real off-by-one-fps mismatch.
+FPS_MATCH_TOLERANCE = 0.5
+
+#: Fade length below which assembly skips the filter graph, seconds. A
+#: sub-0.1 s fade is inaudible as a blend — plain concat carries the same
+#: bytes without an ffmpeg filter pass.
+MIN_FADE_GRAPH_SECONDS = 0.1
+
+#: Overlap below which the finalize blend falls back to concat, seconds. A
+#: sub-50 ms overlap cannot carry an audible fade, so building the overlap
+#: graph would only add ffmpeg spawns for zero blend.
+MIN_OVERLAP_BLEND_SECONDS = 0.05
+
+#: Fade absorption below which tail compensation is skipped, seconds. The
+#: `-ss`/`-t` slice grid carries millisecond precision, so sub-10 ms of
+#: absorbed fade is rounding noise, not drift worth extending the tail for.
+ABSORPTION_EPSILON_SECONDS = 0.01
 
 #: Smallest legitimate take-slice piece, seconds (issue 104). Takes render
 #: at >= 1 s (the ACE render layer rejects anything below), and take joints
@@ -158,7 +182,7 @@ def validate_video(
     rate = str(video.get("avg_frame_rate", "0/1"))
     num, _, den = rate.partition("/")
     actual_fps = float(num) / float(den or 1) if num else 0.0
-    if abs(actual_fps - fps) > 0.5:
+    if abs(actual_fps - fps) > FPS_MATCH_TOLERANCE:
         raise MediaError(f"fps mismatch in {path}: {actual_fps} != {fps}")
     frames = int(video.get("nb_frames", 0) or 0)
     if frames < min_frames and frames != 0:
@@ -334,7 +358,7 @@ def assemble_segment_audio(
         if joint_fade is not None
         else _take_joint_fade(min(durations), crossfade_seconds)
     )
-    if fade < 0.1:
+    if fade < MIN_FADE_GRAPH_SECONDS:
         argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
         for s in slices:
             argv += ["-i", str(s)]
@@ -615,7 +639,7 @@ def build_final_audio(
     ledger = run_dir / "audio" / "takes.jsonl"
     takes: list[Any] = load_takes(ledger) if ledger.exists() else []
     planner = AudioPlanner(takes=takes)
-    if not takes or overlap < 0.05:
+    if not takes or overlap < MIN_OVERLAP_BLEND_SECONDS:
         return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
     half = overlap / 2.0
     windows: list[Path] = []
@@ -685,7 +709,7 @@ def build_final_audio(
             piece_durations = [end - start for start, end in piece_bounds]
             fade = _take_joint_fade(min(piece_durations), overlap)
             absorption = fade * (len(slices) - 1)
-            if absorption >= 0.01:
+            if absorption >= ABSORPTION_EPSILON_SECONDS:
                 tail_start, tail_end = piece_bounds[-1]
                 take_start, _take_end = take_bounds[-1]
                 # Clamp to the take file only — never to the timeline: the
@@ -810,8 +834,8 @@ def plan_augmentation(
     out_w = max(int(target_w), floor_w)
     out_h = max(int(target_h), floor_h)
     source_fps_value = float(source_fps)
-    needs_minterpolate = source_fps_value > 0 and out_fps > source_fps_value + 0.5
-    fps_mismatch = source_fps_value <= 0 or abs(out_fps - source_fps_value) > 0.5
+    needs_minterpolate = source_fps_value > 0 and out_fps > source_fps_value + FPS_MATCH_TOLERANCE
+    fps_mismatch = source_fps_value <= 0 or abs(out_fps - source_fps_value) > FPS_MATCH_TOLERANCE
     needs_reencode = bool(
         needs_minterpolate or fps_mismatch or int(source_w) != out_w or int(source_h) != out_h
     )
@@ -860,11 +884,13 @@ intent instead of smuggling it through a zero.
 #: shipped video never silently uses ffmpeg's default CRF 23.
 FINALIZE_CRF_DEFAULT = 15
 
-#: Lowest/highest h264 CRF (issues 050). Mirrors `voyage.augment`
-#: `CRF_MINIMUM`/`CRF_MAXIMUM` — the same codec bounds, stated here so
-#: `media` stays stdlib-only without importing the augment runner.
-FINALIZE_CRF_MINIMUM = 0
-FINALIZE_CRF_MAXIMUM = 51
+#: Lowest/highest h264 CRF (issues 050, 083). Single ladder home is
+#: `voyage.augment` (`CRF_MINIMUM`/`CRF_MAXIMUM`); these aliases keep the
+#: `FINALIZE_CRF_*` names for existing imports (the old "stated here so
+#: `media` stays stdlib-only without importing" comment is stale —
+#: `voyage.augment` is stdlib-only too, so the import is free).
+FINALIZE_CRF_MINIMUM = _AUGMENT_CRF_MINIMUM
+FINALIZE_CRF_MAXIMUM = _AUGMENT_CRF_MAXIMUM
 
 #: Default x264 speed/quality trade-off (issues 050). Keeps the validated
 #: `veryfast` recipe; slower presets are opt-in via `FinalizeOptions`.
@@ -1015,9 +1041,80 @@ def _segment_video_matches_target(segment: Path, width: int, height: int, fps: i
             return False
         if str(video.get("pix_fmt", "")) != "yuv420p":
             return False
-        return abs(_probe_video_fps(info) - fps) <= 0.5
+        return abs(_probe_video_fps(info) - fps) <= FPS_MATCH_TOLERANCE
     except (MediaError, ValueError, TypeError, KeyError):
         return False
+
+
+@dataclass(frozen=True)
+class ResolvedFinalizeSettings:
+    """One contract for `finalize_run` knob resolution (issue 083).
+
+    The twelve positional scalars are the legacy shim; `options=` is the
+    canonical knob. Both spell the same thing — this struct is what
+    `finalize_run` actually consumes — so scalar-built and options-built
+    calls with matching values resolve identically (pinned by
+    `tests/test_media_augment_unified_083.py`). `settings` carries the
+    audio/joint/skip policy; the `effective_*` fields carry the
+    presentation floors + encode quality after the
+    "explicit scalar wins over `options`, `None` means use `options`"
+    rule (0 disables a floor axis — the 24fps `PRESENTATION_MIN_FPS`
+    still applies downstream in `plan_augmentation`).
+    """
+
+    settings: FinalizeOptions
+    min_fps: int
+    min_width: int
+    min_height: int
+    crf: int
+    preset: str
+
+
+def resolve_finalize_settings(
+    *,
+    options: FinalizeOptions | None,
+    skip_bad: bool,
+    sample_rate: int,
+    channels: int,
+    overlap_fraction: float,
+    overlap_cap_seconds: float,
+    min_fps: int | None,
+    min_width: int | None,
+    min_height: int | None,
+    crf: int | None,
+    preset: str | None,
+) -> ResolvedFinalizeSettings:
+    """Resolve the scalar/`options=` split into one settings struct (pure).
+
+    No filesystem, no ffmpeg: `finalize_run` calls this first, then runs
+    the §53 preflight + encode off the result. Extracted (not duplicated)
+    so the shim and the canonical path can never drift.
+    """
+    settings = (
+        options
+        if options is not None
+        else FinalizeOptions(
+            skip_bad=skip_bad,
+            sample_rate=sample_rate,
+            channels=channels,
+            overlap_fraction=overlap_fraction,
+            overlap_cap_seconds=overlap_cap_seconds,
+            joint_style="hard-splice" if overlap_fraction <= 0 else "blend",
+            min_fps=AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
+            min_width=AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
+            min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
+            crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
+            preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
+        )
+    )
+    return ResolvedFinalizeSettings(
+        settings=settings,
+        min_fps=min_fps if min_fps is not None else settings.min_fps,
+        min_width=min_width if min_width is not None else settings.min_width,
+        min_height=min_height if min_height is not None else settings.min_height,
+        crf=validate_crf(crf if crf is not None else settings.crf),
+        preset=validate_preset(preset if preset is not None else settings.preset),
+    )
 
 
 def finalize_run(
@@ -1069,29 +1166,35 @@ def finalize_run(
     keep the legacy hard splice. The audio timeline stays on the source
     fps (frame counts / requested fps = seconds) — the fps lift touches
     video only, never the mix.
+
+    Knob contract (issue 083): `options=` is canonical; the scalars are a
+    tested shim resolved by `resolve_finalize_settings` (scalar wins over
+    `options`, `None` means use `options`). The `width`/`height`/`fps`
+    defaults (768/432/24) are the legacy fake-native fallback — kept (not
+    raised to the presentation floors) because zero-floor callers rely on
+    them for the stream-copy fast path (see `test_finalize_fastpath`);
+    default-floor callers are lifted to 1280x720@32 by `plan_augmentation`
+    either way, so either default ships the same presentation.
     """
-    settings = (
-        options
-        if options is not None
-        else FinalizeOptions(
-            skip_bad=skip_bad,
-            sample_rate=sample_rate,
-            channels=channels,
-            overlap_fraction=overlap_fraction,
-            overlap_cap_seconds=overlap_cap_seconds,
-            joint_style="hard-splice" if overlap_fraction <= 0 else "blend",
-            min_fps=AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
-            min_width=AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
-            min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
-            crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
-            preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
-        )
+    resolved = resolve_finalize_settings(
+        options=options,
+        skip_bad=skip_bad,
+        sample_rate=sample_rate,
+        channels=channels,
+        overlap_fraction=overlap_fraction,
+        overlap_cap_seconds=overlap_cap_seconds,
+        min_fps=min_fps,
+        min_width=min_width,
+        min_height=min_height,
+        crf=crf,
+        preset=preset,
     )
-    effective_min_fps = min_fps if min_fps is not None else settings.min_fps
-    effective_min_width = min_width if min_width is not None else settings.min_width
-    effective_min_height = min_height if min_height is not None else settings.min_height
-    effective_crf = validate_crf(crf if crf is not None else settings.crf)
-    effective_preset = validate_preset(preset if preset is not None else settings.preset)
+    settings = resolved.settings
+    effective_min_fps = resolved.min_fps
+    effective_min_width = resolved.min_width
+    effective_min_height = resolved.min_height
+    effective_crf = resolved.crf
+    effective_preset = resolved.preset
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
@@ -1180,7 +1283,7 @@ def finalize_run(
             lift == ""
             and not plan.needs_reencode
             and source_fps > 0
-            and abs(out_fps - source_fps) <= 0.5
+            and abs(out_fps - source_fps) <= FPS_MATCH_TOLERANCE
             and all(
                 _segment_video_matches_target(segment, out_w, out_h, out_fps) for segment in usable
             )

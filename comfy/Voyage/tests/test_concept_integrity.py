@@ -22,10 +22,6 @@ from voyage.errors import StateError
 from voyage.supervisor import Supervisor
 
 
-def _init_run(run_dir: Path, run_id: str = "concepts") -> None:
-    initialize_run_directory(run_dir, run_id=run_id)
-
-
 def test_check_novel_fails_loud_on_deleted_vectors(tmp_path: Path) -> None:
     store = ConceptStore(tmp_path / "novelty")
     store.propose("glowing neon lattice", vector=[1.0, 0.0, 0.0], segment=0)
@@ -94,7 +90,7 @@ def test_validate_concepts_reports_row_mismatch(tmp_path: Path) -> None:
 def test_validate_run_flags_lost_vectors(tmp_path: Path) -> None:
     """A run whose vectors vanished must not validate clean."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="concepts")
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     Supervisor(run_dir, config).run_segments(1)
     novelty_dir = run_dir / "novelty"

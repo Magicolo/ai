@@ -1,5 +1,14 @@
 # PROMPTING — style charter, novelty, staged prompts
 
+## Captions (video / music / SFX)
+
+The director carries three caption families — per-block video stages,
+a music caption for ACE-Step takes, and an SFX caption for MMAudio
+windows — all derived from the same concept + charter and evolved
+gradually with the general prompt. Full operator reference (pins
+`--music-caption/--video-caption/--sfx-caption`, finalize windows,
+ladder): `docs/SFX.md`.
+
 ## Style charter
 
 `voyage init --style "..."` sets the run's permanent visual identity

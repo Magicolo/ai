@@ -1,4 +1,4 @@
-"""Benchmark + soak helpers: timing stats, §104 reports, gauge summaries.
+"""Benchmark + soak helpers: timing stats, DESIGN §104 reports, gauge summaries.
 
 Pure functions over plain data — the worker `benchmark` ops produce the
 numbers, the CLI renders them, and the soak harness trends them.

@@ -78,3 +78,42 @@ own plan.
   (`disallow_any_generics`, `warn_return_any`).
 - `Voyage/pyproject.toml:144-166`
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §5.
+
+## Progress log (2026-09-30, toolchain track)
+
+- Re-verified premises live (host `rg` for counts, in-container ruff
+  for families): total `Any` in voyage/ is now **387** (was 364;
+  top files video_causvid 37, augment_worker 36, video_longlive 32,
+  video_ltxv 31, model_registry 27, workers/director 20, supervisor 18,
+  cli 18 — same shape, drifted up). ANN-family probe: **ANN 339
+  (ANN401 326 + ANN001 10 + ANN202 3)** — ANN401 alone grew 255→326.
+- ANN401 tripwire: canNOT be enabled — 326 hits would redden the gate
+  on landing, and fixing them means annotating worker/GPU seams plus
+  the `follow_imports="skip"` heavy-deps override (which renders all
+  numeric/tensor code `Any`-typed by design until upstream ships
+  3.10-clean stubs). Documented as staying out with the count above.
+- Boundary aliases: `rpc.py` still defers — `call()` at `:327-329`
+  keeps `payload: dict[str, Any] -> dict[str, Any]` with the
+  per-op-TypedDict deferral comment at `:348` (unchanged since issue
+  time; `RpcPayload`/`RpcResult` JsonValue aliases exist but only the
+  alias definitions use them). scoreboard.py (`:40,56,118,122`),
+  model_registry.py (25 hits incl. 8 `_record_*` builders),
+  models_ensure.py (`:154,164,263`) still `dict[str, Any]`-valued.
+  Migrating these is annotation surgery across supervisor + workers
+  (incl. dirty supervisor.py) — outside this track's scope
+  (docstrings + constants only). No alias migration this pass.
+- No pyproject/gate change for 035 (nothing green to ratchet).
+
+## Resolution
+
+- Document-only: tripwire stays out (326 ANN401 hits as-read;
+  enabling = instant red), alias migration proposed for the owning
+  pass — adopt `RpcPayload` in `call()` first (single signature,
+  callers already pass JSON-shaped dicts), then scoreboard →
+  models_ensure → model_registry `dict[str, Any]` returns to
+  `JsonValue`-valued aliases, with the heavy-deps `follow_imports`
+  note (issue 035's override section) as the long pole.
+- Files changed: none for 035. Gate evidence: n/a (no change; ANN
+  probe output recorded above). DESIGN proposals: none. Residuals:
+  full 035 scope (ANN401 326, boundary `dict[str, Any]` at
+  rpc.py:327-329, scoreboard/model_registry/models_ensure sites).

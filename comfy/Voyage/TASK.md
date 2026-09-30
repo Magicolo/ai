@@ -1718,7 +1718,16 @@ code/config work the merged spec now requires.
   `VideoConfig` schema (sync by design; no migration needed).
   21 CPU-only tests in `tests/test_backends_adapter.py`.
 
-## 30.4 Benchmark + audit artifacts — never produced
+## 30.4 Benchmark + audit artifacts — produced (2026-09-24+; heading corrected 2026-09-30)
+
+- The "never produced" label above is stale: `reports/longlive-audit.md`
+  (§16 categories A–J) and `reports/video-backends.md` (§21 benchmark
+  matrix, longlive2 qual leg VALID 87f on the idle 4060 Ti) both exist in
+  the tree. What remains open is the per-backend breadth (81/97/121
+  matrix, TeaCache/Q8/FP8-kernel study, extension-throughput), not the
+  artifacts themselves. Full prune-merge of this checklist into DESIGN
+  §140 plus deletion of this file is tracked in issue 093 (needs a DESIGN
+  write + delete approval — out of scope for a TASK-only pass).
 
 - `reports/longlive-audit.md` (100:1 root-cause, §16 categories A–J
   unanswered), `reports/video-backends.md` (§21 benchmark matrix, never run

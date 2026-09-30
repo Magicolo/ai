@@ -1,5 +1,7 @@
 """Inline model ensure for `voyage generate` (selective + parallel).
 
+DESIGN §§84-85, §140 generate-ensure as-built.
+
 Why this module exists: `generate` used to fail late inside workers when
 weight files were missing (a `FileNotFoundError` surfacing as a worker
 retry/circuit-breaker after minutes of GPU work). This module derives the

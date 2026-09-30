@@ -24,6 +24,7 @@ from hypothesis import given
 from hypothesis import strategies as strategies
 from hypothesis.strategies import DataObject
 
+from tests.conftest import bounded_counts, short_texts
 from voyage.seeds import audio_seed, derive_seed, director_seed, video_seed
 
 # `derive_seed` reduces the digest modulo 2**31, so every output is a
@@ -31,10 +32,14 @@ from voyage.seeds import audio_seed, derive_seed, director_seed, video_seed
 MAXIMUM_SEED_VALUE = 2**31 - 1
 
 run_seeds = strategies.integers(min_value=-(2**63), max_value=2**63)
-small_counts = strategies.integers(min_value=0, max_value=999999)
-# `st.text()` already excludes surrogate code points by default, so labels
-# are always encodable without an explicit alphabet restriction.
-short_labels = strategies.text(max_size=24)
+# Shared domain-constrained generators (issue 039): `small_counts` is the
+# conftest `bounded_counts` alias and `short_labels` the conftest
+# `short_texts` strategy. Verified live 2026-09-30: bare `st.text()` drew
+# no surrogates in 500 examples (upstream already excludes `Cs` by
+# default), but the explicit conftest blacklist keeps the guarantee ours
+# instead of depending on an upstream default that could change.
+small_counts = bounded_counts
+short_labels = short_texts
 label_lists = strategies.lists(
     strategies.one_of(short_labels, strategies.integers(min_value=-9999, max_value=9999)),
     max_size=4,

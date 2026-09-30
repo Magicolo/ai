@@ -51,5 +51,13 @@ video from tape. `del` alone frees nothing — eviction is
 `state.json` (`:30`), `concepts.jsonl` (`:31`), `novelty/` (vectors +
 index + jsonl), `segments/NNNNNN/` (video.mp4, audio.wav,
 world/transition/prompt-plan/audio-state/metrics.json, sha256.json,
-recovery.pt on GPU backends, DONE), `logs/` (metrics.jsonl,
-*-worker.log, bench outputs), `final.mp4` after finalize.
+recovery.pt on GPU backends, `video_tail.mp4` tail anchor on
+tail-chained backends, DONE), `audio/` (takes ledger + slices,
+`sfx/` stems + `sfx.jsonl` effects ledger — see `docs/SFX.md`),
+`logs/` (metrics.jsonl, *-worker.log, bench outputs), `final.mp4`
+after finalize (plus `final-sfx.mp4` when the SFX pass runs and the
+augmented presentation output — see `docs/AUGMENT.md`).
+
+2-GPU pairing: video-augment chunks run on cuda:0 while the MMAudio
+SFX stack renders on cuda:1 (serial on 1-GPU boxes;
+`voyage/augment.py:14-18`).

@@ -17,7 +17,7 @@ from typing import Any, Literal, TypeGuard, TypeVar
 try:
     import tomllib
 except ImportError:  # Python 3.10 worker image (upstream env)
-    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+    import tomli as tomllib
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -27,6 +27,38 @@ VideoBackendName = Literal["fake", "longlive2", "ltxv", "causvid"]
 """Video backend vocabulary (issue 022): every backend field, the registry,
 and the streaming set are keyed by this — a typo fails at typecheck
 instead of after GPU init."""
+
+DEPRECATED_VIDEO_BACKENDS: tuple[str, ...] = ("longlive2",)
+"""Video backends kept for existing runs but closed to new work (issue 079).
+
+`ltxv` is the default since 2026-09-29; `longlive2` is the heaviest
+legacy (1264L worker, own `.pt` tape, checkpoint-load OOM in archived
+issue 096). Full deletion needs `supervisor.py` hunks that conflict with
+concurrent Stage-A telemetry work plus coordinated edits across the
+registry, CLI, TUI, model registry, Dockerfile, scripts, and six test
+modules — so this pass deprecates (warn on selection) and retains the
+row. Deletion stays open as the recorded residual in the issue file.
+"""
+
+
+def warn_if_deprecated_backend(backend: str) -> None:
+    """Warn when a deprecated video backend is selected (issue 079).
+
+    Pure advisory: existing longlive2 runs keep working (registry row,
+    worker, and resume path untouched); new `init --backend longlive2`
+    callers get a `DeprecationWarning` pointing at `ltxv`. Silent for
+    every live backend.
+    """
+    import warnings
+
+    if backend in DEPRECATED_VIDEO_BACKENDS:
+        warnings.warn(
+            f"video backend {backend!r} is deprecated (issue 079) and kept "
+            "for existing runs only; new runs should use 'ltxv'",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
 
 AudioBackendName = Literal["fake", "acestep"]
 """Audio backend vocabulary (issue 022): fake sine vs the ACE-Step music stack."""
@@ -257,6 +289,12 @@ class VideoConfig(BaseModel):
         return value
 
 
+#: Ceiling for `AudioConfig.final_overlap_fraction` (finalize blend): at most
+#: half a segment may be re-sliced into the overlap — beyond that the "joint"
+#: would swallow the take itself instead of joining two takes.
+MAX_FINAL_OVERLAP_FRACTION = 0.5
+
+
 class AudioConfig(BaseModel):
     backend: AudioBackendName = "fake"
     sample_rate: int = 48000
@@ -319,8 +357,10 @@ class AudioConfig(BaseModel):
     @field_validator("final_overlap_fraction")
     @classmethod
     def overlap_fraction_range(cls, value: float) -> float:
-        if not 0.0 <= value <= 0.5:
-            raise ValueError("final_overlap_fraction must be within [0, 0.5]")
+        if not 0.0 <= value <= MAX_FINAL_OVERLAP_FRACTION:
+            raise ValueError(
+                f"final_overlap_fraction must be within [0, {MAX_FINAL_OVERLAP_FRACTION}]"
+            )
         return value
 
     @field_validator("final_overlap_cap_seconds")
@@ -622,18 +662,27 @@ def default_config_toml(
     director_device: str = "cuda:1",
 ) -> str:
     preset = _video_preset(video_backend)
+    # Fallbacks below read `_DEFAULT_ROW` (issue 085 single source), never
+    # restated literals: preset dicts are complete projections of
+    # BACKEND_REGISTRY, so these defaults never fire for known backends —
+    # they only pin the shape for hypothetical partial rows. (The old
+    # `device` fallback said "cpu" while the default row is cuda:0; that
+    # literal was unreachable for the same reason, so deriving it changes
+    # no generated TOML.)
     backend = str(preset.get("backend", video_backend))
-    profile = str(preset.get("profile", "ltxv-512p"))
-    width = _preset_int(preset, "width", 768)
-    height = _preset_int(preset, "height", 512)
-    fps = _preset_int(preset, "fps", 24)
-    segment_frames = _preset_int(preset, "segment_frames", 96)
-    raw_latent = preset.get("latent_shape", [1, 8, 48, 44, 80])
+    profile = str(preset.get("profile", _DEFAULT_ROW.profile))
+    width = _preset_int(preset, "width", _DEFAULT_ROW.width)
+    height = _preset_int(preset, "height", _DEFAULT_ROW.height)
+    fps = _preset_int(preset, "fps", _DEFAULT_ROW.fps)
+    segment_frames = _preset_int(preset, "segment_frames", _DEFAULT_ROW.segment_frames)
+    raw_latent = preset.get("latent_shape", list(_DEFAULT_ROW.latent_shape))
     latent_dims = (
-        [int(dim) for dim in raw_latent] if isinstance(raw_latent, list) else [1, 8, 48, 44, 80]
+        [int(dim) for dim in raw_latent]
+        if isinstance(raw_latent, list)
+        else list(_DEFAULT_ROW.latent_shape)
     )
     latent_toml = "[" + ", ".join(str(dim) for dim in latent_dims) + "]"
-    device = str(preset.get("device", "cpu"))
+    device = str(preset.get("device", _DEFAULT_ROW.device))
     audio_preset = _audio_preset(video_backend)
     audio_backend = audio_preset["backend"]
     audio_device = audio_preset["device"]

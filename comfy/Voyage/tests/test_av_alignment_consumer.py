@@ -22,10 +22,6 @@ from voyage.media import av_drift_seconds, check_av_alignment, validate_audio
 from voyage.supervisor import Supervisor
 
 
-def _init_run(run_dir: Path, run_id: str = "alignment") -> None:
-    initialize_run_directory(run_dir, run_id=run_id)
-
-
 def _commit(run_dir: Path, count: int) -> list[str]:
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     return Supervisor(run_dir, config).run_segments(count)
@@ -49,7 +45,7 @@ def test_check_av_alignment_rejects_beyond_budget() -> None:
 
 def test_validate_passes_aligned_segment(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="alignment")
     assert _commit(run_dir, 1) == ["000000"]
     assert validate_run(run_dir) == []
 
@@ -57,7 +53,7 @@ def test_validate_passes_aligned_segment(tmp_path: Path) -> None:
 def test_validate_rejects_drifted_stored_durations(tmp_path: Path) -> None:
     """Rewritten-audio segment must fail validate, not just finalize."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="alignment")
     _commit(run_dir, 1)
     metrics_path = run_dir / "segments" / "000000" / "metrics.json"
     payload = json.loads(metrics_path.read_text(encoding="utf-8"))
@@ -73,7 +69,7 @@ def test_commit_rejects_av_drifted_audio(tmp_path: Path, monkeypatch: pytest.Mon
     import voyage.supervisor as supervisor_module
 
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="alignment")
     # The supervisor calls its own module-global `validate_audio` (bound by
     # `from voyage.media import ...`, which mypy strict does not treat as an
     # explicit re-export), so the drift wrapper must patch the supervisor

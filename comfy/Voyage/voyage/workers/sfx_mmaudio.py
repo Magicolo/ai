@@ -13,7 +13,6 @@ GPU ban (§12): `torch`/`mmaudio` only load inside functions via
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import tempfile
 import time
@@ -33,24 +32,34 @@ from voyage.audio.mmaudio_sfx import (
     validate_duration_seconds,
     validate_model_size,
 )
+from voyage.workers._resident import BYTES_PER_GIB, require_torch
+from voyage.workers._validators import (
+    validate_channels,
+    validate_sample_rate,
+)
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
+
+# Compat re-exports (issue 084): `validate_sample_rate` / `validate_channels`
+# are the shared `_validators` implementations (single home); the names stay
+# bound here so existing imports keep working.
+
+__all__ = ["BYTES_PER_GIB", "validate_sample_rate", "validate_channels"]
 
 _stack: SfxStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
 _model_size = "large_44k_v2"
 
-BYTES_PER_GIB = 1024**3
-"""Byte-to-GiB divisor for VRAM peak reporting (benchmark only)."""
-
 
 def _require_torch() -> None:
-    """Fail fast with ImportError when `torch` is absent (slim image)."""
-    if importlib.util.find_spec("torch") is None:
-        raise ImportError(
-            "sfx_mmaudio benchmark needs optional dependency 'torch' "
-            "(slim image carries the fake SFX worker only)"
-        )
+    """Fail fast with ImportError when `torch` is absent (slim image).
+
+    Shared guard mechanics live in `voyage.workers._resident.require_torch`;
+    this thin wrapper names the needing stack so the failure stays
+    attributable (same class as the historical failure, so slim-image
+    behavior is unchanged).
+    """
+    require_torch("sfx_mmaudio benchmark")
 
 
 def _session_device_index() -> int:
@@ -114,18 +123,6 @@ def _benchmark_report(
         "vram_peak_gib": round(max(peaks), 2) if peaks else None,
         "vram_avg_gib": round(sum(peaks) / len(peaks), 2) if peaks else None,
     }
-
-
-def validate_sample_rate(sample_rate: int) -> None:
-    """Reject non-positive output sample rates (issue 063 class)."""
-    if sample_rate <= 0:
-        raise ValueError(f"sample_rate must be positive (got {sample_rate})")
-
-
-def validate_channels(channels: int) -> None:
-    """Reject non-mono/stereo channel counts."""
-    if channels not in (1, 2):
-        raise ValueError(f"channels must be 1 or 2 (got {channels})")
 
 
 def _require_stack() -> SfxStack:

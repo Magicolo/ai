@@ -35,3 +35,26 @@ sed -n '85,117p' reports/video-backends.md
 
 - Complementary with 091 (091 creates `SFX.md`/`AUGMENT.md`; this issue indexes them + polishes the rest). Benchmark-floors paragraph complements 060/154/163 (harness gaps) — docs here, code there.
 - Issues 042 (README geometry), 065 (missing stacks); DESIGN §§5,56,57,87,140; `reports/video-backends.md:124`, `reports/longlive-audit.md:75`
+
+## Progress log
+
+- 2026-09-30: applied the in-scope one-line batch (`Voyage/docs/*,README.md` only; no Python changes):
+  - `README.md`: ltxv native→floors note (768x512@24 native, ships ≥1280x720@≥32fps via floors, `--no-augment` escape) + 7 missing `generate` flags (`--min-fps/--min-resolution/--no-augment`, `--music-caption/--video-caption/--sfx-caption`, `--no-download`).
+  - `docs/UPSTREAM_LONG_LIVE_PATCHES.md:50`: `local_attn_size` ours 8→16 (live `voyage/config.py:242`; `reports/video-backends.md:41` confirms 16/8).
+  - `docs/BACKENDS.md`: ltxv-first video ordering (default first) + SFX rows (with 091).
+  - `docs/ARCHITECTURE.md`: layout gains `video_tail.mp4`, `audio/sfx/` stems + `sfx.jsonl`, `final-sfx.mp4`, augment output + 2-GPU pairing line.
+  - `docs/OPERATIONS.md`: Finalization gains floors + SFX pins with pointers.
+  - `docs/TROUBLESHOOTING.md`: SFX ladder OOM note + augment FILM stand-in section.
+  - `docs/BENCHMARKING.md`: floors paragraph (Causvid/fake lift math, compare-at-same-floors, `--no-augment` for native timings).
+  - `INSTALL.md` +3 stacks (film/realesrgan/sfx-mmaudio): verified already present (`INSTALL.md:90-92`, `README.md:46-48`, `MODELS.md:45-65/116-131`) — no edit needed.
+- Verification: `rg` verifiers non-empty (floors/flags/1280/32fps/downloads); in-container probe confirms `local_attn_size=16`, augment defaults 32/1280/720, `plan_augmentation` lifts; `test_run_sh.py` 9 passed; `bash -n` scripts OK. Pre-existing `ruff check` 11 errors + 1 format file are in other agents' in-flight CLI-split files (untouched, out of scope).
+
+## Resolution
+
+- Delivered (in-scope): the seven file edits above + 091's `SFX.md`/`AUGMENT.md` index.
+- No code behavior changes; no `Voyage/issues/*.md` reformatting; no commits.
+- Residuals (out of scope — `000_INDEX.md/DESIGN.md/AGENTS.md` + `reports/` untouched by contract):
+  - DESIGN §5.1 as-built (Causvid "no worker/registry/preset" — false since 2026-09-24, VALID 144f). Proposed: replace with "CausVid worker (`voyage/workers/video_causvid.py`) registered in `VIDEO_WORKER_MODULES`/`STREAMING_VIDEO_BACKENDS`, preset `causvid` 832x480@16 in `BACKEND_REGISTRY`, VALID 144f 2026-09-24."
+  - DESIGN §§56-step-10/57 normative 768x432/24fps (two generations behind). Proposed: one rewritten paragraph — "finalize keeps generation resolution, then `plan_augmentation` lifts to ≥1280x720@≥32fps (`AugmentConfig` defaults; `0` disables; 24fps `PRESENTATION_MIN_FPS` floor remains)."
+  - DESIGN §87 coverage list (11 docs, missing 3 `UPSTREAM_*_NOTES` + `reports/` + SFX/AUGMENT). Proposed: append "`docs/SFX.md` (finalize effects), `docs/AUGMENT.md` (presentation floors), `docs/UPSTREAM_*_NOTES.md` (×3), `reports/` (qualification evidence)."
+  - `reports/video-backends.md` LTXV leg (empty "pending Stream A" while ltxv is default). Proposed: record basis + E2E numbers or mark superseded with a pointer to the ltxv-default decision entry (needs an idle-GPU `qualify.sh --backend ltxv` run — card held during this pass).

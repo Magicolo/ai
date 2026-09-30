@@ -36,3 +36,63 @@ grep -n "def finalize_run" -A 15 voyage/media.py | head -n 25
 ## Refs
 
 - Issues 042 (floors vs README), 031-analog plan tests; `voyage/config.py:375-390` `AugmentConfig`
+
+## Progress log
+
+- 2026-09-30 (this resolution): re-verified every premise live
+  (`voyage:latest`, CPU-only): `augment.py:10-12` TODO present,
+  `interpolated_frame_count` (`augment.py:72-76`, `(n-1)*m+1`) with
+  `media.py` carrying no copy (two plan-math homes, conceptual not
+  literal duplication); `finalize_run` 12-scalar overload + `options=`
+  (`media.py:1049-1066`, defaults `768/432/24`); `augment_worker.py:15-19`
+  spike admission (`ModelCompatibilityError` on official weights);
+  `FINALIZE_CRF_*` mirroring `CRF_*` with a stale "so media stays
+  stdlib-only without importing" comment (`augment` IS stdlib-only —
+  verified imports: math/os/subprocess/collections/concurrent/dataclasses
+  + `voyage.errors` only, no cycle either direction).
+- Defaults-trap evaluation (do NOT change): `test_finalize_fastpath.py`
+  pins `finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0)`
+  → stream-copy at 768x432@24 (zero-floor callers depend on the legacy
+  defaults for the fast path). Raising defaults to 1280x720@32 would flip
+  those callers to re-encode and break the test — verified by reading the
+  test (`"Legacy native path: floors disabled so 768x432@24 fake segments
+  stream-copy"`). Decision: keep `768/432/24`, document as legacy shim.
+- TDD failing-first (`tests/test_media_augment_unified_083.py`, 3 tests):
+  watched `AttributeError: module 'voyage.media' has no attribute
+  'interpolated_frame_count'` in-container, then green.
+- Implemented: (1) single plan-math home — `media.py` re-exports
+  `interpolated_frame_count` (`is`-identical to `augment`'s) and aliases
+  `FINALIZE_CRF_MINIMUM/MAXIMUM` to `CRF_MINIMUM/MAXIMUM` (one codec
+  ladder); `augment.py` TODO closed with the single-home rule. (2) one
+  knob contract — new pure `ResolvedFinalizeSettings` +
+  `resolve_finalize_settings()` owns the scalar/`options=` split
+  ("explicit scalar wins, `None` means use `options`"); `finalize_run`
+  delegates (no behavior change) and its docstring declares `options=`
+  canonical + scalars legacy shim + why defaults stay. (3) quarantine —
+  `augment_worker.py` docstring gains a QUARANTINE header (spike
+  stand-in, orchestration is the shipped path, full port or
+  `experimental/` move still open); no code moved.
+- Lesson (do not regress): `ruff check --fix` deletes bare re-export
+  imports (F401) — the `from m import x as x` self-alias idiom marks
+  intentional re-exports (this pass's `media.py` line was pruned once,
+  restored with the idiom, gates clean after).
+- Gates (touched files only): `ruff check` + `format --check` + `mypy
+  strict` clean on `media.py`/`augment.py`/`workers/augment_worker.py`/
+  new test; suites green: new 3 + `test_augment_plan/runner/config` +
+  `test_finalize_fastpath` + `test_integration` (111 passed, 3 skipped).
+
+## Resolution
+
+- Verdict: FIXED (safe subset; spike promotion lands as quarantine).
+- Files changed: `voyage/media.py` (+re-exports, CRF aliases,
+  `ResolvedFinalizeSettings`/`resolve_finalize_settings`, docstring),
+  `voyage/augment.py` (TODO→single-home rule),
+  `voyage/workers/augment_worker.py` (QUARANTINE header),
+  `tests/test_media_augment_unified_083.py` (new, 3 tests).
+- Residual (precise): full upstream FILM port + anime_6B loader (deletes
+  stand-in branches) or `experimental/` move with spike contract;
+  `options=`-only finalize (drop the 12 scalars after the ~10
+  `finalize_run` call sites migrate — `cli.py:1140` already passes
+  explicit geometry); defaults raise to presentation floors (blocked by
+  the zero-floor fast-path contract — needs a `test_finalize_fastpath`
+  rewrite first).

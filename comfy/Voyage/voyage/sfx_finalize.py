@@ -1,5 +1,7 @@
 """Finalize-time SFX pass (slice 3, three-caption doctrine).
 
+DESIGN §7, §56, §140 SFX-slice as-built.
+
 Runs AFTER `finalize_run` publishes the music-only final: windows
 condition on the shipped pixels (continuous frames, so junctions hear
 both sides), join with manual fades (never acrossfade — same two
@@ -62,6 +64,10 @@ SFX_WORKER_MODULES = {
 SFX_DUAL_MODEL_SIZE = "small_44k"
 """Dual-shard runs small on both GPUs (quality-consistent windows —
 a large/small mix would step quality at window joints)."""
+
+SFX_MAX_WORKERS = 2
+"""Only the 1- and 2-GPU shapes exist: 2 is the video-aug-cuda:0/SFX-cuda:1
+pairing, and anything above fail-fasts without 2 visible GPUs (issue 158)."""
 
 
 @dataclass
@@ -335,7 +341,7 @@ def render_sfx_bed(
     """
     from voyage.rpc import SubprocessWorker
 
-    if num_workers not in (1, 2):
+    if num_workers not in (1, SFX_MAX_WORKERS):
         raise MediaError(f"sfx workers must be 1 or 2 (got {num_workers})")
     module = _sfx_worker_module(backend)
     if backend == "mmaudio" and device == "cuda:1" and model_size != "small_44k":
@@ -343,9 +349,9 @@ def render_sfx_bed(
             f"sfx model {model_size} cannot fit cuda:1 (6 GB) — the ladder measured "
             "medium OOM there; use --sfx-model-size small_44k or --sfx-device cuda:0"
         )
-    if num_workers == 2:
+    if num_workers == SFX_MAX_WORKERS:
         visible = augment_devices()
-        if len(visible) < 2:
+        if len(visible) < SFX_MAX_WORKERS:
             seen = ", ".join(visible) if visible else "none"
             raise MediaError(
                 f"--sfx-workers 2 needs 2 visible GPUs, saw {len(visible)} "
@@ -353,7 +359,7 @@ def render_sfx_bed(
             )
     sizes = [model_size] * num_workers
     devices = [device] * num_workers
-    if num_workers == 2:
+    if num_workers == SFX_MAX_WORKERS:
         sizes = [SFX_DUAL_MODEL_SIZE, SFX_DUAL_MODEL_SIZE]
         devices = ["cuda:0", "cuda:1"]
     windows = plan_sfx_windows(timeline_seconds, bounds, seed_base=seed_base)

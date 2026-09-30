@@ -5,12 +5,12 @@
 # you just edited). Both rebuild first; on disagreement check Dockerfile
 # COPY coverage — the file is likely missing from the image.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t voyage:latest .
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$SCRIPT_DIR/.."
+voyage_build_image voyage:latest Dockerfile
 # Same cache-hygiene contract as gates.sh: caches stay out of the tree in
 # container-local /tmp (the baked /app is read-only for the runtime user).
-docker run --rm --user="$(id -u):$(id -g)" -e PYTHONDONTWRITEBYTECODE=1 \
-  -e RUFF_CACHE_DIR=/tmp/voyage-ruff-cache \
-  -e MYPY_CACHE_DIR=/tmp/voyage-mypy-cache \
-  -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/voyage-hypothesis \
+docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" \
   voyage:latest bash -c "ruff check . && ruff format --check . && mypy voyage && python -m pytest -q"

@@ -250,6 +250,8 @@ V1 should be intentionally small and boring.
 
 ## 5.1 Video generator backend architecture
 
+> As-built (batch-7-2026-09-30): `config.BACKEND_REGISTRY` declared single owner of the streaming set and worker-module maps (test-gated by `tests/test_single_source.py`); supervisor-side literal derivation deferred to the supervisor-split pass.
+
 The video renderer is a replaceable subsystem. The production application must not assume that every video generator is a persistent KV-cache stream. Three concrete backends are now first-class design targets:
 
 | Backend | Family | Continuation mechanism | Renderer state across segments | Native target profile | Primary reason to support |
@@ -1037,6 +1039,8 @@ This may become useful if long-term world memory later requires retrieval beyond
 
 # 11. System architecture
 
+> As-built (batch-7-2026-09-30, issue 079): `longlive2` deprecated since 2026-09-30 (kept for existing runs; `voyage init --backend longlive2` warns toward `ltxv`); `ltxv` is the default.
+
 ## 11.1 Process model
 
 The application consists of one supervisor and multiple long-lived worker processes.
@@ -1132,6 +1136,7 @@ Use the versions specified by ACE-Step 1.5, currently Python 3.11–3.12.
 Keep its environment independent as well.
 
 > As-built (§12-container-hygiene-2026-09-30, issues 069/075/076): `.dockerignore` 9 patterns + corrected COPY-graph header; apt all 8 packages `=`-pinned (jammy freeze); chmod 777 → 755 + rationale.
+> As-built (batch-7-2026-09-30, issues 034/035-doc): `gates.sh` mypy gate now covers `voyage` + 82 test modules (was 4); scoped PLR2004 check on 4 files; `gates.sh` DESIGN-ref check (top-level modules; caught `cli_core.py` same-day); coverage floor 65→73.
 
 ---
 
@@ -2998,6 +3003,8 @@ Capture stderr and include the relevant last lines in `MediaError`.
 
 # 56. Finalization
 
+> As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_*` aliases the augment CRF ladder; `resolve_finalize_settings()` is the single scalar/options= contract (768/432/24 defaults retained for the zero-floor stream-copy fast path); `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`).
+
 The final output is produced only by:
 
 ```bash
@@ -3064,6 +3071,8 @@ The finalizer must report the exact transform it applied.
 ---
 
 # 58. CLI specification
+
+> As-built (batch-7-2026-09-30, issue 080): `voyage/cli.py` is now a 735-line seam (parsers + `__all__` re-export surface) over 10 verb-group modules (`cli_paths`/`cli_planning`/`cli_core`/`cli_run_ops`/`cli_models`/`cli_status`/`cli_validate`/`cli_finalize`/`cli_generate`/`cli_observe`, each ≤365L); cross-verb calls and test-patched leaves resolve through the `voyage.cli` namespace at call time via function-level imports (seam-dispatch rule); verb modules never bind seam names from home modules.
 
 The first stable command set should be:
 
@@ -4235,6 +4244,8 @@ GPU-specific packages remain in workers.
 
 # 84. Model version pinning
 
+> As-built (batch-7-2026-09-30, issues 084/085): per-family split target — `voyage/registry_records.py` owns pins + `_record_*`/`_describe_*` builders (767L); `model_registry.py` keeps dataclasses + `MODEL_SPECS` assembly + download/verify/manifest core (1270L); future per-family `registry_{ltxv,causvid,qwen,audio,sfx,augment}.py` target recorded.
+
 For every model integration:
 
 ```text
@@ -4445,6 +4456,8 @@ The table is informational and must point at the authoritative license page.
 ---
 
 # 87. Reference documentation to include
+
+> As-built (batch-7-2026-09-30): `docs/SFX.md` + `docs/AUGMENT.md` created per the §87 contract and indexed.
 
 ## `README.md`
 
@@ -7821,3 +7834,9 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   via `av_drift_seconds` (020/022/003).
 - Batch 5 (2026-09-30): resolved 059/051/062(+027 fold)/063(+028 fold)/017/018/019/102/103/046/047/048/153/156/158/065(+146 fold)/144/139/178/025/026; real 024 (unbounded --output paths) stays OPEN (concurrent owner).
 - Batch 6 (2026-09-30): resolved 049/050/053/054/057/058/060/061/064/066/069/075/076/077/101.
+## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
+
+- Workers seam (batch-7-2026-09-30): shared validators in `voyage.workers._validators` + torch guards/`BYTES_PER_GIB` in `voyage.workers._resident`; fake video serves `standard_serve_map` + `run_benchmark_harness`.
+- Tests/process (batch-7-2026-09-30): `conftest` `short_texts`/`bounded_counts` unification + `VOYAGE_HYPOTHESIS_DATABASE=1` replay opt-in; `_init_run` ratchet test caps at 144 (`test_phase2` folded into `test_recovery`).
+- Scripts (batch-7-2026-09-30): `scripts/lib/common.sh` shared cache-env/user-args/image helpers; `run.sh` TOML sniff covers video/audio/sfx with CUDA-preferring pick; `qualify.sh` takes `--backend`/`--segments`.
+- Batch 7 (2026-09-30): resolved 079-partial/080/082-partial/083/084/085/031-doc/032/033/034/035-doc/036-tracker/037/038/039/040/041/088-proof/089-residual/090/091/092/093-partial/094-policy; real 024 stays OPEN (concurrent owner); 070 value-pin still needs a provisioned box; 086 needs voyage/ scope.

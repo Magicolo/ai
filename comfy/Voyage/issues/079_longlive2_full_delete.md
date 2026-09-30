@@ -50,3 +50,70 @@ grep -rln "longlive" tests/ docs/ reports/
 
 - `voyage/config.py:117-211`, `voyage/supervisor.py:88-108`, `voyage/workers/video_longlive.py:1`, `worker/Dockerfile.video`, `reports/video-backends.md`, `reports/longlive-audit.md`
 - Prior: issues 025 (quadruple registries), 036 (god modules), archived 096 (checkpoint OOM)
+
+## Progress log
+
+- 2026-09-30 (this resolution): EVALUATED FIRST per the task contract.
+  Re-verified every live site in-container/on-disk (no GPUs, no host pip):
+  `BACKEND_REGISTRY` longlive2 row (`config.py:150-164`, 1280x704/29f) +
+  `longlive2-bf16` spec (`model_registry.py:827-855`); `VideoBackendName`
+  Literal (`config.py:26`); `VIDEO_WORKER_MODULES` + `STREAMING_VIDEO_BACKENDS`
+  (`supervisor.py:92-98`); `_frames_per_segment` longlive branch +
+  `_LONGLIVE_*` constants + `_CUDA_BACKENDS` sniff (`cli.py:1309,1313-1315,1341`,
+  `scripts/run.sh:67`); init/generate `--backend` choices (`cli.py:1960,2179`);
+  `TUI BACKENDS` (`tui_state.py:33`); `LongLiveBackend` fake
+  (`fake_backends.py:194`); `download/verify_longlive2_bf16`
+  (`model_registry.py:442-449`, `cli.py:342-456`); `models_ensure.py:57`
+  mapping; `doctor.py:276` verify leg; `worker/Dockerfile.video:66-70,176-253`
+  LongLive@`6b36d20` clone + `wan_models` shims + `_enter_longlive_tree` CWD
+  shim + PYTHONPATH; `scripts/qualify.sh` (longlive2-first driver) +
+  `scripts/build-video.sh:14-16` (imports `video_longlive`); tests
+  (`test_longlive.py`, `test_longlive_stages.py`,
+  `test_longlive_init_validation.py`, `test_longlive_offload_fusion.py`,
+  `test_precision.py` fp8/bf16 legs, `test_qualification.py` longlive2 leg);
+  `reports/video-backends.md:85-117` (VALID 87f) + `reports/longlive-audit.md` +
+  `docs/UPSTREAM_LONG_LIVE_PATCHES.md`.
+- Concurrent-work check: `git status` shows `supervisor.py` (+232 Stage-A
+  telemetry hunks), `workers/director.py` (+24), `workers/video_ltxv.py` (+59)
+  all uncommitted and hot; mid-session `config.py`/`media.py` gained foreign
+  hunks from other agents (`FPS_MATCH_TOLERANCE`, `MAX_FINAL_OVERLAP_FRACTION`,
+  tomli-shim edits — visible in `git diff` alongside my own, disjoint
+  regions). Full deletion requires `supervisor.py:88-108,351,2056,2358`
+  hunks → direct conflict with the in-flight telemetry change → verdict:
+  PARTIAL (largest safe subset), no deletion, no hot-file hunks.
+- TDD failing-first (`tests/test_longlive2_deprecation_079.py`, 4 tests):
+  watched `AttributeError: module 'voyage.config' has no attribute
+  'DEPRECATED_VIDEO_BACKENDS'` in-container (`voyage:latest`), then green.
+- Implemented subset: `config.py` gains `DEPRECATED_VIDEO_BACKENDS =
+  ("longlive2",)` + `warn_if_deprecated_backend()` (pure advisory
+  `DeprecationWarning` pointing at `ltxv`); wired once into
+  `cli.cmd_init` (the new-run decision point); `tui_state.FIELD_HELP`
+  backend marks longlive2 deprecated. Registry row, worker (1264L),
+  resume path, tests, Dockerfile, scripts all retained untouched.
+- Gates (touched files only; full `gates.sh` left to orchestrator):
+  `ruff check` + `ruff format --check` + `mypy` clean on
+  `config.py`/`cli.py`/`tui_state.py`/new test; related suites
+  (`test_backend_registry`, `test_tui_state`, deprecation tests) green.
+  Note: `ruff format` on `config.py` inserted one blank line in my own
+  hunk only — foreign hunks already format-clean, left untouched.
+
+## Resolution
+
+- Verdict: PARTIAL. Deprecate + warn shipped; full delete NOT executed
+  (unsafe under concurrent hot-file work + live dependents above).
+- Files changed: `voyage/config.py` (+deprecated registry + helper),
+  `voyage/cli.py` (+import + one `cmd_init` warn call),
+  `voyage/tui_state.py` (+help text),
+  `tests/test_longlive2_deprecation_079.py` (new, 4 tests).
+- Residual (precise): full delete per §"Resolution candidates" 1-4 stays
+  open — (1) delete `workers/video_longlive.py` + registry longlive rows
+  + `VIDEO_WORKER_MODULES["longlive2"]` + `STREAMING_VIDEO_BACKENDS` entry
+  + Dockerfile clone/shims + `run.sh`/`qualify.sh`/`build-video.sh` refs;
+  (2) delete/repoint the six longlive test modules + precision/qual legs,
+  mark `video-backends.md` longlive leg historical; (3) reorder
+  INSTALL/BACKENDS/MODELS/README ltxv-first; (4) gate `gates.sh` green +
+  `grep -rni longlive voyage/ worker/ scripts/ tests/` empty except
+  historical markers. Preconditions: quiet tree (no uncommitted
+  `supervisor.py`/`director.py`/`video_ltxv.py` hunks), stored-run
+  migration decision for existing longlive2 TOMLs, and generate/run-time
+  warn wiring (this pass warns at `init` only).

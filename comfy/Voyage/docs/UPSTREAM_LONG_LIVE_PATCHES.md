@@ -47,7 +47,7 @@ the pin moves.
 | Setting | Upstream | Ours | Why |
 |---------|----------|------|-----|
 | `use_relative_rope` | `False` | `True` | continuity slice; zero VRAM delta, recorded per segment |
-| `local_attn_size` | 32 | 8 | KV cache is `local_attn × frame_seq` bf16 per layer ×2 branches — 32 OOMs 16 GB |
+| `local_attn_size` | 32 | 16 | KV cache is `local_attn × frame_seq` bf16 per layer ×2 branches — 32 OOMs 16 GB; 16 = sink 8 + 8 rolling (continuity fix §22.5; `voyage/config.py:242`) |
 
 ## 4. Adapter shims (not patches)
 

@@ -83,3 +83,42 @@ where ffmpeg/subprocess-adjacent properties are added.
 - Hypothesis "Suppress a health check everywhere"; `@settings` /
   `register_profile` docs; pytest `tmp_path` docs.
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §9.
+
+## Progress log (2026-09-30, resolution pass)
+
+- As-read counts drifted from the issue: property modules are now 3
+  (`test_seeds_properties`, `test_beat_properties`,
+  `test_similarity_properties`) plus hypothesis use in
+  `test_cli_validate_handoff` / `test_containers_rank2`; beat + similarity
+  already import `bounded_counts` / `short_texts` from conftest, and
+  `test_cli_validate_handoff.py:85` already blacklists the surrogate
+  category explicitly — the seeds file was the sole outlier.
+- Live probe in-container (`voyage:latest`, 500 examples,
+  `database=None`): bare `st.text(max_size=24)` drew zero lone
+  surrogates and 200/200 examples survived `json.dumps`. The seeds-file
+  comment was therefore not crash-risky (upstream `text()` already
+  excludes `Cs` by default); conftest's probe concerned bare
+  `characters()`, a different default. Recorded as nuance, not
+  contradiction — unification is still worthwhile (explicit over
+  implicit).
+- Fix applied (tests/ only): `test_seeds_properties.py` now aliases
+  `small_counts = bounded_counts` / `short_labels = short_texts` from
+  `tests.conftest` with a corrected comment citing the live probe;
+  `conftest.py` gained the env-gated opt-in (`VOYAGE_HYPOTHESIS_DATABASE=1`
+  restores the default database for local replay, otherwise `None`) plus
+  a health-check/deadline policy comment (zero suppressions today —
+  suppress narrowly as encountered; no custom deadlines — properties are
+  CPU-only pure cores; any future ffmpeg-adjacent property needs an
+  explicit `@settings(deadline=...)` with reason).
+- Evidence: `pytest tests/test_init_run_ratchet.py
+  tests/test_seeds_properties.py tests/test_beat_properties.py
+  tests/test_similarity_properties.py` → 29 passed in-container;
+  `ruff check` + `ruff format --check` + `mypy` (strict, gate scope +
+  ratchet module) green.
+
+## Resolution
+
+- Resolved (tests/ slice). Residual: none for this issue — (a)(b)(c)
+  all landed. The `VOYAGE_HYPOTHESIS_DATABASE` opt-in writes the default
+  `.hypothesis/` location on replay runs (gitignored, never baked —
+  `.dockerignore` already lists it).

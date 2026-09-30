@@ -1,4 +1,6 @@
-"""GPU augment runner orchestration: chunked Real-ESRGAN upscale + FILM interpolate (Track D spike).
+"""GPU augment runner orchestration: chunked Real-ESRGAN upscale + FILM interpolate.
+
+Track D spike; DESIGN §§56-57, §140 finalize-augmentation-floors as-built.
 
 Pure orchestration — stdlib only, never torch (supervisor section 12 GPU
 ban): chunk math, ffmpeg chunk decode/encode (arg-lists, verified outputs),
@@ -7,9 +9,11 @@ device selection, and chunk-level parallelism.
 Reuse check (2026-09-29): `voyage.media` has `plan_augmentation`, but it
 computes presentation geometry/fps floors (Track B: out box, minterpolate
 vs plain fps) — a different concern from chunk windows and `(n-1)*m+1`
-frame counts, so there is nothing to import here. TODO (unify): if
-media.py ever gains chunk/frame-count plan math, move
-`interpolated_frame_count` there and import it instead of duplicating.
+frame counts, so there is nothing to import here. Single-home rule
+(issue 083, resolved): `interpolated_frame_count` + the CRF ladder live
+here; `voyage.media` re-exports both (`media.interpolated_frame_count`
+is this function, `FINALIZE_CRF_*` alias `CRF_*`) instead of duplicating
+them — the old TODO to move frame-count math into `media.py` is closed.
 
 Parallelism contract (SFX pairing): augment chunks run on cuda:0 while the
 MMAudio SFX stack (when present) renders on cuda:1 — the two stages share

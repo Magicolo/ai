@@ -34,3 +34,28 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
 ## Refs
 
 - DESIGN §§137A-D, §140; `reports/video-backends.md`, `reports/longlive-audit.md`; AGENTS.md §9 (per-commit approval)
+
+## Progress log (2026-09-30, resolution pass)
+
+- As-read drift confirmed: `wc -l TASK.md DESIGN.md` → **1737 / 7823**
+  (issue said 7577 — DESIGN grew). Both reports exist
+  (`reports/longlive-audit.md`, `reports/video-backends.md`), and §30.2
+  follow-ups kept resolving after the issue was filed
+  (`UPSTREAM_LTXV_NOTES.md` landed 2026-09-29 per §30.2's own text).
+- TASK-only slice applied: §30.4 heading corrected from "never
+  produced" to "produced (2026-09-24+…)" with a body noting which
+  artifacts exist, what stays open (81/97/121 matrix, TeaCache/Q8/FP8,
+  extension-throughput), and that full prune-merge + delete is tracked
+  here, not done. Zero `TASK.md` cross-refs elsewhere
+  (`rg TASK.md` outside issues/ → no hits), so no ref repair was needed.
+- Full fix deliberately not attempted: migration needs writes to
+  `DESIGN.md` (frozen for this pass) and deletion needs per-commit
+  approval (AGENTS §9) — both out of scope.
+
+## Resolution
+
+- Partially resolved (stale "never produced" claim fixed in place).
+  Residual: migrate open §30 items into DESIGN §140 + appropriate §
+  normatives, record the §30.x → §y mapping in the migration commit
+  message, delete `Voyage/TASK.md`, then run the issue's gate (`TASK.md`
+  mentions only historical + `gates.sh` green).

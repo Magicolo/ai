@@ -1,21 +1,84 @@
 #!/usr/bin/env bash
-# Stream B §137A GPU qualification driver for the longlive2 backend.
+# GPU qualification driver (Stream B §137A; issue 090 generalized).
 #
-# Usage: ./scripts/qualify.sh <run-dir>   (e.g. ./scripts/qualify.sh /tmp/qual-longlive2)
+# Usage: ./scripts/qualify.sh [--backend ltxv|longlive2|causvid] [--segments N] <run-dir>
+#   e.g. ./scripts/qualify.sh /tmp/qual-ltxv
+#        ./scripts/qualify.sh --backend causvid --segments 2 /tmp/qual-causvid
 #   <run-dir> MUST be absolute: workers spawn with CWD=run_dir, so a
 #   relative dir doubles up inside payload paths (issue 064 leg b).
+#   Default backend is ltxv (the config default since 2026-09-29); the old
+#   longlive2-only driver is stale on arrival (issue 090). The helper is
+#   backend-agnostic — it benchmarks, runs, validates, and tees the JSON
+#   summary for whatever backend the run dir was inited with.
 #
 # Stages: nvidia-smi presence -> idle gate -> absolute-path gate ->
-# disk preflight -> benchmark video -> 3-segment run -> validate ->
+# disk preflight -> benchmark video -> N-segment run -> validate ->
 # JSON summary teed to reports/ (issue 064 legs c/d, 060 artifacts).
 # Crash recovery (kill -9 the video worker mid-segment, then resume) and
 # the eyeball visual review stay MANUAL — see reports/video-backends.md.
 # NEVER run under contention: the gate aborts when >2 GiB on GPU 0 is held
 # by another process (repo GPU-contention rule).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# NOTE: no external commands before the nvidia-smi gate below — the
+# fail-closed test runs this script with an empty PATH, so SCRIPT_DIR
+# resolves via builtins only (parameter expansion + cd + pwd).
+SCRIPT_DIR="$(cd "${0%/*}" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$SCRIPT_DIR/.."
 
-run_dir="${1:?usage: ./scripts/qualify.sh <absolute-run-dir>}"
+backend="ltxv"
+segments="3"
+run_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --backend)
+      backend="${2:?--backend needs a value (ltxv|longlive2|causvid)}"
+      shift 2
+      ;;
+    --backend=*)
+      backend="${1#--backend=}"
+      shift
+      ;;
+    --segments)
+      segments="${2:?--segments needs a value}"
+      shift 2
+      ;;
+    --segments=*)
+      segments="${1#--segments=}"
+      shift
+      ;;
+    -h|--help)
+      echo "usage: ./scripts/qualify.sh [--backend ltxv|longlive2|causvid] [--segments N] <absolute-run-dir>" >&2
+      exit 0
+      ;;
+    *)
+      if [ -n "$run_dir" ]; then
+        echo "qualify: unexpected extra arg '$1'" >&2
+        exit 2
+      fi
+      run_dir="$1"
+      shift
+      ;;
+  esac
+done
+if [ -z "$run_dir" ]; then
+  echo "usage: ./scripts/qualify.sh [--backend ltxv|longlive2|causvid] [--segments N] <absolute-run-dir>" >&2
+  exit 2
+fi
+case "$backend" in
+  ltxv|longlive2|causvid) ;;
+  *)
+    echo "qualify: --backend must be ltxv|longlive2|causvid (got '$backend')" >&2
+    exit 2
+    ;;
+esac
+case "$segments" in
+  ''|*[!0-9]*|0)
+    echo "qualify: --segments must be a positive integer (got '$segments')" >&2
+    exit 2
+    ;;
+esac
 
 # Fail closed with a message when there is no GPU stack at all (issue 064
 # leg a): without this, the bare pipeline below aborts silently under
@@ -52,12 +115,12 @@ if [ -n "$avail_kib" ] && [ "$avail_kib" -lt $((min_free_gib * 1024 * 1024)) ]; 
 fi
 if [ ! -f "$run_dir/voyage.toml" ]; then
   echo "qualify: no voyage.toml in $run_dir — init first:" >&2
-  echo "  ./scripts/run.sh init --output $run_dir --run-id qual-longlive2 \\" >&2
-  echo "    --style 'pastel neon line-art, peaceful' --backend longlive2 --force" >&2
+  echo "  ./scripts/run.sh init --output $run_dir --run-id qual-${backend} \\" >&2
+  echo "    --style 'pastel neon line-art, peaceful' --backend ${backend} --force" >&2
   exit 2
 fi
 ./scripts/run.sh benchmark video --run "$run_dir" --warmup 1 --measured 3
-./scripts/run.sh run --run "$run_dir" --segments 3
+./scripts/run.sh run --run "$run_dir" --segments "$segments"
 ./scripts/run.sh validate --run "$run_dir"
 # Artifact persistence (issue 064 leg c, 060): the summary used to be
 # stdout-only, so every qualification evaporated. Tee to reports/ and
@@ -66,7 +129,7 @@ fi
 # python snippet): paths with spaces/quotes would otherwise break the
 # quoting or inject code (single quotes inside double quotes do not expand).
 artifact="reports/qual-$(basename "$run_dir")-$(date +%F).json"
-docker run --rm --user="$(id -u):$(id -g)" -e PYTHONDONTWRITEBYTECODE=1 -w /app -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
+docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" -w /app -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
   python -c 'import json, os; from tests.test_qualification import summarize_run; \
 print(json.dumps(summarize_run(os.environ["RUN_DIR"]), indent=2))' \
   | tee "$artifact"

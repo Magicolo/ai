@@ -36,3 +36,34 @@ grep -rn "pytest.mark" tests/ | head -n 20
 ## Refs
 
 - Issues 041 (coverage 65), 069 (dockerignore), 084 (dockerignore gaps in original numbering); `pyproject.toml:190-203`
+
+## Progress log (2026-09-30, resolution pass)
+
+- Premises re-verified live: `requirements.lock:25-26` still carries the
+  `httpcore2==2.13.1` / `httpx2==2.13.1` freeze-record typo (no such PyPI
+  2.x line); `tomli` conditional is `pyproject.toml:24`
+  (`python_version < '3.11'`) and absent from the lock as the issue
+  states; in-tree caches all present (`.coverage` 52K, `.hypothesis/`,
+  `.mypy_cache/` 3.10+3.12, `.ruff_cache/`) — all gitignored;
+  `.dockerignore` already lists `.hypothesis/` + `.coverage` +
+  `coverage.xml` explicitly (issue 069 landed); markers remain
+  `gpu` + `endurance` only, slow tail unmarked; gates/build mypy-scope
+  split confirmed (`gates.sh:28` tests-inclusive vs `build.sh:16`
+  `mypy voyage` only, intentional per 092).
+- No code change made: every fix candidate writes outside this pass's
+  scope — lockfile edits forbidden by the issue itself ("do NOT touch
+  the lockfile", rows fold into 068), markers need `pyproject.toml`
+  (frozen for this pass), the mypy-scope collapse needs `scripts/`
+  (frozen), cache deletion touches gitignored root paths (outside
+  `tests/` + `docs/TASK.md`), and registering a `slow` marker without
+  the `pyproject` half would break `--strict-markers`.
+
+## Resolution
+
+- Not resolved here — returned as residual with premises confirmed
+  current. Suggested split for scoped passes: (a) lockfile typo +
+  tomli-freeze note → lock-owning track with 068; (b) `slow` marker
+  registration + SLOW-tail marking → pyproject-owning track; (c)
+  `scripts/mypy-scope.sh` collapse → scripts-owning track; (d) cache
+  hygiene (post-gate `git status --porcelain` guard) → gates-owning
+  track. None of (a)–(d) is actionable from `tests/` alone.

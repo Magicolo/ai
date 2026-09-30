@@ -4,13 +4,14 @@
 # Env:
 #   VOYAGE_IMAGE  container image (default voyage:latest, the slim CPU image;
 #                 auto-selected to voyage-video:latest when a CUDA backend
-#                 -- ltxv, longlive2, acestep -- is requested, unless set;
+#                 -- ltxv, longlive2, acestep, mmaudio -- is requested,
+#                 unless set;
 #                 bare `run.sh` (the launcher TUI, backend picked
 #                 interactively) also defaults to voyage-video when the host
 #                 has a GPU, so ltxv works with no explicit variables)
 #   VOYAGE_GPUS   set to 1 to pass --gpus all (auto-enabled for CUDA backends
 #                 and GPU-box bare launches unless set; needed for
-#                 longlive2/ltxv/acestep)
+#                 longlive2/ltxv/acestep/mmaudio)
 #   VOYAGE_DRY_RUN  set to 1 to print the resolved image/gpu selection and
 #                 exit (test seam; never runs docker)
 #   VOYAGE_MODELS host models dir mounted at /models (default ~/.cache/voyage-models)
@@ -52,19 +53,22 @@ done
 if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
   requested_backend="ltxv"
 fi
-# Section-aware TOML sniff via the stdlib parser: reads the [video] backend
-# only, so [audio]/[director] backends (or indentation/layout changes) can
+# Section-aware TOML sniff via the stdlib parser: reads the video/audio/sfx
+# backends only, so [director] backends (or indentation/layout changes) can
 # never select the wrong image. Unparseable/missing key -> empty (slim
-# default), never a launcher failure.
+# default), never a launcher failure. Any CUDA backend in any of the three
+# sections selects the video image (issue 090: [audio].backend=acestep +
+# video=fake used to stay slim, then died late in cli._require_cuda_stack;
+# the same holds for [sfx].backend=mmaudio + fake/fake).
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/voyage.toml" ]; then
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import os, tomllib; print(tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")).get("video", {}).get("backend", ""))' \
+    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "longlive2", "causvid", "acestep", "mmaudio"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
 fi
 needs_cuda=0
 case "${requested_backend:-}" in
-  ltxv|longlive2|causvid|acestep) needs_cuda=1 ;;
+  ltxv|longlive2|causvid|acestep|mmaudio) needs_cuda=1 ;;
 esac
 # Bare launcher TUI: the backend is picked interactively inside the TUI, so
 # no CLI signal exists. On a GPU box assume the CUDA stack so bare `run.sh`

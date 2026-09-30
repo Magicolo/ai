@@ -35,3 +35,36 @@ wc -l tests/*.py | sort -rn | head -n 15
 ## Refs
 
 - Issues 034 (lint ratchet), 040 (`_init_run`), 041 (coverage); `tests/conftest.py:80-129`
+
+## Progress log (2026-09-30, resolution pass)
+
+- As-read counts drifted: **116** `test_*.py` files, **1283** `def test_`
+  (issue said 87/~989 — a week of concurrent tracks). A full 116→65
+  fold in one pass with 5+ agents adding test files is unsafe, so this
+  pass executed the first proof fold plus the fixture convergence it
+  depends on.
+- Proof fold landed: `tests/test_phase2.py` (3 tests: scene-cut prefix,
+  tape lookup, restart hook) moved verbatim into
+  `tests/test_recovery.py` under an 088-fold header and the file
+  deleted — same 3 assertions, one fewer file, recovery owns the whole
+  restart/resume surface (the moved `_tape_run` already used recovery's
+  helper). Safety: file re-read live, mtime + `git log -3` both
+  2026-09-23, zero importers (`rg test_phase2` clean after).
+- Fixture convergence (shared with 040): wrappers inlined in
+  stage-timings / concept-integrity / av-alignment; new
+  `tests/test_init_run_ratchet.py` guards delegation + count (144/21
+  as-left). Untouched by design: the two fresh untracked files from
+  concurrent agents (`test_ltxv_stage_ms`, `test_stage_a_telemetry`) and
+  every `scripts/` + `voyage/` file showing in `git status`.
+- As-left: 116 files (fold −1, ratchet +1), 1285 fns (ratchet +2).
+- Evidence in-container: `test_recovery.py` (7 tests incl. the 3 moved)
+  + neighbors → 23 passed; ruff + format + mypy green.
+
+## Resolution
+
+- Partially resolved (trajectory proven, not completed). Residual: the
+  remaining folds (adapter triple, augment quad, audio quintet, TUI
+  trio, video-worker quartet, issue-quintet, finalize/commit cluster,
+  singletons) stay open — continue one cluster per pass with the same
+  discipline (re-read live, check mtime/`git log`, keep assertion
+  counts identical, record before/after collection time).

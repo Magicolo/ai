@@ -79,6 +79,21 @@ _VRAM_PRESSURE_FREE_FRACTION = 0.15
 _GPU_TEMP_WARN_CELSIUS = 84.0
 """Sustained operating temp that earns a WARN (guidance threshold)."""
 
+_SMI_COLUMN_TOTAL = 1
+"""`nvidia-smi --query-gpu` CSV column holding memory.total (column 0 is the name)."""
+
+_SMI_COLUMN_FREE = 2
+"""`nvidia-smi --query-gpu` CSV column holding memory.free."""
+
+_SMI_COLUMN_DRIVER = 3
+"""`nvidia-smi --query-gpu` CSV column holding driver_version."""
+
+_SMI_COLUMN_COMPUTE_CAP = 4
+"""`nvidia-smi --query-gpu` CSV column holding compute_cap."""
+
+_SMI_COLUMN_TEMP = 5
+"""`nvidia-smi --query-gpu` CSV column holding temperature.gpu."""
+
 
 def _capture(argv: list[str]) -> str | None:
     try:
@@ -178,11 +193,13 @@ def _parse_gpu_details(csv_text: str | None) -> list[dict[str, Any]]:
         if not cells or not cells[0]:
             continue
         name = cells[0]
-        total = _parse_mib_gib(cells[1]) if len(cells) > 1 else None
-        free = _parse_mib_gib(cells[2]) if len(cells) > 2 else None
-        driver = cells[3] or None if len(cells) > 3 else None
-        compute_cap = cells[4] or None if len(cells) > 4 else None
-        temp_c = _parse_float(cells[5]) if len(cells) > 5 else None
+        total = _parse_mib_gib(cells[_SMI_COLUMN_TOTAL]) if len(cells) > _SMI_COLUMN_TOTAL else None
+        free = _parse_mib_gib(cells[_SMI_COLUMN_FREE]) if len(cells) > _SMI_COLUMN_FREE else None
+        driver = cells[_SMI_COLUMN_DRIVER] or None if len(cells) > _SMI_COLUMN_DRIVER else None
+        compute_cap = (
+            cells[_SMI_COLUMN_COMPUTE_CAP] or None if len(cells) > _SMI_COLUMN_COMPUTE_CAP else None
+        )
+        temp_c = _parse_float(cells[_SMI_COLUMN_TEMP]) if len(cells) > _SMI_COLUMN_TEMP else None
         details.append(
             {
                 "name": name,

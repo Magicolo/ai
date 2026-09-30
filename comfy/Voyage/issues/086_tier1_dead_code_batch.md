@@ -41,3 +41,24 @@ grep -n "_sha256\|getattr(tui_state" voyage/model_registry.py voyage/tui.py test
 ## Refs
 
 - `voyage/hashing.py:30` (canonical), `voyage/tui_state.py:440,495,541`, `voyage/cli.py:99,1129`
+
+## Progress log (2026-09-30, resolution pass)
+
+- Premises spot-verified live (read-only): `LongLiveBackend` /
+  `AceStepBackend` still `NotImplementedError` placeholders in
+  `voyage/fake_backends.py:186-206` with zero importers/callers outside
+  that file; `_sha256` still present in `voyage/model_registry.py:370`.
+  The issue's findings hold.
+- No code change made: every fix candidate deletes or edits files under
+  `voyage/` (`fake_backends`, `model_registry`, `tui`, `tui_state`,
+  `cli`, `backends`, `__init__`s, `bench.py`), which is outside this
+  pass's scope (`tests/` + `docs/TASK.md` only). The test-side pins
+  (`tests/test_hashing.py:47`, `tests/test_tui_state.py:50`) cannot move
+  first — they pin behavior the source still ships.
+
+## Resolution
+
+- Not resolved here — returned as residual for a `voyage/`-scoped pass.
+  Recommended order per the issue (highest safety first): items 1+2+5+6
+  (pure deletes/inlines), then 3+4 (shim removal), then the `__init__` /
+  `bench.py` disposition. Gate each with `gates.sh` green.

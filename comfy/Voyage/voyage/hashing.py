@@ -1,4 +1,4 @@
-"""Shared SHA-256 helpers (issue 021).
+"""Shared SHA-256 helpers (issue 021; DESIGN §§29-30, 56).
 
 Single home for every chunked file hash in the tree. Stdlib only, so the
 CUDA worker images can import it without dragging the supervisor (torch,

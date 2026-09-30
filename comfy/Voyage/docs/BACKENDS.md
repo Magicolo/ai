@@ -27,6 +27,7 @@ models must fail `init` loudly, never render silently wrong media.
 |------|---------|-----------------|
 | video | `fake` | deterministic `testsrc` 320×180-class H.264 |
 | audio | `fake` | `sine` tone, WAV slices / WAV takes |
+| sfx | `fake` | built-in noise, no weights (byte-identical old runs) |
 | director | `deterministic` | rule-based decisions, no embeddings |
 | inspector | `skipped` | visual feedback off |
 
@@ -37,14 +38,15 @@ finalizer concat path, and checksums run exactly as in production.
 
 | Role | Backend | Image | Notes |
 |------|---------|-------|-------|
+| video | `ltxv` (default) | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
 | video | `longlive2` | `voyage-video:latest` | resident BF16+FP8 stream, `fp8`\|`bf16` quantization |
-| video | `ltxv` | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
 | video | `causvid` | `voyage-video:latest` | DMD causal generator + Wan2.1-1.3B base, 832×480 @ 16 fps native, bf16 |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
+| sfx | `mmaudio` | `voyage-video:latest` | finalize-time video-synced effects, 8 s windows / 1 s fades, amix −6 dB (see `docs/SFX.md`) |
 | director | `qwen` | `voyage-video:latest` (`/opt/venvs/director` via `VOYAGE_DIRECTOR_PYTHON`) | Qwen3-4B-AWQ on cuda:1 (default) or Qwen3-8B bf16 on CPU (`--director-device cpu`), non-thinking, temp 0.7 |
 
 Select in TOML (`config.video.backend`, `config.audio.backend`,
-`config.director.backend`) or per-invocation for runs
+`config.sfx.backend`, `config.director.backend`) or per-invocation for runs
 (`voyage run --director … --quantization …`).
 
 ## LTXV chaining model (`ltxv`, Phase 7 alternative)

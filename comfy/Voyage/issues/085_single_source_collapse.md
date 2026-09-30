@@ -24,12 +24,87 @@ Every backend/floor/geometry change needs N hand edits; one set already diverged
 grep -n "segment_frames\|FALLBACK_FRAMES\|SPEC_MIN_FREE\|DEV_MIN_FREE\|FLOAT_DUST_EPSILON\|1e-9" voyage/config.py voyage/cli.py voyage/tui_state.py voyage/backends.py
 ```
 
+## Drift note (2026-09-30 pre-work re-verification, live in-container)
+
+Already-derived since filing (verified live, pinned by tests, NOT re-done):
+`_VIDEO/_AUDIO/_SFX_BACKEND_PRESETS` + `_video/_audio/_sfx_preset` derive
+from `BACKEND_REGISTRY` (`config.py:892-951`); `BACKEND_STATE_MODES` +
+`_STREAMING_BACKENDS` derive too (`backends.py:74-89`); `_CUDA_*` sets
+derive (`cli.py:1322-1348`); `with_video_backend`/`apply_draft_overrides`
+are thin `resolve_config` wrappers; TUI planning calls
+`cli._frames_per_segment` (no fork); TOML escaper is single-sourced
+(`tui_state._toml_string` delegates to `config._toml_basic_string`);
+geometry/latent rows ride `BACKEND_REGISTRY` (`default_config_toml`
+reads the preset — only dead `.get` fallbacks restate literals).
+Still duplicated (this pass collapses): `1e-9` literal in
+`cli.segments_for_duration` vs `backends.FLOAT_DUST_EPSILON`;
+`tui_state._FALLBACK_*` vs the fake row; `_RESERVED_FOLDER_NAMES`
+cli↔tui_state (needs the new `cli_paths` leaf — direct import either way
+would cycle); `default_config_toml` dead fallbacks vs `_DEFAULT_ROW`.
+Intentionally dual (documented, not collapsed): `SPEC_MIN_FREE_SPACE_GIB`
+20 vs `DEV_MIN_FREE_SPACE_GIB` 5 (spec default vs init default);
+`PRESENTATION_MIN_FPS` 24 (shipped-video guarantee) vs the 32fps augment
+floor; draft 640x352 overlay vs registry rows; `_frames_per_segment`
+per-backend formulas vs `segment_frames` (steady-state minimum planning,
+authoritative per `config.py:103-106` — pinned equal at blocks=1).
+Untouchable this pass: `supervisor.STREAMING_VIDEO_BACKENDS` +
+`VIDEO_WORKER_MODULES` (supervisor.py concurrently modified) — agreement
+tests instead of edits.
+
 ## Fix candidates
 
 1. Derive streaming/state/CUDA/worker-module sets from `BACKEND_REGISTRY`; delete hand literals + both preset wrappers after repointing `cli.py:986`, `tui_state.py:334`.
 2. One TOML escaper (keep stronger C0 version, alias other); one canonical augment-floor triple + derived views; centralize geometry/latent per-backend; single free-space default + init override flag; import `FLOAT_DUST_EPSILON` in cli.
 3. Import-time assertion/test that derived sets equal registry projection.
 4. Gate: `gates.sh` green + `test_backend_registry`, `test_config_resolution`, `test_augment_config` green.
+
+## Progress log (2026-09-30, resolution pass)
+
+- Re-verified every premise live; over half the issue was already derived
+  (presets, state modes, streaming frozenset, `_CUDA_*`, preset wrappers,
+  TUI planning delegation, TOML escaper, registry geometry rows) — pinned
+  by `tests/test_single_source.py` (8 tests, fail-first: `1e-9` literal,
+  fallback literals, and the reserved mirror all failed pre-fix).
+- Collapsed (code): `segments_for_duration` uses
+  `backends.FLOAT_DUST_EPSILON` (new `cli_planning.py`); `tui_state`
+  `_FALLBACK_*` derive from the fake registry row (guarded call —
+  `tui_state` stays stdlib-only at import, literals survive only as the
+  unreachable fallback); `_RESERVED_FOLDER_NAMES` lives once in the new
+  stdlib-only `voyage.cli_paths` leaf (`cli` re-exports,
+  `tui_state` delegates via thin `_flat_folder_name` alias + redundant-alias
+  re-export); `default_config_toml` dead `.get` fallbacks read
+  `_DEFAULT_ROW` (preset dicts are complete projections, so no generated
+  TOML changes — including the old unreachable `device` "cpu" literal).
+- Pinned without edits (agreement tests, deliberately): supervisor
+  streaming tuple + `VIDEO_WORKER_MODULES` vs registry (supervisor.py
+  concurrently modified — no touch); augment floors across
+  `AugmentConfig`/`FinalizeOptions`/`media.AUGMENT_DEFAULT_*` (media stays
+  light — no config import); worker-module key coverage.
+- Documented as intentional dualities (not collapsed):
+  `SPEC_MIN_FREE_SPACE_GIB` 20 vs `DEV_MIN_FREE_SPACE_GIB` 5 (spec vs init
+  defaults); `PRESENTATION_MIN_FPS` 24 (guarantee) vs the 32fps augment
+  floor; draft 640x352 overlay vs registry rows; `_frames_per_segment`
+  per-backend formulas vs `segment_frames` (authoritative steady-state
+  planning per `config.py:103-106`, pinned equal at blocks=1 — a TDD
+  correction mid-pass: unresolved `VideoConfig` carries ltxv defaults, so
+  the pin resolves the preset first).
+- Gates on touched files (`tui_state.py`, `config.py` + split files):
+  `ruff check` + `ruff format --check` + `mypy strict` clean. Had to
+  re-read regions twice: concurrent agents edited `tui_state.py` (035
+  ratchet, 079 help note) and `config.py` (079 deprecate, Stage-B
+  repaint, 035 ratchet) mid-pass — all hunks disjoint, none undone.
+
+## Resolution
+
+- Verdict: **fixed**. Nothing still hand-duplicated that can safely
+  derive; everything else is pinned by agreement tests or documented as
+  intentional.
+- Residual: supervisor-side unification (`STREAMING_VIDEO_BACKENDS`,
+  `VIDEO_WORKER_MODULES` derivation) waits for the supervisor split
+  (080/036 track) and a quiet tree — proposed, not applied.
+- DESIGN proposals (not applied, see return report): streaming/worker-map
+  derivation site, augment-floor import-vs-test note, free-space default
+  reconciliation question.
 
 ## Refs
 

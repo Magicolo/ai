@@ -16,25 +16,20 @@ from typing import Any
 
 from voyage.audio.mmaudio_sfx import validate_duration_seconds
 from voyage.fake_backends import FakeSfxBackend
+from voyage.workers._validators import (
+    validate_channels,
+    validate_output_path,
+    validate_sample_rate,
+    validate_window_id,
+)
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
-from voyage.workers.sfx_mmaudio import validate_channels, validate_sample_rate
+
+__all__ = ["validate_window_id", "validate_output_path"]
 
 _backend = FakeSfxBackend()
 
 BENCHMARK_DURATION_SECONDS = 2.0
 """Probe window for `handle_benchmark` (§104): startup excluded, noise only."""
-
-
-def validate_window_id(window_id: str) -> None:
-    """Reject empty window ids before rendering."""
-    if not window_id.strip():
-        raise ValueError("window_id must be non-empty")
-
-
-def validate_output_path(output_path: str) -> None:
-    """Reject empty output paths before creating parent directories."""
-    if not output_path.strip():
-        raise ValueError("output_path must be non-empty")
 
 
 def handle_health(payload: dict[str, Any]) -> dict[str, Any]:

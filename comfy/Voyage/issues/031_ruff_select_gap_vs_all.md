@@ -66,3 +66,49 @@ enforcing.
   with a small set and add a group at-a-time" (docs.astral.sh/ruff/linter).
 - AGENTS.md §12 (Zoomy-parity toolchain posture).
 - Preserved track result: `ses_f10013fc5ffeLLDtqZEwFbf3JR`, §1.
+
+## Progress log (2026-09-30, toolchain track)
+
+- Re-verified premises live in-container (`voyage:latest`, CPU-only):
+  `ruff check --select ALL --statistics .` now reports (as-read 2026-09-30):
+  D103 797, COM812 703, PLC0415 576, TRY003 461, SLF001 457, PLR2004 387,
+  ANN401 326, EM102 324, CPY001 167, EM101 143, ARG001 110, TC003 95 —
+  every family grew vs the preserved sweep (D103 771→797, COM812 511→703,
+  TRY003 377→461, PLR2004 328→387, ANN401 255→326), so counts drifted up
+  with tree growth. `pyproject.toml:70` select is unchanged (16 families).
+- Probed each ordered-adoption candidate family in-container
+  (`ruff check --select FAMILY --statistics .`):
+  ANN 339 (ANN401 326 + ANN001 10 + ANN202 3), D ~900+ (D103 797, D102 73,
+  D205 35, …), PLR2004 387, PT 85 (PT011 42 + PT018 41 + …), S 77 (S603 31
+  + S607 19 + S108 18 + S110 7 + S112 2), PERF 10 (PERF401 5 + PERF203 5),
+  N 39 (N806 34 + N802 4 + N818 1). **No candidate family is green** —
+  not even the narrowest (PERF: 10 hits across 7 files incl.
+  tests/test_tui_app.py, voyage/cli_observe.py, voyage/cli_validate.py,
+  voyage/concepts.py, voyage/models_ensure.py, voyage/supervisor.py ×2,
+  voyage/workers/director.py ×2, voyage/workers/video_longlive.py;
+  fixing them is loop restructuring across dirty/foreign files, out of
+  this track's scope).
+- Verdict per family (all stay out this pass): ANN — 339 hits, `Any` is
+  the default seam type (see 035); D — ~900 hits, undocumented-public
+  sweep needs its own pass; PLR2004 — 387 tree-wide, only the 15
+  top-level hits convert this pass (see 038; scoped tripwire added to
+  gates.sh instead of select); PT — 85 hits, test-style pass belongs to
+  the test-structure track (039/040/086/088/089, explicitly out of
+  scope); S — 77 hits, subprocess/tempfile hardening is behavior-adjacent
+  (needs per-site review, not autofix); PERF — 10 hits but scattered
+  across dirty/foreign files; N — 39 hits, naming pass belongs with the
+  relevant owners.
+- `select` left unchanged (no family added). No pyproject change for 031.
+
+## Resolution
+
+- Document-only: the gap stays policy (per-file ratchet continues via
+  032/033/034/038/094), with fresh as-read counts above replacing the
+  preserved sweep numbers. Next pass should retry PERF first (smallest:
+  10) once the owning files settle, then N (39), then PT with the test
+  track.
+- Files changed: none for 031. Gate evidence: `select` untouched, so
+  `ruff check .` scope is identical (its 7 current errors are all
+  foreign in-flight files — see 032 log). DESIGN proposals: none.
+  Residuals: entire adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; counts re-baselined above.

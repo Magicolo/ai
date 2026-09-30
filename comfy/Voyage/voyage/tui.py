@@ -1,5 +1,7 @@
 """Interactive launcher TUI: bare `voyage` configures `generate` in-form.
 
+DESIGN §140 launcher-TUI as-built.
+
 Why this module exists: the bare ``voyage`` command (no verb) launches
 this Textual app, which shows every ``generate`` setting with its
 default, validates live, derives the segment/frame plan, and runs the

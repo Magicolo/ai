@@ -85,17 +85,24 @@ ignore = [
 # Issue 034 follow-ups (un-ignore as the owning pass converts each file):
 "voyage/tui.py" = ["BLE", "SIM105", "SIM117", "T201", "RUF100"]
 "voyage/supervisor.py" = ["BLE", "SIM105", "S101", "RUF100"]
-"voyage/cli.py" = ["BLE", "SIM105", "S101", "T201"]
+"voyage/cli.py" = ["BLE", "SIM105", "S101", "T201", "F401"]
+# Issue 080/082 shims: cli.py + model_registry.py are backward-compat
+# re-export seams over the verb-group / family modules — every F401 here
+# is an intentional re-export (parity-pinned by tests/test_cli_split.py +
+# tests/test_registry_split.py), never a dead import. The cli_* fragments
+# mirror cli.py's contract (same moved code); registry_records mirrors
+# model_registry.py's.
+"voyage/cli_*.py" = ["BLE", "SIM105", "S101", "T201"]
+"voyage/registry_records.py" = ["S101"]
 "voyage/doctor.py" = ["BLE", "RUF100"]
 "voyage/config.py" = ["TRY004"]
 "voyage/logrotate.py" = ["TRY300", "RUF100"]
 "voyage/concepts.py" = ["SIM105", "RUF100"]
 "voyage/prompts.py" = ["SIM108"]
 "voyage/tui_state.py" = ["SIM103"]
-"voyage/model_registry.py" = ["S101"]
+"voyage/model_registry.py" = ["S101", "F401"]
 "voyage/persistence.py" = ["RUF100"]
 "voyage/media.py" = ["T201"]
-"voyage/console.py" = ["T201"]
 "voyage/models_ensure.py" = ["BLE"]
 "voyage/workers/loop.py" = ["BLE", "T201"]
 "voyage/workers/director.py" = ["BLE", "TRY004", "TRY300", "RUF100", "T201"]
@@ -165,20 +172,6 @@ module = [
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# Issue 035 ratchet: two stale `tomli`-shim `type: ignore` comments
-# (`voyage/config.py:19`, `voyage/tui_state.py:31`) that mypy flags as
-# unused — the `try/except ImportError` fallback idiom needs no suppression
-# and tomli is installed. Deleting each one-line comment is the real fix
-# (owning pass); this override keeps gates green until then. Scoped to the
-# single code so nothing else in those files is silenced — remove the entry
-# together with the comment.
-[[tool.mypy.overrides]]
-module = [
-  "voyage.config",
-  "voyage.tui_state",
-]
-disable_error_code = ["unused-ignore"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider --strict-markers"
@@ -196,8 +189,10 @@ data_file = "/tmp/voyage-coverage-data"
 
 [tool.coverage.report]
 show_missing = true
-# Issue 041: modest ratchet — 65% (measured 78% total with the fake
-# backends; GPU worker bodies are uncovered by design). Raise toward the
-# measured total as worker coverage grows; the floor fails
-# `coverage report` on any regression.
-fail_under = 65
+# Issue 041: ratchet — 73% (measured 76% total 2026-09-30 with the fake
+# backends, 10342 stmts; GPU worker bodies are uncovered by design:
+# workers/ 64%, audio/ 68%, top-level cores mostly 80-100%). Floor is
+# measured-minus-3 slack: any >3-point regression fails `coverage report`.
+# Raise toward the measured total as worker coverage grows; per-directory
+# floors (workers vs cores) are the documented next step (see issues/041).
+fail_under = 73

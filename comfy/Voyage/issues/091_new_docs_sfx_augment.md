@@ -35,3 +35,16 @@ rg -n "min-fps|min-resolution|no-augment|1280|32 ?fps" docs/ README.md | head -n
 ## Refs
 
 - DESIGN §140 (SFX slices 1-4, finalize floors); `docs/MODELS.md:45-106` (film/realesrgan/SFX rows); `voyage/sfx_finalize.py`, `voyage/augment.py`
+
+## Progress log
+
+- 2026-09-30: verified every claim live in-container (`voyage:latest`, CPU-only, no host pip): `AugmentConfig` defaults 32/1280/720 (`voyage/config.py:375`), `SfxConfig` fake/cpu//models/large_44k_v2 (`voyage/config.py:361`), SFX windows 8.0/1.0/0.5 + `sfx.jsonl`/`sfx` (`voyage/sfx_finalize.py:38-54`), `BACKEND_REGISTRY` rows (fake 768x432@24/cpu, ltxv 768x512@24/cuda:0, causvid 832x480@16/cuda:0 — all with `mmaudio/cuda:0` SFX pairing), `_CUDA_*` sets (video ltxv/longlive2/causvid, audio acestep, sfx mmaudio; `voyage/cli.py:1322-1336`), `_add_sfx_args`/`_add_augment_args` flag lists, and `plan_augmentation` lifts (ltxv→1280x720@32, causvid→1280x720@32, both reencode+minterpolate).
+- 2026-09-30: created `docs/SFX.md` (three-caption doctrine, backends+ladder, finalize windows/fades/amix/stems+ledger, `[sfx]` TOML, `voyage sfx` verb + pins, CUDA pairing, failure modes) and `docs/AUGMENT.md` (floors+flags/TOML/TUI, `plan_augmentation` fast-path vs re-encode, chunked runner + 2-GPU pairing, FILM stand-in caveat + weight-port follow-up, cost + benchmark effect).
+- 2026-09-30: indexed both from `README.md` docs list; added one-paragraph captions pointer in `docs/PROMPTING.md` (no duplication); added SFX rows to `docs/BACKENDS.md` GPU + built-in tables (closes the "zero SFX rows" gap).
+- Verification: `rg -ni "sfx|mmaudio|caption" docs/SFX.md` non-empty; `rg -n "min-fps|min-resolution|no-augment|plan_augmentation" docs/ README.md` hits in AUGMENT.md + README + OPERATIONS; `bash -n` scripts untouched; `test_run_sh.py` 9 passed (no Python changes).
+
+## Resolution
+
+- Delivered (in-scope `Voyage/docs/*,README.md`): `docs/SFX.md` (new), `docs/AUGMENT.md` (new), `README.md` docs index, `docs/PROMPTING.md` captions pointer, `docs/BACKENDS.md` SFX rows.
+- No code behavior changes; no `Voyage/issues/*.md` reformatting; no commits.
+- Residuals: none in-scope. DESIGN §87 coverage list update (add SFX/AUGMENT + 3 `UPSTREAM_*_NOTES` + `reports/`) is out of scope — proposed text in the 092 resolution.

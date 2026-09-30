@@ -34,3 +34,67 @@ grep -n "RUF100\|BLE\|SIM\|S101\|T201" pyproject.toml
 ## Refs
 
 - Issues 031 (select gap), 032 (ignores debt), 033 (mypy gate), 034 (stale ignores); AGENTS.md §12 toolchain
+
+## Progress log (2026-09-30, toolchain track — the pass that implements this policy)
+
+- As-read baselines re-verified live (all drifted up since filing):
+  ALL-stats D103 797 / COM812 703 / PLC0415 576 / TRY003 461 / SLF001 457
+  / PLR2004 387 / ANN401 326; `mypy tests` 140 errors in 38 files
+  (124 checked); Any in voyage/ 387; per-file-ignores block unchanged.
+- What this pass ratcheted (each step is its own regression tripwire —
+  that is the policy working, not overhead):
+  1. `select` untouched (031: no adoption family green; counts
+     re-baselined, retry order PERF → N → PT documented).
+  2. per-file-ignores burn-down, one entry (032: console.py T201 —
+     stale via ruff 0.16.9 `file=` exemption; removal itself trips
+     future bare-print regressions).
+  3. mypy gate 4 → 82 test modules (033: 78 newly gated, exact-command
+     verification `Success: no issues found in 133 source files`, set
+     equality proof; untracked/in-flight + 150-owned + error files
+     excluded with reasons).
+  4. Stale-ignore atomic fix (034: 2 tomli shims + override block;
+     isolated-tree probe first, then live-tree gate verification;
+     `warn_unused_ignores` now guards both files).
+  5. ANN401 tripwire stays out (035: 326 hits; alias migration
+     proposed for the owning pass).
+  6. DESIGN refs completed top-level + gated host-side fail-fast
+     (037: 7 docstrings, sweep clean, E501 tripwire fired mid-pass).
+  7. PLR2004 top-level slice converted + scoped gate check (038: 15
+     hits → 10 named constants in 4 files; full select stays out).
+  8. Coverage ratchet (041: see that file — measurement in flight at
+     write time).
+- Incidents that become policy (do not regress): (a) never `ruff
+  format` issues/*.md (existing exclude honored — all 9 files edited
+  via exact-string appends only); (b) mount-root discipline for probes
+  (`-v $PWD:/app -w /app` from the Voyage dir — one all-zero round
+  discarded); (c) override-block surgery must target the exact block
+  (rindex picked the heavy-deps block first — caught by probe noise);
+  (d) one-liner docstring refs trip E501 (wrap to two lines);
+  (e) gate-context verification beats full-tree verification
+  (test_repaint_similarity_gate passed `mypy tests`, failed the gate
+  invocation — concurrent edit mid-flight); (f) concurrent tracks own
+  their hunks (media.py F401, cli-split I001/SIM300/format drift,
+  pytest failures — all verified foreign via blame/diff, none
+  touched); (g) untracked files never enter the gate.
+
+## Resolution (ratchet policy, binding until superseded)
+
+- Ratchet without ownership re-grows: every future toolchain change
+  follows this pass's shape — re-verify premises live (counts drift),
+  convert the smallest green slice (one entry / one file / one family),
+  verify in the EXACT gate configuration (not a proxy), make the
+  conversion itself the regression tripwire (no separate test files —
+  test structure belongs to 039/040/086/088/089), and record as-read
+  numbers in the owning issue file.
+- Scope fences that held: pyproject.toml + scripts/gates.sh +
+  voyage/*.py docstrings/constants only; tests/ via gate-membership
+  only; no commits; no 000_INDEX.md/DESIGN.md/AGENTS.md edits; no
+  foreign-hunk contact (re-read + blame before every edit).
+- Gate delta of this pass: +78 mypy test modules, +1 scoped PLR2004
+  check (4 files), +1 host-side DESIGN-ref check, −1 per-file-ignore
+  entry, −1 mypy override block; `select` and `fail_under` per their
+  own issues (031/041).
+- Files changed: pyproject.toml, scripts/gates.sh, 11 voyage/*.py
+  files (7 docstrings, 4 constant extractions, 2 shim deletions —
+  config.py carries both kinds), 9 issue files (this log pattern).
+  DESIGN proposals: none.

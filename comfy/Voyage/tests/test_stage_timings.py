@@ -17,10 +17,6 @@ from voyage.persistence import read_state
 from voyage.supervisor import Supervisor
 
 
-def _init_run(run_dir: Path, run_id: str = "timings") -> None:
-    initialize_run_directory(run_dir, run_id=run_id)
-
-
 def _committed_events(run_dir: Path) -> list[dict[str, object]]:
     lines = (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl").read_text(encoding="utf-8")
     events = [json.loads(line) for line in lines.splitlines() if line.strip()]
@@ -30,7 +26,7 @@ def _committed_events(run_dir: Path) -> list[dict[str, object]]:
 def test_segment_committed_carries_stage_breakdown(tmp_path: Path) -> None:
     """segment_committed includes per-stage seconds that add up to elapsed."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="timings")
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()

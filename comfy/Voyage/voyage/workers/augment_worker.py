@@ -1,5 +1,16 @@
 """GPU augment runner: Real-ESRGAN upscale + FILM interpolate (Track D spike).
 
+QUARANTINE (issue 083): this module is a spike stand-in, not the shipped
+augment path — `FilmNetMini` cannot load official `film_net` weights
+(shape mismatch raises `ModelCompatibilityError`) and the compact
+`RealESRGAN_x4plus_anime_6B` SRVGG variant needs its own loader. The
+orchestration (`voyage.augment`: chunk windows, ffmpeg chunk
+decode/encode, device pairing) is the shipped path and never imports
+this module; treat any vendored arch here as a placeholder until the
+full upstream FILM port + anime_6B loader land (or this module moves to
+`experimental/` with a spike contract). Debug augment quality via the
+orchestration + registry weights first, not these stand-ins.
+
 `torch` loads only inside functions (behind a `find_spec` guard) — never
 at module scope (supervisor section 12 GPU ban) — and weight checks run
 before any torch import, so missing weights raise NotImplementedError

@@ -45,6 +45,12 @@ GPU runs. Worker `benchmark` ops live in each `voyage/workers/*.py`
 - **Block throughput**: `blocks/sec` from `generate_blocks` probes.
 - **Segment throughput**: `end-to-end` stage means (inspect/director/
   video/audio/validate/commit) — audio dominates until takes cover ahead.
+- **Finalize floors**: e2e numbers predate the augmentation floors
+  (≥32 fps, ≥1280×720 by default — `docs/AUGMENT.md`). CausVid
+  832×480 @ 16 and fake testsrc ship lifted (~2.7× pixels + 2× fps
+  through minterpolate + upscale + re-encode), so finalize dominates
+  those e2e wall times. Compare GPU runs to GPU runs at the same floor
+  settings; pass `--no-augment` for native-geometry timings.
 - **Peak VRAM**: per-probe CUDA peak; the soak trend shows growth.
 - **CPU usage**: supervisor RSS peak ships in every `resource_gauges`
   event (`ru_maxrss`); worker CPU is not sampled — use container stats.

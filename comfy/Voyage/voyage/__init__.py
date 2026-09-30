@@ -1,4 +1,4 @@
-"""Voyage — autonomous infinite audiovisual voyage (Phase 0 skeleton).
+"""Voyage — autonomous infinite audiovisual voyage (Phase 0 skeleton; DESIGN §§11, 83).
 
 Supervisor package. GPU model code lives in worker subprocesses only;
 this package must never import torch/transformers/diffusers.

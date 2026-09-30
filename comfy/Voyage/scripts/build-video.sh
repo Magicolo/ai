@@ -7,9 +7,12 @@
 # NOTE: the CUDA base image has no `python` shim, so the smoke runs under
 # --entrypoint python3 (the nvidia entrypoint execs `python` otherwise).
 set -euo pipefail
-cd "$(dirname "$0")/.."
-docker build --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -f worker/Dockerfile.video -t voyage-video:latest .
-docker run --rm --user="$(id -u):$(id -g)" -e PYTHONDONTWRITEBYTECODE=1 \
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+cd "$SCRIPT_DIR/.."
+voyage_build_image voyage-video:latest worker/Dockerfile.video
+docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" \
   --entrypoint python3 voyage-video:latest -c "
 from voyage.workers import video_causvid, video_longlive, video_ltxv
 import inspect

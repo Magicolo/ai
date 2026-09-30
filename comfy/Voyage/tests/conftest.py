@@ -24,6 +24,7 @@ they reach the shared strategies.
 from __future__ import annotations
 
 import importlib.util
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -43,8 +44,26 @@ if importlib.util.find_spec("hypothesis") is not None:
     from hypothesis import settings
     from hypothesis import strategies as hypothesis_strategies
 
-    settings.register_profile("container", database=None)
+    # Example-database policy (issue 039): `None` keeps failing examples
+    # out of the bind-mounted tree (correct for ephemeral container runs —
+    # failures are reported verbosely, just never replayed). Set
+    # `VOYAGE_HYPOTHESIS_DATABASE=1` for a local replay run; the default
+    # database then persists under `.hypothesis/` (gitignored, never baked
+    # into images — see `.dockerignore`).
+    if os.environ.get("VOYAGE_HYPOTHESIS_DATABASE"):
+        settings.register_profile("container")
+    else:
+        settings.register_profile("container", database=None)
     settings.load_profile("container")
+
+    # Health-check / deadline policy (issue 039): no property module
+    # suppresses a health check today (verified: zero
+    # `suppress_health_check` hits) — suppress narrowly as encountered,
+    # never suite-wide. No module sets a custom `deadline` either: the
+    # properties cover CPU-only pure cores, so the default deadline never
+    # fires. Any future ffmpeg/subprocess-adjacent property must set an
+    # explicit `@settings(deadline=...)` with a reason, not rely on this
+    # profile.
 
     # Shared domain-constrained generators (issue 039): property modules draw
     # from these instead of inventing overlapping alphabets. `st.data()`
