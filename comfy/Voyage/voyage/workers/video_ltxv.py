@@ -82,6 +82,12 @@ SECOND_PASS: dict[str, Any] = {
 DOWNSCALE_FACTOR = 0.6666666
 IMAGE_COND_NOISE_SCALE = 0.15
 
+MILLISECONDS_PER_SECOND = 1000.0
+"""`perf_counter` seconds → wall milliseconds for `stage_ms` telemetry."""
+
+STAGE_MILLISECONDS_KEYS: tuple[str, ...] = ("encode_ms", "denoise_ms", "save_ms", "tape_ms")
+"""Keys of the `stage_ms` mapping in every `generate_blocks` result (Stage A)."""
+
 
 def padded_size(value: int, multiple: int = 32) -> int:
     """Round `value` up to a multiple (LTXV pads latents to /32)."""
@@ -438,6 +444,11 @@ class LTXVSession:
         self._conditioning_tail_path: str | None = None
         self._last_prompt: str | None = None
         self._fp8_fallback = False
+        # Stage A telemetry (DESIGN §22.5): per-block encode/denoise split
+        # from the latest `_generate_block` call; `generate_blocks` sums
+        # them across blocks into the result's `stage_ms` mapping.
+        self._last_block_encode_ms = 0.0
+        self._last_block_denoise_ms = 0.0
 
     def _encode(self, text: str) -> tuple[Any, Any]:
         """CPU T5 encode (~25 s, cached per prompt); mask moved to the device on use.
@@ -505,9 +516,17 @@ class LTXVSession:
         if conditioning_source is not None and not isinstance(conditioning_source, str):
             conditioning_source = tail_frames_for_conditioning(conditioning_source)
         torch = self._torch
+        # Stage A telemetry: TE time vs denoise time, reported per call on
+        # `self` so `generate_blocks` can sum the split across blocks.
+        encode_elapsed_ms = 0.0
+        denoise_elapsed_ms = 0.0
         if self._negative is None:
+            encode_started = time.perf_counter()
             self._negative = self._encode(NEGATIVE_PROMPT)
+            encode_elapsed_ms += (time.perf_counter() - encode_started) * MILLISECONDS_PER_SECOND
+        encode_started = time.perf_counter()
         pos_embeds, pos_mask = self._encode(prompt)
+        encode_elapsed_ms += (time.perf_counter() - encode_started) * MILLISECONDS_PER_SECOND
         neg_embeds, neg_mask = self._negative
         height_p = padded_size(height)
         width_p = padded_size(width)
@@ -529,7 +548,8 @@ class LTXVSession:
         )
         generator = torch.Generator(device=self._device).manual_seed(seed)
         try:
-            return self._run_multiscale(
+            denoise_started = time.perf_counter()
+            block_images = self._run_multiscale(
                 pos_embeds,
                 pos_mask,
                 neg_embeds,
@@ -569,7 +589,8 @@ class LTXVSession:
             )
             self._quantize_fp8_fallback()
             generator.manual_seed(seed)
-            return self._run_multiscale(
+            denoise_started = time.perf_counter()
+            retried_images = self._run_multiscale(
                 pos_embeds,
                 pos_mask,
                 neg_embeds,
@@ -582,6 +603,15 @@ class LTXVSession:
                 fps,
                 frames,
             )
+            denoise_elapsed_ms += (time.perf_counter() - denoise_started) * MILLISECONDS_PER_SECOND
+            self._last_block_encode_ms = encode_elapsed_ms
+            self._last_block_denoise_ms = denoise_elapsed_ms
+            return retried_images
+        else:
+            denoise_elapsed_ms += (time.perf_counter() - denoise_started) * MILLISECONDS_PER_SECOND
+            self._last_block_encode_ms = encode_elapsed_ms
+            self._last_block_denoise_ms = denoise_elapsed_ms
+            return block_images
 
     def _run_multiscale(
         self,
@@ -660,6 +690,14 @@ class LTXVSession:
         conditioned blocks discard the 25-frame prefix and commit 96 novel
         frames. Counts below are measured from the real tensors (§4.3 rule:
         never assume the pipeline returned exactly the request).
+
+        Stage A telemetry (DESIGN §22.5): the result always carries
+        `stage_ms` (`encode_ms` = TE `_encode` total, `denoise_ms` =
+        `_run_multiscale` total, `save_ms` = `_save_mp4` total, `tape_ms` =
+        recovery-tape write) — wall milliseconds via `perf_counter` only,
+        so no gating flag is needed. Doubles that replace
+        `_generate_block` without reporting the split contribute 0.0 to
+        the encode/denoise totals (read via `getattr` defaults).
         """
         if not prompts or not (len(prompts) == len(seeds) == len(scene_cuts)):
             raise ValueError("prompts/seeds/scene_cuts must be non-empty equal-length lists")
@@ -677,6 +715,9 @@ class LTXVSession:
         pending_tail_frames: NDArray[np.uint8] | None = None
         generated_total = 0
         conditioning_total = 0
+        encode_total_ms = 0.0
+        denoise_total_ms = 0.0
+        save_total_ms = 0.0
         resident_tail = self._conditioning_tail_path
         prompt_changed = self._last_prompt is not None and prompts[0] != self._last_prompt
         try:
@@ -706,6 +747,8 @@ class LTXVSession:
                 block = self._generate_block(
                     prompt, seed, width, height, segment_target_frames, fps, conditioning_source
                 )
+                encode_total_ms += float(getattr(self, "_last_block_encode_ms", 0.0))
+                denoise_total_ms += float(getattr(self, "_last_block_denoise_ms", 0.0))
                 generated_frames = int(block.shape[2])
                 generated_total += generated_frames
                 if conditioning_source is None:
@@ -723,7 +766,9 @@ class LTXVSession:
                 # would silently degrade the next block, so fail loudly.
                 validate_tail_length(int(tail_clip.shape[2]), conditioning_tail_frames)
                 pending_tail = output_path.parent / f"{output_path.stem}_chain{index:02d}.mp4"
+                save_started = time.perf_counter()
                 _save_mp4(tail_clip, pending_tail, fps)
+                save_total_ms += (time.perf_counter() - save_started) * MILLISECONDS_PER_SECOND
                 chain_tails.append(pending_tail)
                 pending_tail = None
                 # Issue 028: bottle the tail for the next block's in-memory
@@ -742,7 +787,9 @@ class LTXVSession:
             raise
         video = novel_clips[0] if len(novel_clips) == 1 else torch.cat(novel_clips, dim=2)
         committed_frames = int(video.shape[2])
+        save_started = time.perf_counter()
         _save_mp4(video, output_path, fps)
+        save_total_ms += (time.perf_counter() - save_started) * MILLISECONDS_PER_SECOND
         tail_path = output_path.parent / TAIL_FILENAME
         if len(chain_tails) == 1:
             chain_tails[0].replace(tail_path)
@@ -765,7 +812,9 @@ class LTXVSession:
             prompt_plan_digest=prompt_plan_digest,
         )
         tape_path = output_path.parent / TAPE_FILENAME
+        tape_started = time.perf_counter()
         video_common.write_tape_atomic(tape_path, tape)
+        tape_total_ms = (time.perf_counter() - tape_started) * MILLISECONDS_PER_SECOND
         self._conditioning_tail_path = str(tail_path)
         self._last_prompt = prompts[-1]
         prefix_discarded = generated_total - committed_frames
@@ -792,6 +841,12 @@ class LTXVSession:
             "conditioning_tail_sha256": tail_checksum,
             "recovery_path": str(tape_path),
             "fp8_fallback": self._fp8_fallback,
+            "stage_ms": {
+                "encode_ms": encode_total_ms,
+                "denoise_ms": denoise_total_ms,
+                "save_ms": save_total_ms,
+                "tape_ms": tape_total_ms,
+            },
         }
 
     def resume_from_tape(self, tape: dict[str, Any]) -> dict[str, Any]:

@@ -422,7 +422,14 @@ def _qwen_generate(
     enable_thinking: bool,
     *,
     device: str,
-) -> str:
+) -> tuple[str, int, int]:
+    """Generate one completion, reporting token usage (Stage A telemetry).
+
+    Returns the decoded text plus (prompt_tokens, completion_tokens) counted
+    from the live input/output tensor widths — the supervisor aggregates
+    them into `segment_committed.director_tokens` so LLM cost is visible
+    per segment instead of vanishing into the `director` stage seconds.
+    """
     _require_module("torch")
     import torch
 
@@ -451,8 +458,11 @@ def _qwen_generate(
         )
     with torch.inference_mode():
         output = model.generate(**inputs, **generate_kwargs)
-    generated = output[0][inputs["input_ids"].shape[1] :]
-    return str(tokenizer.decode(generated, skip_special_tokens=True)).strip()
+    prompt_tokens = int(inputs["input_ids"].shape[1])
+    generated = output[0][prompt_tokens:]
+    completion_tokens = int(generated.shape[0])
+    text = str(tokenizer.decode(generated, skip_special_tokens=True)).strip()
+    return text, prompt_tokens, completion_tokens
 
 
 def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
@@ -483,9 +493,11 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
         (user_message + "\n\nSTRICT: JSON object only. No prose.", max(0.1, temperature - 0.2)),
     ]
     last_error = "no attempts"
+    prompt_tokens = 0
+    completion_tokens = 0
     for attempt_number, (attempt_message, attempt_temp) in enumerate(attempts):
         try:
-            text = _qwen_generate(
+            text, prompt_tokens, completion_tokens = _qwen_generate(
                 model_id,
                 attempt_message,
                 attempt_temp,
@@ -499,6 +511,8 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
             decision = EvolutionDecision.model_validate(data)
             dumped = decision.model_dump()
             dumped["fallback"] = False
+            dumped["prompt_tokens"] = prompt_tokens
+            dumped["completion_tokens"] = completion_tokens
             return dumped
         except Exception as exc:  # noqa: BLE001 — chain must survive any bad output
             last_error = str(exc)
@@ -519,6 +533,8 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     dumped = fallback.model_dump()
     dumped["fallback"] = True
     dumped["notes"] = f"qwen-unparseable ({last_error}); {fallback.notes}"
+    dumped["prompt_tokens"] = prompt_tokens
+    dumped["completion_tokens"] = completion_tokens
     return dumped
 
 

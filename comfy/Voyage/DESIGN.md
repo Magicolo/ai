@@ -7834,6 +7834,66 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   via `av_drift_seconds` (020/022/003).
 - Batch 5 (2026-09-30): resolved 059/051/062(+027 fold)/063(+028 fold)/017/018/019/102/103/046/047/048/153/156/158/065(+146 fold)/144/139/178/025/026; real 024 (unbounded --output paths) stays OPEN (concurrent owner).
 - Batch 6 (2026-09-30): resolved 049/050/053/054/057/058/060/061/064/066/069/075/076/077/101.
+
+## 2026-09-30 — Stage A telemetry: all runtime blind spots instrumented (additive-only)
+
+- User intent: "investigate all telemetry blind spots to be sure that we
+  capture the full performance/runtime story" before the speedup stages;
+  music coherence "changes unexpectedly" — Stage B's repaint gate should
+  help there too. Blind-spot map came from three parallel read-only
+  survey subagents (file:line evidence, verified against live code):
+  commit→propose gap contents (gauges + rotate + control reads + lock
+  acquire + commit-head precheck + per-segment ConceptStore re-read, no
+  `time.sleep` anywhere in `voyage/*.py`); accept-chain rejections emit
+  no metric (only `drift_hold`); zero token reporting (`_qwen_generate`
+  returns str only); LTXV/causvid `generate_blocks` untimed (only
+  longlive has `_CudaStageTimer`); audio swap + slice/assemble as one
+  coarse `audio` stage; prefetch submit/consume untimed; finalize SFX +
+  augment untimed.
+- Music-coherence root causes (planner.py): repaint fires on EXACT
+  `music_caption` string inequality (one-char LLM rewording repaints the
+  whole unconsumed tail); chained takes use fresh derived seeds +
+  text2music with no previous-audio conditioning (only a loose BPM hint);
+  no music loudness matching (only SFX −6 dB); fallbacks degrade to hard
+  cuts. Joining itself is crossfades (commit 2.0 s, finalize ≤0.5 s).
+- What landed (all additive, `stages` key set pinned by
+  test_stage_timings.py): token counts from live tensor widths through
+  `_qwen_decide` into `ProposedSegment.director_tokens` into
+  `segment_committed`; `director_rejection` per §74 continue path +
+  `director_prefetch_rejected` + `director_fallback`; 6-bucket
+  `gap_breakdown` ledger emitted+reset per propose; `prefetch_age_ms`;
+  swap-only `audio_swap_breakdown`; `audio_assemble`; LTXV `stage_ms`
+  merged at `_render_video` from the raw worker result (adapter strips
+  extras by design — never widen the adapter for telemetry).
+- Proof: `tests/test_stage_a_telemetry.py` (11 tests, TDD red-first) +
+  `tests/test_ltxv_stage_ms.py` (5 tests, parallel subagent with
+  exclusive file scope); `tests/test_commit_split.py` canned proposal
+  gained the new `director_tokens` field. Gates: ruff + format + mypy
+  strict clean; 1404 passed, 5 skipped, 2 foreign failures (concurrent
+  agent's qualify.sh lib-path breakage; known TUI Pilot load flake that
+  passes in isolation). Live review notes: `B023` — parameterize
+  loop-varying values into closure signatures instead of capturing.
+- Next: Stage B (caption-similarity repaint gate + prefetch acceptance),
+  Stage C (AWQ kernels + gauge cadence); measurement = extend boba +1m
+  (15 more segments on the same run dir).
+- Stage B repaint gate done 2026-09-30: boba ledger calibration (10 takes,
+  consecutive caption Jaccard sims 0.719/0.444/0.750/0.727/1.000/1.000/
+  0.809/0.907/1.000) proved every baseline repaint was a rewording
+  repaint — takes 2-9 share near-identical captions yet repainted
+  repeatedly. `AudioPlanner.repaint_similarity_threshold = 0.5`
+  (`AudioConfig` + TOML, validated [0,1] finite; no CLI flag per YAGNI):
+  `plan()` repaints only when token-set similarity < threshold, else the
+  new caption rides the next chained/keep take joint (source-anchored
+  repaint preserved for genuine shifts — threshold 0.5 suppresses all
+  but the 0.444 shift). Proof: `tests/test_repaint_similarity_gate.py`
+  (5 tests, TDD red-first; existing repaint tests survive —
+  brighter-pulse vs ambient-drift sim = 0.0). Gates: ruff + format +
+  mypy strict clean; 1428 passed, 6 skipped, 1 foreign failure
+  (concurrent agent's qualify.sh lib-path breakage). Boba +1m extension
+  runs WITHOUT the gate (no-gate baseline for before/after music
+ comparison); gate takes effect on the segment after. Prefetch
+ acceptance + Stage C still open.
+
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 
 - Workers seam (batch-7-2026-09-30): shared validators in `voyage.workers._validators` + torch guards/`BYTES_PER_GIB` in `voyage.workers._resident`; fake video serves `standard_serve_map` + `run_benchmark_harness`.

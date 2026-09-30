@@ -308,6 +308,11 @@ class AudioConfig(BaseModel):
     take_seconds: float = 45.0
     ahead_seconds: float = 20.0
     crossfade_seconds: float = 2.0
+    # Repaint gate (Stage B): a caption change repaints the unconsumed take
+    # region only when Jaccard token-set similarity drops below this.
+    # Boba-calibrated 0.5: reword-repaints scored 0.72–1.00 (suppressed),
+    # the one defensible shift scored 0.444 (still repaints).
+    repaint_similarity_threshold: float = 0.5
     # Rhythm grid (§35): each committed segment spans `beats_per_segment`
     # beats; the take BPM derives from the segment duration (adaptive k:
     # 4 → 8 → 16 … until BPM >= 60 — see voyage.audio.beat). Takes chain
@@ -345,6 +350,13 @@ class AudioConfig(BaseModel):
     def non_negative(cls, value: float) -> float:
         if not math.isfinite(value) or value < 0:
             raise ValueError("must be a finite non-negative number")
+        return value
+
+    @field_validator("repaint_similarity_threshold")
+    @classmethod
+    def similarity_unit_range(cls, value: float) -> float:
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("repaint_similarity_threshold must be within [0, 1]")
         return value
 
     @field_validator("beats_per_segment")
@@ -721,6 +733,7 @@ energy = 0.5
 take_seconds = 45.0
 ahead_seconds = 20.0
 crossfade_seconds = 2.0
+repaint_similarity_threshold = 0.5
 beats_per_segment = 4
 final_overlap_fraction = 0.1
 final_overlap_cap_seconds = 0.5

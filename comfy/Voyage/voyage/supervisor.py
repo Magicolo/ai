@@ -186,6 +186,7 @@ class ProposedSegment(NamedTuple):
     num_blocks: int
     prefetch_hit: bool
     drift_hold: bool
+    director_tokens: dict[str, int]
 
 
 class RenderedVideo(NamedTuple):
@@ -201,6 +202,7 @@ class RenderedVideo(NamedTuple):
     duration: float
     video_time: float
     recovery_tape: str | None
+    video_stage_ms: dict[str, float]
 
 
 class CoveredAudio(NamedTuple):
@@ -307,6 +309,26 @@ def effective_video_stages(explicit: str | None, stages: list[str]) -> list[str]
     return list(stages)
 
 
+def _token_counts(raw: dict[str, Any]) -> dict[str, int]:
+    """LLM token usage carried on an accepted/prefetched raw (Stage A telemetry).
+
+    Worker decide replies report `prompt_tokens`/`completion_tokens`; older
+    or deterministic payloads carry neither and read as zero. Non-int,
+    bool or negative values are untrusted wire data and also read as zero.
+    Pure so the accept loop and the prefetch consumer share one rule.
+    """
+
+    def _as_count(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
+    return {
+        "prompt_tokens": _as_count(raw.get("prompt_tokens")),
+        "completion_tokens": _as_count(raw.get("completion_tokens")),
+    }
+
+
 class Supervisor:
     def __init__(
         self,
@@ -380,6 +402,19 @@ class Supervisor:
         self._prefetch_executor: ThreadPoolExecutor | None = None
         self._prefetch_target: int | None = None
         self._prefetch_future: Future[dict[str, Any] | None] | None = None
+        self._prefetch_submitted_at: float | None = None
+        # Commit→propose gap ledger (Stage A telemetry): each gap-phase
+        # site adds its wall ms here; `_propose_segment` emits the
+        # `gap_breakdown` metric and resets. Keys are fixed so the metric
+        # shape is stable even when a phase does not run.
+        self._gap_ms: dict[str, float] = {
+            "gauges_ms": 0.0,
+            "rotate_ms": 0.0,
+            "control_ms": 0.0,
+            "lock_ms": 0.0,
+            "precheck_ms": 0.0,
+            "concept_store_ms": 0.0,
+        }
         # Restarts used per worker since the current run started (Phase 6
         # slice B budget). Reset by run_segments; direct commit_one_segment
         # callers share the counters for the supervisor's lifetime.
@@ -403,6 +438,7 @@ class Supervisor:
         lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
         acquired = False
         try:
+            lock_started = time.monotonic()
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
@@ -418,6 +454,7 @@ class Supervisor:
                     "refusing a second concurrent writer"
                 ) from exc
             acquired = True
+            self._gap_ms["lock_ms"] += (time.monotonic() - lock_started) * 1000.0
             os.lseek(lock_fd, 0, os.SEEK_SET)
             os.ftruncate(lock_fd, 0)
             os.write(lock_fd, str(os.getpid()).encode("utf-8"))
@@ -872,10 +909,14 @@ class Supervisor:
             committed: list[str] = []
             stopped = False
             while count is None or len(committed) < count:
-                if self._stop_requested():
+                control_started = time.monotonic()
+                stop_requested = self._stop_requested()
+                pause_requested = self._pause_requested()
+                self._gap_ms["control_ms"] += (time.monotonic() - control_started) * 1000.0
+                if stop_requested:
                     stopped = True
                     break
-                if self._pause_requested():
+                if pause_requested:
                     break
                 try:
                     segment_id = self.commit_one_segment()
@@ -1000,6 +1041,7 @@ class Supervisor:
                 return None
 
         self._prefetch_future = executor.submit(_call)
+        self._prefetch_submitted_at = time.monotonic()
 
     def _take_prefetch(self, number: int, segment_id: str) -> dict[str, Any] | None:
         """Consume the prefetched raw proposal when it targets this segment.
@@ -1011,21 +1053,57 @@ class Supervisor:
         future, target = self._prefetch_future, self._prefetch_target
         self._prefetch_future = None
         self._prefetch_target = None
+        submitted_at, self._prefetch_submitted_at = self._prefetch_submitted_at, None
+        prefetch_age_ms = (
+            round((time.monotonic() - submitted_at) * 1000.0, 3)
+            if submitted_at is not None
+            else 0.0
+        )
         if future is None or target != number:
-            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            self._log_metric(
+                {
+                    "event": "director_prefetch_miss",
+                    "segment_id": segment_id,
+                    "prefetch_age_ms": prefetch_age_ms,
+                }
+            )
             return None
         if not future.done():
-            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            self._log_metric(
+                {
+                    "event": "director_prefetch_miss",
+                    "segment_id": segment_id,
+                    "prefetch_age_ms": prefetch_age_ms,
+                }
+            )
             return None
         try:
             raw = future.result()
         except Exception:  # noqa: BLE001 — prefetch must never break a commit
-            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            self._log_metric(
+                {
+                    "event": "director_prefetch_miss",
+                    "segment_id": segment_id,
+                    "prefetch_age_ms": prefetch_age_ms,
+                }
+            )
             return None
         if not isinstance(raw, dict):
-            self._log_metric({"event": "director_prefetch_miss", "segment_id": segment_id})
+            self._log_metric(
+                {
+                    "event": "director_prefetch_miss",
+                    "segment_id": segment_id,
+                    "prefetch_age_ms": prefetch_age_ms,
+                }
+            )
             return None
-        self._log_metric({"event": "director_prefetch_hit", "segment_id": segment_id})
+        self._log_metric(
+            {
+                "event": "director_prefetch_hit",
+                "segment_id": segment_id,
+                "prefetch_age_ms": prefetch_age_ms,
+            }
+        )
         return raw
 
     def _embed_texts(self, texts: list[str]) -> list[list[float]] | None:
@@ -1108,6 +1186,37 @@ class Supervisor:
         )
         return payload
 
+    def _log_rejection(
+        self,
+        segment_id: str,
+        attempt: int,
+        reason: str,
+        extra: dict[str, object],
+        from_prefetch: bool,
+    ) -> None:
+        """Emit `director_rejection` (+ `director_prefetch_rejected`, Stage A).
+
+        One shared seam for every `continue` path of the §74 accept loop,
+        so the metric shape cannot drift between rejection reasons. A
+        burned attempt-0 prefetch additionally emits
+        `director_prefetch_rejected` — the retry-cost signal Stage B/C
+        needs. Method (not a loop closure) so loop variables are always
+        explicit parameters (B023).
+        """
+        if from_prefetch:
+            self._log_metric(
+                {"event": "director_prefetch_rejected", "segment_id": segment_id, "reason": reason}
+            )
+        self._log_metric(
+            {
+                "event": "director_rejection",
+                "segment_id": segment_id,
+                "attempt": attempt,
+                "reason": reason,
+                **extra,
+            }
+        )
+
     def _accept_director_decision(
         self,
         config: ProjectConfig,
@@ -1118,7 +1227,7 @@ class Supervisor:
         measured_context: str = "",
         amendments: list[str] | None = None,
         prefetched_raw: dict[str, Any] | None = None,
-    ) -> EvolutionDecision:
+    ) -> tuple[EvolutionDecision, dict[str, int]]:
         """§74 transaction: validate → novelty → style → accept.
 
         Bounded retries with rejection feedback; exhaustion falls back to
@@ -1151,17 +1260,21 @@ class Supervisor:
             self._log_metric(
                 {"event": "drift_hold", "segment_id": segment_id, "every": drift_every}
             )
-            return hold
+            return hold, {"prompt_tokens": 0, "completion_tokens": 0}
         max_attempts = max(1, config.voyage.novelty_max_attempts)
         feedback = ""
         last_score = 0.0
+        spent_prompt_tokens = 0
+        spent_completion_tokens = 0
         prefetch_pending = prefetched_raw is not None and not amendments
-        for _attempt in range(max_attempts):
+        for attempt in range(max_attempts):
+            served_prefetch = False
             if prefetch_pending:
                 # First candidate comes from the parallel prefetch window
                 # (still fully validated below — a stale proposal just
                 # burns one attempt, then the loop calls the worker live).
                 prefetch_pending = False
+                served_prefetch = True
                 raw: dict[str, Any] = prefetched_raw or {}
             else:
                 raw = self._call_with_restart(
@@ -1173,13 +1286,20 @@ class Supervisor:
                         config, state, store, style_spec, feedback, measured_context
                     ),
                 )
+            served = _token_counts(raw)
+            spent_prompt_tokens += served["prompt_tokens"]
+            spent_completion_tokens += served["completion_tokens"]
             try:
                 decision = EvolutionDecision.model_validate(raw)
             except Exception as exc:
                 feedback = f"previous output failed schema validation: {exc}"
+                self._log_rejection(
+                    segment_id, attempt, "schema", {"detail": str(exc)[:300]}, served_prefetch
+                )
                 continue
             if not decision.video.stages:
                 feedback = "previous output had no video stages; provide 3-5."
+                self._log_rejection(segment_id, attempt, "empty_stages", {}, served_prefetch)
                 continue
             if amendments:
                 decision.video.stages = [
@@ -1197,6 +1317,9 @@ class Supervisor:
                     segment=state.next_segment_number,
                 )
                 feedback = f"style-policy rejection: {exc}"
+                self._log_rejection(
+                    segment_id, attempt, "style", {"detail": str(exc)[:300]}, served_prefetch
+                )
                 continue
             vectors = self._embed_texts([decision.destination_concept])
             vector = vectors[0] if vectors else None
@@ -1214,6 +1337,9 @@ class Supervisor:
                     f"(similarity {last_score:.3f}); propose a different world. "
                     f"Director's novelty claim: {decision.novelty.why_new}"
                 )
+                self._log_rejection(
+                    segment_id, attempt, "novelty", {"score": round(last_score, 3)}, served_prefetch
+                )
                 continue
             record = store.append(
                 decision.destination_concept,
@@ -1229,7 +1355,10 @@ class Supervisor:
                 f"record {record.id}"
             )
             decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
-            return decision
+            return decision, {
+                "prompt_tokens": spent_prompt_tokens,
+                "completion_tokens": spent_completion_tokens,
+            }
         fallback = DeterministicDirector(style_spec.prompt).propose(
             decision_index=state.decision_index,
             current_concept=state.current_concept,
@@ -1243,7 +1372,17 @@ class Supervisor:
             segment=state.next_segment_number,
         )
         fallback.novelty_accepted = False
-        return fallback
+        self._log_metric(
+            {
+                "event": "director_fallback",
+                "segment_id": segment_id,
+                "attempts": max_attempts,
+            }
+        )
+        return fallback, {
+            "prompt_tokens": spent_prompt_tokens,
+            "completion_tokens": spent_completion_tokens,
+        }
 
     def _with_audio_gpu(
         self,
@@ -1270,14 +1409,24 @@ class Supervisor:
             self._config.audio.backend == "acestep"
             and self._config.video.backend in STREAMING_VIDEO_BACKENDS
         )
+        swap_ms = {
+            "video_evict_ms": 0.0,
+            "render_ms": 0.0,
+            "audio_evict_ms": 0.0,
+            "rebuild_ms": 0.0,
+        }
         if swap:
+            evict_started = time.monotonic()
             self._call_with_restart(self._video, "video", segment_id, "evict_gpu", {})
+            swap_ms["video_evict_ms"] = (time.monotonic() - evict_started) * 1000.0
         primary_error: BaseException | None = None
         audio_result: dict[str, object] | None = None
         try:
+            render_started = time.monotonic()
             audio_result = self._call_with_restart(
                 self._audio, "audio", segment_id, "generate_audio", audio_payload
             )
+            swap_ms["render_ms"] = (time.monotonic() - render_started) * 1000.0
         except BaseException as exc:
             primary_error = exc
         if primary_error is not None:
@@ -1288,7 +1437,9 @@ class Supervisor:
         if swap:
             evict_error: Exception | None = None
             try:
+                audio_evict_started = time.monotonic()
                 self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
+                swap_ms["audio_evict_ms"] = (time.monotonic() - audio_evict_started) * 1000.0
             except Exception as exc:
                 evict_error = exc
                 self._log_metric(
@@ -1306,6 +1457,7 @@ class Supervisor:
             # Rebuild runs even when the audio evict failed, so the stream
             # is never stranded evicted after a rendered take.
             try:
+                rebuild_started = time.monotonic()
                 self._call_with_restart(
                     self._video,
                     "video",
@@ -1313,6 +1465,7 @@ class Supervisor:
                     "rebuild",
                     {"recovery_path": recovery_path},
                 )
+                swap_ms["rebuild_ms"] = (time.monotonic() - rebuild_started) * 1000.0
             except Exception as exc:
                 self._log_metric(
                     {
@@ -1325,6 +1478,16 @@ class Supervisor:
                 raise
             if evict_error is not None:
                 raise evict_error
+            # GPU-swap wall detail (Stage A telemetry): swap-only metric —
+            # fake pairings render without touching residency and emit
+            # nothing, so the event's presence already means a swap ran.
+            self._log_metric(
+                {
+                    "event": "audio_swap_breakdown",
+                    "segment_id": segment_id,
+                    "windows": {key: round(value, 3) for key, value in swap_ms.items()},
+                }
+            )
         return audio_result
 
     def _best_effort_audio_teardown(self, segment_id: str, recovery_path: str | None) -> None:
@@ -1410,6 +1573,7 @@ class Supervisor:
             ahead_seconds=audio_cfg.ahead_seconds,
             takes=takes,
             segment_seconds=duration,
+            repaint_similarity_threshold=audio_cfg.repaint_similarity_threshold,
         )
         caption = effective_music_caption(
             audio_cfg.music_caption, decision.audio.music_caption, audio_cfg.music_style
@@ -1496,6 +1660,7 @@ class Supervisor:
         cursor = video_time
         end = video_time + duration
         index = 0
+        slice_started = time.monotonic()
         while cursor < end - 1e-6:
             if index >= MAX_SLICES_PER_SEGMENT:
                 raise MediaError(
@@ -1529,7 +1694,17 @@ class Supervisor:
             cursor += piece
             index += 1
         audio_out = segment / "audio.wav"
+        slice_ms = (time.monotonic() - slice_started) * 1000.0
+        assemble_started = time.monotonic()
         assemble_segment_audio(slices, audio_out, audio_cfg.crossfade_seconds)
+        assemble_ms = (time.monotonic() - assemble_started) * 1000.0
+        self._log_metric(
+            {
+                "event": "audio_assemble",
+                "segment_id": segment_id,
+                "windows": {"slice_ms": round(slice_ms, 3), "assemble_ms": round(assemble_ms, 3)},
+            }
+        )
         ahead = planner.coverage_until() - end
         audio_plan = AudioPlan(
             segment_id=segment_id,
@@ -1710,6 +1885,7 @@ class Supervisor:
         (§18.2). Records the `inspect` + `director` stage timings. Pure
         proposal: no media rendered, no state advanced.
         """
+        concept_store_started = time.monotonic()
         try:
             store = ConceptStore(
                 self._run_dir / "novelty",
@@ -1721,6 +1897,7 @@ class Supervisor:
             # — never a bare pydantic ValidationError that escapes the
             # commit boundary and strands the run at RUNNING.
             raise StateError(f"segment {segment_id}: corrupt concept history: {exc}") from exc
+        self._gap_ms["concept_store_ms"] += (time.monotonic() - concept_store_started) * 1000.0
         # 1b. Piggyback inspect of the previous segment (§44, experimental):
         # ordered, synchronous, never blocking the commit on failure.
         inspect_started = time.monotonic()
@@ -1740,7 +1917,7 @@ class Supervisor:
         drift_hold = number % drift_every != 0
         director_started = time.monotonic()
         with self._stage("director", config.director.backend):
-            decision = self._accept_director_decision(
+            decision, director_tokens = self._accept_director_decision(
                 config,
                 state,
                 store,
@@ -1786,6 +1963,20 @@ class Supervisor:
                 if stage.block_start <= block <= stage.block_end
             )
             block_prompts.append(stage.prompt)
+        # Gap ledger emission (Stage A telemetry): the buckets accumulated
+        # since the previous segment's propose — commit-tail gauges/rotate,
+        # loop control reads, lock acquire, commit-head precheck, and the
+        # ConceptStore init above — are attributed to this segment, then
+        # reset for the next gap. stage_seconds keys are untouched.
+        self._log_metric(
+            {
+                "event": "gap_breakdown",
+                "segment_id": segment_id,
+                "buckets": {key: round(value, 3) for key, value in self._gap_ms.items()},
+            }
+        )
+        for key in self._gap_ms:
+            self._gap_ms[key] = 0.0
         return ProposedSegment(
             decision=decision,
             prompt_plan=prompt_plan,
@@ -1793,6 +1984,7 @@ class Supervisor:
             num_blocks=num_blocks,
             prefetch_hit=prefetch_hit,
             drift_hold=drift_hold,
+            director_tokens=director_tokens,
         )
 
     def _render_video(
@@ -1907,11 +2099,25 @@ class Supervisor:
         frames = segment_result.returned_frames
         duration = frames / config.video.fps
         video_time = state.timeline_frames / config.video.fps
+        # LTXV sub-stage detail (Stage A telemetry): the worker reports
+        # `stage_ms` under its `video` block; the adapter normalization
+        # strips it, so it is read here from the raw worker result. Other
+        # backends report none and merge as an empty mapping.
+        video_stage_ms: dict[str, float] = {}
+        if isinstance(video_block, dict):
+            reported_stages = video_block.get("stage_ms")
+            if isinstance(reported_stages, dict):
+                video_stage_ms = {
+                    str(key): float(value)
+                    for key, value in reported_stages.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                }
         return RenderedVideo(
             frames=frames,
             duration=duration,
             video_time=video_time,
             recovery_tape=recovery_tape,
+            video_stage_ms=video_stage_ms,
         )
 
     def _cover_audio(
@@ -2220,10 +2426,16 @@ class Supervisor:
                 "av_drift_seconds": av_drift,
                 "elapsed_seconds": elapsed,
                 "stages": stage_seconds,
+                "director_tokens": dict(proposed.director_tokens),
+                "video_stage_ms": dict(rendered.video_stage_ms),
             }
         )
+        gauges_started = time.monotonic()
         self._sample_gauges(segment_id)
+        self._gap_ms["gauges_ms"] += (time.monotonic() - gauges_started) * 1000.0
+        rotate_started = time.monotonic()
         self._rotate_worker_logs()
+        self._gap_ms["rotate_ms"] += (time.monotonic() - rotate_started) * 1000.0
         if self._progress is not None:
             from voyage.audio.beat import beats_for_segment
 
@@ -2272,6 +2484,7 @@ class Supervisor:
         started = time.monotonic()
         stage_seconds: dict[str, float] = {}
         config = self._config
+        precheck_started = time.monotonic()
         state = read_state(self._run_dir)
         check_free_space(self._run_dir, config.min_free_space_gib)
 
@@ -2279,7 +2492,12 @@ class Supervisor:
         segment_id = paths.format_segment_id(number)
         segment = paths.segment_dir(self._run_dir, segment_id)
         segment.mkdir(parents=True, exist_ok=True)
-        if (segment / paths.DONE_MARKER).exists():
+        done_present = (segment / paths.DONE_MARKER).exists()
+        done_children: list[str] = []
+        if done_present:
+            done_children = sorted(child.name for child in segment.iterdir())
+        self._gap_ms["precheck_ms"] += (time.monotonic() - precheck_started) * 1000.0
+        if done_present:
             # Crash-window orphan (issue 013): DONE went durable but the
             # state.json advance never landed, so this retry meets the same
             # number with DONE already present. Never re-render over a
@@ -2288,7 +2506,7 @@ class Supervisor:
             # written last, so the real crash window always leaves full
             # media + metadata alongside it) holds no render to protect —
             # fall through to a fresh render, metric-visible.
-            if sorted(child.name for child in segment.iterdir()) == [paths.DONE_MARKER]:
+            if done_children == [paths.DONE_MARKER]:
                 self._log_metric(
                     {
                         "event": "segment_reclaimed",

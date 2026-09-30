@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage.atomic import fsync_dir
+from voyage.concepts import token_set_similarity
 from voyage.errors import StateError
 from voyage.paths import resolve_stored_path
 
@@ -140,6 +141,12 @@ class AudioPlanner:
     take_seconds: float = 45.0
     ahead_seconds: float = 20.0
     takes: list[AudioTake] = field(default_factory=list)
+    # Repaint gate (Stage B): a caption change repaints the unconsumed
+    # region only when the new caption is genuinely different (Jaccard
+    # token-set similarity below this threshold). A mere LLM rewording
+    # (boba baseline: 0.72–1.00) falls through to chained/keep, so the
+    # music evolves at take joints instead of restarting mid-take.
+    repaint_similarity_threshold: float = 0.5
     # When set, fresh-take durations snap to whole multiples of one
     # segment so takes chain on segment-aligned boundaries (beat-grid
     # downbeats stay on segment boundaries across take joints). None
@@ -179,7 +186,10 @@ class AudioPlanner:
           before repaint_start is preserved near bit-exact), so the new take
           inherits the source's `covers_from` — anchoring it at `video_time`
           would replay the preserved head in the next slice (duplicated
-          music at the segment boundary).
+          music at the segment boundary). The repaint gate (Stage B) skips
+          this when the captions are merely reworded (similarity at or above
+          `repaint_similarity_threshold`): the music then evolves at the next
+          take joint, carried by the chained take's fresh caption.
         - Otherwise → "keep" serving from the current take.
         """
         current = self.take_for_time(video_time)
@@ -190,12 +200,20 @@ class AudioPlanner:
                 reason="no take covers current video time",
             )
         if current.caption != caption and video_time < current.covers_until():
-            return PlanDecision(
-                action="repaint",
-                take=self._fresh_take(current.covers_from, caption, seed, segment_index),
-                current=current,
-                reason="caption changed with unconsumed region remaining",
-            )
+            similarity = token_set_similarity(current.caption, caption)
+            if similarity < self.repaint_similarity_threshold:
+                return PlanDecision(
+                    action="repaint",
+                    take=self._fresh_take(current.covers_from, caption, seed, segment_index),
+                    current=current,
+                    reason=(
+                        "caption changed with unconsumed region remaining "
+                        f"(similarity {similarity:.3f})"
+                    ),
+                )
+            # Rewording, not a new direction (Stage B gate): fall through
+            # to chained/keep so the music evolves at the next take joint,
+            # carried by the chained take's fresh caption.
         if current.covers_until() - video_time <= self.ahead_seconds:
             chained = self._fresh_take(current.covers_until(), caption, seed + 1, segment_index)
             return PlanDecision(

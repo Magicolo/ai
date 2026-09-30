@@ -219,6 +219,7 @@ def _canned_proposal() -> ProposedSegment:
         num_blocks=3,
         prefetch_hit=False,
         drift_hold=False,
+        director_tokens={"prompt_tokens": 0, "completion_tokens": 0},
     )
 
 
