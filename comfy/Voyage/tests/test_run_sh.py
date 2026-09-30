@@ -140,3 +140,18 @@ def test_dry_run_reports_host_user_mapping(tmp_path: Path) -> None:
     """
     selection = _dry_run(tmp_path, ["generate"], "absent")
     assert selection["user"] == f"--user={os.getuid()}:{os.getgid()}"
+
+
+@needs_bash
+def test_dry_run_pins_direct_entrypoint(tmp_path: Path) -> None:
+    """The nvidia/cuda entrypoint banner is bypassed on every path.
+
+    voyage-video inherits /opt/nvidia/nvidia_entrypoint.sh, which prints
+    a large CUDA banner + license block on every run. run.sh sets
+    --entrypoint voyage and execs the CLI directly (equivalent on the
+    entrypoint-less slim image); the dry-run seam reports it.
+    """
+    assert _dry_run(tmp_path, ["generate"], "absent")["entrypoint"] == "voyage"
+    second = tmp_path / "second"
+    second.mkdir()
+    assert _dry_run(second, [], "absent")["entrypoint"] == "voyage"

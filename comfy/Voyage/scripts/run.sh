@@ -110,10 +110,17 @@ fi
 # leaves host-owned files on the bind mounts ($PWD:/app, /tmp:/tmp,
 # $models:/models) instead of root-owned ones.
 user_args=("--user=$(id -u):$(id -g)")
+# Direct entrypoint (CUDA-banner suppression): the voyage-video stack
+# inherits the nvidia/cuda entrypoint (/opt/nvidia/nvidia_entrypoint.sh),
+# which prints a large CUDA banner + license block on every run. Voyage has
+# its own GPU checks (torch/doctor), so exec the CLI directly. The slim
+# image defines no entrypoint, making this override equivalent there.
+# Single-sourced so the dry-run seam and `docker run` cannot drift apart.
+entrypoint="voyage"
 if [ "${VOYAGE_DRY_RUN:-}" = "1" ]; then
-  printf 'image=%s\ngpus=%s\nuser=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}"
+  printf 'image=%s\ngpus=%s\nuser=%s\nentrypoint=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}" "$entrypoint"
   exit 0
 fi
-docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
+docker run --rm --entrypoint "$entrypoint" -e PYTHONDONTWRITEBYTECODE=1 -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
   -v "$PWD:/app" -v /tmp:/tmp -v "$models:/models" \
-  "$image" voyage "$@"
+  "$image" "$@"
