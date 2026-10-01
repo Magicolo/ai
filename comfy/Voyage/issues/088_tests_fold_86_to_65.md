@@ -255,3 +255,56 @@ wc -l tests/*.py | sort -rn | head -n 15
   green post-hunk. No voyage/* edit made (forbidden) and no foreign
   hunk undone — the 49/49 evidence above stands as this fold's gate,
   re-run clean once their surface lands.
+
+## Progress log (2026-10-01, prefetch-summary fold pass)
+
+- Premise re-verified live: 166 `test_*.py` files at pass start;
+  singleton `test_prefetch_summary.py` (5 tests, mtime 2026-09-25, last
+  commit d7b4086) present — the smallest remaining cluster per the
+  issue's singleton recipe (`test_prefetch_summary` 5 tests →
+  `test_generation_stack`). No helper collisions (`_events` only in the
+  source; `_metric_events`/`_write_toml`/`_init_run`/`_commit_two` only
+  in the target — verified via rg), zero importers outside self (`rg
+  test_prefetch_summary` clean except the gates.sh mypy entry + issue
+  docs + the new fold banner), both files in the `gates.sh` mypy list.
+  No longlive2 lines in either file — the 079 delete surface is
+  untouched.
+- Fold landed: `_events` helper + 5 tests moved verbatim (fn
+  names/bodies identical, original module docstring kept as a banner
+  per the batch-8 quintet precedent) into
+  `tests/test_generation_stack.py` (target imports extended minimally:
+  `from typing import Any` + `summarize_prefetch_outcome` alongside the
+  existing `Supervisor` import — no other churn); the source file
+  deleted. `scripts/gates.sh` mypy entry removed in the same edit
+  (batch-12 lesson — verified `bash -n` clean; target entry already
+  present, so only a deletion). As-left: 168 files (fold −1 plus the
+  new `test_supervisor_tape_helpers.py` from the paired 081 pass plus 2
+  concurrent-agent untracked files
+  `test_registry_audio_split.py`/`test_registry_ltxv_split.py` landing
+  mid-pass), test count net-zero at 5 preserved (merged file 13→18).
+- Gate evidence (in-container, `voyage:latest`, CPU-only): merged +
+  sources together 23/23 pre-delete; merged solo 18/18 post-delete;
+  neighbors `test_supervisor_prefetch_helpers` +
+  `test_prefetch_shutdown` + `test_prefetch_invalidated_136_168` +
+  `test_generation_stack` 29 passed; `ruff check` + `ruff format
+  --check` + `mypy strict` clean on the merged file; `bash -n` clean
+  on `gates.sh`. Foreign hunks in `tests/test_finalize_fastpath.py` /
+  `tests/test_media_robustness_rank2.py` + many `issues/*` edits coexist
+  untouched.
+
+## Resolution (2026-10-01, prefetch-summary fold pass)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_generation_stack.py` (+56L fold banner/helper/
+  tests, 13→18 tests), deleted `tests/test_prefetch_summary.py`,
+  `scripts/gates.sh` (mypy-list line: `test_prefetch_summary.py` entry
+  removed).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 18/18 post-delete; `ruff check` + `ruff format --check` +
+  `mypy strict` clean on the merged file; `bash -n` clean on `gates.sh`;
+  neighbors 29 passed.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple, augment
+  quad remainder, audio validators, TUI trio, video-worker quartet,
+  finalize/commit merges, leftover singletons incl. `test_hashing` 7 +
+  `test_paths` 8) — one per pass with the same discipline.

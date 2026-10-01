@@ -230,3 +230,61 @@ grep -rn "pytest.mark" tests/ | head -n 20
   when the slow budget tightens; (c) mypy-scope collapse → scripts
   track (the blocking unused-ignore is now gone — collapse is
   unblocked whenever its owner takes it).
+
+## Progress log (2026-10-01, this pass — fastpath + validate legs marked)
+
+- Re-timed both residual sets live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip, `-p no:cacheprovider --durations`):
+  - `tests/test_finalize_fastpath.py`: 6 passed in 10.76s — 4 ffmpeg
+    legs `test_finalize_native_geometry_validates_without_reencode`
+    3.18s / `test_fastpath_skips_part_reencodes_but_keeps_audio` 3.15s
+    / `test_build_final_audio_slice_cache_wired` 2.10s /
+    `test_segment_video_matches_native_fake_segments` 1.97s (was
+    1.37–2.08s batch 13, 1.27–1.99s batch 12 — all four now firmly
+    multi-second); 2 fast legs (`test_slice_cache_key...` <0.005s,
+    `test_cached_slice_take...` 0.21s) — file still mixed, so
+    file-level marking stays rejected per the prior pass.
+  - `tests/test_media_robustness_rank2.py`: 18 passed in 9.64s —
+    4 validate legs `test_validate_dir_as_video...` 1.54s /
+    `test_validate_dir_as_sha256...` 1.41s /
+    `test_validate_deeply_nested_metrics...` 1.39s /
+    `test_validate_dir_as_metrics...` 1.32s (was 0.85–0.97s batch 12
+    — now at the same level as the already-slow publish leg 1.54s in
+    the same file); 11 legs <0.005s + embed legs 0.01s — file still
+    mixed, file-level stays rejected.
+- Marked all 8 per-test `@pytest.mark.slow` (marker lines only, 4+4):
+  the fastpath 4 above + the 4 validate legs. Left unmarked:
+  `test_slice_cache_key...` (<0.005s pure unit) +
+  `test_cached_slice_take...` (0.21s ffmpeg sine, below the
+  multi-second bar) + all probe/run_capture/embed unit legs (<0.02s).
+- Lock legs record-only (forbidden — lock track owns
+  `requirements.lock` w/068): `requirements.lock:25-26` still
+  `httpcore2==2.13.1` / `httpx2==2.13.1`; `tomli` conditional still
+  `pyproject.toml:24` and absent from the lock. Untouched.
+- Gates (in-container `voyage:latest`, CPU-only): `ruff check` +
+  `ruff format --check` + `mypy --strict` clean on both touched
+  files; full two-file run 24 passed in 17.77s; `-m slow` collects
+  10/24 (4 fastpath + 6 media_robustness incl. the 2 pre-existing
+  staging/publish legs) and all 10 pass in 18.59s; `-m "not slow"`
+  collects 14/24.
+- Concurrent-work note: the tree carries other agents' in-flight
+  hunks (`pyproject.toml` 1-line, `supervisor.py`,
+  `registry_records.py`, new `registry_audio`/`registry_ltxv`/
+  `supervisor_tape` modules + 3 new test files, `LTX2.md`,
+  `tango/Tango`) — own diff is exactly the 8 marker lines
+  (verified `git diff`), nothing else touched.
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: fastpath + validate legs DONE (all 8 residual legs marked
+  with wall-time evidence). Files changed:
+  `tests/test_finalize_fastpath.py` (4 marker lines),
+  `tests/test_media_robustness_rank2.py` (4 marker lines).
+  DESIGN proposals: none. Test/gate evidence as in the log above.
+- Residuals: (a) lock typo (`requirements.lock:25-26`) + tomli-freeze
+  note → lock track w/068 (forbidden here, unchanged); (b)
+  mypy-scope collapse → scripts track (batch 13 removed the blocking
+  stale ignore; `scripts/` foreign here); (c) cache guard already
+  landed (batch 12, gates track). Slow-budget follow-up:
+  `test_cached_slice_take...` (0.21s) stays unmarked until the budget
+  tightens below the multi-second bar.

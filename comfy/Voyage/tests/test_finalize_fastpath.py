@@ -123,6 +123,7 @@ def test_cached_slice_take_runs_ffmpeg_once_for_identical_windows(
     assert third.exists() and third.stat().st_size > 0
 
 
+@pytest.mark.slow
 def test_segment_video_matches_native_fake_segments(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -134,6 +135,7 @@ def test_segment_video_matches_native_fake_segments(tmp_path: Path) -> None:
     assert not _segment_video_matches_target(tmp_path / "no-such-segment", 768, 432, 24)
 
 
+@pytest.mark.slow
 def test_finalize_native_geometry_validates_without_reencode(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -149,6 +151,7 @@ def test_finalize_native_geometry_validates_without_reencode(tmp_path: Path) -> 
     assert duration == pytest.approx(4.0, abs=0.15)
 
 
+@pytest.mark.slow
 def test_build_final_audio_slice_cache_wired(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -166,6 +169,7 @@ def test_build_final_audio_slice_cache_wired(tmp_path: Path) -> None:
     assert any(record.get("event") == "segment_committed" for record in metrics)
 
 
+@pytest.mark.slow
 def test_fastpath_skips_part_reencodes_but_keeps_audio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

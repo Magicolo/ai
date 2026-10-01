@@ -380,3 +380,88 @@ is folded as their tracker (not deleted) until the remaining splits land.
   owner, not this track.
 - Never committed; `000_INDEX.md` / `DESIGN.md` / `AGENTS.md`
   untouched (verified via `git diff --name-only`).
+
+## Progress log (2026-10-01, two registry-family extractions)
+
+- Re-measured host `wc -l` at pass start (in-container
+  `voyage:latest`, CPU-only): `registry_records.py` 665 (after the
+  079 longlive2 removal); after both extractions 646. Full signal
+  table this pass: `supervisor.py` 2624, `media.py` 1631,
+  `video_causvid.py` 1226, `model_registry.py` 1188,
+  `video_ltxv.py` 1159, `tui.py` 1146, `config.py` 1028,
+  `cli.py` 736 (seam, stable point), new `registry_audio.py` 105,
+  new `registry_ltxv.py` 84, `registry_film.py` 65,
+  `registry_realesrgan.py` 75, `registry_inspector.py` 75,
+  `test_tui_app.py` 989, `test_causvid_worker.py` 774.
+- Tree discipline per §9: `git diff --name-only` on owned targets
+  was empty before every edit; `Voyage/` quiet except
+  `M Voyage/LTX2.md` (left intact, never touched); concurrent
+  `../tango/Tango` untracked, never touched. `supervisor.py`,
+  `media.py`, video workers, `model_registry.py`, `cli_observe.py`
+  deliberately untouched per the brief (foreign/hot or owned
+  elsewhere).
+- Landed (1) LTXV family (082 residual, smallest decoupled row):
+  new `voyage/registry_ltxv.py` (84L, DESIGN Phase 7, §§84-85)
+  owns all 13 `LTXV_*` pins + 2 `EXPECTED_LTXV_*` hashes +
+  `_record_ltxv` + `_describe_ltxv` verbatim;
+  `registry_records.py` re-exports all 17 names via explicit-`as`
+  self-aliases and carries move comments at the four old sites;
+  `model_registry.py` untouched (its
+  `from voyage.registry_records import ... LTXV_*` chain holds
+  through the facade). TDD: `tests/test_registry_ltxv_split.py`
+  written first (3 agreement tests mirroring the film suite) —
+  watched fail on collection (`ModuleNotFoundError:
+  voyage.registry_ltxv`), then green after the move.
+- Landed (2) audio family (next-smallest decoupled row): new
+  `voyage/registry_audio.py` (105L, DESIGN §§6, 37) owns all 13
+  `ACE_*` pins + `_ACE_CHECKPOINTS_RELATIVE` +
+  `_ACE_LM_RELATIVE` + `_record_audio` + `_describe_audio`
+  verbatim; same facade + move-comment recipe (four old sites).
+  One deliberate deviation from the film pattern: this row
+  carries NO expected ingest hash (manifest record holds no sha
+  — same open residual as inspector/CausVid), so the new module
+  drops the unused `sha256_file` import (ruff F401 would fire)
+  and both docstrings record the residual. TDD: same
+  red-then-green (`ModuleNotFoundError: voyage.registry_audio`).
+- Max TWO reached; the 036 remainder stays recorded, not taken:
+  supervisor commit methods, `media.py` workers/media surface
+  (open since batch 4), video-worker splits (`video_ltxv.py`
+  1159 / `video_causvid.py` 1226), then the two big test files by
+  area (`test_tui_app.py` 989 / `test_causvid_worker.py` 774).
+
+## Resolution (2026-10-01, two registry-family extractions)
+
+- Verdict: TRACKED — no 036-seam extraction this pass (quota filled by
+  the two 082 family splits above); signal table in the entry above
+  stays current except `registry_records.py` 665→646 plus new
+  `registry_ltxv.py` 84 + `registry_audio.py` 105 in the split index.
+- Files changed (owned scope only): `voyage/registry_ltxv.py`
+  (new, 84L), `voyage/registry_audio.py` (new, 105L),
+  `voyage/registry_records.py` (2 facades + 8 move comments, net
+  −19L), `tests/test_registry_ltxv_split.py` (new, 3 tests),
+  `tests/test_registry_audio_split.py` (new, 3 tests).
+  `model_registry.py`, `supervisor.py`, `media.py`,
+  video workers, `cli_observe.py` untouched.
+  Gate evidence: in-container `ruff check` + `ruff format --check` +
+  `mypy strict` clean on all 5 touched files; 15/15 split/agreement
+  tests green (`test_registry_{ltxv,audio,film,realesrgan,inspector}_split`);
+  neighbors 69 green (`test_registry_split`,
+  `test_registry_pins`, `test_augment_models`,
+  `test_augment_weight_loading`, `test_checkpoint_safety`,
+  `test_director_models_dir`) + 60 on the worker-adjacent set
+  (`test_ltxv` + `test_causvid_prep` + `test_sfx_contract`).
+  Full `gates.sh` not run (quota is per-file gates + scoped suites).
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: both new
+  modules follow existing contracts (DESIGN Phase 7 LTXV weights;
+  DESIGN §§6, 37 ACE-Step music stack) and the issue-082
+  move-verbatim + re-export + agreement-test convention; a future
+  split index should list `registry_ltxv.py` and `registry_audio.py`
+  alongside `registry_film.py` / `registry_realesrgan.py` /
+  `registry_inspector.py`."
+  Residuals: `registry_records.py` 646 with 3 families remaining
+  (director triple incl. shared MINILM, causvid+wan21, sfx triple),
+  plus the 036 remainder above (supervisor commit methods,
+  `media.py` surface, video workers, test clusters) — each a future
+  single-group pass. Manifest-race fix + supervisor-side derivation
+  stay with their owners (recorded in 082, not touched here).

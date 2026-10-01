@@ -14,6 +14,57 @@ from pathlib import Path
 
 from voyage.atomic import JsonValue
 from voyage.hashing import sha256_file
+from voyage.registry_audio import (
+    _ACE_CHECKPOINTS_RELATIVE as _ACE_CHECKPOINTS_RELATIVE,
+)
+from voyage.registry_audio import (
+    _ACE_LM_RELATIVE as _ACE_LM_RELATIVE,
+)
+from voyage.registry_audio import (
+    ACE_CHECKPOINTS_SUBDIR as ACE_CHECKPOINTS_SUBDIR,
+)
+from voyage.registry_audio import (
+    ACE_LM17_MIN_BYTES as ACE_LM17_MIN_BYTES,
+)
+from voyage.registry_audio import (
+    ACE_LM_ALLOW as ACE_LM_ALLOW,
+)
+from voyage.registry_audio import (
+    ACE_LM_MIN_BYTES as ACE_LM_MIN_BYTES,
+)
+from voyage.registry_audio import (
+    ACE_LM_REPO as ACE_LM_REPO,
+)
+from voyage.registry_audio import (
+    ACE_LM_REVISION as ACE_LM_REVISION,
+)
+from voyage.registry_audio import (
+    ACE_LM_SUBDIR as ACE_LM_SUBDIR,
+)
+from voyage.registry_audio import (
+    ACE_MAIN_ALLOW as ACE_MAIN_ALLOW,
+)
+from voyage.registry_audio import (
+    ACE_MAIN_LICENSE as ACE_MAIN_LICENSE,
+)
+from voyage.registry_audio import (
+    ACE_MAIN_REPO as ACE_MAIN_REPO,
+)
+from voyage.registry_audio import (
+    ACE_MAIN_REVISION as ACE_MAIN_REVISION,
+)
+from voyage.registry_audio import (
+    ACE_MAIN_SUBDIR as ACE_MAIN_SUBDIR,
+)
+from voyage.registry_audio import (
+    ACE_TURBO_MIN_BYTES as ACE_TURBO_MIN_BYTES,
+)
+from voyage.registry_audio import (
+    _describe_audio as _describe_audio,
+)
+from voyage.registry_audio import (
+    _record_audio as _record_audio,
+)
 from voyage.registry_film import (
     EXPECTED_FILM_SHA256 as EXPECTED_FILM_SHA256,
 )
@@ -73,6 +124,57 @@ from voyage.registry_inspector import (
 )
 from voyage.registry_inspector import (
     _record_inspector as _record_inspector,
+)
+from voyage.registry_ltxv import (
+    EXPECTED_LTXV_DIT_SHA256 as EXPECTED_LTXV_DIT_SHA256,
+)
+from voyage.registry_ltxv import (
+    EXPECTED_LTXV_UPSC_SHA256 as EXPECTED_LTXV_UPSC_SHA256,
+)
+from voyage.registry_ltxv import (
+    LTXV_COMMIT as LTXV_COMMIT,
+)
+from voyage.registry_ltxv import (
+    LTXV_COMMIT_SHORT as LTXV_COMMIT_SHORT,
+)
+from voyage.registry_ltxv import (
+    LTXV_DIT_FILE as LTXV_DIT_FILE,
+)
+from voyage.registry_ltxv import (
+    LTXV_DIT_MIN_BYTES as LTXV_DIT_MIN_BYTES,
+)
+from voyage.registry_ltxv import (
+    LTXV_HF_REPO as LTXV_HF_REPO,
+)
+from voyage.registry_ltxv import (
+    LTXV_HF_REVISION as LTXV_HF_REVISION,
+)
+from voyage.registry_ltxv import (
+    LTXV_SUBDIR as LTXV_SUBDIR,
+)
+from voyage.registry_ltxv import (
+    LTXV_TE_ALLOW as LTXV_TE_ALLOW,
+)
+from voyage.registry_ltxv import (
+    LTXV_TE_REPO as LTXV_TE_REPO,
+)
+from voyage.registry_ltxv import (
+    LTXV_TE_REVISION as LTXV_TE_REVISION,
+)
+from voyage.registry_ltxv import (
+    LTXV_TE_SUBDIR as LTXV_TE_SUBDIR,
+)
+from voyage.registry_ltxv import (
+    LTXV_UPSC_FILE as LTXV_UPSC_FILE,
+)
+from voyage.registry_ltxv import (
+    LTXV_UPSC_MIN_BYTES as LTXV_UPSC_MIN_BYTES,
+)
+from voyage.registry_ltxv import (
+    _describe_ltxv as _describe_ltxv,
+)
+from voyage.registry_ltxv import (
+    _record_ltxv as _record_ltxv,
 )
 from voyage.registry_realesrgan import (
     EXPECTED_REALESRGAN_SHA256 as EXPECTED_REALESRGAN_SHA256,
@@ -164,56 +266,8 @@ QWEN4B_AWQ_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LIC
 # Phase 5 inspector pins live in `voyage.registry_inspector` (issue 082;
 # re-exported at the top so existing importers keep working).
 
-# Phase 4 music stack (DESIGN §§6, 37). ACE-Step 1.5 turbo DiT + 0.6B
-# planner LM (spec V1: 2B turbo + 0.6B LM, 8GB floor; XL rejected).
-# Both repos ungated. Layout lesson from the Step 6 E2E: the handler's
-# initialize_service gates on MAIN_MODEL_COMPONENTS (turbo + vae + text
-# encoder + the 1.7B default LM) directly under <project>/checkpoints/,
-# and auto-downloads the full 9.4GB bundle when anything is missing — so
-# the registry pre-downloads ALL FOUR main components there (the 1.7B LM
-# is load-bearing for the gate even though generation uses the 0.6B via
-# an explicit lm_model_path), plus the 0.6B planner LM alongside.
-ACE_MAIN_REPO = "ACE-Step/Ace-Step1.5"
-
-ACE_MAIN_REVISION = "19671f406d603126926c1b7e2adc169acbcade22"
-
-ACE_MAIN_SUBDIR = "acestep"
-
-ACE_CHECKPOINTS_SUBDIR = "checkpoints"
-
-ACE_MAIN_ALLOW = [
-    "acestep-v15-turbo/*",
-    "vae/*",
-    "Qwen3-Embedding-0.6B/*",
-    "acestep-5Hz-lm-1.7B/*",
-    "config.json",
-]
-
-ACE_TURBO_MIN_BYTES = 4_000_000_000
-
-ACE_LM17_MIN_BYTES = 3_000_000_000
-
-ACE_MAIN_LICENSE = "Apache 2.0 (upstream code repo; no LICENSE file in weight repo)"
-
-ACE_LM_REPO = "ACE-Step/acestep-5Hz-lm-0.6B"
-
-ACE_LM_REVISION = "148d8ea0225bdab342ee1ae3a354275ccd60ca80"
-
-ACE_LM_SUBDIR = "acestep-5Hz-lm-0.6B"
-
-ACE_LM_ALLOW = [
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "special_tokens_map.json",
-    "added_tokens.json",
-    "chat_template.jinja",
-]
-
-ACE_LM_MIN_BYTES = 1_000_000_000
+# Phase 4 music-stack pins live in `voyage.registry_audio` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 MINILM_HF_REPO = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -238,36 +292,8 @@ MINILM_MIN_BYTES = 50_000_000
 
 MINILM_LICENSE = "Apache 2.0"
 
-# Phase 7 LTXV alternative backend: 2B distilled DiT + spatial upscaler
-# (0.9.8) plus the PixArt T5 tokenizer/encoder the pipeline needs for
-# CPU-precomputed bf16 embeds. Both HF repos ungated; weights verified
-# present in ~/.cache/voyage-models/ltxv-2b (Slice 1 probe). License: check
-# the weight repo for the exact Lightricks community-license text.
-LTXV_HF_REPO = "Lightricks/LTX-Video"
-
-LTXV_HF_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
-
-LTXV_SUBDIR = "ltxv-2b"
-
-LTXV_DIT_FILE = "ltxv-2b-0.9.8-distilled.safetensors"
-
-LTXV_UPSC_FILE = "ltxv-spatial-upscaler-0.9.8.safetensors"
-
-LTXV_DIT_MIN_BYTES = 6_000_000_000
-
-LTXV_UPSC_MIN_BYTES = 400_000_000
-
-LTXV_TE_REPO = "PixArt-alpha/PixArt-XL-2-1024-MS"
-
-LTXV_TE_REVISION = "b89adadeccd9ead2adcb9fa2825d3fabec48d404"
-
-LTXV_TE_SUBDIR = "PixArt-XL-2-1024-MS"
-
-LTXV_TE_ALLOW = ["tokenizer/*", "text_encoder/*"]
-
-LTXV_COMMIT = "4b2d053057623ddd4d0a1d3e9cd28890e9ef487f"
-
-LTXV_COMMIT_SHORT = "4b2d053"
+# Phase 7 LTXV pins live in `voyage.registry_ltxv` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # Stream D CausVid backend (DESIGN §5.4, TASK §§19/23.4/25.3, §30.1).
 # Worker: `voyage/workers/video_causvid.py` (backend `causvid`, registered
@@ -443,9 +469,8 @@ MMAUDIO_CLIP_LICENSE = "Apple AMLR (research, see repo LICENSE)"
 # (A removed video backend's generator hash lived here until issue
 # 079 deleted it with the backend.)
 
-EXPECTED_LTXV_DIT_SHA256 = "76aa8c4786af752fa6f951947129d5290c3c6c0b2fadcadea6b5e114ae2cad8f"
-
-EXPECTED_LTXV_UPSC_SHA256 = "5b076031c6f860db9037a54f3bb819f10bfb5532ea26a6d30062292428a0c208"
+# EXPECTED_LTXV_* hashes live in `voyage.registry_ltxv` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # EXPECTED_FILM_SHA256 lives in `voyage.registry_film` (issue 082;
 # re-exported at the top so existing importers keep working).
@@ -453,9 +478,8 @@ EXPECTED_LTXV_UPSC_SHA256 = "5b076031c6f860db9037a54f3bb819f10bfb5532ea26a6d3006
 # EXPECTED_REALESRGAN_SHA256 lives in `voyage.registry_realesrgan`
 # (issue 082; re-exported at the top so existing importers keep working).
 
-_ACE_CHECKPOINTS_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}"
-
-_ACE_LM_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}/{ACE_LM_SUBDIR}"
+# _ACE_* derived relatives live in `voyage.registry_audio` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 
 def _record_director(models_dir: Path) -> dict[str, JsonValue]:
@@ -485,46 +509,12 @@ def _record_director(models_dir: Path) -> dict[str, JsonValue]:
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _record_audio(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Phase 4 music stack."""
-    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
-    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
-    ace_dir = models_dir / ACE_MAIN_SUBDIR
-    planner_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
-    return {
-        "repo": ACE_MAIN_REPO,
-        "revision": ACE_MAIN_REVISION,
-        "model_dir": str(ace_dir),
-        "turbo_bytes": turbo_weights.stat().st_size if turbo_weights.exists() else 0,
-        "license": ACE_MAIN_LICENSE,
-        "planner_repo": ACE_LM_REPO,
-        "planner_revision": ACE_LM_REVISION,
-        "planner_dir": str(checkpoints_dir / ACE_LM_SUBDIR),
-        "planner_bytes": planner_weights.stat().st_size if planner_weights.exists() else 0,
-    }
+# Audio record builder lives in `voyage.registry_audio`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _record_ltxv(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Phase 7 LTXV stack."""
-    ltxv_dir = models_dir / LTXV_SUBDIR
-    dit_path = ltxv_dir / LTXV_DIT_FILE
-    upsc_path = ltxv_dir / LTXV_UPSC_FILE
-    return {
-        "repo": LTXV_HF_REPO,
-        "revision": LTXV_HF_REVISION,
-        "model_dir": str(ltxv_dir),
-        "checkpoint_bytes": dit_path.stat().st_size,
-        "files": [LTXV_DIT_FILE, LTXV_UPSC_FILE],
-        "code_commit": LTXV_COMMIT,
-        "text_encoder_repo": LTXV_TE_REPO,
-        "text_encoder_revision": LTXV_TE_REVISION,
-        # Per-file shas (071): verify_model checks each against these so a
-        # mutated weight fails ensure even though presence + floors pass.
-        "checkpoint_shas": {
-            f"{LTXV_SUBDIR}/{LTXV_DIT_FILE}": sha256_file(dit_path),
-            f"{LTXV_SUBDIR}/{LTXV_UPSC_FILE}": sha256_file(upsc_path),
-        },
-    }
+# LTXV record builder lives in `voyage.registry_ltxv`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 def _record_causvid(models_dir: Path) -> dict[str, JsonValue]:
@@ -618,21 +608,12 @@ def _describe_director_awq(models_dir: Path) -> str:
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_audio(models_dir: Path) -> str:
-    """Exact OK string for the music stack (byte-stable)."""
-    checkpoints_dir = models_dir / ACE_MAIN_SUBDIR / ACE_CHECKPOINTS_SUBDIR
-    turbo_weights = checkpoints_dir / "acestep-v15-turbo" / "model.safetensors"
-    planner_weights = checkpoints_dir / ACE_LM_SUBDIR / "model.safetensors"
-    return (
-        f"audio-acestep OK (turbo {turbo_weights.stat().st_size / 1024**3:.1f} GiB "
-        f"+ planner LM {planner_weights.stat().st_size / 1024**3:.1f} GiB)"
-    )
+# Audio describe helper lives in `voyage.registry_audio`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_ltxv(models_dir: Path) -> str:
-    """Exact OK string for the LTXV stack (byte-stable)."""
-    dit_path = models_dir / LTXV_SUBDIR / LTXV_DIT_FILE
-    return f"ltxv-2b OK (DiT {dit_path.stat().st_size / 1024**3:.1f} GiB + upscaler)"
+# LTXV describe helper lives in `voyage.registry_ltxv`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 def _describe_sfx(models_dir: Path) -> str:

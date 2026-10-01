@@ -503,3 +503,42 @@ own plan.
   1441,1660` + `dict[str, Any]` `:237,:259,:296,:1011,:1037,:1155,:
   1239,:1291,:1899,:1903,:2129,:2138,:2459`; `voyage/model_registry.py:
   953,963`; `voyage/atomic.py:97,110,118` (by design).
+
+## Progress log (2026-10-01, verification-only pass — blocked-leg re-probe)
+
+- Read-only probes (host grep + live file reads, no source edits for
+  035): comparable `Any` total in `voyage/*.py voyage/workers/*.py` is
+  now **492** (was 387 — growth is new files since: `augment_worker.py`
+  60, `video_causvid.py` 39, `video_ltxv.py` 33, `segment_manifest.py`
+  21, `supervisor.py` 20, `workers/director.py` 20; the 079 delete took
+  out `video_longlive.py`'s 32). ANN probe in-container: **360**
+  (ANN401 345 + ANN001 11 + ANN202 4; was 339).
+- Landed narrowings all HOLD (grep-verified): `scoreboard.py` zero code
+  `Any` (docstring mention only), `models_ensure.py` zero code `Any`,
+  `registry_records.py` zero `Any`, `model_registry.py` down to the
+  import + `snapshot_kwargs`/`file_kwargs` (`:879,:889`).
+- Blocked legs re-verified still-blocked (sites unchanged since the last
+  live mypy probes — no edit attempted): leg 1 `rpc.py:328 call()`
+  still `payload: dict[str, Any]` (deferral comment intact); the
+  supervisor traps stand (`supervisor.py:570` `dict(payload)`, `:1121`
+  `{"texts": texts}`, `:1132` `float(value)`); leg 2 supervisor
+  `dict[str, object]` chain intact (`:534,556/558,810,1198,1233,1285,
+  1433/1435,1466,1654` + `dict[str, Any]` `:239,:253,:290,:1005,:1031,
+  :1149,:1893,:2123,:2132,:2453`); leg 4 hub kwargs still
+  `dict[str, Any]` (`model_registry.py:879,889` — `JsonValue` union too
+  wide for the hub signatures, batch-12 probe evidence stands). The 079
+  delete touched `supervisor.py`/`model_registry.py` only at the
+  longlive surface (module map, init branch, spec row, WAN pins) —
+  disjoint from every chain site above.
+- No annotation-only narrowing is greenable: the only remaining
+  `dict[str, Any]` in quiet files are the three proven-blocked legs.
+
+## Resolution (2026-10-01, verification-only pass)
+
+- Verdict: DEFERRED (record-only) — all legs residual with live evidence
+  above. Files changed: none for 035 (this issue file only). Gate
+  evidence: n/a (no change). DESIGN proposals: none.
+- Residuals (unchanged): `voyage/rpc.py:328` (`call()` payload/return)
+  + `:281,:284` (fd juggling, by design); supervisor chain (lines
+  above); `voyage/model_registry.py:879,889` (hub kwargs);
+  `voyage/atomic.py:97,110,118` (by design).

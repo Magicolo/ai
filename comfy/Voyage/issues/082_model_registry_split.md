@@ -224,3 +224,103 @@ grep -n "_sha256\|_MANIFEST_LOCK\|_repair_manifest" voyage/model_registry.py voy
   families per pass, facade chain `registry_<family>` →
   `registry_records` → `model_registry`, agreement test per family);
   manifest-race fix shape unchanged from the batch-7 entry.
+
+## Progress log (2026-10-01, ltxv + audio families)
+
+- Pre-checks live in-container (`voyage:latest`, CPU-only,
+  `docker run --rm -v $PWD:/app -w /app voyage:latest ...` from
+  `Voyage/`): `wc -l voyage/registry_records.py` → 665 at pass
+  start (747 at batch-13 close, minus 079 longlive2 removal);
+  `git diff --name-only` on owned targets empty before every edit
+  (`Voyage/` quiet except `M Voyage/LTX2.md`, left intact per
+  brief); `model_registry.py` untouched (facade chain holds).
+- Re-verified remaining families live via
+  `grep -n "^QWEN\|^MINILM\|^ACE_\|^LTXV\|^CAUSVID\|^WAN21\|^MMAUDIO\|^def _record_\|^def _describe_"`:
+  director QWEN_* + QWEN4B_AWQ_* + shared MINILM_* (coupled via
+  both `_record_director` builders), audio ACE pair, LTXV row,
+  causvid+WAN21 row, SFX triple — all decoupled except the
+  director triple (MINILM shared). Two smallest decoupled rows
+  taken this pass (quota convention, max two): LTXV then audio.
+- TDD failing-first, twice: wrote
+  `tests/test_registry_ltxv_split.py` then
+  `tests/test_registry_audio_split.py` (3 agreement tests each:
+  pins single-sourced, builders single-sourced, MODEL_SPECS row
+  points at family builders — mirroring
+  `test_registry_film_split.py`) BEFORE the new modules —
+  in-container collection failed with
+  `ModuleNotFoundError: No module named 'voyage.registry_ltxv'`
+  (red) and `... 'voyage.registry_audio'` (red), then created
+  each module + re-export until green.
+- Extraction (1): new `voyage/registry_ltxv.py` (84L, DESIGN
+  Phase 7, §§84-85) owns all 13 `LTXV_*` pins +
+  `EXPECTED_LTXV_DIT_SHA256` + `EXPECTED_LTXV_UPSC_SHA256` +
+  `_record_ltxv` + `_describe_ltxv` verbatim; `registry_records.py`
+  re-exports all 17 names via explicit-`as` self-aliases (sorted
+  between the inspector and realesrgan blocks) and carries move
+  comments at the four old sites (pins, EXPECTED hashes, record,
+  describe). `video_ltxv.py:42` imports the four used pins via
+  `model_registry` (facade-safe, zero edits); `cli_observe.py`
+  resolves `LTXV_*_REVISION` via call-time `getattr` (facade-safe).
+- Extraction (2): new `voyage/registry_audio.py` (105L, DESIGN
+  §§6, 37) owns all 13 `ACE_*` pins + `_ACE_CHECKPOINTS_RELATIVE`
+  + `_ACE_LM_RELATIVE` + `_record_audio` + `_describe_audio`
+  verbatim (next-smallest decoupled row); same facade + move
+  comments (four old sites, audio block sorted before film).
+  Deliberate deviation from the film recipe, recorded in both
+  docstrings: no EXPECTED hash exists for this row (manifest
+  record carries no sha — same open residual as inspector/
+  CausVid), so the new module omits the `sha256_file` import
+  (ruff F401 would fire). No worker imports ACE pins directly
+  (only `model_registry` + `cli_observe` getattr) — facade-safe.
+- Gate evidence (in-container `voyage:latest`, CPU-only): new
+  suites 3+3 passed; combined split/agreement 15 passed
+  (`test_registry_{ltxv,audio,film,realesrgan,inspector}_split`);
+  neighbors 69 passed (`test_registry_split` +
+  `test_registry_pins` + `test_augment_models` +
+  `test_augment_weight_loading` + `test_checkpoint_safety` +
+  `test_director_models_dir`) + 60 passed on the worker-adjacent
+  set (`test_ltxv` + `test_causvid_prep` + `test_sfx_contract`
+  alongside the new suites — LTXV worker facade path covered).
+  Per-file gates: `ruff check` + `ruff format --check` + `mypy
+  strict` clean on all 5 touched files (`registry_ltxv.py`,
+  `registry_audio.py`, `registry_records.py`, both new tests).
+  One isort catch on the way (`_ACE_*` constants sort before
+  `ACE_*` in the facade) — fixed via in-container
+  `ruff check --fix`, all green after. No `pyproject.toml` change
+  (family modules are clean under the base rule set).
+- Remaining families in `registry_records.py` (646L, live line
+  numbers post-pass): director QWEN_* (`QWEN_HF_REPO:216`,
+  `QWEN4B_AWQ_HF_REPO:244`, shared `MINILM_HF_REPO:272` +
+  `_record_director:485` + `_describe_director:564` +
+  `_record_director_awq:576` + `_describe_director_awq:597`);
+  causvid+WAN21 (`CAUSVID_COMMIT:308`, `WAN21_HF_REPO:342` +
+  `_record_causvid:520` + `_describe_causvid:627`); SFX triple
+  (`MMAUDIO_CODE_COMMIT:379`, `MMAUDIO_VOCODER_REPO:414`,
+  `MMAUDIO_CLIP_REPO:436` + `_record_sfx:542` +
+  `_describe_sfx:619`). No candidate proved coupled mid-pass —
+  both extractions landed as planned.
+
+## Resolution (2026-10-01, ltxv + audio families)
+
+- Verdict: **partial** — fourth and fifth per-family splits landed;
+  `registry_records.py` 665→646L (net −19L; facade imports
+  outweigh each moved block singly; payoff compounds as the
+  remaining 3 follow).
+- Files changed: `voyage/registry_ltxv.py` (new, 84L),
+  `voyage/registry_audio.py` (new, 105L),
+  `voyage/registry_records.py` (2 facades + 8 move comments, net
+  −19L), `tests/test_registry_ltxv_split.py` (new, 3 tests),
+  `tests/test_registry_audio_split.py` (new, 3 tests).
+- Residual (open, ordered): (1) remaining 3 per-family splits
+  (director triple incl. shared MINILM, causvid+wan21, sfx triple
+  — same recipe; supervisor-side derivation stays with its
+  owner); (2) in-core manifest read-modify-write race fix +
+  `_MANIFEST_LOCK`/`_repair_manifest` removal (needs the 3
+  `test_containers_rank2.py` repair tests re-pointed; runtime
+  locking behavior change — separate pass, owner-held).
+- DESIGN proposal (not applied, see return report): per-family
+  modules continue the `registry_film.py` pattern (one to two
+  families per pass, facade chain `registry_<family>` →
+  `registry_records` → `model_registry`, agreement test per
+  family); manifest-race fix shape unchanged from the batch-7
+  entry.

@@ -229,3 +229,25 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
 - Residuals: unchanged — (1) parity rescue research + (2) the
   `test_final_blend_scale.py:107-136` owner's 31-input-scale proof
   before any single-graph join lands.
+
+## Progress log (2026-10-01, verification-only pass — PIN CONFIRMATION ONLY)
+
+- Premise re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip): the ≤2-input pin still holds —
+  `tests/test_final_blend_scale.py` +
+  `tests/test_issue_152_blend_probe_memo.py` +
+  `tests/test_issue_152_wide_manual_join_proof.py` = **14 passed**
+  unmodified. `git diff HEAD --` on `voyage/sfx_finalize.py` +
+  `voyage/media.py` is EMPTY and both files stay UNCHANGED by this leg.
+- Verdict: PROVEN-BLOCKED, unchanged — hang PASS / parity FAIL stands
+  (batch-12 proof), pairwise probe-memo fold remains, no behavior
+  change. Nothing to do.
+
+## Resolution (2026-10-01, verification-only pass)
+
+- Verdict: confirmed blocked (pin holds, proof split stands). Files
+  changed: none (this issue file only). DESIGN proposals: none (the
+  batch-12 pairwise-fold proposal stands as quoted).
+- Residuals: unchanged — (1) parity rescue research + (2) the
+  `test_final_blend_scale.py` owner's 31-input-scale proof before any
+  single-graph join lands.

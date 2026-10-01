@@ -415,3 +415,46 @@ grep -rln "longlive" tests/ docs/ reports/
   the quoted patch in the delivery message (079 §11/backends section:
   backend table drops the longlive2 row, recovery-format section
   drops the `.pt` tape, migration note for stored runs).
+
+## Progress log (2026-10-01, 079-followup sweep — orphan grep + pins + one orphan landed)
+
+- Orphan sweep (host `grep -rni longlive`, read-only): `voyage/` names
+  it ONLY in the removal machinery (`config.py:31 REMOVED_VIDEO_BACKENDS`
+  + `removed_backend_suffix` `:43` + docstrings `:34-38`); `worker/` +
+  `scripts/` are CLEAN; `tests/` mentions it ONLY in removal-contract
+  tests (`test_longlive2_removed_079.py`, `test_generate.py`
+  migration-hint test, `test_registry_pins.py` absence gates);
+  docs/reports mention it ONLY in historical markers/kept evidence
+  (`video-backends.md` + `UPSTREAM_LONG_LIVE_PATCHES.md` HISTORICAL
+  headers, `longlive-audit.md` dated evidence, `BENCHMARKING.md:85`
+  filename pointer, `TASK.md` §30 log). Migration wiring is generic
+  (`config` `_video_preset` `:978` / `_audio_preset` `:994` /
+  `_sfx_preset` `:1005` + `load_config` `:791` + `supervisor.
+  video_worker_module` `:210-218` + `cli_run_ops.cmd_init` `:72-77`,
+  all via `removed_backend_suffix`, no literal outside `config.py`).
+  `__pycache__` hits are gitignored stale bytecode only.
+- 070 gate tests ARE updated for the delete (`test_registry_pins.py:28`
+  `-r`-row comment, `:108` `test_wan22_pins_removed_with_longlive2_backend`,
+  `:115` `test_floating_snapshot_set_is_empty`) — the batch-13
+  "foreign fallout" note is resolved at HEAD `2217b5e` (commit message:
+  "079 longlive2 full delete (+070 closed)... gates green").
+- One orphan LANDED (owned, quiet file, zero behavior change):
+  `Voyage/pyproject.toml:110` per-file-ignores entry for the deleted
+  `voyage/workers/video_longlive.py` (the only `video_longlive` hit
+  outside the designed residual set) — line deleted. No TDD (no
+  behavior to drive — ruff silently ignores non-matching globs);
+  gate evidence below instead, per contract.
+
+## Resolution (2026-10-01, 079-followup sweep)
+
+- Verdict: SWEPT + one orphan landed. Files changed: `Voyage/pyproject.toml`
+  only (1-line deletion above). No test files changed.
+- Gate evidence (in-container `voyage:latest`, CPU-only, no host pip):
+  `ruff check .` — All checks passed (full tree, proves the deletion
+  changes nothing observable); `pytest tests/test_registry_pins.py
+  tests/test_longlive2_removed_079.py tests/test_generate.py
+  tests/test_backend_registry.py` — 74 passed.
+  DESIGN proposals: none.
+- Residuals: none new — end-state is the designed residual (hint
+  machinery + contract tests + dated evidence). Next sweep re-runs the
+  four greps above.

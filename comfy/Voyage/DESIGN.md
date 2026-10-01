@@ -4328,6 +4328,7 @@ GPU-specific packages remain in workers.
 # 84. Model version pinning
 
 > As-built (batch-7-2026-09-30, issues 084/085): per-family split target — `voyage/registry_records.py` owns pins + `_record_*`/`_describe_*` builders (767L); `model_registry.py` keeps dataclasses + `MODEL_SPECS` assembly + download/verify/manifest core (1270L); future per-family `registry_{ltxv,causvid,qwen,audio,sfx,augment}.py` target recorded.
+> As-built (batch-14-2026-10-01, issue 082): `registry_ltxv.py` (84L) + `registry_audio.py` (105L) extracted move-verbatim + facade + agreement tests; remaining families: director triple (shared MINILM), causvid+WAN21, SFX triple.
 
 For every model integration:
 
@@ -8101,3 +8102,11 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Partial: 036/081/082 (+`registry_realesrgan.py` +`registry_inspector.py` +registry-film pattern extractions; no DESIGN text change per convention, folded here only), 088 (+`sfx_parser_parity` fold), 089 (+`integration:119` ignore removed), 166 (`resolve_augment_weights` registry-to-loader seam — see §§56-57 batch-13 as-built).
 - Record-only: 031/035 (no DESIGN text change).
 - Blocked-remain: 152-proven (pairwise fold stands until parity proven — see §56 batch-12 correction; no new note, standing note already present).
+
+## Batch 14 (2026-10-01)
+
+- Resolved: 089-fastpath/validate-legs (marker-only change otherwise; none outstanding beyond the fastpath/validate legs).
+- Partial: 082 (`registry_ltxv.py` 84L + `registry_audio.py` 105L extracted move-verbatim + facade + agreement tests; remaining families: director triple (shared MINILM), causvid+WAN21, SFX triple — see §84 batch-14 as-built), 081 (`supervisor_tape.py` 51L, `tape_tail_sha_matches` extracted move-verbatim + facade + 6 agreement tests; `supervisor.py` 2650→2624L; no inline DESIGN change per convention, folded here only), 036 (see issue), 088 (`prefetch_summary`→`generation_stack` fold landed; remaining clusters listed in the issue).
+- Record-only: 031/035 (none new; record-only re-probes; batch-12/13 proposals stand).
+- Confirmed-blocked: 152/166 (152 none new; record-only re-probe, batch-12/13 proposals stand).
+- Verified: 079-clean (none new; followup sweep clean; one orphan: deleted worker's pyproject per-file-ignores entry removed), 070-tests-updated, 093-stub (none outstanding; stub verified, rm pending approval).

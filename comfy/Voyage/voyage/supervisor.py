@@ -110,6 +110,9 @@ from voyage.supervisor_proposal import (
 from voyage.supervisor_proposal import (
     previous_transition_captions as previous_transition_captions,
 )
+from voyage.supervisor_tape import (
+    tape_tail_sha_matches as tape_tail_sha_matches,
+)
 from voyage.vision.metrics import (
     Histogram,
     frame_histogram,
@@ -739,37 +742,8 @@ class Supervisor:
 
     @staticmethod
     def _tape_tail_sha_matches(segment: Path, resolved_tape: Path) -> bool:
-        """Best-effort taped-tail check for one discovery candidate (123).
-
-        JSON tapes (ltxv/causvid) may carry `conditioning_tail_sha256` +
-        `conditioning_tail_path`: recompute and compare, so a truncated
-        tail degrades to an older tape instead of silently anchoring the
-        next segment on garbage. Returns True (adopt) whenever the tape
-        carries no hash, the tail file is absent (the derive path
-        materializes it — absence is not corruption), or the tape is not
-        JSON at all (torn JSON — 139/197's territory, never masked
-        here): only a clean parse with both keys
-        present and a present-but-mismatched tail returns False.
-        """
-        try:
-            raw: JsonValue = json.loads(resolved_tape.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return True
-        if not isinstance(raw, dict):
-            return True
-        digest = raw.get("conditioning_tail_sha256")
-        raw_path = raw.get("conditioning_tail_path")
-        if not isinstance(digest, str) or not digest or not isinstance(raw_path, str):
-            return True
-        tail_path = Path(raw_path)
-        if not tail_path.is_absolute():
-            tail_path = segment / tail_path
-        if not tail_path.is_file():
-            return True
-        try:
-            return sha256_file(tail_path) == digest
-        except OSError:
-            return True
+        """Best-effort taped-tail check (123; logic lives in supervisor_tape)."""
+        return tape_tail_sha_matches(segment, resolved_tape)
 
     def _resume_video_worker(self, segment_id: str) -> None:
         """Rebuild video causal context from the latest tape (DESIGN §27.1).

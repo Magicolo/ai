@@ -369,3 +369,37 @@ enforcing.
 - Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF,
   N) still dark; PERF unblocks when the supervisor sites +
   worker/test sites clear under their owners.
+
+## Progress log (2026-10-01, verification-only pass — re-probe counts)
+
+- Read-only probes live in-container (`voyage:latest`, CPU-only, no host
+  pip — no source edits for 031): `ruff check --select ALL --statistics .`
+  top rows: D103 889, COM812 825, PLC0415 767, SLF001 583, TRY003 509,
+  PLR2004 419, EM102 374, ANN401 345 (full capture in run output;
+  drifted with tree growth, consistent with prior passes).
+- `ruff check --select PERF --output-format concise .` → **10 hits**
+  (6 PERF401 + 4 PERF203): `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748`, `voyage/cli_validate.py:223,229`,
+  `voyage/concepts.py:437`, `voyage/models_ensure.py:226`,
+  `voyage/supervisor.py:499,571` (banned file),
+  `voyage/workers/director.py:390,517` (foreign). Down 11→10 vs batch 13:
+  the `video_longlive.py` site vanished with the 079 file deletion, and
+  the batch-12 `cli_observe.py` handoff holds (no `cli_observe.py` hit).
+- `ruff check --select N --statistics` → **51** (N806 38 + N801 10 +
+  N802 2 + N818 1; was 60 — the deleted longlive test modules carried
+  the retired test-double names). `ruff check --select PT --statistics`
+  → **111** (PT011 63 + PT018 46 + PT013 1 + PT012 1; was 112 — one
+  PT017 gone with the deleted modules).
+- No family is green in isolation; every remaining PERF site sits in a
+  test-track / foreign / banned file. No `select` change, no
+  per-file-ignores added.
+
+## Resolution (2026-10-01, verification-only pass)
+
+- Verdict: DEFERRED (record-only) — PERF 10, N 51, PT 111 as-read above.
+- Files changed: none for 031 (this issue file only). Gate evidence:
+  `select` untouched (`Voyage/pyproject.toml:70` confirmed 16 families).
+  DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; PERF unblocks when the supervisor sites + worker/test
+  sites clear under their owners.

@@ -310,3 +310,51 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
   `~/.cache/voyage-models/{frame_interpolation,realesrgan}` weights
   (both present on the host 2026-10-01) incl. the fp16 numeric + eyeball
   the FILM resolution left open.
+
+## Progress log (2026-10-01, this pass — inference wiring evaluated, NOT forced)
+
+- Premises re-verified live FIRST (host greps, no edits):
+  `resolve_augment_weights` + `AugmentWeights` referenced only in
+  `voyage/augment.py` + `tests/test_issue_166_resolve_weights.py`
+  (the batch-13 seam holds); no production caller wires
+  weights→loader (`voyage/augment.py` / `supervisor.py` never import
+  the worker — only docstring/comment mentions in
+  `cli_observe.py:318`, `workers/__init__.py:13`,
+  `video_ltxv.py:150`); `finalize_run` (`voyage/media.py:1311`) +
+  `FinalizeOptions` + `AugmentConfig` carry no model-pass knob
+  (floors-only) — wiring needs a new knob plus a chunk worker that
+  does not exist yet.
+- CPU-provability assessment: the only fully CPU-testable slice on
+  this box (slim `voyage:latest`, no torch, no `/models`) would be an
+  opt-in knob whose absent-weights leg falls back to ffmpeg — i.e.
+  scaffolding with zero observable behavior change (knob accepted,
+  same bytes out), while the model legs need torch + provisioned
+  weights (`voyage-video` CPU could load per batch-10/11, but
+  chunk-scale OOM-halving past ~200 frames + fp16-on-CUDA numerics +
+  quality eyeball need idle-CUDA per the FILM resolution). Per the
+  brief (do NOT force hot `finalize_run` changes that cannot be
+  proven) + the 152 no-media-topology-alone warning + YAGNI (a
+  fallback-only knob nobody calls is dead plumbing), no `media.py` /
+  `config.py` / CLI change made. TDD N/A — no behavior changed, so no
+  failing test written (a knowingly-no-op knob test is not a gate
+  asset).
+- No code change: `voyage/` + `tests/` untouched by this leg (own diff
+  for the whole pass is exactly the 8 slow-marker lines in the two
+  089 files, verified `git diff`).
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: BLOCKED (CPU-only box) — recorded with exact handoff,
+  nothing forced. Files changed: none (this issue file only).
+  DESIGN proposals: none (the batch-13 §§56-57 "both weights
+  strict-load" note stands; no new DESIGN claim owed).
+- Residuals (exact inference handoff for the augment/GPU owner —
+  unchanged from batch 13, still current): (1) add the chunk worker
+  (calls `resolve_augment_weights`, passes non-None legs to
+  `augment_worker.upscale_frames` / `interpolate_pair` with
+  `device=chunk.device`, keeps the ffmpeg encode for None legs);
+  (2) thread it through `run_augment_chunks` behind an opt-in knob
+  (ffmpeg stays the default — `finalize_run`'s current contract is
+  unchanged until then); (3) prove on idle-CUDA with the provisioned
+  host weights incl. the fp16 numeric + eyeball the FILM resolution
+  left open.

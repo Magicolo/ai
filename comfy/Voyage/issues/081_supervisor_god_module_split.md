@@ -243,3 +243,72 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   residual stands unchanged. This track's batch-13 quota went to two
   082 registry-family splits (realesrgan + inspector, see 082); 036
   carries the pass verdict and the foreign-tree incident log.
+
+## Progress log (2026-10-01, tape-extraction pass)
+
+- Pre-checks live: `wc -l voyage/supervisor.py` → 2650 at pass start;
+  `git diff --name-only -- voyage/supervisor.py` empty before BOTH edits
+  (facade import, then method delegation), so the quiet-region rule held.
+  Concurrent tracks hold foreign hunks in `pyproject.toml` (079 ignore
+  removal), `tests/test_finalize_fastpath.py`,
+  `tests/test_media_robustness_rank2.py`, untracked
+  `tests/test_registry_audio_split.py` /
+  `tests/test_registry_ltxv_split.py`, plus many `issues/*` edits —
+  none inside the extraction region (final `git diff` on
+  `supervisor.py` shows only the facade + delegation, 5 insertions /
+  31 deletions). Routing maps (`VIDEO/AUDIO_WORKER_MODULES`,
+  `STREAMING_VIDEO_BACKENDS` — issue 023 area), commit-pipeline core,
+  and audio-coverage deliberately untouched.
+- TDD failing-first: wrote `tests/test_supervisor_tape_helpers.py` (6
+  agreement/behavior tests: facade single-source, method delegation,
+  non-JSON adopt, missing-keys adopt, absent-tail adopt,
+  mismatch-reject) BEFORE the new module — in-container collection
+  failed with `ModuleNotFoundError: No module named
+  'voyage.supervisor_tape'` (red), then created the module + re-export
+  until green.
+- Extraction: new `voyage/supervisor_tape.py` (51L, DESIGN §§73, 27)
+  owns `tape_tail_sha_matches` verbatim
+  (ex-`supervisor.py:744-775` staticmethod body, docstring intact);
+  `supervisor.py` (2650→2624L) imports and re-exports via the
+  explicit-`as` self-alias pattern and keeps
+  `Supervisor._tape_tail_sha_matches` as a one-line delegating
+  `@staticmethod` wrapper (callers via `self.` unchanged). No
+  unused-import cleanup (`json`/`JsonValue`/`sha256_file` all still
+  used elsewhere — verified via rg).
+- Gate evidence (in-container `voyage:latest`, CPU-only): new agreement
+  suite 6 passed; neighbors `test_supervisor_proposal_helpers` +
+  `test_supervisor_prefetch_helpers` + `test_supervisor_commit_types`
+  + `test_tape_trust_123_171` + `test_recovery` +
+  `test_supervisor_lifecycle` 36 passed; commit-path neighbors
+  `test_commit_hardening` + `test_failure_policy` +
+  `test_generation_stack` + `test_prefetch_summary` 47 passed (pre-fold).
+  Per-file gates: `ruff check` + `ruff format --check` + `mypy strict`
+  clean on all 3 files (`supervisor.py`, `supervisor_tape.py`,
+  `test_supervisor_tape_helpers.py`; one `ruff format` reflow on the
+  new test file). DESIGN-ref check passes (`DESIGN §§73, 27` in the
+  first 15 lines). No full-tree `gates.sh` run (foreign hunks in
+  `pyproject.toml`/tests would color it); touched-file gates + the 83
+  related tests are the verdict.
+
+## Resolution (2026-10-01, tape-extraction pass)
+
+- Verdict: fourth single-group split landed; full god-module
+  decomposition remains open. Files changed:
+  `voyage/supervisor_tape.py` (new, 51L),
+  `voyage/supervisor.py` (facade re-export + staticmethod → delegation,
+  net −26L),
+  `tests/test_supervisor_tape_helpers.py` (new, 6 agreement/behavior tests).
+- DESIGN proposals: "No DESIGN text change proposed: the new module
+  follows the existing DESIGN §§73/27 contract (supervisor lifecycle
+  and recovery-tape discovery) and the issue-081 move-verbatim +
+  re-export + agreement-test pattern; a future split index should list
+  `supervisor_tape.py` alongside `supervisor_proposal.py` /
+  `supervisor_prefetch.py` / `supervisor_commit_types.py`."
+- Residuals: full decomposition minus proposal/prefetch/commit-types/tape
+  (commit pipeline methods vs lifecycle vs audio-coverage per fix
+  candidate 1; `sha256_file` re-export shim; streaming-set derivation
+  per 023/083 — still open; worker-module map merge;
+  deterministic-payload compat block; legacy-migration threading;
+  `run_id` legacy; remaining tape helpers `_latest_recovery_tape` /
+  `_resume_video_worker` are stateful and stay for a future pass) —
+  each a future single-group pass.

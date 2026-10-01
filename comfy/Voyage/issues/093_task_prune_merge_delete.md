@@ -169,3 +169,41 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
   DESIGN proposals: none.
 - Residuals: exactly one, unchanged — `git rm Voyage/TASK.md` needs
   explicit user approval per AGENTS.md §9.
+
+## Progress log (2026-10-01, this pass — verify-only, no deletion)
+
+- Re-verified live (host reads + `git ls-files`, no edits — `git rm`
+  forbidden without user approval per AGENTS §9): `TASK.md` is the
+  28-line pointer stub (unchanged since batch 12; tracked, not
+  ignored); `docs/BENCHMARKING.md:69` "Backend qualification" section
+  intact (the §30.4 procedural home); DESIGN historical entries
+  `:6929` + `:8095` intact (methodology history + batch-12 as-built,
+  zero live-spec refs).
+- Dangling-ref sweep: `grep -rn "TASK\.md"` over `tests/` +
+  `voyage/` (excl. `issues/`) → only the stub's self-rows
+  (title/history-pointer/rm-pending note) + the 2 historical DESIGN
+  entries — no ref repair owed. `VALID_TASK_TYPES` hits in
+  `test_acestep_contract.py` are ACE-Step task types, unrelated to
+  `TASK.md`. `test_causvid_prep.py:1` docstring cites "TASK §30.1"
+  (historical, left intact).
+- No test reads `TASK.md` content: no `open`/`Path`/`read` of
+  `TASK.md` anywhere in `tests/` or `voyage/` (grep clean) — the stub
+  is test-safe.
+- Ready-to-execute state for the orchestrator (NOT run here): from
+  repo root `/home/goulade/Projects/ai`, `git rm
+  comfy/Voyage/TASK.md` (deletion needs explicit user approval per
+  AGENTS §9; the standing continue-until-clean directive covers
+  execution once approved). Post-rm verification: `grep -rn
+  "TASK\.md" Voyage/ --include="*.md" --include="*.py" | grep -v
+  "issues/"` must show only the 2 historical DESIGN entries, then
+  `Voyage/scripts/gates.sh` green. Nothing is lost — full text in
+  `git log --oneline -- Voyage/TASK.md` (recorded in the stub).
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: VERIFIED (stub + BENCHMARKING home intact) + DELETION
+  READY (exact command + post-conditions above; approval still
+  pending). Files changed: none (this issue file only). DESIGN
+  proposals: none.
+- Residuals: exactly one — `git rm` execution by the orchestrator
+  under approval. Nothing else is open.

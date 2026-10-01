@@ -54,6 +54,7 @@ def _segment_dir(run_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_validate_dir_as_video_returns_error_not_raise(tmp_path: Path) -> None:
     """A directory where `video.mp4` belongs yields INVALID errors, no traceback."""
     from voyage.cli import validate_run
@@ -68,6 +69,7 @@ def test_validate_dir_as_video_returns_error_not_raise(tmp_path: Path) -> None:
     assert any("video.mp4" in error for error in errors)
 
 
+@pytest.mark.slow
 def test_validate_dir_as_metrics_returns_error_not_raise(tmp_path: Path) -> None:
     """A directory where `manifest.json` belongs yields INVALID errors, no traceback."""
     from voyage.cli import validate_run
@@ -82,6 +84,7 @@ def test_validate_dir_as_metrics_returns_error_not_raise(tmp_path: Path) -> None
     assert any("manifest.json" in error for error in errors)
 
 
+@pytest.mark.slow
 def test_validate_deeply_nested_metrics_returns_error_not_raise(tmp_path: Path) -> None:
     """Deeply nested `manifest.json` maps to an error string, never RecursionError."""
     from voyage.cli import validate_run
@@ -97,6 +100,7 @@ def test_validate_deeply_nested_metrics_returns_error_not_raise(tmp_path: Path) 
     assert any("manifest.json" in error for error in errors)
 
 
+@pytest.mark.slow
 def test_validate_dir_as_sha256_returns_error_not_raise(tmp_path: Path) -> None:
     """A directory where `manifest.json` belongs yields INVALID errors, no traceback."""
     from voyage.cli import validate_run
