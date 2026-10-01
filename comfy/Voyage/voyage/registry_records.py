@@ -259,6 +259,165 @@ from voyage.registry_inspector import (
 from voyage.registry_inspector import (
     _record_inspector as _record_inspector,
 )
+from voyage.registry_ltx23 import (
+    EXPECTED_LTX23_AUDIO_VAE_SHA256 as EXPECTED_LTX23_AUDIO_VAE_SHA256,
+)
+from voyage.registry_ltx23 import (
+    EXPECTED_LTX23_CONN_SHA256 as EXPECTED_LTX23_CONN_SHA256,
+)
+from voyage.registry_ltx23 import (
+    EXPECTED_LTX23_DIT_SHA256 as EXPECTED_LTX23_DIT_SHA256,
+)
+from voyage.registry_ltx23 import (
+    EXPECTED_LTX23_TE_SHA256 as EXPECTED_LTX23_TE_SHA256,
+)
+from voyage.registry_ltx23 import (
+    EXPECTED_LTX23_VIDEO_VAE_SHA256 as EXPECTED_LTX23_VIDEO_VAE_SHA256,
+)
+from voyage.registry_ltx23 import (
+    LTX23_AUDIO_VAE_FILE as LTX23_AUDIO_VAE_FILE,
+)
+from voyage.registry_ltx23 import (
+    LTX23_AUDIO_VAE_MIN_BYTES as LTX23_AUDIO_VAE_MIN_BYTES,
+)
+from voyage.registry_ltx23 import (
+    LTX23_AUDIO_VAE_SUBFOLDER as LTX23_AUDIO_VAE_SUBFOLDER,
+)
+from voyage.registry_ltx23 import (
+    LTX23_CONN_FILE as LTX23_CONN_FILE,
+)
+from voyage.registry_ltx23 import (
+    LTX23_CONN_MIN_BYTES as LTX23_CONN_MIN_BYTES,
+)
+from voyage.registry_ltx23 import (
+    LTX23_CONN_SUBFOLDER as LTX23_CONN_SUBFOLDER,
+)
+from voyage.registry_ltx23 import (
+    LTX23_DIT_FILE as LTX23_DIT_FILE,
+)
+from voyage.registry_ltx23 import (
+    LTX23_DIT_MIN_BYTES as LTX23_DIT_MIN_BYTES,
+)
+from voyage.registry_ltx23 import (
+    LTX23_DIT_REPO as LTX23_DIT_REPO,
+)
+from voyage.registry_ltx23 import (
+    LTX23_DIT_REVISION as LTX23_DIT_REVISION,
+)
+from voyage.registry_ltx23 import (
+    LTX23_DIT_SUBFOLDER as LTX23_DIT_SUBFOLDER,
+)
+from voyage.registry_ltx23 import (
+    LTX23_SUBDIR as LTX23_SUBDIR,
+)
+from voyage.registry_ltx23 import (
+    LTX23_TE_FILE as LTX23_TE_FILE,
+)
+from voyage.registry_ltx23 import (
+    LTX23_TE_MIN_BYTES as LTX23_TE_MIN_BYTES,
+)
+from voyage.registry_ltx23 import (
+    LTX23_TE_REPO as LTX23_TE_REPO,
+)
+from voyage.registry_ltx23 import (
+    LTX23_TE_REVISION as LTX23_TE_REVISION,
+)
+from voyage.registry_ltx23 import (
+    LTX23_VIDEO_VAE_FILE as LTX23_VIDEO_VAE_FILE,
+)
+from voyage.registry_ltx23 import (
+    LTX23_VIDEO_VAE_MIN_BYTES as LTX23_VIDEO_VAE_MIN_BYTES,
+)
+from voyage.registry_ltx23 import (
+    LTX23_VIDEO_VAE_SUBFOLDER as LTX23_VIDEO_VAE_SUBFOLDER,
+)
+from voyage.registry_ltx23 import (
+    _describe_ltx23 as _describe_ltx23,
+)
+from voyage.registry_ltx23 import (
+    _record_ltx23 as _record_ltx23,
+)
+from voyage.registry_ltx25 import (
+    EXPECTED_LTX25_AUDIO_VAE_SHA256 as EXPECTED_LTX25_AUDIO_VAE_SHA256,
+)
+from voyage.registry_ltx25 import (
+    EXPECTED_LTX25_DIT_SHA256 as EXPECTED_LTX25_DIT_SHA256,
+)
+from voyage.registry_ltx25 import (
+    EXPECTED_LTX25_TE_SHA256 as EXPECTED_LTX25_TE_SHA256,
+)
+from voyage.registry_ltx25 import (
+    EXPECTED_LTX25_UPSC_SHA256 as EXPECTED_LTX25_UPSC_SHA256,
+)
+from voyage.registry_ltx25 import (
+    EXPECTED_LTX25_VIDEO_VAE_SHA256 as EXPECTED_LTX25_VIDEO_VAE_SHA256,
+)
+from voyage.registry_ltx25 import (
+    LTX25_AUDIO_VAE_FILE as LTX25_AUDIO_VAE_FILE,
+)
+from voyage.registry_ltx25 import (
+    LTX25_AUDIO_VAE_MIN_BYTES as LTX25_AUDIO_VAE_MIN_BYTES,
+)
+from voyage.registry_ltx25 import (
+    LTX25_AUDIO_VAE_SUBFOLDER as LTX25_AUDIO_VAE_SUBFOLDER,
+)
+from voyage.registry_ltx25 import (
+    LTX25_DIT_FILE as LTX25_DIT_FILE,
+)
+from voyage.registry_ltx25 import (
+    LTX25_DIT_MIN_BYTES as LTX25_DIT_MIN_BYTES,
+)
+from voyage.registry_ltx25 import (
+    LTX25_DIT_REPO as LTX25_DIT_REPO,
+)
+from voyage.registry_ltx25 import (
+    LTX25_DIT_REVISION as LTX25_DIT_REVISION,
+)
+from voyage.registry_ltx25 import (
+    LTX25_SUBDIR as LTX25_SUBDIR,
+)
+from voyage.registry_ltx25 import (
+    LTX25_TE_FILE as LTX25_TE_FILE,
+)
+from voyage.registry_ltx25 import (
+    LTX25_TE_MIN_BYTES as LTX25_TE_MIN_BYTES,
+)
+from voyage.registry_ltx25 import (
+    LTX25_TE_REPO as LTX25_TE_REPO,
+)
+from voyage.registry_ltx25 import (
+    LTX25_TE_REVISION as LTX25_TE_REVISION,
+)
+from voyage.registry_ltx25 import (
+    LTX25_UPSC_FILE as LTX25_UPSC_FILE,
+)
+from voyage.registry_ltx25 import (
+    LTX25_UPSC_MIN_BYTES as LTX25_UPSC_MIN_BYTES,
+)
+from voyage.registry_ltx25 import (
+    LTX25_UPSC_SUBFOLDER as LTX25_UPSC_SUBFOLDER,
+)
+from voyage.registry_ltx25 import (
+    LTX25_VAE_REPO as LTX25_VAE_REPO,
+)
+from voyage.registry_ltx25 import (
+    LTX25_VAE_REVISION as LTX25_VAE_REVISION,
+)
+from voyage.registry_ltx25 import (
+    LTX25_VIDEO_VAE_FILE as LTX25_VIDEO_VAE_FILE,
+)
+from voyage.registry_ltx25 import (
+    LTX25_VIDEO_VAE_MIN_BYTES as LTX25_VIDEO_VAE_MIN_BYTES,
+)
+from voyage.registry_ltx25 import (
+    LTX25_VIDEO_VAE_SUBFOLDER as LTX25_VIDEO_VAE_SUBFOLDER,
+)
+from voyage.registry_ltx25 import (
+    _describe_ltx25 as _describe_ltx25,
+)
+from voyage.registry_ltx25 import (
+    _record_ltx25 as _record_ltx25,
+)
 from voyage.registry_ltxv import (
     EXPECTED_LTXV_DIT_SHA256 as EXPECTED_LTXV_DIT_SHA256,
 )
@@ -452,6 +611,12 @@ from voyage.registry_sfx import (
 # Stream D CausVid + Wan2.1 pins live in `voyage.registry_causvid`
 # (issue 082; re-exported at the top so existing importers keep working).
 
+# LTX-2.5 Q3 stack pins live in `voyage.registry_ltx25`
+# (re-exported at the top so existing importers keep working).
+
+# LTX-2.3 Q3 stack pins live in `voyage.registry_ltx23`
+# (re-exported at the top so existing importers keep working).
+
 # SFX effects-stack pins live in `voyage.registry_sfx` (issue 082;
 # re-exported at the top so existing importers keep working).
 
@@ -482,6 +647,14 @@ from voyage.registry_sfx import (
 # EXPECTED_LTXV_* hashes live in `voyage.registry_ltxv` (issue 082;
 # re-exported at the top so existing importers keep working).
 
+# EXPECTED_LTX25_* hashes live in `voyage.registry_ltx25`
+# (measured live 2026-10-01 from the consolidated volume at the pinned
+# revisions, CPU-only sha256; re-exported at the top).
+
+# EXPECTED_LTX23_* hashes live in `voyage.registry_ltx23`
+# (measured live 2026-10-01 from the consolidated volume at the pinned
+# revisions, CPU-only sha256; re-exported at the top).
+
 # EXPECTED_FILM_SHA256 lives in `voyage.registry_film` (issue 082;
 # re-exported at the top so existing importers keep working).
 
@@ -510,6 +683,14 @@ from voyage.registry_sfx import (
 
 # CausVid record builder lives in `voyage.registry_causvid`
 # (issue 082; re-exported at the top so existing importers keep working).
+
+
+# LTX-2.5 record builder lives in `voyage.registry_ltx25`
+# (re-exported at the top so existing importers keep working).
+
+
+# LTX-2.3 record builder lives in `voyage.registry_ltx23`
+# (re-exported at the top so existing importers keep working).
 
 
 # SFX record builder lives in `voyage.registry_sfx`
@@ -546,6 +727,14 @@ from voyage.registry_sfx import (
 
 # CausVid describe helper lives in `voyage.registry_causvid`
 # (issue 082; re-exported at the top so existing importers keep working).
+
+
+# LTX-2.5 describe helper lives in `voyage.registry_ltx25`
+# (re-exported at the top so existing importers keep working).
+
+
+# LTX-2.3 describe helper lives in `voyage.registry_ltx23`
+# (re-exported at the top so existing importers keep working).
 
 
 # FILM builders live in `voyage.registry_film` (issue 082; re-exported

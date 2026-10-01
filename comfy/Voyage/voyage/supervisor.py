@@ -75,6 +75,7 @@ from voyage.models import (
     SegmentWorldState,
     StyleSpec,
 )
+from voyage.models_ensure import JOINT_AUDIO_BACKENDS
 from voyage.persistence import read_state, write_state
 from voyage.prompts import (
     apply_feedback_amendments,
@@ -2138,12 +2139,31 @@ class Supervisor:
                     for key, value in reported_stages.items()
                     if isinstance(value, (int, float)) and not isinstance(value, bool)
                 }
+        # Joint-audio backends (DESIGN §140 ltx plan) render the segment
+        # soundtrack inside the video worker: the raw `audio_path` wire
+        # value is validated here and threaded to `_cover_audio`, which
+        # commits it as the segment audio.wav instead of rendering takes.
+        joint_audio_path: str | None = None
+        if config.video.backend in JOINT_AUDIO_BACKENDS:
+            audio_source = video_block.get("audio_path") if isinstance(video_block, dict) else None
+            if not isinstance(audio_source, str) or not audio_source:
+                raise MediaError(
+                    f"segment {segment_id}: joint-audio backend {config.video.backend} "
+                    "reported no audio_path"
+                )
+            if not Path(audio_source).is_file():
+                raise MediaError(
+                    f"segment {segment_id}: joint-audio backend {config.video.backend} "
+                    f"audio_path is not a regular file: {audio_source!r}"
+                )
+            joint_audio_path = audio_source
         return RenderedVideo(
             frames=frames,
             duration=duration,
             video_time=video_time,
             recovery_tape=recovery_tape,
             video_stage_ms=video_stage_ms,
+            joint_audio_path=joint_audio_path,
         )
 
     def _cover_audio(
@@ -2157,15 +2177,45 @@ class Supervisor:
         decision: EvolutionDecision,
         recovery_tape: str | None,
         stage_seconds: dict[str, float],
+        joint_audio_path: str | None = None,
     ) -> CoveredAudio:
         """Music takes + slice/assemble for one commit (DESIGN §35, issue 020).
 
         Renders takes when coverage runs low, then slices/assembles the
         segment audio. Records the `audio` timing. Delegates to
         `_ensure_audio_coverage` — this seam exists so the commit
-        orchestration reads as four stages.
+        orchestration reads as four stages. Joint-audio backends (DESIGN
+        §140 ltx plan) skip takes entirely: `joint_audio_path` carries
+        the worker-rendered soundtrack, committed here as the segment
+        audio.wav (empty take list, zero ahead buffer — each segment is
+        self-contained; `_commit_segment` still validates + checksums it).
         """
         audio_started = time.monotonic()
+        if joint_audio_path is not None:
+            with self._stage("audio", f"{config.video.backend} joint"):
+                try:
+                    track = Path(joint_audio_path).read_bytes()
+                except OSError as exc:
+                    raise MediaError(
+                        f"segment {segment_id}: joint-audio soundtrack unreadable: "
+                        f"{joint_audio_path!r} ({exc})"
+                    ) from exc
+                if not track:
+                    raise MediaError(
+                        f"segment {segment_id}: joint-audio soundtrack is empty: "
+                        f"{joint_audio_path!r}"
+                    )
+                atomic_write_bytes(segment / "audio.wav", track)
+            stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
+            return CoveredAudio(
+                audio_plan=AudioPlan(segment_id=segment_id),
+                audio_ahead=0.0,
+                take_action="joint",
+                take_reason=(
+                    f"joint-audio backend {config.video.backend}: worker soundtrack "
+                    "committed directly, no takes"
+                ),
+            )
         with self._stage("audio", config.audio.backend):
             audio_plan, audio_ahead, take_action, take_reason = self._ensure_audio_coverage(
                 config,
@@ -2574,6 +2624,7 @@ class Supervisor:
             proposed.decision,
             rendered.recovery_tape,
             stage_seconds,
+            rendered.joint_audio_path,
         )
         return self._commit_segment(
             config,

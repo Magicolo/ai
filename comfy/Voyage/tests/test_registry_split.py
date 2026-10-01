@@ -19,6 +19,8 @@ EXPECTED_SPEC_KEYS = (
     "sfx-mmaudio",
     "ltxv-2b",
     "causvid",
+    "ltx25",
+    "ltx23",
     "film",
     "realesrgan-anime",
 )
@@ -30,6 +32,8 @@ RECORD_BUILDERS = (
     "_record_audio",
     "_record_ltxv",
     "_record_causvid",
+    "_record_ltx25",
+    "_record_ltx23",
     "_record_sfx",
     "_record_film",
     "_record_realesrgan",
@@ -43,6 +47,8 @@ DESCRIBE_HELPERS = (
     "_describe_ltxv",
     "_describe_sfx",
     "_describe_causvid",
+    "_describe_ltx25",
+    "_describe_ltx23",
     "_describe_film",
     "_describe_realesrgan",
 )
@@ -59,12 +65,16 @@ PIN_NAMES = (
     "ACE_MAIN_REVISION",
     "LTXV_HF_REPO",
     "CAUSVID_HF_REPO",
+    "LTX25_DIT_REPO",
+    "LTX25_TE_REPO",
+    "LTX23_DIT_REPO",
+    "LTX23_TE_REPO",
     "FILM_HF_REPO",
 )
 
 
 def test_model_specs_keys_unchanged() -> None:
-    """The registry assembly keeps all nine bundles (issue 082)."""
+    """The registry assembly keeps all eleven bundles (issue 082)."""
     assert tuple(sorted(model_registry.MODEL_SPECS)) == tuple(sorted(EXPECTED_SPEC_KEYS))
 
 
@@ -112,6 +122,8 @@ def spec_key(model_key: str) -> str:
         "sfx-mmaudio": "sfx",
         "ltxv-2b": "ltxv",
         "causvid": "causvid",
+        "ltx25": "ltx25",
+        "ltx23": "ltx23",
         "film": "film",
         "realesrgan-anime": "realesrgan",
     }

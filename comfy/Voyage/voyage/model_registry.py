@@ -44,6 +44,16 @@ from voyage.registry_records import (
     CAUSVID_LICENSE_URL,
     CAUSVID_SUBDIR,
     EXPECTED_FILM_SHA256,
+    EXPECTED_LTX23_AUDIO_VAE_SHA256,
+    EXPECTED_LTX23_CONN_SHA256,
+    EXPECTED_LTX23_DIT_SHA256,
+    EXPECTED_LTX23_TE_SHA256,
+    EXPECTED_LTX23_VIDEO_VAE_SHA256,
+    EXPECTED_LTX25_AUDIO_VAE_SHA256,
+    EXPECTED_LTX25_DIT_SHA256,
+    EXPECTED_LTX25_TE_SHA256,
+    EXPECTED_LTX25_UPSC_SHA256,
+    EXPECTED_LTX25_VIDEO_VAE_SHA256,
     EXPECTED_LTXV_DIT_SHA256,
     EXPECTED_LTXV_UPSC_SHA256,
     EXPECTED_REALESRGAN_SHA256,
@@ -55,6 +65,45 @@ from voyage.registry_records import (
     FILM_MIN_BYTES,
     FILM_REPO_PATH,
     FILM_SUBDIR,
+    LTX23_AUDIO_VAE_FILE,
+    LTX23_AUDIO_VAE_MIN_BYTES,
+    LTX23_AUDIO_VAE_SUBFOLDER,
+    LTX23_CONN_FILE,
+    LTX23_CONN_MIN_BYTES,
+    LTX23_CONN_SUBFOLDER,
+    LTX23_DIT_FILE,
+    LTX23_DIT_MIN_BYTES,
+    LTX23_DIT_REPO,
+    LTX23_DIT_REVISION,
+    LTX23_DIT_SUBFOLDER,
+    LTX23_SUBDIR,
+    LTX23_TE_FILE,
+    LTX23_TE_MIN_BYTES,
+    LTX23_TE_REPO,
+    LTX23_TE_REVISION,
+    LTX23_VIDEO_VAE_FILE,
+    LTX23_VIDEO_VAE_MIN_BYTES,
+    LTX23_VIDEO_VAE_SUBFOLDER,
+    LTX25_AUDIO_VAE_FILE,
+    LTX25_AUDIO_VAE_MIN_BYTES,
+    LTX25_AUDIO_VAE_SUBFOLDER,
+    LTX25_DIT_FILE,
+    LTX25_DIT_MIN_BYTES,
+    LTX25_DIT_REPO,
+    LTX25_DIT_REVISION,
+    LTX25_SUBDIR,
+    LTX25_TE_FILE,
+    LTX25_TE_MIN_BYTES,
+    LTX25_TE_REPO,
+    LTX25_TE_REVISION,
+    LTX25_UPSC_FILE,
+    LTX25_UPSC_MIN_BYTES,
+    LTX25_UPSC_SUBFOLDER,
+    LTX25_VAE_REPO,
+    LTX25_VAE_REVISION,
+    LTX25_VIDEO_VAE_FILE,
+    LTX25_VIDEO_VAE_MIN_BYTES,
+    LTX25_VIDEO_VAE_SUBFOLDER,
     LTXV_COMMIT,
     LTXV_COMMIT_SHORT,
     LTXV_DIT_FILE,
@@ -144,6 +193,8 @@ from voyage.registry_records import (
     _describe_director_awq,
     _describe_film,
     _describe_inspector,
+    _describe_ltx23,
+    _describe_ltx25,
     _describe_ltxv,
     _describe_realesrgan,
     _describe_sfx,
@@ -153,6 +204,8 @@ from voyage.registry_records import (
     _record_director_awq,
     _record_film,
     _record_inspector,
+    _record_ltx23,
+    _record_ltx25,
     _record_ltxv,
     _record_realesrgan,
     _record_sfx,
@@ -189,6 +242,16 @@ __all__ = [
     "CAUSVID_LICENSE_URL",
     "CAUSVID_SUBDIR",
     "EXPECTED_FILM_SHA256",
+    "EXPECTED_LTX23_AUDIO_VAE_SHA256",
+    "EXPECTED_LTX23_CONN_SHA256",
+    "EXPECTED_LTX23_DIT_SHA256",
+    "EXPECTED_LTX23_TE_SHA256",
+    "EXPECTED_LTX23_VIDEO_VAE_SHA256",
+    "EXPECTED_LTX25_AUDIO_VAE_SHA256",
+    "EXPECTED_LTX25_DIT_SHA256",
+    "EXPECTED_LTX25_TE_SHA256",
+    "EXPECTED_LTX25_UPSC_SHA256",
+    "EXPECTED_LTX25_VIDEO_VAE_SHA256",
     "EXPECTED_LTXV_DIT_SHA256",
     "EXPECTED_LTXV_UPSC_SHA256",
     "EXPECTED_REALESRGAN_SHA256",
@@ -202,6 +265,45 @@ __all__ = [
     "FILM_REPO_PATH",
     "FILM_SUBDIR",
     "FileSpec",
+    "LTX23_AUDIO_VAE_FILE",
+    "LTX23_AUDIO_VAE_MIN_BYTES",
+    "LTX23_AUDIO_VAE_SUBFOLDER",
+    "LTX23_CONN_FILE",
+    "LTX23_CONN_MIN_BYTES",
+    "LTX23_CONN_SUBFOLDER",
+    "LTX23_DIT_FILE",
+    "LTX23_DIT_MIN_BYTES",
+    "LTX23_DIT_REPO",
+    "LTX23_DIT_REVISION",
+    "LTX23_DIT_SUBFOLDER",
+    "LTX23_SUBDIR",
+    "LTX23_TE_FILE",
+    "LTX23_TE_MIN_BYTES",
+    "LTX23_TE_REPO",
+    "LTX23_TE_REVISION",
+    "LTX23_VIDEO_VAE_FILE",
+    "LTX23_VIDEO_VAE_MIN_BYTES",
+    "LTX23_VIDEO_VAE_SUBFOLDER",
+    "LTX25_AUDIO_VAE_FILE",
+    "LTX25_AUDIO_VAE_MIN_BYTES",
+    "LTX25_AUDIO_VAE_SUBFOLDER",
+    "LTX25_DIT_FILE",
+    "LTX25_DIT_MIN_BYTES",
+    "LTX25_DIT_REPO",
+    "LTX25_DIT_REVISION",
+    "LTX25_SUBDIR",
+    "LTX25_TE_FILE",
+    "LTX25_TE_MIN_BYTES",
+    "LTX25_TE_REPO",
+    "LTX25_TE_REVISION",
+    "LTX25_UPSC_FILE",
+    "LTX25_UPSC_MIN_BYTES",
+    "LTX25_UPSC_SUBFOLDER",
+    "LTX25_VAE_REPO",
+    "LTX25_VAE_REVISION",
+    "LTX25_VIDEO_VAE_FILE",
+    "LTX25_VIDEO_VAE_MIN_BYTES",
+    "LTX25_VIDEO_VAE_SUBFOLDER",
     "LTXV_COMMIT",
     "LTXV_COMMIT_SHORT",
     "LTXV_DIT_FILE",
@@ -301,6 +403,8 @@ __all__ = [
     "_describe_director_awq",
     "_describe_film",
     "_describe_inspector",
+    "_describe_ltx23",
+    "_describe_ltx25",
     "_describe_ltxv",
     "_describe_realesrgan",
     "_describe_sfx",
@@ -312,6 +416,8 @@ __all__ = [
     "_record_director_awq",
     "_record_film",
     "_record_inspector",
+    "_record_ltx23",
+    "_record_ltx25",
     "_record_ltxv",
     "_record_realesrgan",
     "_record_sfx",
@@ -765,6 +871,170 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         success_message=_describe_causvid,
         manifest_checkpoint=f"{CAUSVID_SUBDIR}/{CAUSVID_CHECKPOINT_FILE}",
     ),
+    "ltx25": ModelSpec(
+        name="ltx25",
+        manifest_key="ltx25",
+        snapshots=(),
+        files=(
+            FileSpec(
+                LTX25_DIT_REPO,
+                LTX25_DIT_REVISION,
+                LTX25_DIT_FILE,
+                "",
+                LTX25_SUBDIR,
+            ),
+            FileSpec(
+                LTX25_TE_REPO,
+                LTX25_TE_REVISION,
+                LTX25_TE_FILE,
+                "",
+                LTX25_SUBDIR,
+            ),
+            FileSpec(
+                LTX25_VAE_REPO,
+                LTX25_VAE_REVISION,
+                LTX25_VIDEO_VAE_FILE,
+                LTX25_VIDEO_VAE_SUBFOLDER,
+                LTX25_SUBDIR,
+            ),
+            FileSpec(
+                LTX25_VAE_REPO,
+                LTX25_VAE_REVISION,
+                LTX25_AUDIO_VAE_FILE,
+                LTX25_AUDIO_VAE_SUBFOLDER,
+                LTX25_SUBDIR,
+            ),
+            FileSpec(
+                LTX25_VAE_REPO,
+                LTX25_VAE_REVISION,
+                LTX25_UPSC_FILE,
+                LTX25_UPSC_SUBFOLDER,
+                LTX25_SUBDIR,
+            ),
+        ),
+        record_builder=_record_ltx25,
+        checks=(
+            RequiredFile(f"{LTX25_SUBDIR}/{LTX25_DIT_FILE}", LTX25_DIT_MIN_BYTES),
+            RequiredFile(f"{LTX25_SUBDIR}/{LTX25_TE_FILE}", LTX25_TE_MIN_BYTES),
+            RequiredFile(
+                f"{LTX25_SUBDIR}/{LTX25_VIDEO_VAE_SUBFOLDER}/{LTX25_VIDEO_VAE_FILE}",
+                LTX25_VIDEO_VAE_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{LTX25_SUBDIR}/{LTX25_AUDIO_VAE_SUBFOLDER}/{LTX25_AUDIO_VAE_FILE}",
+                LTX25_AUDIO_VAE_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{LTX25_SUBDIR}/{LTX25_UPSC_SUBFOLDER}/{LTX25_UPSC_FILE}",
+                LTX25_UPSC_MIN_BYTES,
+            ),
+        ),
+        success_message=_describe_ltx25,
+        expected_hashes=(
+            ExpectedHash(f"{LTX25_SUBDIR}/{LTX25_DIT_FILE}", EXPECTED_LTX25_DIT_SHA256),
+            ExpectedHash(f"{LTX25_SUBDIR}/{LTX25_TE_FILE}", EXPECTED_LTX25_TE_SHA256),
+            ExpectedHash(
+                f"{LTX25_SUBDIR}/{LTX25_VIDEO_VAE_SUBFOLDER}/{LTX25_VIDEO_VAE_FILE}",
+                EXPECTED_LTX25_VIDEO_VAE_SHA256,
+            ),
+            ExpectedHash(
+                f"{LTX25_SUBDIR}/{LTX25_AUDIO_VAE_SUBFOLDER}/{LTX25_AUDIO_VAE_FILE}",
+                EXPECTED_LTX25_AUDIO_VAE_SHA256,
+            ),
+            ExpectedHash(
+                f"{LTX25_SUBDIR}/{LTX25_UPSC_SUBFOLDER}/{LTX25_UPSC_FILE}",
+                EXPECTED_LTX25_UPSC_SHA256,
+            ),
+        ),
+    ),
+    "ltx23": ModelSpec(
+        name="ltx23",
+        manifest_key="ltx23",
+        snapshots=(),
+        files=(
+            FileSpec(
+                LTX23_DIT_REPO,
+                LTX23_DIT_REVISION,
+                LTX23_DIT_FILE,
+                LTX23_DIT_SUBFOLDER,
+                LTX23_SUBDIR,
+            ),
+            FileSpec(
+                LTX23_TE_REPO,
+                LTX23_TE_REVISION,
+                LTX23_TE_FILE,
+                "",
+                LTX23_SUBDIR,
+            ),
+            FileSpec(
+                LTX23_DIT_REPO,
+                LTX23_DIT_REVISION,
+                LTX23_CONN_FILE,
+                LTX23_CONN_SUBFOLDER,
+                LTX23_SUBDIR,
+            ),
+            FileSpec(
+                LTX23_DIT_REPO,
+                LTX23_DIT_REVISION,
+                LTX23_VIDEO_VAE_FILE,
+                LTX23_VIDEO_VAE_SUBFOLDER,
+                LTX23_SUBDIR,
+            ),
+            FileSpec(
+                LTX23_DIT_REPO,
+                LTX23_DIT_REVISION,
+                LTX23_AUDIO_VAE_FILE,
+                LTX23_AUDIO_VAE_SUBFOLDER,
+                LTX23_SUBDIR,
+            ),
+        ),
+        record_builder=_record_ltx23,
+        checks=(
+            RequiredFile(
+                f"{LTX23_SUBDIR}/{LTX23_DIT_SUBFOLDER}/{LTX23_DIT_FILE}",
+                LTX23_DIT_MIN_BYTES,
+            ),
+            RequiredFile(f"{LTX23_SUBDIR}/{LTX23_TE_FILE}", LTX23_TE_MIN_BYTES),
+            RequiredFile(
+                f"{LTX23_SUBDIR}/{LTX23_CONN_SUBFOLDER}/{LTX23_CONN_FILE}",
+                LTX23_CONN_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{LTX23_SUBDIR}/{LTX23_VIDEO_VAE_SUBFOLDER}/{LTX23_VIDEO_VAE_FILE}",
+                LTX23_VIDEO_VAE_MIN_BYTES,
+            ),
+            RequiredFile(
+                f"{LTX23_SUBDIR}/{LTX23_AUDIO_VAE_SUBFOLDER}/{LTX23_AUDIO_VAE_FILE}",
+                LTX23_AUDIO_VAE_MIN_BYTES,
+            ),
+            # Shared Mode-A upscaler lives in the ltx25 volume (no
+            # duplication): the ltx23 stack is incomplete without it.
+            RequiredFile(
+                f"{LTX25_SUBDIR}/{LTX25_UPSC_SUBFOLDER}/{LTX25_UPSC_FILE}",
+                LTX25_UPSC_MIN_BYTES,
+            ),
+        ),
+        success_message=_describe_ltx23,
+        expected_hashes=(
+            ExpectedHash(
+                f"{LTX23_SUBDIR}/{LTX23_DIT_SUBFOLDER}/{LTX23_DIT_FILE}",
+                EXPECTED_LTX23_DIT_SHA256,
+            ),
+            ExpectedHash(f"{LTX23_SUBDIR}/{LTX23_TE_FILE}", EXPECTED_LTX23_TE_SHA256),
+            ExpectedHash(
+                f"{LTX23_SUBDIR}/{LTX23_CONN_SUBFOLDER}/{LTX23_CONN_FILE}",
+                EXPECTED_LTX23_CONN_SHA256,
+            ),
+            ExpectedHash(
+                f"{LTX23_SUBDIR}/{LTX23_VIDEO_VAE_SUBFOLDER}/{LTX23_VIDEO_VAE_FILE}",
+                EXPECTED_LTX23_VIDEO_VAE_SHA256,
+            ),
+            ExpectedHash(
+                f"{LTX23_SUBDIR}/{LTX23_AUDIO_VAE_SUBFOLDER}/{LTX23_AUDIO_VAE_FILE}",
+                EXPECTED_LTX23_AUDIO_VAE_SHA256,
+            ),
+        ),
+    ),
     "film": ModelSpec(
         name="film",
         manifest_key="film",
@@ -1134,6 +1404,44 @@ def verify_causvid_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "causvid")
 
 
+def download_ltx25_models(models_dir: Path) -> dict[str, JsonValue]:
+    """Explicit download of the LTX-2.5 Q3 stack (backend `ltx25`).
+
+    Q3_K_M DiT (Abiray, ungated) + Gemma4-Q2_K text encoder (elix3r,
+    gated — needs a token with access) + conv/audio VAEs + spatial
+    upscaler (Lightricks/LTX-2.5, gated). Single-file fetches that
+    replicate the Hub layout under <models>/ltx25/. Merges into the
+    shared manifest; returns the merged record. Backs the
+    `models download ltx25` CLI target for the `ltx25` worker
+    (`voyage/workers/video_ltx25.py`).
+    """
+    return download_model(models_dir, "ltx25")
+
+
+def verify_ltx25_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the LTX-2.5 Q3 stack."""
+    return verify_model(models_dir, "ltx25")
+
+
+def download_ltx23_models(models_dir: Path) -> dict[str, JsonValue]:
+    """Explicit download of the LTX-2.3 Q3 stack (backend `ltx23`).
+
+    Q3_K_M DiT + connectors + distilled VAEs (unsloth/LTX-2.3-GGUF,
+    ungated) + Gemma3-QAT-Q2_K backbone (unsloth, ungated) into
+    <models>/ltx23/ (Hub layout). The Mode-A spatial upscaler is shared
+    from the ltx25 volume (checked, not re-fetched). Merges into the
+    shared manifest; returns the merged record. Backs the
+    `models download ltx23` CLI target for the `ltx23` worker
+    (`voyage/workers/video_ltx23.py`).
+    """
+    return download_model(models_dir, "ltx23")
+
+
+def verify_ltx23_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the LTX-2.3 Q3 stack."""
+    return verify_model(models_dir, "ltx23")
+
+
 def download_film_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the FILM interpolation weights (Track C).
 
@@ -1168,13 +1476,16 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
     """Every models-tree root the registry downloads (086).
 
     Covers all shipped stacks: Wan2.1 + CausVid DMD, LTXV DiT/upscaler +
-    its PixArt text encoder, Qwen3-8B director, Qwen3.5-9B inspector,
+    its PixArt text encoder, LTX-2.5 Q3 + LTX-2.3 Q3 stacks (shared Mode-A
+    upscaler), Qwen3-8B director, Qwen3.5-9B inspector,
     MiniLM embeddings, ACE-Step music, MMAudio SFX, FILM interpolation,
     Real-ESRGAN anime upscaler.
     """
     return {
         "wan21_dir": str(models_dir / WAN21_SUBDIR),
         "causvid_dir": str(models_dir / CAUSVID_SUBDIR),
+        "ltx25_dir": str(models_dir / LTX25_SUBDIR),
+        "ltx23_dir": str(models_dir / LTX23_SUBDIR),
         "ltxv_dir": str(models_dir / LTXV_SUBDIR),
         "ltxv_text_encoder_dir": str(models_dir / LTXV_TE_SUBDIR),
         "qwen_dir": str(models_dir / QWEN_SUBDIR),

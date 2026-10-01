@@ -19,7 +19,9 @@ import pytest
 RUN_SH = Path(__file__).resolve().parent.parent / "scripts" / "run.sh"
 # run.sh resolves --user from `id -u`/`id -g` on every path (including the
 # dry-run seam), so the isolated PATH must provide it alongside coreutils.
-_CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname", "id")
+# python3 is needed for the stored-config TOML sniff (run.sh parses
+# DIR/voyage.toml with the stdlib parser when --backend is absent).
+_CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname", "id", "python3")
 _SMI_MODE = Literal["present-ok", "present-fail", "absent"]
 
 needs_bash = pytest.mark.skipif(
@@ -155,3 +157,41 @@ def test_dry_run_pins_direct_entrypoint(tmp_path: Path) -> None:
     second = tmp_path / "second"
     second.mkdir()
     assert _dry_run(second, [], "absent")["entrypoint"] == "voyage"
+
+
+@needs_bash
+def test_generate_ltx25_selects_ltx_image_without_host_gpu(tmp_path: Path) -> None:
+    """Explicit ltx25 backend: ComfyUI worker image, GPU flag on."""
+    selection = _dry_run(tmp_path, ["generate", "--backend", "ltx25"], "absent")
+    assert selection["image"] == "voyage-ltx:latest"
+    assert selection["gpus"] == "--gpus all"
+
+
+@needs_bash
+def test_generate_ltx23_selects_ltx_image_with_equals_form(tmp_path: Path) -> None:
+    """Equals-form --backend= works for the ltx image selection too."""
+    selection = _dry_run(tmp_path, ["generate", "--backend=ltx23"], "present-ok")
+    assert selection["image"] == "voyage-ltx:latest"
+    assert selection["gpus"] == "--gpus all"
+
+
+@needs_bash
+def test_explicit_ltxv_backend_stays_video_image_despite_gpu(tmp_path: Path) -> None:
+    """ltxv keeps the video image (regression guard for the ltx split)."""
+    selection = _dry_run(tmp_path, ["generate", "--backend", "ltxv"], "present-ok")
+    assert selection["image"] == "voyage-video:latest"
+    assert selection["gpus"] == "--gpus all"
+
+
+@needs_bash
+def test_run_dir_with_ltx_toml_selects_ltx_image(tmp_path: Path) -> None:
+    """Stored-config runs sniff [video].backend for the ltx image."""
+    run_dir = tmp_path / "rundir"
+    run_dir.mkdir()
+    run_dir.joinpath("voyage.toml").write_text(
+        '[video]\nbackend = "ltx25"\n',
+        encoding="utf-8",
+    )
+    selection = _dry_run(tmp_path, ["run", "--run", str(run_dir)], "absent")
+    assert selection["image"] == "voyage-ltx:latest"
+    assert selection["gpus"] == "--gpus all"

@@ -111,6 +111,28 @@ def test_cuda_backends_include_augmentation_by_default() -> None:
         assert {"film", "realesrgan-anime"} <= specs
 
 
+def test_ltx_backends_require_own_spec_without_audio_stacks() -> None:
+    """ltx25/ltx23 render joint A/V: own spec + director + augment, never
+    ACE-Step/MMAudio — even when a config pairs those audio stacks (the
+    joint audio.wav is the full soundtrack; DESIGN §140 ltx plan).
+
+    Phase 4 extends `VideoBackendName` + presets; until then the cast pins
+    the intended Literal membership (dataclasses never validate at runtime).
+    """
+    from typing import cast
+
+    from voyage.config import VideoBackendName
+    from voyage.models_ensure import required_specs
+
+    for backend, spec in (("ltx25", "ltx25"), ("ltx23", "ltx23")):
+        config = _config_with_style()
+        config.video.backend = cast(VideoBackendName, backend)
+        config.audio.backend = "acestep"
+        config.sfx.backend = "mmaudio"
+        specs = {item.spec for item in required_specs(config, sfx_enabled=True)}
+        assert specs == {spec, "director-qwen4b-awq", "film", "realesrgan-anime"}
+
+
 def test_augment_disabled_excludes_film_and_realesrgan() -> None:
     from voyage.models_ensure import required_specs
 

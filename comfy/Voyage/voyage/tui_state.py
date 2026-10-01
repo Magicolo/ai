@@ -33,7 +33,7 @@ except ImportError:  # Python 3.10 worker image (upstream env)
 from voyage.cli_paths import _RESERVED_FOLDER_NAMES as _RESERVED_FOLDER_NAMES
 from voyage.cli_paths import is_flat_folder_name as _shared_flat_folder_name
 
-BACKENDS = ("ltxv", "causvid", "fake")
+BACKENDS = ("ltxv", "causvid", "ltx25", "ltx23", "fake")
 DIRECTORS = ("qwen", "deterministic")
 QUANTIZATIONS = ("fp8", "bf16")
 
@@ -612,6 +612,10 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
     )
 
 
+_LTX_IMAGE_BACKENDS = frozenset({"ltx25", "ltx23"})
+"""Backends served by the voyage-ltx image (pinned ComfyUI stack)."""
+
+
 def gpu_warning(backend: str) -> str:
     """One-line CUDA/GPU notice for CUDA backends, else an empty string.
 
@@ -624,8 +628,10 @@ def gpu_warning(backend: str) -> str:
     from voyage.cli import _CUDA_BACKENDS
 
     if backend in _CUDA_BACKENDS:
-        return (
-            f"{backend} needs the CUDA worker image (VOYAGE_IMAGE=voyage-video) "
-            "plus a GPU (--gpus all)."
-        )
+        # The LTX backends ship in voyage-ltx (separate image with the
+        # pinned ComfyUI stack — see scripts/run.sh image selection and
+        # worker/Dockerfile.ltx); every other CUDA backend is voyage-video.
+        image = "voyage-ltx" if backend in _LTX_IMAGE_BACKENDS else "voyage-video"
+        message = f"{backend} needs the CUDA worker image (VOYAGE_IMAGE={image})"
+        return message + " plus a GPU (--gpus all)."
     return ""

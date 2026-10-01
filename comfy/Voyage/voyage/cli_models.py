@@ -173,6 +173,8 @@ def cmd_models(args: argparse.Namespace) -> int:
     # pre-split interception point) keeps working.
     from voyage.cli import (
         download_causvid_models,
+        download_ltx23_models,
+        download_ltx25_models,
         download_ltxv_models,
         verify_audio_models,
         verify_causvid_models,
@@ -180,6 +182,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         verify_director_models,
         verify_film_models,
         verify_inspector_models,
+        verify_ltx23_models,
+        verify_ltx25_models,
         verify_ltxv_models,
         verify_realesrgan_models,
         verify_sfx_models,
@@ -190,6 +194,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("video: fake (built-in) | ltxv-2b (LTXV 2B distilled, default)")
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
+        print("video: ltx25 (LTX-2.5 Q3 + Gemma4 TE + VAEs, joint A/V)")
+        print("video: ltx23 (LTX-2.3 Q3 + Gemma3 TE + VAEs, joint A/V)")
         print("audio: fake (built-in) | audio-acestep (ACE-Step 1.5 turbo + 0.6B planner)")
         print("sfx: fake (built-in) | sfx-mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")
         print(
@@ -207,6 +213,10 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(lmessage)
         cok, cmessage = verify_causvid_models(_models_dir(args))
         print(cmessage)
+        l25ok, l25message = verify_ltx25_models(_models_dir(args))
+        print(l25message)
+        l23ok, l23message = verify_ltx23_models(_models_dir(args))
+        print(l23message)
         dok, dmessage = verify_director_models(_models_dir(args))
         print(dmessage)
         dawq_ok, dawq_message = verify_director_awq_models(_models_dir(args))
@@ -222,7 +232,19 @@ def cmd_models(args: argparse.Namespace) -> int:
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        all_ok = lok and cok and dok and dawq_ok and aok and sok and fok and rok and iok
+        all_ok = (
+            lok
+            and cok
+            and l25ok
+            and l23ok
+            and dok
+            and dawq_ok
+            and aok
+            and sok
+            and fok
+            and rok
+            and iok
+        )
         return 0 if all_ok else 1
     if action == "download":
         target = getattr(args, "models_target", "ltxv-2b")
@@ -252,6 +274,32 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(f"DMD checkpoint: {video.get('checkpoint_bytes')} bytes")
             print(f"manifest: {models_dir / 'manifest.json'}")
             return 0
+        if target == "ltx25":
+            models_dir = _models_dir(args)
+            print(f"downloading ltx25 into {models_dir} ...")
+            try:
+                record = download_ltx25_models(models_dir)
+            except Exception as exc:
+                print(f"download failed: {exc}", file=sys.stderr)
+                return 1
+            video = record["ltx25"]
+            assert isinstance(video, dict)
+            print(f"DiT: {video.get('checkpoint_bytes')} bytes")
+            print(f"manifest: {models_dir / 'manifest.json'}")
+            return 0
+        if target == "ltx23":
+            models_dir = _models_dir(args)
+            print(f"downloading ltx23 into {models_dir} ...")
+            try:
+                record = download_ltx23_models(models_dir)
+            except Exception as exc:
+                print(f"download failed: {exc}", file=sys.stderr)
+                return 1
+            video = record["ltx23"]
+            assert isinstance(video, dict)
+            print(f"DiT: {video.get('checkpoint_bytes')} bytes")
+            print(f"manifest: {models_dir / 'manifest.json'}")
+            return 0
         if target == "director-qwen8b":
             return _download_director(_models_dir(args))
         if target == "director-qwen4b-awq":
@@ -271,6 +319,8 @@ def cmd_models(args: argparse.Namespace) -> int:
             [
                 "ltxv-2b",
                 "causvid",
+                "ltx25",
+                "ltx23",
                 "director-qwen8b",
                 "director-qwen4b-awq",
                 "audio-acestep",
@@ -285,6 +335,7 @@ def cmd_models(args: argparse.Namespace) -> int:
     if action == "info":
         print("backends: `voyage models list` (video/audio/director/inspector)")
         print("weights: ltxv-2b (~7 GB) | causvid (~28 GB)")
+        print("weights: ltx25 (~38 GB Q3 + TE + VAEs + upscaler) | ltx23 (~20 GB Q3 + TE + VAEs)")
         print("weights: director-qwen8b (~16 GB) | audio-acestep | inspector-qwen35 (~19 GB)")
         print("weights: sfx-mmaudio (~8 GB: 3 variants + VAE/sync/CLIP/vocoder)")
         print("weights: film (~66 MB interpolation) | realesrgan-anime (~18 MB upscaler)")

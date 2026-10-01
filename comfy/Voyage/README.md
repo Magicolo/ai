@@ -39,6 +39,8 @@ Fake backends need nothing. Real backends need one download each
 ```bash
 ./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights (default)
 ./scripts/run.sh models download causvid        # ~28 GB CausVid DMD + Wan2.1-1.3B base
+./scripts/run.sh models download ltx25          # ~38 GB LTX-2.5 Q3 + TE + VAEs (joint A/V; TE/VAEs gated)
+./scripts/run.sh models download ltx23          # ~20 GB LTX-2.3 Q3 + TE + VAEs (joint A/V)
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
 ./scripts/run.sh models download director-qwen4b-awq  # ~2.6 GB GPU director decider
 ./scripts/run.sh models download audio-acestep    # ACE-Step checkpoints

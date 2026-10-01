@@ -35,6 +35,7 @@ def test_commit_types_field_names_unchanged() -> None:
         "video_time",
         "recovery_tape",
         "video_stage_ms",
+        "joint_audio_path",
     ]
     assert list(commit_types.CoveredAudio._fields) == [
         "audio_plan",

@@ -11,7 +11,9 @@ plus the FILM/Real-ESRGAN finalize augmentation on CUDA (unless
 unless deterministic, MMAudio SFX only when the finalize pass will run,
 the VLM inspector only when enabled — verifies each via `model_registry`,
 and downloads the missing ones in parallel with per-model console
-progress. Fake backends need no weight files at all (the director falls
+progress. Joint-audio video backends (`ltx25`, `ltx23`) render their own
+soundtrack, so ACE-Step and MMAudio are never required for them.
+Fake backends need no weight files at all (the director falls
 back to deterministic), so a fake run ensures the empty set and stays
 offline-friendly.
 
@@ -58,8 +60,19 @@ the inspector ever download together)."""
 _VIDEO_SPEC_FOR_BACKEND = {
     "ltxv": "ltxv-2b",
     "causvid": "causvid",
+    "ltx25": "ltx25",
+    "ltx23": "ltx23",
 }
 """CUDA video backend → its registry spec (fake needs no files)."""
+
+JOINT_AUDIO_BACKENDS = frozenset({"ltx25", "ltx23"})
+"""Video backends that generate their own joint A/V track (DESIGN §140 ltx
+plan): ACE-Step music takes and the MMAudio SFX pass are never required for
+them, even if a config pairs those audio stacks (Phase 4 presets pair
+nothing). The committed joint audio.wav is the full soundtrack. The manual
+`voyage sfx` verb stays available outside generate — `cmd_sfx` ensures
+nothing itself (it relies on a manual `models download sfx-mmaudio`).
+Imported by the supervisor bypass; single source."""
 
 
 @dataclass(frozen=True)
@@ -89,12 +102,15 @@ def required_specs(
     `augment_enabled` gates the finalize-stage augmentation floors (FILM
     interpolation + Real-ESRGAN anime upscaler): CUDA backends include
     them by default, `False` restores the pre-augmentation set (tests,
-    weight-free probes). `VideoBackendName` is a closed Literal, so past
-    the fake early-return the `_VIDEO_SPEC_FOR_BACKEND` index below is
-    total (no KeyError).
+    weight-free probes).     Joint-audio backends (`JOINT_AUDIO_BACKENDS`)
+    never pull ACE-Step or MMAudio: their video model renders the full
+    soundtrack, so those stacks are skipped even when paired.
+    `VideoBackendName` is a closed Literal, so past the fake early-return
+    the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
     """
     if config.video.backend == "fake":
         return []
+    joint_audio = config.video.backend in JOINT_AUDIO_BACKENDS
     required = [
         RequiredModel(
             spec=_VIDEO_SPEC_FOR_BACKEND[config.video.backend],
@@ -114,7 +130,7 @@ def required_specs(
                 ),
             ]
         )
-    if config.audio.backend == "acestep":
+    if config.audio.backend == "acestep" and not joint_audio:
         required.append(
             RequiredModel(
                 spec="audio-acestep",
@@ -133,7 +149,7 @@ def required_specs(
                 models_dir=_resolve_dir(models_root, config.video.models_dir),
             )
         )
-    if sfx_enabled and config.sfx.backend == "mmaudio":
+    if sfx_enabled and config.sfx.backend == "mmaudio" and not joint_audio:
         required.append(
             RequiredModel(
                 spec="sfx-mmaudio",

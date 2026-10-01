@@ -187,6 +187,8 @@ def test_models_verify_reports_augment_stacks(
     for name in (
         "verify_ltxv_models",
         "verify_causvid_models",
+        "verify_ltx25_models",
+        "verify_ltx23_models",
         "verify_director_models",
         "verify_director_awq_models",
         "verify_audio_models",

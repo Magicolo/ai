@@ -1,0 +1,148 @@
+# Base pinned by digest: linux/amd64 manifest of
+# nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04 (torch 2.14.0+cu130 needs
+# CUDA 13 at runtime; the 12.8 base of voyage-video cannot host it).
+# Resolved the same way as the video image (`docker buildx imagetools
+# inspect --raw ...`). The tag alone drifts; the digest freezes it.
+# Bump procedure: resolve the new amd64 digest the same way, update FROM,
+# re-freeze worker/requirements-ltx.txt on a GPU box, note in
+# docs/INSTALL.md.
+FROM nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04@sha256:e3fd439288969c0c78d52768cda4a10ab20f408180d6fa2933f94f7af7810cb0
+
+# LTX worker env (DESIGN §140): CUDA 13 + Python 3.11 + torch 2.14.0/cu130
+# + pinned ComfyUI stack running IN-PROCESS (PromptExecutor behind a
+# fake-server shim — no ComfyUI server process). Separate image from
+# voyage-video on purpose: the validated experiment stack (torch 2.14 /
+# transformers 5.17) would break voyage-video's frozen torch-2.8 /
+# transformers-4.57.6 pins, and the user constraint is to not break
+# existing functionality. Layer order keeps slow builds cached across
+# voyage-code edits (torch + requirements + clones before COPY).
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CUDA_HOME=/usr/local/cuda
+
+# Apt rows are intentionally unpinned (noble versions were not pre-resolved;
+# the digest-pinned FROM above keeps the snapshot reproducible). Re-query
+# procedure: rebuild, run `dpkg-query -W <pkgs>` in the image, pin exact
+# with `=`, note in docs/INSTALL.md. python3.11 comes from the deadsnakes
+# PPA (noble ships only 3.12; same deadsnake provenance as the TE-2 host
+# toolchain fix). python3.11-dev is here (not late) because triton
+# JIT-compiles its CUDA utils on first Gemma RoPE use and gcc + Python.h
+# must both be present (TE-2 lesson). curl is the get-pip.py fallback if
+# deadsnakes ever drops ensurepip from python3.11-venv.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-venv python3.11-dev \
+        git gcc g++ ffmpeg curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3.11 -m ensurepip --upgrade \
+    && ln -sfn /usr/bin/python3.11 /usr/bin/python3
+
+# pip + torch trio from the cu130 index (torch 2.14.0+cu130 is NOT on the
+# default index; the cp311 x86_64 wheel was confirmed present pre-build).
+# Explicit `python3.11 -m pip`: no python3-pip is installed (that would be
+# noble's 3.12 pip — wrong interpreter), so no bare `pip` binary exists.
+RUN python3.11 -m pip install "pip==25.0.1" \
+    && python3.11 -m pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu130
+
+# Validated experiment freeze (worker/requirements-ltx.txt header): everything
+# except the torch trio above, plus textual for console/TUI parity.
+COPY worker/requirements-ltx.txt /tmp/requirements-ltx.txt
+RUN python3.11 -m pip install -r /tmp/requirements-ltx.txt
+
+# Verified-fetch clones (same contract as the video image): `--depth 1`
+# keeps context small; `fetch <sha>` + `checkout <sha>` + `rev-parse
+# --verify` prove the pinned commit is exactly what got checked out.
+# Layout mirrors the validated experiment tree (ComfyUI + custom_nodes/
+# ComfyUI-GGUF) so Phase-2 workers can reuse the experiment import paths.
+# License surface: LTX-2.5/LTX-2.3 GGUF weights pulled at runtime carry
+# their upstream licenses (see voyage/registry_ltx25.py + registry_ltx23.py
+# + docs/MODELS.md) — check before redistributing images.
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /opt/comfyui \
+    && git -C /opt/comfyui fetch --depth 1 origin 2f35f4a08176d993cded35dac3332be4f7287f41 \
+    && git -C /opt/comfyui checkout 2f35f4a08176d993cded35dac3332be4f7287f41 \
+    && git -C /opt/comfyui rev-parse --verify HEAD \
+    && git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git /opt/comfyui/custom_nodes/ComfyUI-GGUF \
+    && git -C /opt/comfyui/custom_nodes/ComfyUI-GGUF fetch --depth 1 origin 6ea2651e7df66d7585f6ffee804b20e92fb38b8a \
+    && git -C /opt/comfyui/custom_nodes/ComfyUI-GGUF checkout 6ea2651e7df66d7585f6ffee804b20e92fb38b8a \
+    && git -C /opt/comfyui/custom_nodes/ComfyUI-GGUF rev-parse --verify HEAD
+
+# Gemma4 LTX text-encoder patch (validated in the experiment tree): adds
+# gemma4 to TXT_ARCH_LIST + LTXV_BF16_PARAMETERS to the GGUF loader.
+# Applied with --forward so a rebuild against an already-patched tree fails
+# loud instead of double-applying; the grep asserts the marker landed.
+COPY worker/patches-ltx25-gemma4.patch /tmp/patches-ltx25-gemma4.patch
+RUN patch --forward -p1 -d /opt/comfyui/custom_nodes/ComfyUI-GGUF < /tmp/patches-ltx25-gemma4.patch \
+    && grep -q '"gemma4"' /opt/comfyui/custom_nodes/ComfyUI-GGUF/loader.py \
+    && grep -q 'LTXV_BF16_PARAMETERS' /opt/comfyui/custom_nodes/ComfyUI-GGUF/loader.py
+
+# Console progress (rich, in requirements) + voyage supervisor package
+# (pure-python here; torch lives only behind the worker module import).
+# --no-deps: pydantic already pinned above, so the editable install adds
+# only the voyage package itself.
+COPY pyproject.toml README.md /app/
+COPY voyage/ /app/voyage/
+RUN python3.11 -m pip install --no-deps -e /app
+
+# Director decider venv (same reason as the video image): the decider needs
+# GPTQModel + sentence-transformers, kept isolated so the validated LTX
+# freeze above is never perturbed. Pins mirror the video image's director
+# venv, on python3.11 (torch 2.11.0+cu128 ships a cp311 wheel). The
+# supervisor spawns the director with this interpreter via
+# VOYAGE_DIRECTOR_PYTHON below; unset (slim image, tests) falls back to
+# sys.executable. voyage itself resolves via the /app PYTHONPATH entry.
+RUN python3.11 -m venv /opt/venvs/director \
+    && /opt/venvs/director/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/director/bin/pip install torch==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+    && /opt/venvs/director/bin/pip install "GPTQModel==7.5.0" "sentence-transformers==6.1.0" \
+        "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
+    && /opt/venvs/director/bin/pip install transformers==5.17.0
+
+# Run as the invoking host user (same contract as the video image): the
+# supervisor and its worker subprocesses share bind mounts with the host,
+# so a root container leaves root-owned renders behind. A real user
+# carrying the host's UID/GID (build args, forwarded by
+# scripts/build-ltx.sh from `id`; defaults 1000) keeps every written file
+# host-owned. Rebuild after a host-uid change. Placed late so the slow
+# torch/requirements/clone layers above stay cached. The usermod branch is
+# load-bearing on ubuntu24.04-based images: the base already owns UID 1000
+# under another name, so a uid-only getent check would skip useradd and the
+# later `USER voyager` would fail to resolve.
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+  getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
+  if ! getent passwd voyager >/dev/null; then \
+    if getent passwd "${UID}" >/dev/null; then \
+      usermod -l voyager -d /home/voyager -s /bin/bash "$(getent passwd "${UID}" | cut -d: -f1)"; \
+    else \
+      useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
+    fi; \
+  fi; \
+  mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
+  chown -R "${UID}:${GID}" /opt/comfyui /opt/venvs;
+ENV HOME=/home/voyager
+USER voyager
+
+ENV PYTHONPATH=/opt/comfyui:/app \
+    VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
+    VOYAGE_MODELS_DIR=/models \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# WORKDIR /app (same contract as the video image): keeps `-w /app` in
+# run.sh as belt-and-braces; Phase-2 workers satisfy any CWD contract
+# themselves with absolute voyage paths.
+WORKDIR /app
+
+# Build-time doctor gate (same contract as the video image): verifies
+# ffmpeg/torch-CUDA/disk/models facts inside THIS image's CUDA stack.
+# Exit code is ffmpeg-only, so missing models at build time warn via
+# facts without failing the build.
+RUN voyage doctor
+
+CMD ["voyage", "doctor"]

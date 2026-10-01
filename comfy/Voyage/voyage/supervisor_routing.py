@@ -24,8 +24,11 @@ VIDEO_WORKER_MODULES = {
     "fake": "voyage.workers.video",
     "ltxv": "voyage.workers.video_ltxv",
     "causvid": "voyage.workers.video_causvid",
+    "ltx25": "voyage.workers.video_ltx25",
+    "ltx23": "voyage.workers.video_ltx23",
 }
-"""Backend name → worker module. ltxv/causvid only exist in the CUDA image."""
+"""Backend name → worker module. ltxv/causvid only exist in the CUDA image;
+ltx25/ltx23 only exist in the voyage-ltx image."""
 
 STREAMING_VIDEO_BACKENDS: tuple[str, ...] = tuple(
     name for name, record in BACKEND_REGISTRY.items() if record.streaming

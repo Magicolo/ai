@@ -52,7 +52,9 @@ run reuses the same segment number and overwrites the media in place.
 `ltxv`/`causvid` video + `acestep` cannot co-reside on 16 GB. The supervisor
 sequence is: evict video → render audio take → evict audio → rebuild
 video from tape. `del` alone frees nothing — eviction is
-`del` + `gc.collect()` + `torch.cuda.empty_cache()`.
+`del` + `gc.collect()` + `torch.cuda.empty_cache()`. The `ltx25`/`ltx23`
+backends skip this dance entirely: their audio is joint (committed with
+the video, no audio worker), so no GPU swap ever runs for them.
 
 ## What lives where in a run dir
 

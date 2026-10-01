@@ -4,8 +4,9 @@
 # Env:
 #   VOYAGE_IMAGE  container image (default voyage:latest, the slim CPU image;
 #                 auto-selected to voyage-video:latest when a CUDA backend
-#                 -- ltxv, acestep, mmaudio -- is requested,
-#                 unless set;
+#                 -- ltxv, acestep, mmaudio -- is requested, and to
+#                 voyage-ltx:latest when an LTX ComfyUI backend -- ltx25,
+#                 ltx23 -- is requested, unless set;
 #                 bare `run.sh` (the launcher TUI, backend picked
 #                 interactively) also defaults to voyage-video when the host
 #                 has a GPU, so ltxv works with no explicit variables)
@@ -63,12 +64,17 @@ fi
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/voyage.toml" ]; then
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
+    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
 fi
 needs_cuda=0
+# ltx25/ltx23 run the ComfyUI worker stack, which lives in voyage-ltx
+# (separate image — the validated torch 2.14/cu130 + pinned ComfyUI tree
+# would break the voyage-video pins), not voyage-video.
+ltx_backend=0
 case "${requested_backend:-}" in
   ltxv|causvid|acestep|mmaudio) needs_cuda=1 ;;
+  ltx25|ltx23) needs_cuda=1; ltx_backend=1 ;;
 esac
 # Bare launcher TUI: the backend is picked interactively inside the TUI, so
 # no CLI signal exists. On a GPU box assume the CUDA stack so bare `run.sh`
@@ -89,6 +95,8 @@ else
 fi
 if [ -n "${VOYAGE_IMAGE:-}" ]; then
   image="$VOYAGE_IMAGE"
+elif [ "$ltx_backend" = "1" ]; then
+  image="voyage-ltx:latest"
 elif [ "$want_cuda" = "1" ]; then
   image="voyage-video:latest"
 else

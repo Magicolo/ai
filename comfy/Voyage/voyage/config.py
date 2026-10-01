@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from voyage.errors import ConfigurationError
 
-VideoBackendName = Literal["fake", "ltxv", "causvid"]
+VideoBackendName = Literal["fake", "ltxv", "causvid", "ltx25", "ltx23"]
 """Video backend vocabulary (issue 022): every backend field, the registry,
 and the streaming set are keyed by this — a typo fails at typecheck
 instead of after GPU init."""
@@ -202,6 +202,52 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         audio_device="cuda:0",
         sfx_backend="mmaudio",
         sfx_device="cuda:0",
+        state_mode="reconstructable_prefix",
+        streaming=True,
+    ),
+    # ltx25/ltx23 (DESIGN §140 ltx plan, Voyage/LTX2.md campaign):
+    # LTX-2.5 / LTX-2.3 distilled GGUF via in-process ComfyUI
+    # (voyage/workers/video_ltx25.py / video_ltx23.py). Committed
+    # segments are Mode A two-stage 1216x704@24 (stage-1
+    # 608x352x121 8-sigma distilled, 2x latent upscale, stage-2
+    # 3-step refine); 121-frame windows with a 25-frame frozen
+    # prefix carry commit 96 novel (same 25+96 math as ltxv).
+    # latent_shape is the stage-1 video latent [B, C, T, H, W] =
+    # [1, 128, (121-1)//8+1, 608//32, 352//32] (EmptyLTXVLatentVideo
+    # convention); the workers enforce the fixed native geometry
+    # themselves. Quantization, text encoder, and VAE are implicit
+    # per family (Q3_K_M DiT only — OOM is a clean failure, no
+    # fallback rung). Both render their own joint soundtrack, so
+    # audio/sfx pair fake/fake and the supervisor commits the
+    # worker's audio.wav directly (models_ensure.JOINT_AUDIO_BACKENDS
+    # skips ACE-Step/MMAudio even when paired).
+    "ltx25": BackendRecord(
+        profile="ltx25-704p",
+        width=1216,
+        height=704,
+        fps=24,
+        segment_frames=96,
+        latent_shape=(1, 128, 16, 19, 11),
+        device="cuda:0",
+        audio_backend="fake",
+        audio_device="cpu",
+        sfx_backend="fake",
+        sfx_device="cpu",
+        state_mode="reconstructable_prefix",
+        streaming=True,
+    ),
+    "ltx23": BackendRecord(
+        profile="ltx23-704p",
+        width=1216,
+        height=704,
+        fps=24,
+        segment_frames=96,
+        latent_shape=(1, 128, 16, 19, 11),
+        device="cuda:0",
+        audio_backend="fake",
+        audio_device="cpu",
+        sfx_backend="fake",
+        sfx_device="cpu",
         state_mode="reconstructable_prefix",
         streaming=True,
     ),
@@ -712,7 +758,8 @@ seed = {seed}
 min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}
 
 [video]
-# "ltxv" (CUDA) | "causvid" (CUDA, 16 fps) | "fake" (built-in testsrc)
+# "ltxv" (CUDA) | "causvid" (CUDA, 16 fps) | "ltx25"/"ltx23" (CUDA, joint A/V)
+# | "fake" (built-in testsrc)
 backend = "{backend}"
 profile = "{profile}"
 width = {width}
@@ -968,10 +1015,12 @@ def apply_draft_overrides(
     )
 
 
-# Audio backend paired with each video row: CUDA video backends get the
-# real ACE-Step music stack (models + device mirror the video row), while
-# fake video keeps the fake sine backend for CPU-only test runs. The
-# pairing lives in BackendRecord.audio_backend/audio_device — these dicts
+# Audio backend paired with each video row: ltxv/causvid get the real
+# ACE-Step music stack (models + device mirror the video row); the
+# joint-audio ltx25/ltx23 rows pair fake (soundtrack ships with the
+# video — the supervisor commits it directly); fake video keeps the
+# fake sine backend for CPU-only test runs. The pairing lives in
+# BackendRecord.audio_backend/audio_device — these dicts
 # are derived views (issue 022), never a second source.
 _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int | list[int]]] = {
     name: {
@@ -1028,9 +1077,10 @@ def _audio_preset(backend: str) -> dict[str, str]:
 def _sfx_preset(backend: str) -> dict[str, str]:
     """SFX pairing row as a plain dict (derived from BACKEND_REGISTRY).
 
-    CUDA video backends pair the MMAudio stack on cuda:0 (SFX/music on
-    by default on GPU); fake keeps the fake-noise backend on CPU so
-    CPU-only test runs never touch weights.
+    ltxv/causvid pair the MMAudio stack on cuda:0 (SFX/music on by
+    default on GPU); the joint-audio ltx25/ltx23 rows pair fake (their
+    soundtrack ships with the video); fake keeps the fake-noise backend
+    on CPU so CPU-only test runs never touch weights.
     """
     try:
         return _SFX_BACKEND_PRESETS[backend]

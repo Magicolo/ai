@@ -105,6 +105,8 @@ from voyage.model_registry import (
     download_director_models,
     download_film_models,
     download_inspector_models,
+    download_ltx23_models,
+    download_ltx25_models,
     download_ltxv_models,
     download_realesrgan_models,
     download_sfx_models,
@@ -114,6 +116,8 @@ from voyage.model_registry import (
     verify_director_models,
     verify_film_models,
     verify_inspector_models,
+    verify_ltx23_models,
+    verify_ltx25_models,
     verify_ltxv_models,
     verify_realesrgan_models,
     verify_sfx_models,
@@ -218,6 +222,8 @@ __all__ = [
     "download_director_models",
     "download_film_models",
     "download_inspector_models",
+    "download_ltx23_models",
+    "download_ltx25_models",
     "download_ltxv_models",
     "download_realesrgan_models",
     "download_sfx_models",
@@ -235,6 +241,8 @@ __all__ = [
     "verify_director_models",
     "verify_film_models",
     "verify_inspector_models",
+    "verify_ltx23_models",
+    "verify_ltx25_models",
     "verify_ltxv_models",
     "verify_realesrgan_models",
     "verify_sfx_models",
@@ -281,7 +289,7 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     init.add_argument(
         "--backend",
-        choices=("fake", "ltxv", "causvid"),
+        choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
         default="ltxv",
         help="video backend preset written into the run config",
     )
@@ -322,6 +330,8 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
         choices=[
             "ltxv-2b",
             "causvid",
+            "ltx25",
+            "ltx23",
             "director-qwen8b",
             "audio-acestep",
             "sfx-mmaudio",
@@ -506,7 +516,7 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     gen.add_argument(
         "--backend",
-        choices=("fake", "ltxv", "causvid"),
+        choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
         default="ltxv",
         help="video backend preset written into the run config",
     )

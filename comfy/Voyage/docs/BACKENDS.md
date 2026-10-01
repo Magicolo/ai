@@ -40,6 +40,8 @@ finalizer concat path, and checksums run exactly as in production.
 |------|---------|-------|-------|
 | video | `ltxv` (default) | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
 | video | `causvid` | `voyage-video:latest` | DMD causal generator + Wan2.1-1.3B base, 832×480 @ 16 fps native, bf16 |
+| video | `ltx25` | `voyage-ltx:latest` | LTX-2.5 22B GGUF Q3 + Gemma4 TE, Mode-A two-stage 1216×704 @ 24 fps, joint A/V |
+| video | `ltx23` | `voyage-ltx:latest` | LTX-2.3 22B GGUF Q3 + Gemma3 DualCLIP TE, same Mode-A chassis, joint A/V |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
 | sfx | `mmaudio` | `voyage-video:latest` | finalize-time video-synced effects, 8 s windows / 1 s fades, amix −6 dB (see `docs/SFX.md`) |
 | director | `qwen` | `voyage-video:latest` (`/opt/venvs/director` via `VOYAGE_DIRECTOR_PYTHON`) | Qwen3-4B-AWQ on cuda:1 (default) or Qwen3-8B bf16 on CPU (`--director-device cpu`), non-thinking, temp 0.7 |
@@ -90,6 +92,44 @@ safe to run mid-sequence.
  saves/restores tail state around its probes, so like ltxv it does not
  advance any stream — safe to run mid-sequence.
 
+## LTX-2.5 chaining model (`ltx25`, quality path)
+
+Resident ComfyUI in-process worker (`voyage/workers/video_ltx25.py`)
+driving the pinned experiment stack (ComfyUI @2f35f4a + ComfyUI-GGUF
+@6ea2651 + gemma4 patch, image `voyage-ltx:latest`) via a fake-server
+`PromptExecutor`. The quality path is the default and only mode: Mode A
+two-stage — stage 1 renders 608×352×121 with the distilled 8-sigma
+`euler_ancestral` schedule (CFG 1.0), a 2× latent upscale follows, and
+stage 2 refines 1216×704×121 in 3 steps. Quantization, TE, and VAE are
+implicit (Q3_K_M DiT + Gemma4-Q2K TE + conv video VAE — Q3-only, OOM
+fails clean, no fallback rung). Chaining is an explicit frozen prefix:
+the previous segment's last 25 frames pin the new latent via
+`LTXVImgToVideoInplace` (`noise_mask` strength 1.0); every segment
+renders 121-frame windows, fresh blocks commit all 121, conditioned
+blocks drop the 25-frame prefix and commit 96 novel. Audio is joint:
+`LTXVAudioVAEDecode` output is committed as the segment `audio.wav`
+(canonical s16le 48 kHz stereo), so no ACE-Step/MMAudio workers ever run
+for this backend (`JOINT_AUDIO_BACKENDS`). The tail file
+`video_tail.mp4` beside the segment video is the crash-recovery anchor;
+`recovery.pt` carries the §5.3 JSON record with profile `ltx25` (tapes
+never resume across backends); `scene_cut` forces a fresh start. Native
+1216×704 @ 24 fps. Needs `models download ltx25`. The `benchmark` op
+saves/restores tail state around its probes, so it does not advance any
+stream — safe to run mid-sequence.
+
+## LTX-2.3 chaining model (`ltx23`, same chassis)
+
+Same ComfyUI in-process chassis as `ltx25`
+(`voyage/workers/video_ltx23.py`, same image): the only differences are
+the text-encoder node (`DualCLIPLoaderGGUF` with the Gemma3-Q2K backbone
+plus the distilled embeddings connectors), the unsloth distilled
+video/audio VAEs, and the Q3_K_M DiT file — the spatial upscaler is the
+shared LTX-2.5 file (no duplication). Same Mode-A geometry (1216×704 @
+24 fps), same 121/25/96 chaining, same joint-audio commit, same
+`reconstructable_prefix` state mode; `recovery.pt` carries profile
+`ltx23`. Needs `models download ltx23`. The `benchmark` op
+saves/restores tail state around its probes — safe to run mid-sequence.
+
 ## Experimental backends
 
 - **Visual inspector** (`[experimental] visual_inspector`, default off):
@@ -97,5 +137,5 @@ safe to run mid-sequence.
   feed the director context, amendments apply post-validation with a
   provisional `style_similarity_min = 0.60`. Advisory only — retry→skip,
   never blocks a commit. Needs `models download inspector-qwen35`.
-- **Recovery profiles** (`ltxv`, `causvid`): tapes never resume across
-  backends or numerics.
+- **Recovery profiles** (`ltxv`, `causvid`, `ltx25`, `ltx23`): tapes never resume across
+   backends or numerics.

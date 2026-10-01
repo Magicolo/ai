@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GPU qualification driver (Stream B §137A; issue 090 generalized).
 #
-# Usage: ./scripts/qualify.sh [--backend ltxv|causvid] [--segments N] <run-dir>
+# Usage: ./scripts/qualify.sh [--backend ltxv|causvid|ltx25|ltx23] [--segments N] <run-dir>
 #   e.g. ./scripts/qualify.sh /tmp/qual-ltxv
 #        ./scripts/qualify.sh --backend causvid --segments 2 /tmp/qual-causvid
 #   <run-dir> MUST be absolute: workers spawn with CWD=run_dir, so a
@@ -33,7 +33,7 @@ run_dir=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --backend)
-      backend="${2:?--backend needs a value (ltxv|causvid)}"
+      backend="${2:?--backend needs a value (ltxv|causvid|ltx25|ltx23)}"
       shift 2
       ;;
     --backend=*)
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      echo "usage: ./scripts/qualify.sh [--backend ltxv|causvid] [--segments N] <absolute-run-dir>" >&2
+      echo "usage: ./scripts/qualify.sh [--backend ltxv|causvid|ltx25|ltx23] [--segments N] <absolute-run-dir>" >&2
       exit 0
       ;;
     *)
@@ -63,13 +63,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$run_dir" ]; then
-  echo "usage: ./scripts/qualify.sh [--backend ltxv|causvid] [--segments N] <absolute-run-dir>" >&2
+  echo "usage: ./scripts/qualify.sh [--backend ltxv|causvid|ltx25|ltx23] [--segments N] <absolute-run-dir>" >&2
   exit 2
 fi
 case "$backend" in
-  ltxv|causvid) ;;
+  ltxv|causvid|ltx25|ltx23) ;;
   *)
-    echo "qualify: --backend must be ltxv|causvid (got '$backend')" >&2
+     echo "qualify: --backend must be ltxv|causvid|ltx25|ltx23 (got '$backend')" >&2
     exit 2
     ;;
 esac

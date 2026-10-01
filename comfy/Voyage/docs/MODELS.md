@@ -1,8 +1,10 @@
 # MODELS — exact IDs, revisions, links
 
 All pins live in code in `voyage/model_registry.py` (the single source of
-truth); this file mirrors them for humans. Every repo is **ungated** —
-no token required. Verify local files with `voyage models verify`.
+truth); this file mirrors them for humans. Most repos are **ungated** —
+no token required — except the LTX-2.5 text encoder, VAEs and upscaler
+(see below), which need a token with access. Verify local files with
+`voyage models verify`.
 
 ## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB, default)
 
@@ -29,6 +31,28 @@ at `adb6a5ecd07666b4d0290042915c8406e6d5ce22`, cloned in
 (non-commercial, share-alike); the Wan2.1 base is Apache 2.0. Native
 geometry 832×480 @ 16 fps; full notes:
 `docs/UPSTREAM_CAUSVID_NOTES.md`.
+
+## Video — LTX-2.5 Q3 + Gemma4 TE + VAEs (`models download ltx25`, ~38 GB, joint A/V)
+
+| Artifact | Repo / file | Revision |
+|----------|-------------|----------|
+| DiT (`LTX-2.5-Distilled-Q3_K_M.gguf`, ~12.9 GB) | [Abiray/LTX-2.5-Distilled-GGUF](https://huggingface.co/Abiray/LTX-2.5-Distilled-GGUF) | `7b0c2025441f1bf12c18eac375ad21f5e3d3c9e0` |
+| Text encoder (`gemma4-12b-with-proj-ltx-2.5-Q2_K.gguf`, ~6.0 GB, **gated**) | [elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF](https://huggingface.co/elix3r/gemma4-12b-with-proj-ltx-2.5-GGUF) | `2a18e836d286eb0570ec9f013c3591eb8c614d57` |
+| Video VAE (`vae/ltx-2.5-video-vae-conv-bf16.safetensors`, ~1.5 GB, **gated**) + audio VAE (`vae/ltx-2.5-audio-vae-bf16.safetensors`, **gated**) + spatial upscaler (`latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors`, **gated**) | [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | `5e6e71018ee1756ed329b697a7b4aedc934dfce9` |
+
+Driven in-process through pinned ComfyUI (`2f35f4a`) + ComfyUI-GGUF
+(`6ea2651`) + gemma4 patch — see `LTX2.md` experiments E1-E4/S21-S30.
+Generates joint audio (no ACE-Step/MMAudio for this backend).
+
+## Video — LTX-2.3 Q3 + Gemma3 TE + VAEs (`models download ltx23`, ~20 GB, joint A/V)
+
+| Artifact | Repo / file | Revision |
+|----------|-------------|----------|
+| DiT (`distilled/ltx-2.3-22b-distilled-Q3_K_M.gguf`, ~10.8 GB) + connectors (`text_encoders/ltx-2.3-22b-distilled_embeddings_connectors.safetensors`, ~2.3 GB) + video/audio VAEs (`vae/*`, ~1.8 GB) | [unsloth/LTX-2.3-GGUF](https://huggingface.co/unsloth/LTX-2.3-GGUF) | `96e8ed4925ead3db9ff4d0084f165ef6a74f28d0` |
+| Text encoder backbone (`gemma-3-12b-it-qat-Q2_K.gguf`, ~4.8 GB) | [unsloth/gemma-3-12b-it-qat-GGUF](https://huggingface.co/unsloth/gemma-3-12b-it-qat-GGUF) | `858acec7ec0541a46c39985c95d3b52d8f3ab183` |
+
+Same pinned ComfyUI stack as ltx25; the Mode-A spatial upscaler is
+shared from the ltx25 volume (not duplicated). Joint audio, like ltx25.
 
 ## Finalize augmentation — FILM interpolation (`models download film`, ~66 MB)
 

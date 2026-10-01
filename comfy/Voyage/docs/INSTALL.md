@@ -83,6 +83,8 @@ never leave root-owned `__pycache__` in the bind mount.
 ```bash
 ./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB, default)
 ./scripts/run.sh models download causvid        # CausVid DMD + Wan2.1-1.3B base (~28 GB)
+./scripts/run.sh models download ltx25          # LTX-2.5 Q3 + TE + VAEs (~38 GB, joint A/V; TE/VAEs gated)
+./scripts/run.sh models download ltx23          # LTX-2.3 Q3 + TE + VAEs (~20 GB, joint A/V)
 ./scripts/run.sh models download director-qwen8b  # director (~16 GB)
 ./scripts/run.sh models download director-qwen4b-awq  # GPU director decider (~2.6 GB)
 ./scripts/run.sh models download audio-acestep    # audio checkpoints
@@ -94,4 +96,6 @@ never leave root-owned `__pycache__` in the bind mount.
 ```
 
 Exact repo IDs, revisions, and links: `docs/MODELS.md`. All repos are
-ungated — no Hugging Face token needed.
+ungated — no Hugging Face token needed — except the LTX-2.5 text
+encoder, VAEs and upscaler (gated; `ltx25` download needs a token
+with access).

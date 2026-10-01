@@ -125,6 +125,23 @@ def test_plan_summary_causvid_reports_72f_at_16fps() -> None:
     assert "16fps" in summary
 
 
+@pytest.mark.parametrize("backend", ["ltx25", "ltx23"])
+def test_ltx_backend_is_accepted(backend: str) -> None:
+    state = _valid_state()
+    state.backend = backend
+    assert validate(state) == []
+
+
+@pytest.mark.parametrize("backend", ["ltx25", "ltx23"])
+def test_plan_summary_ltx_reports_96f_at_24fps(backend: str) -> None:
+    state = _valid_state()
+    state.backend = backend
+    summary = plan_summary(state)
+    assert backend in summary
+    assert "96f/segment" in summary
+    assert "24fps" in summary
+
+
 def test_plan_summary_default_is_five_seconds() -> None:
     summary = plan_summary(_valid_state())
     assert "2 segment(s)" in summary
@@ -835,6 +852,15 @@ def test_gpu_warning_names_image_and_gpu_flag(backend: str) -> None:
     assert "--gpus" in warning
 
 
+@pytest.mark.parametrize("backend", ["ltx25", "ltx23"])
+def test_gpu_warning_names_ltx_image(backend: str) -> None:
+    warning = gpu_warning(backend)
+    assert warning
+    assert "\n" not in warning
+    assert "voyage-ltx" in warning
+    assert "--gpus" in warning
+
+
 def test_plan_counts_causvid_uses_72_novel_per_block_at_16fps() -> None:
     state = GenerateFormState(style="x", backend="causvid", duration="5s")
     assert plan_counts(state) == (2, 144, pytest.approx(9.0))  # type: ignore[comparison-overlap]
@@ -843,6 +869,18 @@ def test_plan_counts_causvid_uses_72_novel_per_block_at_16fps() -> None:
 def test_plan_counts_causvid_scales_with_blocks() -> None:
     state = GenerateFormState(style="x", backend="causvid", duration="5s", blocks="2")
     assert plan_counts(state) == (1, 144, pytest.approx(9.0))  # type: ignore[comparison-overlap]
+
+
+@pytest.mark.parametrize("backend", ["ltx25", "ltx23"])
+def test_plan_counts_ltx_uses_96_novel_per_block_at_24fps(backend: str) -> None:
+    state = GenerateFormState(style="x", backend=backend, duration="5s")
+    assert plan_counts(state) == (2, 192, pytest.approx(8.0))  # type: ignore[comparison-overlap]
+
+
+@pytest.mark.parametrize("backend", ["ltx25", "ltx23"])
+def test_plan_counts_ltx_scales_with_blocks(backend: str) -> None:
+    state = GenerateFormState(style="x", backend=backend, duration="5s", blocks="2")
+    assert plan_counts(state) == (1, 192, pytest.approx(8.0))  # type: ignore[comparison-overlap]
 
 
 def test_field_errors_keyed_by_field() -> None:
