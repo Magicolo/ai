@@ -288,3 +288,73 @@ grep -rn "pytest.mark" tests/ | head -n 20
   landed (batch 12, gates track). Slow-budget follow-up:
   `test_cached_slice_take...` (0.21s) stays unmarked until the budget
   tightens below the multi-second bar.
+
+## Progress log (2026-10-01, this pass — lock record + mypy-list + 8 slow marks)
+
+- (a) Lock record-only (forbidden — never edited): `requirements.lock:25-26`
+  still `httpcore2==2.13.1` / `httpx2==2.13.1`; `tomli` conditional still
+  `pyproject.toml:24` and absent from the lock. Lock track w/068 owns both.
+- (b) mypy-list move ATTEMPTED with per-file proof (scripts/ ownership
+  granted by the brief): `tests/test_integration.py` is `mypy --strict`
+  clean in-container (`Success: no issues found in 1 source file`), and
+  the batch-13 blocker (line-119 stale ignore) is gone — line 119 is now
+  plain `options = FinalizeOptions(joint_style=joint_style)`, line 127
+  keeps its covering ignore (real arg-type error, left intact). Added
+  `tests/test_integration.py` to `scripts/gates.sh:49` (alphabetical slot
+  after `test_inspector_wiring.py`). Per-file gates: `mypy --strict`
+  clean on `test_integration.py` + `test_state_integrity.py` +
+  `test_tui.py` (3 files, no issues); `ruff check` + `ruff format
+  --check` clean on all 7 touched test files; `bash -n scripts/gates.sh`
+  clean. Foreign-hunk note: `scripts/gates.sh` also carries a concurrent
+  hunk removing `tests/test_prefetch_shutdown.py` from the same mypy
+  list (not mine — preserved, never touched); full `gates.sh` green is
+  left to the orchestrator because the file is shared.
+- (c) Slow-tail re-timed live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip, `-m "not slow and not gpu and not endurance"`
+  `--durations=30`, 1657 passed in 257.07s): top unmarked multi-second
+  legs are `test_e1_media_augment.py::test_188_numbering_gap_lenient...`
+  9.98s / `test_generate.py::test_generate_fake_end_to_end...` 9.32s /
+  `test_media_memory.py::test_finalize_reencode...` 8.97s /
+  `test_state_integrity.py::test_finalize_skip_bad...` 6.47s /
+  `test_e1_media_augment.py::test_138_missing_video_lenient...` 5.64s /
+  `test_tui.py::test_generate_end_to_end_fake_backend` 5.64s /
+  `test_e1_media_augment.py::test_138_missing_audio_lenient...` 5.50s /
+  `test_failure_policy.py::test_finalize_space_preflight` 5.09s. Marked
+  all 8 per-test `@pytest.mark.slow` (marker lines only, 6 files).
+  Verified: `-m slow --collect-only` on the 7 touched files collects
+  10 (8 new + 2 pre-existing integration); 5 passed in 28.83s
+  (e1 3 + failure 1 + state 1) and 3 passed in 23.04s (generate +
+  media_memory + tui). Remaining 22 unmarked multi-second legs recorded
+  below with the same evidence run (all `not slow` at run time).
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: partial (lock record-only; mypy-list landed per-file-green
+  with a shared-file caveat; 8 slow legs marked with wall-time evidence).
+  Files changed: `scripts/gates.sh` (1 mypy-list token,
+  `test_integration.py`); `tests/test_e1_media_augment.py` (3 markers),
+  `tests/test_generate.py` (1), `tests/test_media_memory.py` (1),
+  `tests/test_state_integrity.py` (1), `tests/test_tui.py` (1),
+  `tests/test_failure_policy.py` (1); this issue file.
+  DESIGN proposals: none.
+- Residuals: (a) lock typo (`requirements.lock:25-26`) + tomli note →
+  lock track w/068 (forbidden, unchanged); (b) full `gates.sh` green →
+  orchestrator (shared file carries the foreign prefetch-shutdown hunk);
+  comment staleness (`scripts/gates.sh:27-28` still says 83 files vs 76
+  listed) left as-is (list-line only per the brief); (c) 22 unmarked
+  multi-second legs from the same 257s evidence run (mark when the slow
+  budget tightens): `test_generate.py` 4.75/4.72/4.65s (name-wins,
+  ensure-selective, defaults, name-routes), `test_generate_ensure.py`
+  4.74/4.73s, `test_av_alignment_consumer.py` 3.53s,
+  `test_media_memory.py::test_finalize_fastpath...` 3.00s,
+  `test_ltxv.py::test_verify...` 2.66s,
+  `test_tui_checkbox_toggle_181.py` 2.49s, `test_scoreboard.py` 2.43s,
+  `test_cli_validate_handoff.py` 2.40s,
+  `test_commit_side_integrity_095_101_104.py` 2.27/2.02s,
+  `test_e1_media_augment.py::test_188_strict...` 2.13s,
+  `test_qualification.py::test_fake_three_segment...` 2.07s,
+  `test_generation_stack.py::test_stop_workers...` 2.01s,
+  `test_console.py` 1.99s, `test_issue_141...` 1.97s,
+  `test_supervisor_av_align.py` 1.94/1.85s,
+  `test_e1_media_augment.py::test_138_strict...` 1.90s,
+  `test_crash_matrix.py::test_repeated_crashes...` 1.78s.

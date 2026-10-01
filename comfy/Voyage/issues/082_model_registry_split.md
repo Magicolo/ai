@@ -324,3 +324,108 @@ grep -n "_sha256\|_MANIFEST_LOCK\|_repair_manifest" voyage/model_registry.py voy
   `registry_records` → `model_registry`, agreement test per
   family); manifest-race fix shape unchanged from the batch-7
   entry.
+
+## Progress log (2026-10-01, causvid + sfx families)
+
+- Pre-checks live in-container (`voyage:latest`, CPU-only,
+  `docker run --rm -v $PWD:/app -w /app voyage:latest ...` from
+  `Voyage/`): `wc -l voyage/registry_records.py` → 646 at pass
+  start (matches the ltxv+audio close); `git diff --name-only` on
+  owned targets empty before every edit (`Voyage/` carries foreign
+  concurrent hunks in `LTX2.md`, issues 031/035/081/088/152,
+  `scripts/gates.sh`, `tests/test_generation_stack.py` + a
+  `test_prefetch_shutdown.py` deletion — all left intact per §9,
+  none inside either extraction region); `model_registry.py`
+  untouched (facade chain holds).
+- Re-verified remaining families live via grep: director QWEN_* +
+  QWEN4B_AWQ_* + shared MINILM_* (coupled via both
+  `_record_director` builders), causvid+WAN21 row, SFX triple.
+  Quota is max TWO families — the two decoupled rows taken this
+  pass (causvid, then sfx); the director triple is DEFERRED (see
+  Resolution: shared-MINILM single-source decision + largest
+  remaining row, needs its own pass).
+- TDD failing-first, twice: wrote
+  `tests/test_registry_causvid_split.py` then
+  `tests/test_registry_sfx_split.py` (3 agreement tests each:
+  pins single-sourced, builders single-sourced, MODEL_SPECS row
+  points at family builders — mirroring
+  `test_registry_film_split.py`) BEFORE the new modules —
+  in-container collection failed with
+  `ModuleNotFoundError: No module named 'voyage.registry_causvid'`
+  (red) and `... 'voyage.registry_sfx'` (red), then created
+  each module + re-export until green.
+- Extraction (1): new `voyage/registry_causvid.py` (121L, DESIGN
+  §5.4) owns all 11 `CAUSVID_*` pins + all 9 `WAN21_*` pins +
+  `_record_causvid` + `_describe_causvid` verbatim;
+  `registry_records.py` re-exports all 22 names via explicit-`as`
+  self-aliases (sorted between the audio and film blocks) and
+  carries move comments at the three old sites (pins, record,
+  describe). `workers/video_causvid.py:60-69` imports its 7 used
+  pins via `model_registry` (facade-safe, zero edits);
+  `cli_observe.py` resolves `CAUSVID_*`/`WAN21_*` revisions via
+  call-time `getattr` (facade-safe).
+- Extraction (2): new `voyage/registry_sfx.py` (135L, SFX slice
+  2 three-caption doctrine) owns all 26 `MMAUDIO_*` pins (code +
+  vocoder + CLIP) + `_record_sfx` + `_describe_sfx` verbatim
+  (largest decoupled row); same facade + move comments (three
+  old sites, sfx block sorted after realesrgan). No worker
+  imports MMAUDIO pins directly (only `model_registry` +
+  `cli_observe` getattr) — facade-safe.
+- Deliberate deviation from the film recipe, recorded in both
+  docstrings: neither row carries an EXPECTED ingest hash (the
+  CausVid DMD file was pruned 2026-09-24, the SFX record carries
+  no sha — same open residual as inspector/audio), so
+  `registry_sfx.py` omits the `sha256_file` import (ruff F401
+  would fire); `registry_causvid.py` KEEPS it (`_record_causvid`
+  computes `checkpoint_sha256` live). Consequence: `sha256_file`
+  is now unused in `registry_records.py` (causvid was its sole
+  user — verified via grep), so the import is deleted there.
+- Gate evidence (in-container `voyage:latest`, CPU-only): new
+  suites 3+3 passed; combined split/agreement 40 passed
+  (`test_registry_{causvid,sfx,ltxv,audio,film,realesrgan,
+  inspector}_split` + `test_registry_split` +
+  `test_registry_pins`); neighbors 89 passed
+  (`test_augment_models` + `test_augment_weight_loading` +
+  `test_checkpoint_safety` + `test_director_models_dir` +
+  `test_causvid_prep` + `test_ltxv` + `test_sfx_contract` +
+  `test_vocoder_allowlist` — CausVid worker + SFX/vocoder paths
+  covered). Per-file gates: `ruff check` + `ruff format --check`
+  + `mypy strict` clean on all 5 touched files
+  (`registry_causvid.py`, `registry_sfx.py`,
+  `registry_records.py`, both new tests). No `pyproject.toml`
+  change (family modules are clean under the base rule set).
+  Full `gates.sh` left to the orchestrator.
+- Remaining family in `registry_records.py` (609L, live line
+  numbers post-pass): director triple (`QWEN_HF_REPO:365`,
+  `QWEN4B_AWQ_HF_REPO:393`, shared `MINILM_HF_REPO:421` +
+  `_record_director:490` + `_describe_director:533` +
+  `_record_director_awq:545` + `_describe_director_awq:566`).
+
+## Resolution (2026-10-01, causvid + sfx families)
+
+- Verdict: **partial** — sixth and seventh per-family splits
+  landed; `registry_records.py` 646→609L (net −37L; the two
+  largest decoupled rows — facade imports no longer outweigh the
+  moved blocks).
+- Files changed: `voyage/registry_causvid.py` (new, 121L),
+  `voyage/registry_sfx.py` (new, 135L),
+  `voyage/registry_records.py` (2 facades + 6 move comments +
+  `sha256_file` import deletion, net −37L),
+  `tests/test_registry_causvid_split.py` (new, 3 tests),
+  `tests/test_registry_sfx_split.py` (new, 3 tests).
+- Residual (open, ordered): (1) director triple
+  (`QWEN_*` + `QWEN4B_AWQ_*` + shared `MINILM_*`, 20 pins + 4
+  builders — DEFERRED by quota, not by difficulty: MINILM is
+  shared by both `_record_director` builders, so the split must
+  decide explicitly whether MINILM stays in `registry_records`
+  with a comment or moves into `registry_director` with a
+  single-source note; silent pin duplication is forbidden);
+  (2) in-core manifest read-modify-write race fix +
+  `_MANIFEST_LOCK`/`_repair_manifest` removal (needs the 3
+  `test_containers_rank2.py` repair tests re-pointed; runtime
+  locking behavior change — separate pass, owner-held).
+- DESIGN proposal (not applied, see return report): the director
+  triple follows the `registry_causvid.py` pattern (one family
+  module + facade chain + agreement test, with the MINILM
+  coupling decided explicitly in both docstrings); manifest-race
+  fix shape unchanged from the batch-7 entry.

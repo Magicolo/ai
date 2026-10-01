@@ -465,3 +465,71 @@ is folded as their tracker (not deleted) until the remaining splits land.
   `media.py` surface, video workers, test clusters) — each a future
   single-group pass. Manifest-race fix + supervisor-side derivation
   stay with their owners (recorded in 082, not touched here).
+
+## Progress log (2026-10-01, extraction-skipped + one 088 fold)
+
+- Re-measured `wc -l` at pass start (in-container `voyage:latest`,
+  CPU-only): `supervisor.py` 2624 (unchanged — no extraction met
+  the verbatim + zero-cross-ref rule, see 081 extraction-skipped
+  entry), `tests/test_generation_stack.py` 316→465,
+  `scripts/gates.sh` mypy-list line edited in the same pass.
+- Tree discipline per §9: `git diff --name-only` on owned targets
+  was empty before every edit; concurrent tracks hold foreign hunks
+  in `voyage/registry_records.py` (mid-landing causvid/sfx family
+  facades — its `_record_causvid`/`_record_sfx` redefinitions color
+  any mypy run that follows imports, recorded not fixed), `LTX2.md`,
+  `issues/031/035/152` — all left intact, none in owned scope.
+- Landed (088): `tests/test_prefetch_shutdown.py` (2 tests) folded
+  verbatim into `tests/test_generation_stack.py` (18→20 tests;
+  088-fold banner + helpers + classes, fn names/bodies identical;
+  target imports extended minimally: `math`/`threading`/`time`/
+  `ThreadPoolExecutor`/`ConceptStore`/`ProjectConfig`/
+  `DirectorDestination`/`EvolutionDecision`/`StyleSpec`/
+  `PREFETCH_TIMEOUT_SECONDS`). Source deleted; `scripts/gates.sh`
+  mypy entry removed in the same edit (`bash -n` clean). As-left:
+  169 `test_*.py` files, merged file 20 tests.
+- Max quota reached (ONE extraction skipped with cause + ONE fold);
+  the 036 remainder stays recorded, not taken.
+
+## Resolution (2026-10-01, extraction-skipped + one 088 fold)
+
+- Verdict: TRACKED — no 036-seam extraction this pass (quota filled
+  by the 081 skip-record + the 088 fold below); signal table above
+  stays current except the test-file count (169 as-left).
+- Files changed (owned scope only):
+  `tests/test_generation_stack.py` (+149L fold banner/helpers/tests,
+  18→20 tests), deleted `tests/test_prefetch_shutdown.py`,
+  `scripts/gates.sh` (mypy-list line: `test_prefetch_shutdown.py`
+  entry removed).
+  Gate evidence: in-container `ruff check` + `ruff format --check`
+  clean on the merged file; `mypy strict` reports zero errors in the
+  merged file (4 errors all inside the foreign dirty
+  `voyage/registry_records.py`, followed via imports — recorded not
+  fixed); merged+sources 20/20 pre-delete, merged solo 20/20
+  post-delete; neighbors 22 passed
+  (`test_supervisor_{prefetch,proposal,commit_types,tape}_helpers` +
+  `test_prefetch_invalidated_136_168`); `bash -n` clean on
+  `gates.sh`. Full `gates.sh` not run (foreign registry hunks would
+  color it).
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: the fold
+  is mechanical (same assertions, one fewer file) under the existing
+  issue-088 recipe."
+  Residuals: supervisor commit methods, `media.py` workers/media
+  surface (open since batch 4), video-worker splits, registry
+  causvid/sfx families (foreign-owned, in flight), then test-file
+  clusters per 088 — each a future single-group pass.
+
+## Progress log (2026-10-01, 082 causvid+sfx note — tracker only, no 036-seam change)
+
+- The "registry causvid/sfx families (foreign-owned, in flight)"
+  residual above has landed under issue 082 (this pass, owned
+  scope: new `voyage/registry_causvid.py` 121L +
+  `voyage/registry_sfx.py` 135L, `registry_records.py` 646→609L
+  via 2 facades + 6 move comments + `sha256_file` import
+  deletion, 2 agreement suites 3+3 green; per-file `ruff check` +
+  `ruff format --check` + `mypy strict` clean on all 5 touched
+  files). `registry_records.py` now holds 1 family (director
+  triple, deferred by 082 quota — shared-MINILM decision open).
+  No 036-owned extraction this pass (quota filled by the two 082
+  family splits); signal table otherwise unchanged.

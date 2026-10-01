@@ -308,3 +308,61 @@ wc -l tests/*.py | sort -rn | head -n 15
   quad remainder, audio validators, TUI trio, video-worker quartet,
   finalize/commit merges, leftover singletons incl. `test_hashing` 7 +
   `test_paths` 8) — one per pass with the same discipline.
+
+## Progress log (2026-10-01, prefetch-shutdown fold pass)
+
+- Premise re-verified live: singleton `test_prefetch_shutdown.py` (2
+  tests, mtime 2026-09-30, last functional commit 195b267) present —
+  the smallest remaining cluster. No helper/class collisions
+  (`_RecordingDirector`/`_WedgedDirector`/`_stub_decision`/
+  `_stubbed_supervisor`/`_submit_prefetch`/`_shutdown_executor` absent
+  from the target — verified via rg), zero importers outside self
+  (`rg test_prefetch_shutdown` clean except the gates.sh mypy entry +
+  issue docs), both files in the `gates.sh` mypy list.
+  Target `test_generation_stack.py` already holds the prior
+  prefetch-summary fold (same area — shutdown-drain belongs with the
+  prefetch contract), so no new file is created.
+- Fold landed: 2 stub-director classes + 4 helpers + 2 tests moved
+  verbatim (fn names/bodies identical, original module docstring kept
+  as a banner at `test_generation_stack.py:326` per the batch-8
+  quintet precedent) into `tests/test_generation_stack.py` (target
+  imports extended minimally: `math`/`threading`/`time`/
+  `ThreadPoolExecutor`/`ConceptStore`/`ProjectConfig`/
+  `DirectorDestination`/`EvolutionDecision`/`StyleSpec`/
+  `PREFETCH_TIMEOUT_SECONDS` alongside the existing `Supervisor`
+  import — no other churn); the source file deleted.
+  `scripts/gates.sh` mypy entry removed in the same edit (batch-12
+  lesson — verified `bash -n` clean; target entry already present,
+  so only a deletion). As-left: 169 files, merged file 18→20 tests,
+  test count net-zero at 2 preserved.
+- Gate evidence (in-container, `voyage:latest`, CPU-only): merged +
+  sources together 20/20 pre-delete; merged solo 20/20 post-delete;
+  neighbors `test_supervisor_prefetch_helpers` +
+  `test_supervisor_proposal_helpers` +
+  `test_supervisor_commit_types` + `test_supervisor_tape_helpers` +
+  `test_prefetch_invalidated_136_168` 22 passed; `ruff check` + `ruff
+  format --check` clean on the merged file; `mypy strict` reports
+  zero errors in the merged file (4 errors all inside the foreign
+  dirty `voyage/registry_records.py` — concurrent agent's in-flight
+  causvid/sfx facades, followed via imports, recorded not fixed);
+  `bash -n` clean on `gates.sh`.
+
+## Resolution (2026-10-01, prefetch-shutdown fold pass)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_generation_stack.py` (+149L fold banner/
+  classes/helpers/tests, 18→20 tests), deleted
+  `tests/test_prefetch_shutdown.py`, `scripts/gates.sh` (mypy-list
+  line: `test_prefetch_shutdown.py` entry removed).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 20/20 post-delete; `ruff check` + `ruff format --check`
+  clean on the merged file; `mypy strict` zero errors in the merged
+  file (foreign registry errors recorded, not fixed); `bash -n`
+  clean on `gates.sh`; neighbors 22 passed.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple, augment
+  quad remainder, audio validators, TUI trio, video-worker quartet,
+  finalize/commit merges, leftover singletons incl. `test_hashing` 7 +
+  `test_paths` 8) — one per pass with the same discipline (re-read
+  live, check mtime/`git log`, keep assertion counts identical, move
+  the gates.sh mypy entry with any fold that deletes a listed file).

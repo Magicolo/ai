@@ -194,6 +194,7 @@ def test_resume_failures_consume_the_same_budget(tmp_path: Path) -> None:
     assert calls.count("restart") == 2
 
 
+@pytest.mark.slow
 def test_finalize_space_preflight(tmp_path: Path) -> None:
     """finalize_run refuses to start when the free-space reserve is crossed."""
     run_dir = tmp_path / "run"

@@ -127,6 +127,7 @@ def test_138_missing_audio_strict_raises(tmp_path: Path) -> None:
         finalize_run(run_dir, tmp_path / "strict.mp4")
 
 
+@pytest.mark.slow
 def test_138_missing_audio_lenient_skips_segment(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -140,6 +141,7 @@ def test_138_missing_audio_lenient_skips_segment(
     assert "skipping 000001" in capsys.readouterr().out
 
 
+@pytest.mark.slow
 def test_138_missing_video_lenient_skips_segment(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -165,6 +167,7 @@ def test_188_numbering_gap_strict_raises(tmp_path: Path) -> None:
         finalize_run(run_dir, tmp_path / "strict.mp4")
 
 
+@pytest.mark.slow
 def test_188_numbering_gap_lenient_warns_and_finalizes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

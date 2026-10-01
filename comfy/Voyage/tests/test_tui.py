@@ -153,6 +153,7 @@ def test_parser_has_no_required_command() -> None:
     assert args.command is None
 
 
+@pytest.mark.slow
 def test_generate_end_to_end_fake_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Headless TUI run: fake backend, 1s video, deterministic director.
 

@@ -207,6 +207,7 @@ def test_finalize_rejects_av_misalignment(tmp_path: Path) -> None:
         finalize_run(run_dir, tmp_path / "final.mp4")
 
 
+@pytest.mark.slow
 def test_finalize_skip_bad_finalizes_rest(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)

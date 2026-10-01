@@ -251,3 +251,34 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
 - Residuals: unchanged — (1) parity rescue research + (2) the
   `test_final_blend_scale.py` owner's 31-input-scale proof before any
   single-graph join lands.
+
+## Progress log (2026-10-01, re-probe pass — PIN CONFIRMATION ONLY)
+
+- Premise re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip): the ≤2-input pin still holds —
+  `tests/test_final_blend_scale.py::test_final_blend_never_spawns_wide_acrossfade_graph`
+  (asserts EVERY ffmpeg call in the final blend takes at most 2 audio
+  inputs) passes unmodified, as do the probe-memo suite
+  (`tests/test_issue_152_blend_probe_memo.py`) and the wide-join proof
+  (`tests/test_issue_152_wide_manual_join_proof.py`). Pin text read
+  live (`:107-136`, docstring + `wide == []` assertion intact) — the
+  owner has NOT relaxed it, so no join landing was evaluated.
+- `git diff --name-only` on `voyage/sfx_finalize.py` +
+  `voyage/media.py` is EMPTY (no concurrent hunks) and both files stay
+  UNCHANGED by this leg.
+- Test evidence: `test_final_blend_scale.py` +
+  `test_issue_152_blend_probe_memo.py` +
+  `test_issue_152_wide_manual_join_proof.py` = **14 passed** in 8.08 s
+  unmodified (shared run).
+- Verdict: PROVEN-BLOCKED, unchanged — hang PASS / parity FAIL stands
+  (batch-12 proof), pairwise probe-memo fold remains, no behavior
+  change. Nothing to do.
+
+## Resolution (2026-10-01, re-probe pass)
+
+- Verdict: confirmed blocked (pin holds, proof split stands). Files
+  changed: none (this issue file only). DESIGN proposals: none (the
+  batch-12 pairwise-fold proposal stands as quoted).
+- Residuals: unchanged — (1) parity rescue research + (2) the
+  `test_final_blend_scale.py` owner's 31-input-scale proof before any
+  single-graph join lands.

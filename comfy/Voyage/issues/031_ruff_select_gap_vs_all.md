@@ -403,3 +403,45 @@ enforcing.
 - Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
   still dark; PERF unblocks when the supervisor sites + worker/test
   sites clear under their owners.
+
+## Progress log (2026-10-01, re-probe pass — fresh counts, no adoption)
+
+- Pre-flight: `git diff --name-only HEAD -- comfy/Voyage/voyage/
+  comfy/Voyage/tests/ comfy/Voyage/pyproject.toml` EMPTY (only
+  pre-existing `comfy/Voyage/LTX2.md` modified at repo root, out of
+  scope) — tree clean, but adoption still needs EVERY site in an
+  owned-clean file, and none qualifies (below).
+- Fresh counts live in-container (`voyage:latest` image 2026-09-30,
+  CPU-only, `docker run --rm -v $PWD:/app -w /app`, no host pip):
+  `ruff check --select PERF --output-format concise .` → **10 hits**
+  (6 PERF401 + 4 PERF203): `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748` (both test-track owned),
+  `voyage/cli_validate.py:223,229`, `voyage/concepts.py:437`,
+  `voyage/models_ensure.py:226`, `voyage/supervisor.py:502,574`
+  (banned file), `voyage/workers/director.py:390,517` (foreign).
+  The batch-12 `cli_observe.py` handoff holds (no hit remains).
+- `ruff check --select N --statistics` → **51** (N806 38 + N801 10 +
+  N802 2 + N818 1, unchanged). `ruff check --select PT --statistics`
+  → **111** (PT011 63 + PT018 46 + PT013 1 + PT012 1, unchanged).
+  `ruff check --select ALL --statistics` top rows: D103 889, COM812
+  826, PLC0415 767, SLF001 604, TRY003 509, PLR2004 419, EM102 374,
+  ANN401 345 (SLF001 583→604 and COM812 825→826 drifted with tree
+  growth; rest match the prior pass).
+- Adoption re-checked site-by-site (regions read live, no edits):
+  `cli_validate.py:223,229` are conditional appends inside nested
+  loops with sibling statements (not clean comprehension targets —
+  needs the owner); `concepts.py:437` / `models_ensure.py:226` same
+  conditional-append shape in foreign files; supervisor/director
+  PERF203 are try-except-in-loop restructures (banned/foreign);
+  tests are test-track owned. No owned-clean site exists, so no
+  family is green in isolation and no `select` change was made.
+- `Voyage/pyproject.toml:70` select confirmed unchanged (16 families).
+
+## Resolution (2026-10-01, re-probe pass)
+
+- Verdict: DEFERRED (record-only) — PERF 10, N 51, PT 111 as-read above.
+- Files changed: none for 031 (this issue file only). Gate evidence:
+  `select` untouched. DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; PERF unblocks when the supervisor sites + worker/test
+  sites clear under their owners.

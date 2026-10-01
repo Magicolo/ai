@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from voyage.atomic import JsonValue
-from voyage.hashing import sha256_file
 from voyage.registry_audio import (
     _ACE_CHECKPOINTS_RELATIVE as _ACE_CHECKPOINTS_RELATIVE,
 )
@@ -64,6 +63,72 @@ from voyage.registry_audio import (
 )
 from voyage.registry_audio import (
     _record_audio as _record_audio,
+)
+from voyage.registry_causvid import (
+    CAUSVID_CHECKPOINT_FILE as CAUSVID_CHECKPOINT_FILE,
+)
+from voyage.registry_causvid import (
+    CAUSVID_CHECKPOINT_NAME as CAUSVID_CHECKPOINT_NAME,
+)
+from voyage.registry_causvid import (
+    CAUSVID_CHECKPOINT_SUBDIR as CAUSVID_CHECKPOINT_SUBDIR,
+)
+from voyage.registry_causvid import (
+    CAUSVID_CKPT_MIN_BYTES as CAUSVID_CKPT_MIN_BYTES,
+)
+from voyage.registry_causvid import (
+    CAUSVID_COMMIT as CAUSVID_COMMIT,
+)
+from voyage.registry_causvid import (
+    CAUSVID_COMMIT_SHORT as CAUSVID_COMMIT_SHORT,
+)
+from voyage.registry_causvid import (
+    CAUSVID_HF_REPO as CAUSVID_HF_REPO,
+)
+from voyage.registry_causvid import (
+    CAUSVID_HF_REVISION as CAUSVID_HF_REVISION,
+)
+from voyage.registry_causvid import (
+    CAUSVID_LICENSE as CAUSVID_LICENSE,
+)
+from voyage.registry_causvid import (
+    CAUSVID_LICENSE_URL as CAUSVID_LICENSE_URL,
+)
+from voyage.registry_causvid import (
+    CAUSVID_SUBDIR as CAUSVID_SUBDIR,
+)
+from voyage.registry_causvid import (
+    WAN21_ALLOW as WAN21_ALLOW,
+)
+from voyage.registry_causvid import (
+    WAN21_DIT_MIN_BYTES as WAN21_DIT_MIN_BYTES,
+)
+from voyage.registry_causvid import (
+    WAN21_HF_REPO as WAN21_HF_REPO,
+)
+from voyage.registry_causvid import (
+    WAN21_HF_REVISION as WAN21_HF_REVISION,
+)
+from voyage.registry_causvid import (
+    WAN21_LICENSE as WAN21_LICENSE,
+)
+from voyage.registry_causvid import (
+    WAN21_LICENSE_URL as WAN21_LICENSE_URL,
+)
+from voyage.registry_causvid import (
+    WAN21_SUBDIR as WAN21_SUBDIR,
+)
+from voyage.registry_causvid import (
+    WAN21_T5_MIN_BYTES as WAN21_T5_MIN_BYTES,
+)
+from voyage.registry_causvid import (
+    WAN21_VAE_MIN_BYTES as WAN21_VAE_MIN_BYTES,
+)
+from voyage.registry_causvid import (
+    _describe_causvid as _describe_causvid,
+)
+from voyage.registry_causvid import (
+    _record_causvid as _record_causvid,
 )
 from voyage.registry_film import (
     EXPECTED_FILM_SHA256 as EXPECTED_FILM_SHA256,
@@ -209,6 +274,90 @@ from voyage.registry_realesrgan import (
 from voyage.registry_realesrgan import (
     _record_realesrgan as _record_realesrgan,
 )
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_ALLOW as MMAUDIO_CLIP_ALLOW,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_LICENSE as MMAUDIO_CLIP_LICENSE,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_MIN_BYTES as MMAUDIO_CLIP_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_REPO as MMAUDIO_CLIP_REPO,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_REVISION as MMAUDIO_CLIP_REVISION,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CLIP_SUBDIR as MMAUDIO_CLIP_SUBDIR,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CODE_COMMIT as MMAUDIO_CODE_COMMIT,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_CODE_COMMIT_SHORT as MMAUDIO_CODE_COMMIT_SHORT,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_EXT_FILES as MMAUDIO_EXT_FILES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_HF_REPO as MMAUDIO_HF_REPO,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_HF_REVISION as MMAUDIO_HF_REVISION,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_LARGE_MIN_BYTES as MMAUDIO_LARGE_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_LICENSE as MMAUDIO_LICENSE,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_LICENSE_URL as MMAUDIO_LICENSE_URL,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_MEDIUM_MIN_BYTES as MMAUDIO_MEDIUM_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_SMALL_MIN_BYTES as MMAUDIO_SMALL_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_SUBDIR as MMAUDIO_SUBDIR,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_SYNCHFORMER_MIN_BYTES as MMAUDIO_SYNCHFORMER_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VAE_MIN_BYTES as MMAUDIO_VAE_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_ALLOW as MMAUDIO_VOCODER_ALLOW,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_LICENSE as MMAUDIO_VOCODER_LICENSE,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_MIN_BYTES as MMAUDIO_VOCODER_MIN_BYTES,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_REPO as MMAUDIO_VOCODER_REPO,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_REVISION as MMAUDIO_VOCODER_REVISION,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_VOCODER_SUBDIR as MMAUDIO_VOCODER_SUBDIR,
+)
+from voyage.registry_sfx import (
+    MMAUDIO_WEIGHT_FILES as MMAUDIO_WEIGHT_FILES,
+)
+from voyage.registry_sfx import (
+    _describe_sfx as _describe_sfx,
+)
+from voyage.registry_sfx import (
+    _record_sfx as _record_sfx,
+)
 
 # Phase 3 director LLM (DESIGN §8). Qwen3-8B dense, Apache 2.0, ungated.
 # BF16 weights (~16.4 GiB); served on CPU from system RAM in the director
@@ -295,155 +444,11 @@ MINILM_LICENSE = "Apache 2.0"
 # Phase 7 LTXV pins live in `voyage.registry_ltxv` (issue 082;
 # re-exported at the top so existing importers keep working).
 
-# Stream D CausVid backend (DESIGN §5.4, TASK §§19/23.4/25.3, §30.1).
-# Worker: `voyage/workers/video_causvid.py` (backend `causvid`, registered
-# in supervisor VIDEO_WORKER_MODULES + STREAMING_VIDEO_BACKENDS, CLI via
-# `generate --backend causvid` / `models download/verify causvid`); this
-# block pins the upstream sources and exposes the download/verify entry
-# points mirroring the ltxv pattern.
-# Pins probed 2026-09-24 (see docs/UPSTREAM_CAUSVID_NOTES.md for URLs,
-# geometry/fps/overlap notes, license implications, open worker questions).
-# Upstream code pin (git commit, not a floating branch; master HEAD at probe
-# time — tip commit 2025-08-07 "Update README.md").
-CAUSVID_COMMIT = "adb6a5ecd07666b4d0290042915c8406e6d5ce22"
+# Stream D CausVid + Wan2.1 pins live in `voyage.registry_causvid`
+# (issue 082; re-exported at the top so existing importers keep working).
 
-CAUSVID_COMMIT_SHORT = "adb6a5e"
-
-# DMD causal generator checkpoint (CC BY-NC-SA 4.0, ungated). The worker will
-# strict-load `torch.load(<checkpoint>)['generator']` per the upstream
-# long-video script; bidirectional/warp/ODE/LMDB siblings are skipped.
-CAUSVID_HF_REPO = "tianweiy/CausVid"
-
-CAUSVID_HF_REVISION = "b545eb2728fc9d1515023a270b847f7b24b3aa89"
-
-CAUSVID_SUBDIR = "causvid"
-
-CAUSVID_CHECKPOINT_SUBDIR = "autoregressive_checkpoint"
-
-CAUSVID_CHECKPOINT_NAME = "model.pt"
-
-CAUSVID_CHECKPOINT_FILE = f"{CAUSVID_CHECKPOINT_SUBDIR}/{CAUSVID_CHECKPOINT_NAME}"
-
-# Measured 2026-09-24: autoregressive_checkpoint/model.pt is 11,352,649,716
-# bytes (~10.6 GiB) — a full training snapshot keyed on ['generator'], not a
-# params-only file, hence far above a 1.3B bf16 param count. Floor holds ~12%
-# headroom below measured (same convention as the Wan2.1 subset floors).
-CAUSVID_CKPT_MIN_BYTES = 10_000_000_000
-
-CAUSVID_LICENSE = "CC BY-NC-SA 4.0 (non-commercial; share-alike on adaptations)"
-
-CAUSVID_LICENSE_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/deed.en"
-
-# Wan2.1-T2V-1.3B base providing the DiT arch, T5 encoder, tokenizer and VAE
-# underneath the CausVid DMD checkpoint. Ungated, Apache 2.0. Downloaded as
-# a subset (diffusion shard + VAE + T5 + tokenizer). File sizes measured from
-# the HF API file listing at pin time (no download): DiT 5.68GB, VAE 508MB,
-# T5 11.36GB.
-WAN21_HF_REPO = "Wan-AI/Wan2.1-T2V-1.3B"
-
-WAN21_HF_REVISION = "37ec512624d61f7aa208f7ea8140a131f93afc9a"
-
-WAN21_SUBDIR = "Wan2.1-T2V-1.3B"
-
-WAN21_ALLOW = [
-    "diffusion_pytorch_model.safetensors",
-    "config.json",
-    "Wan2.1_VAE.pth",
-    "models_t5_umt5-xxl-enc-bf16.pth",
-    "google/umt5-xxl/*",
-]
-
-WAN21_DIT_MIN_BYTES = 5_000_000_000
-
-WAN21_VAE_MIN_BYTES = 400_000_000
-
-WAN21_T5_MIN_BYTES = 10_000_000_000
-
-WAN21_LICENSE = "Apache 2.0"
-
-WAN21_LICENSE_URL = "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/blob/main/LICENSE.txt"
-
-# SFX effects stack (SFX slice 2, three-caption doctrine). Upstream
-# hkchengrex/MMAudio (CVPR 2025 video-to-audio, CC-BY-NC-4.0
-# non-commercial — same class as the CausVid DMD checkpoint): native
-# .pth weights (no comfy-loader machinery), 44 kHz variants only (the
-# pipeline is 44.1/48 kHz end to end). small_44k (157 M params, 601 MB)
-# is the 2060 ladder candidate; large_44k_v2 (1.03 B, 3.9 GB,
-# upstream-recommended) is the 4060 default.
-# Code pin: main HEAD 2026-02-23 (docs-only tip commit — inference code
-# untouched since the vendored ComfyUI copy). Weights pin: HF main
-# 2026-02-19. The 44 kHz BigVGAN vocoder auto-downloads upstream from
-# nvidia (pinned here instead — explicit, never at run time); CLIP text
-# tower loads from the registry-pinned DFN5B .bin via open_clip's
-# builtin ViT-H-14-378-quickgelu arch entry (no hub round-trip).
-MMAUDIO_CODE_COMMIT = "974010a026c731054592d8f777218bd9d85a6c24"
-
-MMAUDIO_CODE_COMMIT_SHORT = "974010a"
-
-MMAUDIO_HF_REPO = "hkchengrex/MMAudio"
-
-MMAUDIO_HF_REVISION = "eb13a1a98fdbec91753775c57b074ccdfc60587c"
-
-MMAUDIO_SUBDIR = "mmaudio"
-
-MMAUDIO_WEIGHT_FILES = (
-    "weights/mmaudio_small_44k.pth",
-    "weights/mmaudio_medium_44k.pth",
-    "weights/mmaudio_large_44k_v2.pth",
-)
-
-MMAUDIO_EXT_FILES = (
-    "ext_weights/v1-44.pth",
-    "ext_weights/synchformer_state_dict.pth",
-)
-
-MMAUDIO_SMALL_MIN_BYTES = 500_000_000
-
-MMAUDIO_MEDIUM_MIN_BYTES = 2_000_000_000
-
-MMAUDIO_LARGE_MIN_BYTES = 3_400_000_000
-
-MMAUDIO_VAE_MIN_BYTES = 1_000_000_000
-
-MMAUDIO_SYNCHFORMER_MIN_BYTES = 800_000_000
-
-MMAUDIO_LICENSE = "CC BY-NC 4.0 (non-commercial)"
-
-MMAUDIO_LICENSE_URL = "https://huggingface.co/hkchengrex/MMAudio/blob/main/README.md"
-
-MMAUDIO_VOCODER_REPO = "nvidia/bigvgan_v2_44khz_128band_512x"
-
-MMAUDIO_VOCODER_REVISION = "95a9d1dcb12906c03edd938d77b9333d6ded7dfb"
-
-MMAUDIO_VOCODER_SUBDIR = f"{MMAUDIO_SUBDIR}/vocoder/bigvgan_v2_44khz_128band_512x"
-
-# Data-only snapshot (issue 072): the loader resolves exactly these two files
-# via `BigVGANv2.from_pretrained(vocoder_dir)` with the class already imported
-# from the pinned `/opt/mmaudio` clone (`MMAUDIO_CODE_COMMIT`) — snapshot
-# `.py` files are never imported (`trust_remote_code` is never set), so the
-# old `*.py` + `alias_free_activation/*` globs only widened the executable
-# surface for no runtime benefit. No activation file from the snapshot is
-# consumed (activation code ships in the clone); keep the list exact.
-MMAUDIO_VOCODER_ALLOW = (
-    "config.json",
-    "bigvgan_generator.pt",
-)
-
-MMAUDIO_VOCODER_MIN_BYTES = 400_000_000
-
-MMAUDIO_VOCODER_LICENSE = "MIT"
-
-MMAUDIO_CLIP_REPO = "apple/DFN5B-CLIP-ViT-H-14-384"
-
-MMAUDIO_CLIP_REVISION = "01b771ed0d1395ca5ffdd279897d665ebe00dfd2"
-
-MMAUDIO_CLIP_SUBDIR = f"{MMAUDIO_SUBDIR}/clip"
-
-MMAUDIO_CLIP_ALLOW = ("open_clip_pytorch_model.bin", "config.json")
-
-MMAUDIO_CLIP_MIN_BYTES = 3_000_000_000
-
-MMAUDIO_CLIP_LICENSE = "Apple AMLR (research, see repo LICENSE)"
+# SFX effects-stack pins live in `voyage.registry_sfx` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # Finalize-stage augmentation weights (Track C): FILM frame interpolation +
 # Real-ESRGAN anime upscaler. Inference-only weights fetched at runtime via
@@ -517,48 +522,12 @@ def _record_director(models_dir: Path) -> dict[str, JsonValue]:
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _record_causvid(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Stream D CausVid stack."""
-    causvid_dir = models_dir / CAUSVID_SUBDIR
-    checkpoint_path = causvid_dir / CAUSVID_CHECKPOINT_FILE
-    wan21_dir = models_dir / WAN21_SUBDIR
-    return {
-        "repo": CAUSVID_HF_REPO,
-        "revision": CAUSVID_HF_REVISION,
-        "model_dir": str(causvid_dir),
-        "checkpoint_bytes": checkpoint_path.stat().st_size,
-        "checkpoint_sha256": sha256_file(checkpoint_path),
-        "files": [CAUSVID_CHECKPOINT_FILE],
-        "code_commit": CAUSVID_COMMIT,
-        "license": CAUSVID_LICENSE,
-        "license_url": CAUSVID_LICENSE_URL,
-        "base_repo": WAN21_HF_REPO,
-        "base_revision": WAN21_HF_REVISION,
-        "base_dir": str(wan21_dir),
-        "base_license": WAN21_LICENSE,
-    }
+# CausVid record builder lives in `voyage.registry_causvid`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _record_sfx(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the SFX effects stack."""
-    sfx_dir = models_dir / MMAUDIO_SUBDIR
-    large_weights = sfx_dir / "weights" / "mmaudio_large_44k_v2.pth"
-    return {
-        "repo": MMAUDIO_HF_REPO,
-        "revision": MMAUDIO_HF_REVISION,
-        "model_dir": str(sfx_dir),
-        "variants": list(MMAUDIO_WEIGHT_FILES),
-        "large_bytes": large_weights.stat().st_size if large_weights.exists() else 0,
-        "code_commit": MMAUDIO_CODE_COMMIT,
-        "license": MMAUDIO_LICENSE,
-        "license_url": MMAUDIO_LICENSE_URL,
-        "vocoder_repo": MMAUDIO_VOCODER_REPO,
-        "vocoder_revision": MMAUDIO_VOCODER_REVISION,
-        "vocoder_license": MMAUDIO_VOCODER_LICENSE,
-        "clip_repo": MMAUDIO_CLIP_REPO,
-        "clip_revision": MMAUDIO_CLIP_REVISION,
-        "clip_license": MMAUDIO_CLIP_LICENSE,
-    }
+# SFX record builder lives in `voyage.registry_sfx`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 def _describe_director(models_dir: Path) -> str:
@@ -616,18 +585,12 @@ def _describe_director_awq(models_dir: Path) -> str:
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_sfx(models_dir: Path) -> str:
-    """Exact OK string for the SFX stack (byte-stable)."""
-    large_weights = models_dir / MMAUDIO_SUBDIR / "weights" / "mmaudio_large_44k_v2.pth"
-    return (
-        f"sfx-mmaudio OK (large {large_weights.stat().st_size / 1024**3:.1f} GiB + VAE/sync/CLIP)"
-    )
+# SFX describe helper lives in `voyage.registry_sfx`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_causvid(models_dir: Path) -> str:
-    """Exact OK string for the CausVid stack (byte-stable)."""
-    gib = (models_dir / CAUSVID_SUBDIR / CAUSVID_CHECKPOINT_FILE).stat().st_size / 1024**3
-    return f"causvid OK (DMD {gib:.1f} GiB + Wan2.1-1.3B base)"
+# CausVid describe helper lives in `voyage.registry_causvid`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 # FILM builders live in `voyage.registry_film` (issue 082; re-exported

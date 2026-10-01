@@ -256,6 +256,7 @@ def _generate_args(output: Path, *extra: str) -> list[str]:
     ]
 
 
+@pytest.mark.slow
 def test_generate_fake_end_to_end_validated_finalized(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     assert main(_generate_args(run_dir)) == 0

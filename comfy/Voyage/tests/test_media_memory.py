@@ -165,6 +165,7 @@ def test_finalize_fastpath_publishes_without_read_bytes(
     assert duration == pytest.approx(4.0, abs=0.15)
 
 
+@pytest.mark.slow
 def test_finalize_reencode_path_publishes_without_read_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

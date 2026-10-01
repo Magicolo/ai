@@ -542,3 +542,71 @@ own plan.
   + `:281,:284` (fd juggling, by design); supervisor chain (lines
   above); `voyage/model_registry.py:879,889` (hub kwargs);
   `voyage/atomic.py:97,110,118` (by design).
+
+## Progress log (2026-10-01, re-probe pass — legs re-verified, one new site probed then reverted)
+
+- Pre-flight: `git diff --name-only HEAD -- comfy/Voyage/voyage/
+  comfy/Voyage/tests/` EMPTY (only pre-existing `comfy/Voyage/LTX2.md`
+  modified at repo root, out of scope). `voyage/supervisor.py` never
+  touched (forbidden — its sites are remainder only, read for
+  evidence, never edited).
+- Baseline live in-container (`voyage:latest`, CPU-only, no host pip):
+  `mypy voyage` → clean (73 source files). `rg -n "Any" voyage/
+  --glob '*.py'` → 386 lines (top: `augment_worker` 60,
+  `video_causvid` 39, `video_ltxv` 33, `segment_manifest` 21,
+  `supervisor` 20, `workers/director` 20); landed narrowings all HOLD
+  (grep-verified): `scoreboard.py` zero code `Any`, `models_ensure.py`
+  zero code `Any`, `registry_records.py` zero `Any`,
+  `model_registry.py` down to the `Any` import + `snapshot_kwargs`/
+  `file_kwargs` (`:879,:889`).
+- Blocked legs re-verified still-blocked (sites read live, no edits):
+  leg 1 `rpc.py:328-329 call()` still `payload: dict[str, Any] ->
+  dict[str, Any]` (deferral comment `:348-349` intact;
+  `raw_stdout`/`readable: Any` at `:281,:284` stay by construction);
+  leg 2 supervisor `dict[str, object]` chain intact (`:537`
+  `_log_metric`, `:559/:561` `_call_with_restart`, `:784` gauges,
+  `:1172` `extra`, `:1407/:1409` `_with_audio_gpu`, `:1628`
+  `payload`, plus `dict[str, Any]` `:242`/`video_init`,
+  `:256`/`audio_init`, `:293`, `:979`, `:1005`, `:1123`, `:1207`,
+  `:1259`, `:1867/:1871`, `:2097`, and `state: Any` `:1117`,`:1201`);
+  leg 4 hub kwargs still `dict[str, Any]` (`model_registry.py:879,889`
+  — batch-12 probe evidence stands: the `JsonValue` union is too
+  wide for the hub signatures); `atomic.py:97,110,118` stay by design
+  (docstring records the tried + reverted widening).
+- Newly-unblocked candidate probed live, then REVERTED (no edit
+  landed): `voyage/bench.py:16 _finite_float(value: Any)` → `(value:
+  JsonValue)` (same idiom as the landed `scoreboard.py` precedent;
+  callers in `summarize_gauges` pass `Any` from `dict[str, Any]`
+  events). In-container `mypy voyage/bench.py` on the probe →
+  **2 errors** (`:172,:177: Argument 1 to "_finite_float" has
+  incompatible type "object"; expected "JsonValue"`): the
+  `summarize_sfx_windows(windows: list[dict[str, object]])` callers
+  pass `record.get(...)` (`object | None`), the same `dict[str,
+  object]`-chain invariance class as batch-11/12. Narrowing the
+  callers cascades into the CLI collectors (foreign `dict[str,
+  object]` sites) — coordinated surgery, out of scope. Probe
+  reverted; post-revert `mypy` + `ruff check` + `ruff format --check`
+  on `voyage/bench.py` all green.
+- Verdict: no annotation-only narrowing is greenable — the only
+  remaining `dict[str, Any]` in quiet files are the three
+  proven-blocked legs (plus the `dict[str, object]` chain that just
+  blocked the bench candidate from the other side).
+
+## Resolution (2026-10-01, re-probe pass)
+
+- Verdict: DEFERRED (record-only) — all legs residual with live
+  evidence above; bench candidate probed-blocked and reverted.
+  Files changed: none for 035 (this issue file only; `voyage/bench.py`
+  probed then restored byte-identical — `git diff` clean).
+  Gate evidence: baseline `mypy voyage` clean (73 files);
+  post-revert per-file gates on `voyage/bench.py` green.
+  DESIGN proposals: none (annotation-only scope, no behavior change).
+- Residuals (exact, as-read line numbers): `voyage/rpc.py:328-329`
+  (`call()` payload/return) + `:281,:284` (fd juggling, by design);
+  supervisor chain (`:537,:559/:561,:784,:1172,:1407/:1409,:1628` +
+  `dict[str, Any]` `:242,:256,:293,:979,:1005,:1123,:1207,:1259,:
+  1867/:1871,:2097` + `state: Any` `:1117,:1201`);
+  `voyage/model_registry.py:879,889` (`snapshot_kwargs`/`file_kwargs`);
+  `voyage/atomic.py:97,110,118` (by design); `voyage/bench.py:16`
+  (`_finite_float` — newly probed, blocked by the
+  `summarize_sfx_windows list[dict[str, object]]` callers).

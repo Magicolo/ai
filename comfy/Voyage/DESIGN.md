@@ -4329,6 +4329,7 @@ GPU-specific packages remain in workers.
 
 > As-built (batch-7-2026-09-30, issues 084/085): per-family split target — `voyage/registry_records.py` owns pins + `_record_*`/`_describe_*` builders (767L); `model_registry.py` keeps dataclasses + `MODEL_SPECS` assembly + download/verify/manifest core (1270L); future per-family `registry_{ltxv,causvid,qwen,audio,sfx,augment}.py` target recorded.
 > As-built (batch-14-2026-10-01, issue 082): `registry_ltxv.py` (84L) + `registry_audio.py` (105L) extracted move-verbatim + facade + agreement tests; remaining families: director triple (shared MINILM), causvid+WAN21, SFX triple.
+> As-built (batch-15-2026-10-01, issue 082): `registry_causvid.py` (121L) + `registry_sfx.py` (135L) extracted move-verbatim + facade + agreement tests; remaining family: director triple (shared MINILM coupling must be decided explicitly).
 
 For every model integration:
 
@@ -8110,3 +8111,11 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Record-only: 031/035 (none new; record-only re-probes; batch-12/13 proposals stand).
 - Confirmed-blocked: 152/166 (152 none new; record-only re-probe, batch-12/13 proposals stand).
 - Verified: 079-clean (none new; followup sweep clean; one orphan: deleted worker's pyproject per-file-ignores entry removed), 070-tests-updated, 093-stub (none outstanding; stub verified, rm pending approval).
+
+## Batch 15 (2026-10-01)
+
+- Partial: 082 (`registry_causvid.py` 121L + `registry_sfx.py` 135L extracted move-verbatim + facade + agreement tests; remaining family: director triple (shared MINILM coupling must be decided explicitly) — see §84 batch-15 as-built), 081 (extraction skipped with cause; no DESIGN contract change, folded here only), 088 (`prefetch_shutdown`→`generation_stack` fold mechanical; no DESIGN contract change, folded here only).
+- Partial: 089 (8 slow marks + `test_integration.py` in mypy gate; no DESIGN contract change, folded here only).
+- Record-only: 031/035/152 (no new DESIGN claims this batch).
+- 093 rm-ready (no new DESIGN claims; `git rm` pending approval).
+- Blocked: 166 (CPU-only; no new DESIGN claims this batch).
