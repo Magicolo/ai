@@ -378,3 +378,39 @@ grep -rn "pytest.mark" tests/ | head -n 20
   Gate evidence: n/a (no change). DESIGN proposals: none.
 - Residuals: unchanged — (a) lock typo (`requirements.lock:25-26`) +
   tomli-freeze note → lock track w/068 (forbidden here).
+
+## Progress log (2026-10-01, lock-leg re-verdict — user-ordered, read-first)
+
+- Batch-2's 068 refutation re-verified LIVE (in-container
+  `voyage:latest`, CPU-only, no host pip): `pip show
+  httpx2/httpcore2/huggingface_hub` -> 2.13.1/2.13.1/2.0.0 with intact
+  `Required-by` chains (`httpx2 <- huggingface_hub`,
+  `httpcore2 <- httpx2`); `importlib.metadata` Requires-Dist:
+  `huggingface_hub==2.0.0` declares `httpx2<3,>=2.0.0`
+  unconditional/marker-free and `httpx2==2.13.1` declares
+  `httpcore2==2.13.1` pinned; all three import with versions.
+  Gate `tests/test_lock_manifest_agreement.py:172` pins both rows
+  reachable (green in this pass's 31-test neighbor run).
+- tomli note checked likewise: `pyproject.toml:24` conditional
+  `tomli>=2.0; python_version < '3.11'`; `requirements.lock` is the
+  slim-image 3.12 freeze (header declares slim-only scope) and
+  correctly omits it — absence is marker-correct, not a defect.
+  Runtime uses stdlib `tomllib` with `tomli` fallback
+  (`voyage/config.py:18-20`, same in `voyage/tui_state.py`); the 3.10
+  worker image carries its own stack (`huggingface_hub[cli]==0.36.2`
+  layer, no lock coverage by design).
+- Verdict: MOOT — neither lock leg describes a real defect anymore.
+  The `httpcore2/httpx2` rows are genuine distributions (068 stands,
+  re-proven live); the tomli absence is conditional-correct.
+  CLOSE-recommendation for the lock legs; any worker-path freeze note,
+  if wanted, belongs to the lock/worker track as a nicety, never as a
+  defect. No source edits (record-only per brief).
+
+## Resolution (2026-10-01, lock-leg re-verdict)
+
+- Verdict: lock legs MOOT / CLOSE-recommended with live evidence
+  above. Files changed: this issue file only (append). Gate
+  evidence: `test_lock_manifest_agreement` green; no behavior
+  change. DESIGN proposals: none.
+- Residuals: slow-tail / mypy-scope / cache-guard legs per their
+  owning tracks (unchanged by this pass).

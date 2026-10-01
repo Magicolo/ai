@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from voyage import hashing, media, paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json, read_json
 from voyage.bench import summarize_gauges, timing_stats
 from voyage.concepts import ConceptStore, token_set_similarity
 from voyage.config import AudioConfig, default_config_toml, load_config
-from voyage.errors import ConfigurationError
+from voyage.errors import ConfigurationError, MediaError
+from voyage.hashing import sha256_file, sha256_text
 from voyage.models import PromptStage, WorkerRequest, WorkerResponse
-from voyage.paths import format_segment_id
+from voyage.paths import (
+    MAX_SEGMENT_NUMBER,
+    MIN_SEGMENT_NUMBER,
+    format_segment_id,
+    resolve_stored_path,
+    segment_dir,
+)
 from voyage.prompts import build_prompt_plan, compose_prompt
 from voyage.rpc import decode_request, decode_response, encode_request, encode_response
 from voyage.seeds import audio_seed, derive_seed, director_seed, video_seed
+from voyage.workers import video_causvid, video_ltxv
 
 
 def test_atomic_write_json_roundtrip(tmp_path: Path) -> None:
@@ -203,3 +213,120 @@ def test_rpc_framing_roundtrip() -> None:
     assert decoded == request
     response = WorkerResponse(id="req-000001", ok=True, result={"a": 1})
     assert decode_response(encode_response(response)) == response
+
+
+# --- 088 fold: tests/test_hashing.py (7 tests) ---
+# """Shared hashing helpers (issue 021).
+#
+# CPU-only, stdlib only: known vectors, chunked-vs-oneshot equivalence, and
+# delegation of the four non-supervisor call sites. `supervisor.py` keeps its
+# own copy — it belongs to another track (noted, not touched).
+# """
+
+
+def test_sha256_file_matches_hashlib(tmp_path: Path) -> None:
+    target = tmp_path / "weights.bin"
+    target.write_bytes(b"voyage-weights-bytes" * 4096)
+    assert sha256_file(target) == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def test_sha256_file_empty(tmp_path: Path) -> None:
+    target = tmp_path / "empty.bin"
+    target.write_bytes(b"")
+    assert sha256_file(target) == hashlib.sha256(b"").hexdigest()
+
+
+def test_sha256_file_streams_in_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multi-chunk reads hash identically (chunk size is an impl detail)."""
+    monkeypatch.setattr(hashing, "CHUNK_SIZE_BYTES", 7)
+    target = tmp_path / "chunked.bin"
+    target.write_bytes(bytes(range(256)) * 64)
+    assert sha256_file(target) == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def test_sha256_text_known_vector() -> None:
+    assert sha256_text("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+def test_media_alias_delegates(tmp_path: Path) -> None:
+    target = tmp_path / "audio.wav"
+    target.write_bytes(b"media-bytes")
+    assert media._sha256_file(target) == sha256_file(target)
+
+
+def test_ltxv_sha256_file_delegates(tmp_path: Path) -> None:
+    target = tmp_path / "video_tail.mp4"
+    target.write_bytes(b"tail-bytes")
+    assert video_ltxv.sha256_file(target) == sha256_file(target)
+
+
+def test_causvid_sha256_helpers_delegate(tmp_path: Path) -> None:
+    target = tmp_path / "video_tail.mp4"
+    target.write_bytes(b"causvid-tail-bytes")
+    assert video_causvid.sha256_file(target) == sha256_file(target)
+    assert video_causvid.sha256_text("causvid") == sha256_text("causvid")
+
+
+# --- 088 fold: tests/test_paths.py (8 tests) ---
+# """Direct tests for the run-directory layout helpers (issue 038).
+#
+# `paths` was imported widely but never asserted: the six-digit id format,
+# the segment-dir join, and the relocation-tolerant stored-path resolver
+# had zero pins, so a layout regression would surface only as mysterious
+# downstream failures.
+# """
+
+
+def test_format_segment_id_zero_pads() -> None:
+    assert format_segment_id(0) == "000000"
+    assert format_segment_id(1) == "000001"
+    assert format_segment_id(42) == "000042"
+    assert format_segment_id(MAX_SEGMENT_NUMBER) == "999999"
+
+
+def test_format_segment_id_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match="segment number"):
+        format_segment_id(MIN_SEGMENT_NUMBER - 1)
+    with pytest.raises(ValueError, match="segment number"):
+        format_segment_id(MAX_SEGMENT_NUMBER + 1)
+
+
+def test_format_segment_id_roundtrip_orders_lexicographically() -> None:
+    rendered = [format_segment_id(number) for number in (0, 1, 9, 10, 999999)]
+    assert rendered == sorted(rendered)
+    assert all(len(segment_id) == 6 for segment_id in rendered)
+
+
+def test_segment_dir_joins_layout(tmp_path: Path) -> None:
+    segment_path = segment_dir(tmp_path, "000001")
+    assert segment_path == tmp_path / paths.SEGMENTS_DIRNAME / "000001"
+
+
+def test_resolve_stored_path_resolves_relative_against_run_dir(tmp_path: Path) -> None:
+    resolved = resolve_stored_path(tmp_path, "audio/take_0000.wav")
+    assert resolved == tmp_path / "audio" / "take_0000.wav"
+
+
+def test_resolve_stored_path_keeps_existing_absolute(tmp_path: Path) -> None:
+    """Outside-the-run absolutes raise (issue 015) — the old trust is gone."""
+    existing = tmp_path / "video.mp4"
+    existing.write_bytes(b"media")
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "elsewhere", existing)
+
+
+def test_resolve_stored_path_reanchors_moved_run(tmp_path: Path) -> None:
+    """A stale absolute entry heals when the layout anchor exists at the new home."""
+    run_dir = tmp_path / "run"
+    relocated = run_dir / paths.SEGMENTS_DIRNAME / "000000" / "recovery.pt"
+    relocated.parent.mkdir(parents=True)
+    relocated.write_bytes(b"tape")
+    stale = Path("/old/home/audio") / "x" / "segments" / "000000" / "recovery.pt"
+    assert resolve_stored_path(run_dir, stale) == relocated
+
+
+def test_resolve_stored_path_returns_stale_when_unhealable(tmp_path: Path) -> None:
+    """Unhealable outside-the-run absolutes raise (issue 015)."""
+    stale = tmp_path / "nowhere" / "recovery.pt"
+    with pytest.raises(MediaError, match="escapes the run dir"):
+        resolve_stored_path(tmp_path / "run", stale)

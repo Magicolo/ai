@@ -8,12 +8,15 @@ CPU-only images without the display extra still gate green).
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from voyage import cli
-from voyage.config import Unset
+from voyage.config import AugmentConfig, ProjectConfig, Unset, VideoConfig, resolve_config
+from voyage.console import VoyageConsole
 from voyage.tui_state import (
     GenerateFormState,
     plan_summary,
@@ -252,3 +255,443 @@ def test_stop_with_corrupt_state_reports_feedback(tmp_path: Path) -> None:
             assert app._generation_running
 
     asyncio.run(_run())
+
+
+# --- 088 fold: tests/test_tui_absent_defaults_023.py (4 tests) ---
+# """TUI untouched-form inheritance (issue 023).
+#
+# The CLI spells absence as ``None`` (stored TOML wins) but the TUI form
+# prefills ``quantization``/``min_fps``/``min_resolution`` with concrete
+# defaults, so pressing Generate on an untouched form silently reverted a
+# run customized to ``bf16``/``60``/``1920x1080``. These tests pin the
+# absent-encoding: untouched-at-default fields emit ``Unset`` and resolve
+# to the stored config unchanged, while explicit non-defaults still win.
+# """
+# NOTE: the source file carries no home fixture; the moved tests now run
+# under this file's autouse `_isolated_home` (HOME→tmp_path) — a no-op for
+# them (pure namespace/resolve transforms, never read HOME).
+
+
+def _customized_base() -> ProjectConfig:
+    """Stored config differing from every TUI form default."""
+    base = ProjectConfig(style="inherit-probe")
+    video = VideoConfig(**{**base.video.model_dump(), "quantization": "bf16"})
+    augment = AugmentConfig(min_fps=60, min_width=1920, min_height=1080)
+    return base.model_copy(update={"video": video, "augment": augment})
+
+
+def test_untouched_form_emits_unset_for_quantization_and_floors() -> None:
+    """Default-valued TUI fields encode absence, never explicit values."""
+    namespace = to_generate_namespace(GenerateFormState(style="x", name="probe"))
+    assert namespace.quantization is Unset
+    assert namespace.min_fps is Unset
+    assert namespace.min_resolution is Unset
+
+
+def test_untouched_form_preserves_stored_quantization_and_floors() -> None:
+    """An untouched form resolves to the stored config unchanged (023)."""
+    namespace = to_generate_namespace(GenerateFormState(style="x", name="probe"))
+    resolved = resolve_config(
+        _customized_base(),
+        quantization=namespace.quantization,
+        min_fps=namespace.min_fps,
+        min_resolution=namespace.min_resolution,
+    )
+    assert resolved.video.quantization == "bf16"
+    assert (resolved.augment.min_fps, resolved.augment.min_width, resolved.augment.min_height) == (
+        60,
+        1920,
+        1080,
+    )
+
+
+def test_explicit_non_default_tui_values_still_win() -> None:
+    """Deliberate TUI choices override the stored config as before."""
+    state = GenerateFormState(
+        style="x",
+        name="probe",
+        quantization="bf16",
+        min_fps="60",
+        min_resolution="1920x1080",
+    )
+    namespace = to_generate_namespace(state)
+    assert namespace.quantization == "bf16"
+    assert namespace.min_fps == 60
+    assert namespace.min_resolution == "1920x1080"
+    resolved = resolve_config(
+        ProjectConfig(style="probe"),
+        quantization=namespace.quantization,
+        min_fps=namespace.min_fps,
+        min_resolution=namespace.min_resolution,
+    )
+    assert resolved.video.quantization == "bf16"
+    assert (resolved.augment.min_fps, resolved.augment.min_width, resolved.augment.min_height) == (
+        60,
+        1920,
+        1080,
+    )
+
+
+def test_blank_tui_floors_still_emit_unset() -> None:
+    """Actively cleared floor fields keep the pre-existing blank→Unset path."""
+    namespace = to_generate_namespace(
+        GenerateFormState(style="x", name="probe", min_fps="", min_resolution="")
+    )
+    assert namespace.min_fps is Unset
+    assert namespace.min_resolution is Unset
+
+
+# --- 088 fold: tests/test_tui_checkbox_help_114.py (3 tests) ---
+# """TUI checkbox help coverage (issue 114, TDD red-first).
+#
+# Why this file exists: the five flag checkboxes (draft/force/skip-bad/
+# verbose/no-color) have no tooltip, no FIELD_HELP entry, and no widget-id
+# mapping, so the focus-driven help panel falls back to the overview on
+# exactly the flags that need one sentence each. The batch-8 boxes
+# (no_download/no_sfx) already follow the help pattern and must keep
+# working — these tests pin both the new keys and the pre-existing ones.
+# """
+# NOTE: source `_isolated_home` (docstring "remembered TUI settings") is
+# behavior-identical to this file's fixture — reused, not duplicated;
+# `_require_app` is byte-identical to the 181 file's — kept once here.
+
+
+def _require_app() -> Any:
+    """Import the Textual app (skip when the display extra is missing)."""
+    pytest.importorskip("textual")
+    from voyage.tui import VoyageApp
+
+    return VoyageApp
+
+
+_EXPECTED_HELP_KEYWORDS = {
+    "draft": "640",
+    "force": "non-empty",
+    "skip_bad": "salvage",
+    "verbose": "verbose",
+    "no_color": "color",
+}
+
+_FLAG_WIDGET_IDS = {
+    "draft": "flag-draft",
+    "force": "flag-force",
+    "skip_bad": "flag-skip-bad",
+    "verbose": "flag-verbose",
+    "no_color": "flag-no-color",
+}
+
+
+def test_field_help_covers_all_flag_checkboxes() -> None:
+    """FIELD_HELP gains one entry per flag checkbox (no key collisions)."""
+    from voyage.tui_state import FIELD_HELP
+
+    for field in _EXPECTED_HELP_KEYWORDS:
+        assert field in FIELD_HELP, f"FIELD_HELP missing {field!r}"
+        assert _EXPECTED_HELP_KEYWORDS[field] in FIELD_HELP[field].lower()
+    # Batch-8 keys stay intact (coordinate, don't collide).
+    assert "no_download" in FIELD_HELP
+    assert "no_sfx" in FIELD_HELP
+
+
+def test_flag_checkboxes_carry_tooltips() -> None:
+    """Each flag Checkbox passes its FIELD_HELP text as tooltip."""
+    import asyncio
+
+    VoyageApp = _require_app()
+
+    async def _run() -> None:
+        from textual.widgets import Checkbox
+
+        app = VoyageApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            for field, widget_id in _FLAG_WIDGET_IDS.items():
+                box = app.query_one(f"#{widget_id}", Checkbox)
+                tooltip = str(getattr(box, "tooltip", "") or "")
+                assert tooltip, f"#{widget_id} has no tooltip"
+                assert _EXPECTED_HELP_KEYWORDS[field] in tooltip.lower()
+
+    asyncio.run(_run())
+
+
+def test_help_panel_describes_focused_checkbox() -> None:
+    """Focusing a flag checkbox shows its help, not the overview."""
+    import asyncio
+
+    VoyageApp = _require_app()
+
+    async def _run() -> None:
+        from textual.widgets import Checkbox, Static
+
+        app = VoyageApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#help-body", Static)
+            for field, widget_id in _FLAG_WIDGET_IDS.items():
+                app.set_focus(app.query_one(f"#{widget_id}", Checkbox))
+                await pilot.pause()
+                body = str(panel.content).lower()
+                assert "focus any field" not in body, f"#{widget_id} fell back to overview"
+                assert _EXPECTED_HELP_KEYWORDS[field] in body, f"#{widget_id} help missing"
+
+    asyncio.run(_run())
+
+
+# --- 088 fold: tests/test_tui_checkbox_toggle_181.py (2 tests) ---
+# """Widget-to-state coverage for TUI flag checkboxes (issue 181, TDD red-first).
+#
+# Why this file exists: ``test_tui_state.py`` covers state-to-namespace
+# (given ``force=True`` the namespace carries it) but nothing covers
+# widget-to-state (given the user checks "Force", ``_read_form().force``
+# becomes ``True``) — a transposed flag id in ``_read_form`` passes the
+# whole suite. These tests toggle each box through the real Pilot click
+# path (the issue-131 interaction precedent — never programmatic
+# ``.value`` sets) and assert ``_read_form`` follows, plus a count/ids pin
+# so a deleted or renamed flag fails loudly.
+# """
+# NOTE: `_require_app` kept once in the 114 section above; this section's
+# `_isolated_home` is behavior-identical to this file's fixture — reused.
+
+
+_FLAG_FIELDS = (
+    ("flag-draft", "draft"),
+    ("flag-force", "force"),
+    ("flag-skip-bad", "skip_bad"),
+    ("flag-verbose", "verbose"),
+    ("flag-no-color", "no_color"),
+)
+
+_EXPECTED_FLAG_IDS = frozenset(
+    [
+        "flag-draft",
+        "flag-force",
+        "flag-skip-bad",
+        "flag-no-download",
+        "flag-no-sfx",
+        "flag-verbose",
+        "flag-no-color",
+    ]
+)
+
+
+async def _click_when_ready(pilot: Any, app: Any, selector: str) -> None:
+    """Click once the target is really under the mouse (issue 093 pattern).
+
+    ``pilot.click`` returns False instead of raising when the click lands
+    on another widget — callers must honor that or a lost click looks
+    like a hung toggle. OutOfBounds (target still off-screen while the
+    scheduled scroll applies) retries the same way.
+    """
+    from textual.pilot import OutOfBounds
+    from textual.widgets import Checkbox
+
+    for _ in range(100):
+        app.query_one(selector, Checkbox).scroll_visible()
+        await pilot.pause(0.05)
+        try:
+            if await pilot.click(selector):
+                return
+        except OutOfBounds:
+            continue
+    raise AssertionError(f"checkbox {selector} never became clickable")
+
+
+def test_flag_checkbox_id_set_is_pinned() -> None:
+    """Exactly the seven known flag ids exist (renames/deletes fail)."""
+    import asyncio
+
+    VoyageApp = _require_app()
+
+    async def _run() -> None:
+        from textual.widgets import Checkbox
+
+        app = VoyageApp()
+        # Tall viewport (verified live 2026-09-30): at (120, 40) the last
+        # flag scrolls under the fold and repeated scroll_visible + click
+        # sequences land on other widgets, so the toggle test below mounts
+        # at (120, 60) where every flag is clickable without scrolling.
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.pause()
+            found = {box.id for box in app.query(Checkbox)}
+            assert found == _EXPECTED_FLAG_IDS
+
+    asyncio.run(_run())
+
+
+def test_flag_toggles_propagate_to_read_form() -> None:
+    """Real clicks toggle each flag and ``_read_form`` follows both ways."""
+    import asyncio
+
+    VoyageApp = _require_app()
+
+    async def _run() -> None:
+        app = VoyageApp()
+        async with app.run_test(size=(120, 60)) as pilot:
+            await pilot.pause()
+            for widget_id, field in _FLAG_FIELDS:
+                assert getattr(app._read_form(), field) is False
+                await _click_when_ready(pilot, app, f"#{widget_id}")
+                await pilot.pause()
+                assert getattr(app._read_form(), field) is True, widget_id
+                await _click_when_ready(pilot, app, f"#{widget_id}")
+                await pilot.pause()
+                assert getattr(app._read_form(), field) is False, widget_id
+
+    asyncio.run(_run())
+
+
+# --- 088 fold: tests/test_tui_progress_parity_113.py (5 tests) ---
+# """TUI progress content parity with the console (issue 113, TDD red-first).
+#
+# Why this file exists: ``TuiProgress`` docstring promises plain-text lines
+# mirror the console wording, but ``segment_plan``/``segment_done`` drop the
+# decision-relevant lines (backend labels, drift hold, video geometry,
+# energy, take ids + action, prefetch, elapsed total). These tests drive one
+# canned plan/done pair through both sinks and assert token parity on the
+# non-verbose subset. Verbose-gated detail (seeds/transitions/texture/notes)
+# stays console-only by contract. Caption-family lines (161) are out of
+# scope here — see ``tests/test_sfx_caption_render_161.py``.
+# """
+
+
+def _plan_info() -> dict[str, Any]:
+    """One canned supervisor-style plan dict (all parity keys populated)."""
+    return {
+        "number": 3,
+        "segment_id": "000003",
+        "destination": "neon reef at dusk",
+        "phase": "ESTABLISH",
+        "novelty_accepted": True,
+        "drift_hold": True,
+        "prefetch_hit": True,
+        "director_backend": "qwen",
+        "video_backend": "fake",
+        "audio_backend": "fake",
+        "geometry": "768x432",
+        "fps": 24,
+        "planned_frames": 48,
+        "planned_duration": 2.0,
+        "blocks": 2,
+        "video_prompts": ["a neon reef at dusk, glowing polyps"],
+        "video_seeds": [4242],
+        "scene_cuts": [True],
+        "transition_mechanism": "hybrid",
+        "transition_stages": ["the reef brightens"],
+        "audio_caption": "slow ambient electronic composition",
+        "audio_energy": 0.52,
+        "audio_bpm": 120.0,
+        "audio_beats": 4,
+        "audio_texture": "granular",
+        "audio_environment": ["cave"],
+        "notes": "novelty similarity 0.100 record 7",
+    }
+
+
+def _done_info() -> dict[str, Any]:
+    """One canned commit summary (take action + prefetch + elapsed set)."""
+    return {
+        "number": 3,
+        "segment_id": "000003",
+        "frames": 48,
+        "duration": 2.0,
+        "take_ids": ["take_000000"],
+        "take_action": "render",
+        "take_reason": "coverage low",
+        "beats": 4,
+        "bpm": 120.0,
+        "video_backend": "fake",
+        "overlap_fraction": 0.1,
+        "overlap_cap_seconds": 0.5,
+        "stage_seconds": {"video": 1.2, "audio": 0.4},
+        "elapsed": 2.1,
+        "prefetch_hit": True,
+    }
+
+
+class _FakeApp:
+    """Synchronous stand-in for VoyageApp (no event loop needed)."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.bars: list[tuple[int, int]] = []
+
+    def call_from_thread(self, callback: Any, *args: Any) -> Any:
+        return callback(*args)
+
+    def append_run_line(self, text: str) -> None:
+        self.lines.append(text)
+
+    def advance_run_bar(self, done: int, total: int) -> None:
+        self.bars.append((done, total))
+
+
+def _tui_lines_for_plan() -> list[str]:
+    """Drive TuiProgress.segment_plan on the canned dict, return history."""
+    import pytest
+
+    pytest.importorskip("textual")
+    from voyage.tui import TuiProgress
+
+    fake = _FakeApp()
+    progress = TuiProgress(cast(Any, fake), 1)
+    progress.segment_plan(_plan_info())
+    return list(fake.lines)
+
+
+def _tui_lines_for_done() -> list[str]:
+    """Drive TuiProgress.segment_done on the canned dict, return history."""
+    import pytest
+
+    pytest.importorskip("textual")
+    from voyage.tui import TuiProgress
+
+    fake = _FakeApp()
+    progress = TuiProgress(cast(Any, fake), 1)
+    progress.segment_done(_done_info())
+    return list(fake.lines)
+
+
+def test_tui_plan_shows_backend_labels_and_drift_hold() -> None:
+    """Drift line carries the director backend + hold flag like console."""
+    lines = _tui_lines_for_plan()
+    blob = "\n".join(lines)
+    assert "qwen" in blob
+    assert "drift hold" in blob
+
+
+def test_tui_plan_shows_video_geometry_line() -> None:
+    """Geometry/fps/frames/blocks/scene-cut reach the TUI run log."""
+    lines = _tui_lines_for_plan()
+    blob = "\n".join(lines)
+    assert "768x432" in blob
+    assert "24fps" in blob
+    assert "48f" in blob
+    assert "2 block(s)" in blob
+    assert "scene-cut" in blob
+
+
+def test_tui_plan_shows_audio_backend_and_energy() -> None:
+    """Non-verbose audio line keeps backend + energy (not just beats)."""
+    stream = io.StringIO()
+    VoyageConsole(stream=stream).segment_plan(_plan_info())
+    assert "energy 0.52" in stream.getvalue()
+    blob = "\n".join(_tui_lines_for_plan())
+    assert "fake" in blob
+    assert "energy 0.52" in blob
+
+
+def test_tui_done_shows_take_ids_and_action() -> None:
+    """Commit line names the take + the keep/render/repaint judgment."""
+    blob = "\n".join(_tui_lines_for_done())
+    assert "take_000000" in blob
+    assert "render" in blob
+
+
+def test_tui_done_shows_prefetch_and_elapsed_total() -> None:
+    """Prefetch-hit marker + elapsed total ride the timing line."""
+    stream = io.StringIO()
+    VoyageConsole(stream=stream).segment_done(_done_info())
+    assert "prefetch hit" in stream.getvalue()
+    blob = "\n".join(_tui_lines_for_done())
+    assert "prefetch hit" in blob
+    assert "2.1s" in blob

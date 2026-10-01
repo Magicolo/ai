@@ -313,3 +313,78 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
 - Residuals: unchanged — (1) parity rescue research + (2) the
   `test_final_blend_scale.py` owner's 31-input-scale proof before any
   single-graph join lands.
+
+## Progress log (2026-10-01, parity-rescue research — user-ordered, read-first)
+
+- Premise re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip, scratch in /tmp only): the pin now lives at
+  `tests/test_finalize_fastpath.py:275`
+  (`test_final_blend_never_spawns_wide_acrossfade_graph` — moved from
+  the deleted `test_final_blend_scale.py`, same <=2-input assertion,
+  green unmodified); production fold vs flat wide still diverges exactly
+  as batch-12 measured (N=4 sine: sizes 4992102 B both, first diff frame
+  288001, max 65536 s32 units, mean ~5041, dirty secs [6,9]).
+- MECHANISM FOUND (exact): `afade` runs in its input's NATIVE sample
+  format (ffmpeg 7.1.5 filter negotiation, proven by `-v verbose`
+  auto-insert dumps) — s16-fed pair graph inserts NO converter before
+  `afade` (`s16 -> fltp` lands AFTER it, before `adelay`/`amix`), so the
+  fade is s16-INTEGER math truncating every faded sample to the s16
+  grid; s32-fed pair graph (fold blends 2+) likewise keeps `afade` in
+  s32-INTEGER (full precision). Unit pins: s16-fed `afade`-alone fade
+  region 100% grid with truncation signature (DC 13902: sample-1 ideal
+  18981 -> 0, sample-47999 ideal 13901.71 -> 13901); s32-fed
+  `afade`-alone fade region grid fraction 0.0014 (chance level). So
+  blend 1 fades in s16 exactly like every wide chain (overlap-1/pure
+  regions identical), while blends 2+ fade in s32 — same ideal gains,
+  finer truncation grid — differing by <=1 s16 LSB (65536 s32 units),
+  confined to second-and-later overlaps. `amix`/`adelay` always run
+  fltp (exact for grid values: <=16 significant bits < 24-bit
+  mantissa); the terminal fltp->s32 quantization is shared and
+  innocent.
+- Decisive probe matrix (all CPU-only `voyage:latest`, N=4 4 s sine):
+  R1 fold-twice byte-identical (max=0 — no random dither stage);
+  R2 intermediate ladder vs wide: s16 -> max=0 BIT-IDENTICAL,
+  s32/f32/f64 -> max=65536/65536/65535 at the same first-diff frame
+  (file width is irrelevant — the negotiated filter domain decides);
+  R3 chained single-graph without barriers vs fold max=16 (pure fltp
+  rounding-order residue) vs wide max=65536 (files incidental);
+  R4 `aformat=dbl` wide diverges from BOTH flat-wide and fold from
+  overlap-1 (float gains everywhere — also explains why batch-12's
+  forced-s32 was worse: it moved stage 1 off the s16 grid too).
+  Sine-sample forensics first suggested impossible gains (implied
+  g=1/6) — a cross-domain comparison artifact; DC fixtures (exact
+  gain solve) + converter dumps gave the true story.
+- CONSTRUCTIONS (both bit-identical, NEITHER landed — recorded only):
+  (1) single-spawn rescue — chained pairwise stages with an
+  `aformat=sample_fmts=s32` barrier per stage == production fold
+  byte-for-byte (N=4: 624000 frames, max=0, sizes 4992102 B; each
+  stem decoded once, one spawn); (2) other direction —
+  s16-intermediate fold == flat wide byte-for-byte (N=4 AND N=8:
+  1200000 frames, max=0; both fade every stage in s16 — not a
+  production option, it reintroduces the 16-bit generational loss the
+  s32 intermediates were chosen to avoid).
+- Closed legs: dither (R1 determinism + converter dump shows format
+  converters only — the integer-trunc path has no dither stage);
+  `aresample` precision (no resampling: every converter 48000->48000);
+  `aformat` (s32-barrier rescues, dbl/s32-everywhere diverge).
+
+## Resolution (2026-10-01, parity-rescue research)
+
+- Verdict: MECHANISM NAILED, CONSTRUCTION PROVEN, STILL BLOCKED ON
+  LANDING. No behavior change (`voyage/media.py`,
+  `voyage/sfx_finalize.py`, the pin test, and all other tests
+  untouched — `git diff` clean on them).
+- Files changed: new `tests/test_issue_152_parity_research.py` only
+  (6 tests, all green in-container: s16-truncation unit pin,
+  s32-precision contrast, s16-fold==wide, staged-s32==fold,
+  bounded-divergence characterization, determinism; `ruff check` +
+  `ruff format --check` clean).
+- Test evidence: new file 6/6 in ~2 s; neighbor run green — new +
+  `test_finalize_fastpath` + probe-memo + wide-proof +
+  `test_lock_manifest_agreement` = 31 passed in 17.17 s.
+- DESIGN proposals: none (behavior unchanged; the batch-12
+  pairwise-fold proposal stands as quoted).
+- Residuals: landing construction (1) needs the pin owner's
+  31-input-scale no-hang proof + <=2-input pin relaxation first
+  (N=8 proven here CPU-only; incident scale + GPU long-run remain
+  theirs) — do not wire from the sfx/media side alone.

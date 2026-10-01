@@ -3059,6 +3059,7 @@ Capture stderr and include the relevant last lines in `MediaError`.
 ---
 
 # 56. Finalization
+> As-built (batch-2026-10-01, issue 152): parity mechanism found — `afade` runs in its input's native sample format, so s16-fed fades truncate to the s16 grid while s32-fed (fold blends 2+) keep precision (≤1 s16 LSB, second-and-later overlaps only); chained pairwise stages with an `aformat=s32` barrier per stage == production fold byte-for-byte (N=4 and N=8, max=0). Recorded NOT landed — needs the pin owner's 31-input-scale no-hang proof + ≤2-input pin relaxation first; the pairwise probe-memo fold stands.
 
 > As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_*` aliases the augment CRF ladder; `resolve_finalize_settings()` is the single scalar/options= contract (768/432/24 defaults retained for the zero-floor stream-copy fast path); `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`).
 > As-built (batch-8-2026-09-30, issue 138): `finalize --skip-bad` is input triage with a record — missing artifacts, checksum/metrics/alignment failures, and numbering gaps are each skipped with a `finalize: skipping ...` warning naming the segment; the post-assembly presentation check stays strict, so a corrupt stage still aborts the finalize.
@@ -3755,6 +3756,7 @@ One component owns each piece of mutable state.
 ---
 
 # 73. Ownership model
+> As-built (batch-2026-10-01, issue 081): `supervisor.py` 2666→2587L via 3 verbatim extractions + 1 derivation (non-quiet tree, foreign hunks preserved) — new `voyage/supervisor_routing.py` (69L: `VIDEO`/`AUDIO_WORKER_MODULES`, `audio/video_worker_module`, `STREAMING_VIDEO_BACKENDS` now derived from `BACKEND_REGISTRY` per 023/083, value-identical `('ltxv', 'causvid')`), `voyage/supervisor_plan_info.py` (82L: stateless `segment_plan_info`, §§73/18.2), `voyage/supervisor_lock.py` (49L: stateless `read_lock_holder`, §73) — each with facade re-export + delegation + agreement tests (6/5/7); split index now reads proposal/prefetch/commit-types/tape/routing/plan-info/lock. Remainder is stateful-only (commit pipeline, lifecycle hub, audio-coverage) and needs a future stateful-group pattern; `sha256_file` shim stays (`cli_validate.py` importer); worker-map merge needs a 023-owner design decision.
 
 ```text
 supervisor     owns lifecycle + commit state
@@ -6141,6 +6143,7 @@ Where this document and current upstream model code disagree, **the current upst
 
 Any such discrepancy discovered during implementation must be documented in the relevant source file and in the backend-specific upstream notes, for example `docs/UPSTREAM_LONG_LIVE_PATCHES.md`, `docs/UPSTREAM_LTXV_NOTES.md`, or `docs/UPSTREAM_CAUSVID_NOTES.md`.
 # 140. Implementation progress log (non-spec, handoff record)
+> As-built (batch-2026-10-01, issue 093): `Voyage/TASK.md` removed via `git rm` — brief retirement complete (open §30 items live once in the §140 batch-9 entry, §30.4 procedure in `docs/BENCHMARKING.md`); full text survives in `git log --oneline -- Voyage/TASK.md`; remaining `TASK.md` mentions are historical only.
 
 ## 2026-09-21 — Phase 0 skeleton complete (task groups A-D, G-partial, I, J, K-unit)
 
@@ -8128,3 +8131,10 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Fold: 088 (`final_blend_scale`→`finalize_fastpath`; no DESIGN contract change, folded here only).
 - Record-only: 031/035/152 (record-only re-probes; no new DESIGN claims this batch).
 - Records: 089/093/166 (no new DESIGN claims this batch).
+
+## Batch (2026-10-01)
+
+- 081 (see §73 as-built): 3 verbatim extractions + streaming derivation landed (`supervisor_routing.py` / `supervisor_plan_info.py` / `supervisor_lock.py`, 18 agreement tests); remainder stateful-only, `sha256_file` shim stays, worker-map merge and audio-coverage deferred with cause.
+- 088 (tail-only; DESIGN proposals: none): 6 folds, 11 sources deleted, assertion net-zero (`av_alignment_consumer`→`state_integrity`, `hashing`+`paths`→`unit`, adapter triple→`adapter_contract`, `take_ahead_guard`→`audio_request_validation`, 4 TUI satellites→`tui`, `integration`→`state_integrity`); as-left 163 files / 1625 tests; augment-quad remainder + video-worker quartet + audio/TUI/finalize remainders each carry an exact verbatim-block cause.
+- 093 (see §140 as-built): `Voyage/TASK.md` git-rm landed; nothing live lost.
+- 152 (see §56 as-built): parity mechanism found (native-format `afade`; staged-s32 == fold byte-for-byte), recorded NOT landed pending the pin owner's 31-input proof + pin relaxation; pairwise fold stands.

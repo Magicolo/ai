@@ -432,3 +432,137 @@ wc -l tests/*.py | sort -rn | head -n 15
   discipline (re-read live, check mtime/`git log`, keep assertion
   counts identical, move the gates.sh mypy entry with any fold that
   deletes a listed file).
+
+## Progress log (2026-10-01, full-resolution pass)
+
+- Premise: 170 `test_*.py` at pass start; user ordered FULL resolution
+  of every remaining cluster in one pass under the established recipe
+  (re-read live, mtime/`git log`, names/bodies/counts identical,
+  banner, zero importers, gates-list move in the same edit, `bash -n`
+  clean; TDD per fold: merged+sources green pre-delete, merged solo
+  green post-delete; ruff + format + mypy strict per touched file; one
+  cluster at a time with `git diff` disjointness vs concurrent hunks).
+- Six folds landed (11 source files deleted, assertion net-zero
+  throughout — every moved test fn keeps its name, every assertion
+  line is byte-identical unless a drift adaptation is noted):
+  1. `test_av_alignment_consumer` (6) → `test_state_integrity`
+     (15→21): `_commit` byte-identical — reused, not duplicated (blend
+     precedent); import extended with the three media helpers only.
+     Pre-delete 27 (merged 21 + 6 dupes), post-delete 21/21.
+     Gates: source entry removed (target kept).
+  2. `test_hashing` (7) + `test_paths` (8) → `test_unit` (22→37):
+     no helper collisions; imports extended (hashlib, hashing/media/
+     paths modules, sha256 helpers, path constants, MediaError, worker
+     modules). Pre-delete 52 (37 + 15 dupes), post-delete 37/37.
+     Gates: both source entries removed (target kept).
+  3. Adapter triple → `test_adapter_contract` (11→40): backends
+     `_stub_transport` semantically identical — reused (NOTE); backends
+     `_video_config`/`_request` + commit-split helpers verbatim.
+     Drift adaptations (assertions untouched, 124 precedent):
+     backends `[literal-required]`→`[index]`, unknown-backend
+     +`[arg-type]`, pre-loop `worker_result: dict[str, Any]`
+     declaration (annotated `for` target is a SyntaxError — first
+     attempt proved it); commit-split per-line ignore codes exactly as
+     merged-solo mypy demands (incompatible assigns `assignment`,
+     compatible restores `method-assign`; state-line `arg-type` kept,
+     config-line + backend-line stale ignores dropped); supervisor
+     re-export keeps `attr-defined` (import source unchanged).
+     Pre-delete 69 (40 + 29 dupes), post-delete 40/40. Gates: no
+     change (both sources unlisted).
+  4. `test_audio_take_ahead_guard` (7) → `test_audio_request_validation`
+     (11→18): no collisions; imports extended (pydantic,
+     AudioConfig/toml/resolve). Pre-delete 25 (18 + 7 dupes),
+     post-delete 18/18. Gates: source entry removed (target kept).
+  5. Four TUI satellites (14) → `test_tui` (19→33): absent-defaults
+     (4) + checkbox-help (3) + checkbox-toggle (2) + progress-parity
+     (5). `_require_app` ×2 byte-identical — kept once (NOTE);
+     `_isolated_home` ×3 behavior-identical (docstring differs) —
+     target's kept (NOTE); absent-defaults tests gain the autouse
+     fixture as a no-op (NOTE, they never read HOME). Pre-delete 47
+     (33 + 14 dupes), post-delete 33/33. Gates: absent-defaults entry
+     removed (other three sources unlisted; target kept).
+  6. `test_integration` (6) → `test_state_integrity` (21→27):
+     `_init_run` behavior differs (fixed itest/seed-7 vs parameterized)
+     — moved as `_itest_init_run` (quintet prefix precedent); imports
+     extended (FinalizeOptions/validate_video, read_state,
+     SubprocessWorker). Pre-delete 33 (27 + 6 dupes), post-delete
+     27/27. Gates: source entry removed (target kept).
+- Gate evidence (in-container, `voyage:latest`, CPU-only): every fold
+  `ruff check` + `ruff format --check` + `mypy strict` clean on all
+  touched files (final combined run: 5 files green); `bash -n` clean
+  on `gates.sh` after each list edit; gates-list integrity re-verified
+  (every listed path exists — no dangling entries). Full `gates.sh`
+  not run (foreign dirty hunks in `voyage/*` + `tests/test_registry_split.py`
+  / `tests/test_stage_a_telemetry.py` would color it — untouched per
+  scope). Slow suites included post-delete: state_integrity 27/27
+  (~44s), tui 33/33 (~10s), adapter 40/40, unit 37/37, audio 18/18.
+- As-left: 163 `test_*.py` files, 1625 `def test_` (fold net-zero;
+  file-count delta vs 170 as-read = −11 folded + 4 concurrent-agent
+  adds landing mid-pass, incl. untracked
+  `test_supervisor_routing_helpers.py`).
+- Never touched: `000_INDEX.md`, `DESIGN.md`, `AGENTS.md`, other
+  issues' files, any `voyage/*` source (only `tests/*` + the owned
+  `scripts/gates.sh` list lines). Never committed. No host pip (all
+  probes/tests via `docker run --rm -v $PWD:/app -w /app voyage:latest`).
+
+## Resolution (2026-10-01, full-resolution pass)
+
+- Verdict: fixed to the recipe limit — six folds landed (files
+  changed: `tests/test_adapter_contract.py` 11→40 tests,
+  `tests/test_audio_request_validation.py` 11→18,
+  `tests/test_tui.py` 19→33, `tests/test_state_integrity.py` 15→27,
+  `tests/test_unit.py` 22→37; deleted 11 sources:
+  `test_av_alignment_consumer`, `test_hashing`, `test_paths`,
+  `test_backends_adapter`, `test_commit_split`,
+  `test_audio_take_ahead_guard`, `test_tui_absent_defaults_023`,
+  `test_tui_checkbox_help_114`, `test_tui_checkbox_toggle_181`,
+  `test_tui_progress_parity_113`, `test_integration`;
+  `scripts/gates.sh` mypy list: 6 source entries removed —
+  av_alignment_consumer, hashing, paths, take_ahead_guard,
+  tui_absent_defaults_023, integration — each in the same edit as its
+  deletion; backends_adapter/commit_split/checkbox_help/
+  checkbox_toggle/progress_parity were unlisted, no move needed).
+  DESIGN proposals: none.
+- Residuals (exact causes — each cluster probed live, unfoldable
+  verbatim under the recipe):
+  - Augment quad remainder (`test_augment_config` 33 +
+    `test_augment_plan` 11 + `test_augment_models` 13 +
+    `test_augment_runner` 39 + `test_augment_weight_loading` 6):
+    SKIPPED — foreign hunk in `tests/test_augment_models.py`
+    (concurrent agent's uncommitted +2 lines adding
+    `verify_ltx25_models`/`verify_ltx23_models` to the expected tuple,
+    matching their untracked `voyage/registry_ltx23.py` +
+    `voyage/registry_ltx25.py`; registry-split track actively working
+    this area). Rule: never fold out of a file another agent just
+    edited. Retry once their track lands (re-read + `git diff` first).
+  - Video-worker quartet: SKIPPED — 24 pre-existing mypy-strict
+    errors across the candidates (`test_causvid_worker` 14 incl.
+    `video_causvid.CAUSVID_COMMIT`/`CAUSVID_CHECKPOINT_FILE`
+    attr-defined; `test_video_common` 6 incl. `TAIL_FILENAME`/
+    `TAPE_FILENAME` attr-defined on both worker modules + 2 ndarray
+    type-arg; `test_ltxv_tensor_handoff` 4 incl. ndarray type-arg): the
+    6 attr-defined errors need `voyage/workers/*` re-exports, which is
+    voyage-source scope (forbidden to this pass + other groups' area).
+    Transplanting them into the listed+clean `test_ltxv.py` would turn
+    a green gated file red. Owners: worker/registry tracks.
+  - Audio remainder (`test_audio_planner` 13 + `test_audio_accounting`
+    6 + `test_audio_workers` 8 + `test_audio_acestep_cwd` 2): planner
+    carries 2 pre-existing errors (ndarray type-arg/no-any-return,
+    unlisted); the rest are clean but have no enumerated fold target
+    left (validators done). One-per-pass follow-up.
+  - TUI remainder (`test_tui_app` 33 Pilot 989L + `test_tui_state` 26):
+    app stays solo per the issue's own demotion recipe (tui_app = only
+    Pilot); state carries 3 pre-existing comparison-overlap errors
+    (pytest.approx tuple equality, unlisted) — needs owner attention,
+    not a verbatim fold into listed `test_tui.py`.
+  - Finalize/commit remainder (`test_commit_hardening` 20 +
+    `test_finalize_encode_rank2` 8; `test_finalize_fastpath` 10 stays
+    as the area owner): hardening carries 5 pre-existing errors incl.
+    `supervisor.validate_video` attr-defined (needs voyage-source
+    re-export — forbidden); encode_rank2 carries 1 (`audio_acestep.
+    subprocess` attr-defined — needs worker re-export or body edits).
+    Untracked `test_commit_slice_compensation.py` excluded (in-flight,
+    uncommitted — never fold untracked files).
+  - All residuals keep assertion counts identical (nothing moved);
+    next passes use the same discipline. `gates.sh` list is fully
+    consistent (no dangling paths).

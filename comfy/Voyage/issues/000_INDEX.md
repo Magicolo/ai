@@ -1,6 +1,6 @@
 # Voyage pedantic investigation — ranked index (OPEN issues only)
 
-10 files: 9 open issues + this index (2026-10-01). The 181 resolved /
+9 files: 8 open issues + this index (2026-10-01). The 182 resolved /
 closed / folded / superseded / decided issues were removed from the working
 tree (`git rm`) — they live on in git history
 (`git log --oneline -- comfy/Voyage/issues/`), each with title, severity,
@@ -16,13 +16,12 @@ under concurrent edits — re-verify file:line with grep before fixing.
 
 ## Open, ranked by criticality
 
-- 081 — PARTIAL (HIGH, supervisor god-module split; `supervisor_proposal.py` 91L + `supervisor_prefetch.py` 43L + `supervisor_commit_types.py` 63L + `supervisor_tape.py` 51L extracted with facades + agreement tests; remainder: commit pipeline vs lifecycle vs audio-coverage, `sha256_file` shim, streaming-set derivation per 023/083, worker-map merge, deterministic payload, legacy threading, `run_id`; extractions need a quiet tree + verbatim-movable blocks — see file)
+- 081 — PARTIAL (HIGH, supervisor god-module split; `supervisor_proposal.py` 91L + `supervisor_prefetch.py` 43L + `supervisor_commit_types.py` 63L + `supervisor_tape.py` 51L + `supervisor_routing.py` 69L + `supervisor_plan_info.py` 82L + `supervisor_lock.py` 49L extracted with facades + agreement tests + streaming-set derivation per 023/083 landed 2026-10-01 (non-quiet tree, foreign take-joint hunks preserved); remainder itemized in file: commit-pipeline stateful methods vs lifecycle remainder vs audio-coverage (skipped — foreign take-joint hunk), `sha256_file` shim MUST STAY (cli_validate importer), worker-map merge (needs 023 design), deterministic payload, legacy threading ABSENT, `run_id` — see file)
 - 035 — PARTIAL (MEDIUM-HIGH, `Any` leakage; landed: scoreboard/models_ensure/registry narrowings + `json.loads` narrowings + `scoreboard_rows` return; blocked legs: `rpc.call()` + supervisor `dict[str, object]` chain + hub kwargs + `atomic`/`rpc`-fd idioms — all probed-blocked by invariance, exact lines in file)
 - 166 — PARTIAL (MEDIUM, unloadable weights; SRVGG anime-6B loader + full FILM port strict-load end to end; remainder: chunk-scale inference wiring — needs GPU numerics/eyeball + opt-in knob, exact handoff in file)
-- 088 — PARTIAL (MEDIUM, tests fold; quintet + prefetch_summary + prefetch_shutdown + final_blend_scale + sfx_parser_parity folds landed with recipe; remaining clusters: adapter triple, augment remainder, audio validators, TUI trio, video-worker quartet, finalize/commit merges, singletons — see file)
-- 152 — PROVEN-BLOCKED (MEDIUM-LOW, SFX bed left-fold; wide MANUAL-fade N-way join proven no-hang but NOT bit-identical ≤1 s16 LSB, pinned by `test_final_blend_scale` ≤2-input rule; O(N) probe-memo fold remains until parity proven + pin-owner 31-input proof)
-- 089 — PARTIAL (MEDIUM, test hygiene; slow-marks + mypy-list moves + cache guard landed; remainder: lockfile typo + tomli note — lockfile FORBIDDEN to edit, lock track w/068; mypy-scope collapse → scripts)
-- 093 — PARTIAL (MEDIUM, TASK prune-merge; stub + BENCHMARKING §30.4 home verified; remainder: `git rm comfy/Voyage/TASK.md` needs explicit user approval per AGENTS.md §9)
+- 088 — PARTIAL (MEDIUM, tests fold; quintet + prefetch_summary + prefetch_shutdown + final_blend_scale + sfx_parser_parity folds landed with recipe + 2026-10-01 full-resolution 6 folds landed (11 sources deleted, net-zero): av_alignment_consumer→state_integrity, hashing+paths→unit, adapter triple→adapter_contract, take_ahead_guard→audio_request_validation, 4 TUI satellites→tui, integration→state_integrity; skipped with cause: augment remainder (foreign hunk), video-worker quartet (24 mypy errors), audio remainder (planner errors/no target), TUI remainder (app solo/state errors), finalize/commit remainder (hardening/encode errors + untracked excluded) — see file)
+- 152 — PROVEN-BLOCKED (MEDIUM-LOW, SFX bed left-fold; wide MANUAL-fade N-way join proven no-hang but NOT bit-identical ≤1 s16 LSB, pinned by `test_final_blend_scale` ≤2-input rule; 2026-10-01 parity-rescue breakthrough (recorded NOT landed): afade native-format truncation mechanism nailed (s16 vs s32 integer math) + chained-pairwise+s32-barrier construction proven byte-identical (N=4 max=0); O(N) probe-memo fold remains until parity proven + pin-owner 31-input proof)
+- 089 — PARTIAL (MEDIUM, test hygiene; slow-marks + mypy-list moves + cache guard landed; 2026-10-01 lock-leg re-verdict: lock legs MOOT per batch-2 068 refutation (httpx2/httpcore2 genuine distributions, tomli omission marker-correct) — CLOSE-recommended; remainder: mypy-scope collapse → scripts)
 - 036 — PARTIAL (god-module tracker; cli + registry + supervisor extractions logged per batch; remainder: supervisor commit methods, `media.py` surface, video workers, test clusters)
 - 031 — DOCUMENTED (LOW, ruff select gap vs ALL; PERF10/N51/PT111 re-probed, every remaining site dirty/foreign/banned; retry PERF→N→PT once owners clear sites — see file)
 
@@ -121,6 +120,7 @@ under concurrent edits — re-verify file:line with grep before fixing.
 - 090 — RESOLVED batch 7 (was: scripts cleanup; lib/common.sh + audio/sfx gaps)
 - 091 — RESOLVED batch 7 (was: missing operator docs; SFX.md + AUGMENT.md)
 - 092 — RESOLVED batch 7 (was: docs one-line batch)
+- 093 — RESOLVED 2026-10-01 (was: TASK prune-merge; TASK.md removed via `git rm comfy/Voyage/TASK.md` under explicit user approval, pre/post dangling-grep verification clean (only historical DESIGN entries), ruff + causvid_prep subset green; file's final +42-line closeout log superseded by this manifest entry (staging mechanics))
 - 094 — CLOSED batch 10 (was: ratchet policy record)
 - 095 — RESOLVED batch 4 (was: segment-manifest checksums; 7-artifact sha256.json)
 - 096 — RESOLVED batch 8 (was: validate_video fps; parse → MediaError + estimate gate)

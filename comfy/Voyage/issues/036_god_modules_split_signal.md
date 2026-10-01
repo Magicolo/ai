@@ -614,3 +614,24 @@ is folded as their tracker (not deleted) until the remaining splits land.
   split); signal table otherwise unchanged except
   `registry_records.py` 609→564 (facade, done) plus new
   `registry_director.py` 175 in the split index.
+
+## Progress log (2026-10-01, 081 full-resolution note — tracker only, no 036-seam change)
+
+- The 081 supervisor split advanced under issue 081 this pass
+  (owned scope: new `voyage/supervisor_routing.py` 69L +
+  `voyage/supervisor_plan_info.py` 82L + `voyage/supervisor_lock.py`
+  49L, `supervisor.py` 2666→2587L via 3 facades + 3 move
+  comments/delegations + 1 unused-import drop, 3 agreement suites
+  18 green; per-file `ruff check` + `ruff format --check` + `mypy
+  strict` clean on all 7 files; neighbors 104 + 53 + 7 green;
+  streaming-set derivation per 023/083 landed value-identical in the
+  new routing module). Non-quiet tree throughout — both foreign
+  `supervisor.py` hunks (media imports + take-joint compensation)
+  preserved, `scripts/gates.sh` untouched (orchestrator reconciles
+  the 3 new test files). 081 remains open for the stateful
+  commit/lifecycle/audio groups (exact causes in the 081
+  full-resolution entry: verbatim-pattern exhaustion, audio region
+  dirty, shim/merge/compat/run_id contract-bound, legacy-threading
+  absent). No 036-owned extraction this pass; signal table otherwise
+  unchanged except `supervisor.py` 2666→2587 plus the three new
+  `supervisor_*` modules in the split index.

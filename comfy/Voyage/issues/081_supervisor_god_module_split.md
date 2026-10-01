@@ -429,3 +429,204 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   023/083; worker-module map merge; deterministic-payload compat;
   legacy-migration threading; `run_id` legacy) — each a future
   single-group pass with its own agreement tests.
+  SUPERSEDED 2026-10-01 by the full-resolution pass below (3
+  extractions + derivation landed; remainder itemized with exact
+  cause — the "nothing cleanly movable" verdict above no longer
+  holds for routing/plan-info/lock, which moved verbatim on the
+  non-quiet tree with foreign hunks preserved).
+
+## Progress log (2026-10-01, full-resolution pass — 3 extractions + derivation, non-quiet tree)
+
+- Pre-checks live (`docker run --rm -v $PWD:/app -w /app voyage:latest`
+  from `Voyage/`, CPU-only): `wc -l voyage/supervisor.py` → 2666 at
+  pass start (includes the foreign take-joint compensation hunk, not
+  this track); `git diff -- voyage/supervisor.py` NON-EMPTY before
+  EVERY edit (foreign hunks: media imports `ABSORPTION_EPSILON_SECONDS`
+  / `_take_joint_fade` at :55-58 + slice-walk `piece_bounds` /
+  `joint_fade` compensation at :1686-1768 inside
+  `_ensure_audio_coverage`). Per the non-quiet discipline each
+  candidate region was re-read + diffed before editing; all three
+  landed extractions avoid both foreign regions (facade imports at
+  :96-134, maps/funcs deletions at :139-224, `_segment_plan_info` at
+  :1884-1944, `_read_lock_holder` at :358-387 — all clean, verified
+  via `git diff -- voyage/supervisor.py | grep "^@@ "` before each
+  edit). Final `git diff` shows own hunks only as facades +
+  deletions + wrappers + one unused-import drop, both foreign hunks
+  byte-intact. Concurrent tracks hold foreign hunks in `DESIGN.md`,
+  `LTX2.md`, `README.md`, `docs/*`, `tests/test_registry_split.py`,
+  `tests/test_stage_a_telemetry.py`, `voyage/cli.py`,
+  `voyage/cli_models.py`, `voyage/model_registry.py`,
+  `voyage/registry_records.py`, `scripts/gates.sh` + untracked
+  `tests/test_commit_slice_compensation.py`,
+  `voyage/registry_ltx23.py` / `registry_ltx25.py` — all left intact,
+  none in owned scope. `scripts/gates.sh` NOT edited (orchestrator
+  reconciles the 3 new test files into the mypy list).
+- 023 verification live: `BACKEND_REGISTRY` carries streaming flags
+  (`fake` False, `ltxv`/`causvid` True); `backends._STREAMING_BACKENDS`
+  is already derived (`frozenset({'causvid', 'ltxv'})`);
+  `supervisor.STREAMING_VIDEO_BACKENDS` was still the hand literal
+  `('ltxv', 'causvid')` with internal uses at :245/:1429/:2048/:2123;
+  `VIDEO keys == registry keys`, `AUDIO keys = {acestep, fake}`;
+  no `issues/023*` file exists and no in-flight routing work was found
+  (region clean), while `backends.py:82-88` names the supervisor track
+  as the unification owner — so routing was taken first per the brief,
+  verbatim-move first, derivation second.
+- TDD red-first per extraction (all in-container): each new test module
+  was written BEFORE its source module and watched fail on collection
+  with `ModuleNotFoundError: No module named
+  'voyage.supervisor_routing' / 'voyage.supervisor_plan_info' /
+  'voyage.supervisor_lock'` (red), then created the module + facade
+  until green. No other reds (one isort order fix per extraction,
+  applied manually — routing facade order, two test import sorts;
+  never `ruff --fix` on shared files).
+- Extraction 1 — routing verbatim: new `voyage/supervisor_routing.py`
+  (69L after derivation, DESIGN §§73, 5) owns `VIDEO_WORKER_MODULES` /
+  `STREAMING_VIDEO_BACKENDS` / `AUDIO_WORKER_MODULES` /
+  `audio_worker_module` / `video_worker_module` verbatim
+  (ex-`supervisor.py:125-144` + `:206-224`, docstrings + the
+  function-local `removed_backend_suffix` import intact);
+  `supervisor.py` re-exports all five via explicit-`as` self-aliases
+  (isort-canonical order: routing before tape) + move comments at both
+  old sites; cleanup: dropped the now-unused `ConfigurationError`
+  import (ruff F401, verified zero remaining uses via grep — `os` stays,
+  still used by `_held_run_lock` + `__init__`). Follow-up derivation
+  (same pass, own new file only): `STREAMING_VIDEO_BACKENDS` is now
+  `tuple(name for name, record in BACKEND_REGISTRY.items() if
+  record.streaming)` with a 023/083 derivation docstring —
+  value-identical `('ltxv', 'causvid')` (registry insertion order is
+  fake/ltxv/causvid), so the facade values never changed; `VIDEO`
+  values stay hand-mapped (the registry carries no worker-module
+  paths — nothing to derive them from).
+- Extraction 2 — commit-plan stateless helper: new
+  `voyage/supervisor_plan_info.py` (82L, DESIGN §§73, 18.2) owns
+  `segment_plan_info` verbatim (ex-`supervisor.py:1884-1944` body minus
+  the `self` param; function-local `MAX_BPM` / `beats_for_segment`
+  imports intact; `effective_music_caption` imported directly from
+  `voyage.supervisor_proposal`, never via the supervisor facade, so no
+  cycle); `supervisor.py` re-exports via explicit-`as` + keeps
+  `Supervisor._segment_plan_info` as a one-line delegating wrapper
+  (single internal caller at :2157, all via `self`, unchanged).
+  Zero-`self`-use verified via AST (`self.` count 0) before moving.
+- Extraction 3 — lifecycle lock stateless helper: new
+  `voyage/supervisor_lock.py` (49L, DESIGN §73) owns
+  `read_lock_holder` verbatim (ex-`supervisor.py:358-387` body minus
+  the `self` param; `os`/`Path` imports carried); `supervisor.py`
+  re-exports via explicit-`as` + keeps
+  `Supervisor._read_lock_holder` as a one-line delegating wrapper
+  (internal caller `_held_run_lock` at :342 + 5 hardening-test call
+  sites at `test_supervisor_hardening.py:227-235`, all via `self`,
+  unchanged). Zero-`self`-use verified via AST before moving
+  (the prior skip's "rewrites every caller" concern is answered by
+  the tape-pattern delegation — no caller rewritten).
+- Gate evidence (in-container `voyage:latest`, CPU-only): per-file
+  `ruff check` + `ruff format --check` + `mypy strict` clean on all 7
+  files (`supervisor.py`, 3 new modules, 3 new test files). New suites
+  18 passed (`test_supervisor_routing_helpers` 6 + `test_supervisor_
+  plan_info_helpers` 5 + `test_supervisor_lock_helpers` 7).
+  Agreement/importer/hardening 104 passed (18 new + `test_single_
+  source` + `test_surface_rank2` + `test_ltxv` +
+  `test_longlive2_removed_079` + proposal/prefetch/commit-types/tape +
+  `test_supervisor_hardening`). Commit neighbors 53 passed
+  (`test_failure_policy` + `test_commit_hardening` +
+  `test_generation_stack` + `test_supervisor_lifecycle`, 56 s).
+  Crash matrix 7 passed. Routing-derivation re-verify 59 passed
+  (routing + single-source + surface + ltxv + longlive2). No
+  full-tree `gates.sh` run (foreign hunks across 13 files + untracked
+  registry/test files would color it; `scripts/gates.sh` itself is
+  foreign-modified this pass — left intact per the brief).
+
+## Resolution (2026-10-01, full-resolution pass)
+
+- Verdict: PARTIAL-FULL — 3 verbatim extractions + 1 derivation
+  landed on a non-quiet tree without touching any foreign hunk; the
+  remainder below proves unextractable under the landed
+  move-verbatim + explicit-`as` facade + delegation pattern, each
+  with an exact cause (no further verbatim-movable group exists —
+  verified via AST `self.`-use + caller + dirt scan over all 45
+  methods).
+- Files changed (own scope only): `voyage/supervisor_routing.py`
+  (new, 69L), `voyage/supervisor_plan_info.py` (new, 82L),
+  `voyage/supervisor_lock.py` (new, 49L),
+  `voyage/supervisor.py` (2666→2587L: 3 facades + 3 move
+  comments/delegations + 1 unused-import drop; foreign take-joint +
+  media-import hunks preserved), `tests/test_supervisor_routing_
+  helpers.py` (new, 6 tests), `tests/test_supervisor_plan_info_
+  helpers.py` (new, 5 tests), `tests/test_supervisor_lock_helpers.py`
+  (new, 7 tests). Never touched: `scripts/gates.sh` (orchestrator
+  reconciles the 3 new test files), `000_INDEX.md`, `DESIGN.md`,
+  `AGENTS.md`, other issues' files, non-supervisor `voyage/*` source.
+  Never `ruff format` on `issues/*.md`. Never committed. No host pip.
+- DESIGN proposals: "No DESIGN text change proposed: all three
+  modules follow existing contracts (DESIGN §§73/5 routing, §§73/18.2
+  plan, §73 lock) and the issue-081 move-verbatim + re-export +
+  agreement-test convention; a future split index should list
+  `supervisor_routing.py` / `supervisor_plan_info.py` /
+  `supervisor_lock.py` alongside `supervisor_proposal.py` /
+  `supervisor_prefetch.py` / `supervisor_commit_types.py` /
+  `supervisor_tape.py`."
+- Residuals (each verified live, with exact cause):
+  - Commit-pipeline stateful methods (`_decide_payload` 1 `self.`,
+    `_accept_director_decision` 11, `_propose_segment` 13,
+    `_render_video` 8, `_cover_audio` 2, `_commit_segment` 12,
+    `_commit_one_segment_locked` 13, `commit_one_segment` 3,
+    `_with_audio_gpu` 14, `_best_effort_audio_teardown` 7, inspect
+    trio 2/4/3, `_adopt_unaccounted_segment` 10,
+    `_write_state_preserving_control_plane` 2, `_embed_texts` 1,
+    `_log_rejection` 2, prefetch trio 10/1/12, `_sample_gauges` 6,
+    `_resume_video_worker` 4, `_latest_recovery_tape` 8,
+    `_call_with_restart` 9 with 20+ `self._log_metric` fan-out sites)
+    — every body reads `self._run_dir` / `self._config` /
+    `self._log_metric` / workers; moving one method rewrites its
+    signature (`self.` → params, not verbatim) and moving a group
+    needs mixin inheritance (novel pattern, changes `class
+    Supervisor:`, MRO risk, collides with concurrent tracks) —
+    forbidden by "never single stateful methods" + the verbatim
+    rule. Needs a future stateful-group pattern decision, one group
+    per quiet-tree pass.
+  - Lifecycle remainder (`_held_run_lock` 4 `self.` incl. the
+    `self._read_lock_holder` call + `test_commit_hardening.py:191` +
+    `:2585` callers; `_stored_relative` 1 `self.` + callers at
+    :1658/:2487; `_checked_tape_path` 2 `self.` + caller at :2200 +
+    hardening tests + `paths.py:96` doc ref; `start/stop_workers`,
+    `run_segments` 25 `self.`, control-plane, `_stage`/`_log_metric`
+    (hub, 20+ callers)/`_rotate_worker_logs`) — same cause
+    (stateful + cross-refs outside any single contiguous block).
+  - Audio-coverage group (`_ensure_audio_coverage` 7 `self.`,
+    `_with_audio_gpu`, `_best_effort_audio_teardown`,
+    `_cover_audio`) — SKIPPED per non-quiet discipline: the region
+    carries the foreign take-joint compensation hunk (:1686-1731
+    inside `_ensure_audio_coverage` + media imports at :55-58,
+    verified before each edit). Take after the foreign track lands
+    or coordinate with its owner.
+  - `sha256_file` shim (`:53` re-export) — MUST STAY: external
+    importer `voyage/cli_validate.py:23` (`from voyage.supervisor
+    import sha256_file`, used at :70/:88) depends on the facade and
+    `cli_validate.py` is non-supervisor source (out of scope).
+    Internal uses (:1846/:2330/:2349/:2493/:2494/:2498) already
+    resolve through the facade. Removal belongs to the cli track
+    (migrate `cli_validate.py` to `voyage.hashing` first).
+  - Streaming-set derivation per 023/083 — LANDED this pass (see
+    above); `backends._STREAMING_BACKENDS` was already derived (no
+    backends edit — out of scope). The `backends.py:82-88`
+    "supervisor track owns unifying" note now describes two derived
+    views.
+  - Worker-map merge (3 maps → 1 table) — NOT verbatim: `VIDEO` (3
+    keys) vs `AUDIO` (2 keys) have different key sets and different
+    error contracts (video keeps the 079 longlive2 hint via
+    `removed_backend_suffix`, audio does not); merging rewrites error
+    messages and breaks `test_longlive2_removed_079`. Needs a design
+    decision (single table with per-family hints) by the 023 owner.
+  - Deterministic-payload compat (flat fields at :1154-1166 inside
+    `_decide_payload`) — in-method block, not a standalone method;
+    extracting splits a stateful method (violates verbatim + never-
+    single-stateful). Moves with a future `_decide_payload` accept
+    group.
+  - Legacy-migration threading (issue's `:1460`
+    `LEGACY_MIGRATION_REMOVE_AFTER`) — ABSENT live: `grep -rn
+    LEGACY_MIGRATION voyage/supervisor.py` is empty; remaining
+    legacy comments (016 run-relative at :1717, `sha256.json` at
+    :1843, `CONCEPTS_FILENAME` at :1986, legacy manifest at :2347)
+    are load-bearing compat, not threading. No action.
+  - `run_id` legacy (`:540` in `_log_metric`) — single line inside
+    the `_log_metric` hub (20+ callers); moving needs the hub
+    (forbidden single-stateful) or a method split. Stays.

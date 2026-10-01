@@ -41,7 +41,6 @@ from voyage.director import (
     format_measured_context,
 )
 from voyage.errors import (
-    ConfigurationError,
     DiskSpaceError,
     FatalWorkerError,
     MediaError,
@@ -95,6 +94,12 @@ from voyage.supervisor_commit_types import (
 from voyage.supervisor_commit_types import (
     RenderedVideo as RenderedVideo,
 )
+from voyage.supervisor_lock import (
+    read_lock_holder as read_lock_holder,
+)
+from voyage.supervisor_plan_info import (
+    segment_plan_info as segment_plan_info,
+)
 from voyage.supervisor_prefetch import (
     summarize_prefetch_outcome as summarize_prefetch_outcome,
 )
@@ -110,6 +115,21 @@ from voyage.supervisor_proposal import (
 from voyage.supervisor_proposal import (
     previous_transition_captions as previous_transition_captions,
 )
+from voyage.supervisor_routing import (
+    AUDIO_WORKER_MODULES as AUDIO_WORKER_MODULES,
+)
+from voyage.supervisor_routing import (
+    STREAMING_VIDEO_BACKENDS as STREAMING_VIDEO_BACKENDS,
+)
+from voyage.supervisor_routing import (
+    VIDEO_WORKER_MODULES as VIDEO_WORKER_MODULES,
+)
+from voyage.supervisor_routing import (
+    audio_worker_module as audio_worker_module,
+)
+from voyage.supervisor_routing import (
+    video_worker_module as video_worker_module,
+)
 from voyage.supervisor_tape import (
     tape_tail_sha_matches as tape_tail_sha_matches,
 )
@@ -120,26 +140,8 @@ from voyage.vision.metrics import (
     summarize_segment,
 )
 
-VIDEO_WORKER_MODULES = {
-    "fake": "voyage.workers.video",
-    "ltxv": "voyage.workers.video_ltxv",
-    "causvid": "voyage.workers.video_causvid",
-}
-"""Backend name → worker module. ltxv/causvid only exist in the CUDA image."""
-
-STREAMING_VIDEO_BACKENDS = ("ltxv", "causvid")
-"""Backends whose worker holds a resident session across blocks/segments.
-
-These get the multi-block prompts/seeds payload, the resume-hook restart
-path, and the acestep audio GPU swap (their DiT is GPU-resident, so audio
-must evict + rebuild around takes). Fake renders statelessly per segment.
-"""
-
-AUDIO_WORKER_MODULES = {
-    "fake": "voyage.workers.audio",
-    "acestep": "voyage.workers.audio_acestep",
-}
-"""Backend name → worker module. acestep only exists in the GPU image."""
+# Backend routing lives in `voyage.supervisor_routing`
+# (issue 081; re-exported at the top so existing importers keep working).
 
 #: Seconds a best-effort gauge probe may take per worker (issue 017).
 #: Gauges are observability, not correctness — at 5 s the three health
@@ -201,25 +203,8 @@ MAX_SLICES_PER_SEGMENT = 128
 # (issue 081; re-exported at the top so existing importers keep working).
 
 
-def audio_worker_module(backend: str) -> str:
-    try:
-        return AUDIO_WORKER_MODULES[backend]
-    except KeyError:
-        raise ConfigurationError(
-            f"unknown audio backend {backend!r} (known: {sorted(AUDIO_WORKER_MODULES)})"
-        ) from None
-
-
-def video_worker_module(backend: str) -> str:
-    try:
-        return VIDEO_WORKER_MODULES[backend]
-    except KeyError:
-        from voyage.config import removed_backend_suffix
-
-        raise ConfigurationError(
-            f"unknown video backend {backend!r} (known: {sorted(VIDEO_WORKER_MODULES)})"
-            f"{removed_backend_suffix(backend)}"
-        ) from None
+# Backend-routing resolvers live in `voyage.supervisor_routing`
+# (issue 081; re-exported at the top so existing importers keep working).
 
 
 # Director-proposal pure helpers live in `voyage.supervisor_proposal`
@@ -369,35 +354,8 @@ class Supervisor:
                     pass
 
     def _read_lock_holder(self, lock_path: Path) -> str:
-        """Pid recorded by the lock holder, or 'unknown' (best-effort).
-
-        Staleness-honest (issue 004): the lock dies with its holder, so a
-        recorded pid for a dead process is residue from a previous run —
-        the live holder simply has not written its pid yet
-        (write-after-acquire). Report 'unknown' rather than naming a dead
-        process; EPERM (alive but unsignalable) still names the pid.
-        """
-        try:
-            text = lock_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return "unknown"
-        if not text:
-            return "unknown"
-        try:
-            pid = int(text, 10)
-        except ValueError:
-            return "unknown"
-        if pid <= 0:
-            return "unknown"
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return "unknown"
-        except PermissionError:
-            return text
-        except OSError:
-            return "unknown"
-        return text
+        """Pid recorded by the lock holder (logic lives in supervisor_lock)."""
+        return read_lock_holder(lock_path)
 
     def _stored_relative(self, absolute_path: Path) -> str:
         """Persist `absolute_path` run-relative when possible (issue 016).
@@ -1869,55 +1827,18 @@ class Supervisor:
         prefetch_hit: bool,
         drift_hold: bool,
     ) -> dict[str, Any]:
-        """Console plan dict: decision + prompts shown before the render."""
-        from voyage.audio.acestep import MAX_BPM
-        from voyage.audio.beat import beats_for_segment
-
-        planned_frames = video_payload.get("frames", config.video.segment_frames)
-        if not isinstance(planned_frames, int) or planned_frames <= 0:
-            planned_frames = config.video.segment_frames
-        planned_duration = planned_frames / config.video.fps
-        caption = effective_music_caption(
-            config.audio.music_caption,
-            decision.audio.music_caption,
-            config.audio.music_style,
+        """Console plan dict (logic lives in supervisor_plan_info)."""
+        return segment_plan_info(
+            config,
+            number,
+            segment_id,
+            decision,
+            block_prompts,
+            video_payload,
+            num_blocks,
+            prefetch_hit,
+            drift_hold,
         )
-        energy = min(1.0, max(0.0, decision.audio.energy))
-        beats, grid_bpm = beats_for_segment(
-            planned_duration, config.audio.beats_per_segment, max_bpm=MAX_BPM
-        )
-        seeds = video_payload.get("seeds", [video_payload.get("seed", 0)])
-        cuts = video_payload.get("scene_cuts", [])
-        return {
-            "number": number,
-            "segment_id": segment_id,
-            "destination": decision.destination_concept,
-            "phase": decision.phase,
-            "novelty_accepted": decision.novelty_accepted,
-            "drift_hold": drift_hold,
-            "prefetch_hit": prefetch_hit,
-            "director_backend": config.director.backend,
-            "video_backend": config.video.backend,
-            "audio_backend": config.audio.backend,
-            "geometry": f"{config.video.width}x{config.video.height}",
-            "fps": config.video.fps,
-            "planned_frames": planned_frames,
-            "planned_duration": planned_duration,
-            "blocks": num_blocks,
-            "video_prompts": list(block_prompts),
-            "video_seeds": list(seeds) if isinstance(seeds, list) else [seeds],
-            "scene_cuts": list(cuts) if isinstance(cuts, list) else [],
-            "transition_mechanism": decision.transition.mechanism,
-            "transition_stages": list(decision.transition.intermediate_stages),
-            "audio_caption": caption,
-            "audio_energy": energy,
-            "audio_bpm": grid_bpm,
-            "audio_beats": beats,
-            "audio_texture": decision.audio.texture,
-            "audio_environment": list(decision.audio.environment),
-            "audio_sfx_caption": decision.audio.sfx_caption,
-            "notes": decision.notes,
-        }
 
     def _propose_segment(
         self,
