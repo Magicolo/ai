@@ -44,6 +44,14 @@ from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 from voyage.workers.video_common import TAIL_FILENAME as TAIL_FILENAME
 from voyage.workers.video_common import TAPE_FILENAME as TAPE_FILENAME
+from voyage.workers.video_ltxv_validators import SPATIAL_GRANULARITY as SPATIAL_GRANULARITY
+from voyage.workers.video_ltxv_validators import padded_size as padded_size
+from voyage.workers.video_ltxv_validators import (
+    validate_conditioning_start as validate_conditioning_start,
+)
+from voyage.workers.video_ltxv_validators import validate_fps as validate_fps
+from voyage.workers.video_ltxv_validators import validate_frame_count as validate_frame_count
+from voyage.workers.video_ltxv_validators import validate_spatial_size as validate_spatial_size
 
 DIT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
 UPSC_FILENAME = "ltxv-spatial-upscaler-0.9.8.safetensors"
@@ -61,7 +69,8 @@ COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 # Upstream spatial granularity: width/height divisible by 32 (one-stage);
 # two-stage multiscale wants 64. 768x512 passes both; 768x432 passes neither
 # (pads to 768x448) — hence the native 768x512 preset (§5.3 verdict).
-SPATIAL_GRANULARITY = 32
+# SPATIAL_GRANULARITY + padded_size/validate_* moved to video_ltxv_validators
+# (issue 036); facades above keep `video_ltxv.<name>` importers working.
 SPATIAL_GRANULARITY_TWO_STAGE = 64
 STATE_MODE = "reconstructable_prefix"
 
@@ -91,53 +100,9 @@ STAGE_MILLISECONDS_KEYS: tuple[str, ...] = ("encode_ms", "denoise_ms", "save_ms"
 """Keys of the `stage_ms` mapping in every `generate_blocks` result (Stage A)."""
 
 
-def padded_size(value: int, multiple: int = 32) -> int:
-    """Round `value` up to a multiple (LTXV pads latents to /32)."""
-    return ((value - 1) // multiple + 1) * multiple
-
-
-def validate_spatial_size(width: int, height: int) -> None:
-    """Reject sizes the pipeline would silently pad (DESIGN §5.3).
-
-    Upstream pads non-conforming sizes with -1 then crops; Voyage refuses
-    them instead so runs never silently bin/pad (768x432 -> 768x448).
-    """
-    for dimension_name, dimension in (("width", width), ("height", height)):
-        if dimension <= 0:
-            raise ValueError(f"LTXV {dimension_name} must be positive (got {dimension})")
-        if dimension % SPATIAL_GRANULARITY != 0:
-            padded = padded_size(dimension, SPATIAL_GRANULARITY)
-            raise ValueError(
-                f"LTXV {dimension_name} {dimension} is not divisible by "
-                f"{SPATIAL_GRANULARITY} (would pad to {padded})"
-            )
-
-
-def validate_frame_count(frame_count: int) -> None:
-    """Enforce the upstream (F-1)%8==0 temporal contract."""
-    if frame_count <= 0:
-        raise ValueError(f"LTXV frame count must be positive (got {frame_count})")
-    if (frame_count - 1) % 8 != 0:
-        raise ValueError(
-            f"LTXV frame count {frame_count} violates the 8n+1 constraint "
-            "((F-1)%8 must be 0; e.g. 25, 121, 257)"
-        )
-
-
-def validate_fps(fps: int) -> None:
-    """Reject non-positive frame rates before they reach `mimsave`/tape (issue 064)."""
-    if fps <= 0:
-        raise ValueError(f"LTXV fps must be positive (got {fps})")
-
-
-def validate_conditioning_start(start_frame: int, target_frames: int) -> None:
-    """Enforce the upstream multiple-of-8 target-frame rule for extensions."""
-    if start_frame < 0 or start_frame >= target_frames:
-        raise ValueError(
-            f"LTXV conditioning start {start_frame} out of range [0, {target_frames - 1}]"
-        )
-    if start_frame % 8 != 0:
-        raise ValueError(f"LTXV conditioning start {start_frame} must be a multiple of 8")
+# Moved to voyage.workers.video_ltxv_validators (issue 036):
+# padded_size, validate_spatial_size, validate_frame_count, validate_fps,
+# validate_conditioning_start — facades above re-export them verbatim.
 
 
 def is_oom(failure: BaseException) -> bool:

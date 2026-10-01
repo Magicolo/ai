@@ -42,7 +42,7 @@ def test_fake_video_benchmark_op_reports_math(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
-        result = supervisor._video.call(
+        result: dict[str, Any] = supervisor._video.call(
             "benchmark",
             {"warmup": 1, "measured": 2, "width": 320, "height": 180, "fps": 24, "frames": 24},
         )
@@ -64,7 +64,7 @@ def test_fake_audio_benchmark_op_reports_math(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
-        result = supervisor._audio.call(
+        result: dict[str, Any] = supervisor._audio.call(
             "benchmark",
             {"warmup": 1, "measured": 2, "duration_seconds": 1.0},
         )
@@ -83,7 +83,7 @@ def test_director_benchmark_op_times_decisions(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
-        result = supervisor._director.call("benchmark", {"warmup": 1, "measured": 2})
+        result: dict[str, Any] = supervisor._director.call("benchmark", {"warmup": 1, "measured": 2})
     finally:
         supervisor.stop_workers()
     assert result["backend"] == "deterministic"

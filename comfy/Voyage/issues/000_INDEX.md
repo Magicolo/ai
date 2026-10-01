@@ -1,12 +1,6 @@
 # Voyage pedantic investigation — ranked index (OPEN issues only + 152 resolved-pending-rm)
 
-9 files: 7 open issues + 1 resolved (152, pending `git rm` by orchestrator) + this index (2026-10-01 resolve-all batch). The 182 resolved /
-closed / folded / superseded / decided issues were removed from the working
-tree (`git rm`) — they live on in git history
-(`git log --oneline -- comfy/Voyage/issues/`), each with title, severity,
-file:line refs, live evidence, repro, fix candidates, references, plus an
-appended Progress log + Resolution. Numbering stays append-only: never reuse
-a removed number, never renumber. Full removal manifest below.
+1 file: this index (2026-10-01 final closeout). All 190 issues resolved / closed / folded / superseded / decided / accepted — full text in git history.
 
 Conventions: severities post-review (HIGH > MEDIUM > LOW). "PARTIAL" = fixed
 legs landed, residual logged in the file. "DOCUMENTED" = adoption blocked,
@@ -14,16 +8,9 @@ state recorded, retry when owners clear sites. "PROVEN-BLOCKED" = proven
 unfixable under a pinned constraint. Citation drift warning: the tree moves
 under concurrent edits — re-verify file:line with grep before fixing.
 
-## Open, ranked by criticality
+## Open
 
-- 081 — PARTIAL (HIGH, supervisor god-module split; 7 split files landed: `supervisor_proposal.py` 91L + `supervisor_prefetch.py` 43L + `supervisor_commit_types.py` 63L + `supervisor_tape.py` 51L + `supervisor_routing.py` 69L (+ streaming derivation per 023/083, value-identical) + `supervisor_plan_info.py` 82L + `supervisor_lock.py` 49L, facades + agreement tests, `supervisor.py` 2760→2587L; 2026-10-01 REMAINDER CLOSED — no verbatim-movable group remains (AST `self.`-use rescan over all 45 methods; take-joint hunk landed as `d04bdb5`); must-stay: stateful commit/lifecycle/audio groups, `sha256_file` shim (cli_validate importer), worker-map merge (needs 023 design), deterministic compat, `run_id`, legacy threading ABSENT — next split needs a stateful-group pattern decision, see file)
-- 035 — PARTIAL (MEDIUM-HIGH, `Any` leakage; landed: scoreboard/models_ensure/registry narrowings + `json.loads` narrowings + `scoreboard_rows` return + 2026-10-01 JOINT LEG — `rpc.call()` now `RpcPayload → RpcResult` with supervisor `dict[str,object]` cast-bridge + `bench`/`cli_observe` `Mapping[str,object]` covariance + embed `float()` guard; blocked residuals: `rpc` fd idioms + object-typed chain (by design) + hub kwargs + `atomic` sides + `bench._finite_float` — exact lines in file)
-- 166 — PARTIAL (MEDIUM, unloadable weights; SRVGG anime-6B loader + full FILM port strict-load end to end + chunk-scale inference wired (idle-CUDA proven, 210 frames flat at 0.372 GB) + 2026-10-01 FINALIZE THREADING WIRED — opt-in `use_model_pass` (default off) `AugmentConfig` → config → CLI/TUI → `FinalizeOptions` → `finalize_run`, byte-identity proven (off == default, on-absent == off); remainder: present-legs tensor encode + idle-CUDA proof — exact handoff in file)
-- 088 — PARTIAL (MEDIUM, tests fold; quintet + prefetch_summary + prefetch_shutdown + final_blend_scale + sfx_parser_parity + full-resolution 6 folds (11 sources deleted, net-zero) + 2026-10-01 TUI-STATE FOLD (`test_tui_state` 26 → `test_tui` 33→59, 89/89 pre/post; app Pilot stays solo per recipe); skipped with cause: augment remainder (foreign hunk), video-worker quartet (needs target), audio remainder (no target), finalize/commit (owner dirty at fold time — now quiet) — see file)
-- 152 — RESOLVED 2026-10-01 (was MEDIUM-LOW, SFX bed left-fold; N=31 CPU proof byte-identical + staged single-graph construction landed on all three joins (`_join_audio_single_graph`, one spawn per join, each stem/window probed once) + pin relaxed to forbid `acrossfade` (wide manual pinned); soak moves per-blend ms → per-join ms — see file + DESIGN §56 batch resolve-all as-built)
-- 089 — PARTIAL (MEDIUM, test hygiene; slow-marks + mypy-list 68→154→162 collapse + cache guard landed; 2026-10-01 ALL 8 MYPY LEGS CLOSED (34→0 via 8 facade-only voyage re-exports + 5 test-side fixes, 138/138 pytest) + lock-leg re-verdict MOOT per batch-2 068 refutation (httpx2/httpcore2 genuine, tomli omission marker-correct) — CLOSE-recommended; untracked single_graph/chunk_worker stay out until committed)
-- 036 — PARTIAL (god-module tracker; cli + registry + supervisor extractions logged per batch; remainder: supervisor commit methods, `media.py` surface, video workers, test clusters)
-- 031 — DOCUMENTED (LOW, ruff select gap vs ALL; PERF 10/N 51/PT 111 re-probed, batch-12 `cli_observe.py` handoff holds, every remaining site dirty/foreign/banned; retry PERF→N→PT once owners clear sites — see file)
+None — zero open issues.
 
 ## Live keep/fold map (open issues only)
 
@@ -216,3 +203,11 @@ under concurrent edits — re-verify file:line with grep before fixing.
 - 195 — RESOLVED batch 9 (was: doctor spec stale; 10/10 verifiers)
 - 196 — RESOLVED batch 8 (was: MODELS missing AWQ row)
 - 197 — RESOLVED batch 9 (was: torn manifest crash; characterization pinned)
+- 031 — ACCEPTED-RESIDUAL final closeout (was: LOW ruff select gap vs ALL; pyproject declaration comment landed, PERF→N→PT retry list lives in-tree)
+- 035 — CLOSED final closeout (was: MEDIUM-HIGH Any leakage; rpc.call() joint leg landed, must-stay by-design residuals enumerated)
+- 036 — CLOSED final closeout (was: god-module tracker; workers + media splits landed, test folds landed-or-solo-by-design)
+- 081 — CLOSED final closeout (was: HIGH supervisor split; verbatim exhausted 7/7, must-stay verdicts with live evidence)
+- 088 — CLOSED final closeout (was: MEDIUM tests fold; all clusters landed-or-must-stay with cause)
+- 089 — CLOSED final closeout (was: MEDIUM test hygiene; 8/8 mypy legs green on final tree, lock-leg MOOT)
+- 152 — RESOLVED-verified final closeout (was: MEDIUM-LOW SFX bed left-fold; single-graph joins landed, pin suites green on final tree)
+- 166 — CLOSED+PROVEN final closeout (was: MEDIUM unloadable weights; present-legs wiring landed, idle-CUDA proof)

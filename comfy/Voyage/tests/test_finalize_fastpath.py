@@ -96,6 +96,7 @@ def test_cached_slice_take_runs_ffmpeg_once_for_identical_windows(
     take = _sine_take(tmp_path / "take.wav", seconds=10.0)
     spawns: list[tuple[float, float]] = []
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
     real_slice_take = media_module.slice_take
 
@@ -112,7 +113,7 @@ def test_cached_slice_take_runs_ffmpeg_once_for_identical_windows(
             take_path, start_seconds, duration_seconds, dest, sample_rate, channels
         )
 
-    monkeypatch.setattr(media_module, "slice_take", _counting)
+    monkeypatch.setattr(media_audio_module, "slice_take", _counting)
     cache: dict[tuple[str, str, str], Path] = {}
     first = _cached_slice_take(cache, take, 4.0, 2.0, tmp_path / "w0.wav", 48000, 2)
     second = _cached_slice_take(cache, take, 4.0, 2.0, tmp_path / "w1.wav", 48000, 2)
@@ -286,6 +287,7 @@ def test_final_blend_never_spawns_wide_acrossfade_graph(
     underneath (recording wrapper delegates).
     """
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
     run_dir = tmp_path / "run"
     usable = _synthetic_run(run_dir, segments=8)
@@ -296,7 +298,7 @@ def test_final_blend_never_spawns_wide_acrossfade_graph(
         calls.append(list(argv))
         return real_run_capture(argv)
 
-    monkeypatch.setattr(media_module, "run_capture", _recording)
+    monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(build_final_audio, run_dir, usable, tmp_path, FPS, 48000, 2)
         try:

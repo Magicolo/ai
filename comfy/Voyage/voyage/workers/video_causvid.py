@@ -74,6 +74,10 @@ from voyage.model_registry import (
 )
 from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
+from voyage.workers.video_causvid_frames import dropped_tail_frames as dropped_tail_frames
+from voyage.workers.video_causvid_frames import novel_frames_per_rollout as novel_frames_per_rollout
+from voyage.workers.video_causvid_frames import reencode_window_frames as reencode_window_frames
+from voyage.workers.video_causvid_frames import split_tail_novel as split_tail_novel
 from voyage.workers.video_common import TAIL_FILENAME as TAIL_FILENAME
 from voyage.workers.video_common import TAPE_FILENAME as TAPE_FILENAME
 
@@ -146,11 +150,6 @@ def validate_overlap_frames(overlap_frames: int, num_frame_per_block: int) -> No
         )
 
 
-def dropped_tail_frames(overlap_frames: int) -> int:
-    """Frames dropped per rollout: ``4 * (overlap - 1) + 1`` (9 at overlap 3)."""
-    return 4 * (overlap_frames - 1) + 1
-
-
 def decoded_frames_for_latents(latent_frames: int) -> int:
     """Pixel frames decoded from ``latent_frames`` at 4x temporal compression."""
     if latent_frames <= 0:
@@ -158,32 +157,9 @@ def decoded_frames_for_latents(latent_frames: int) -> int:
     return (latent_frames - 1) * TEMPORAL_COMPRESSION + 1
 
 
-def novel_frames_per_rollout(decoded_frames: int, overlap_frames: int) -> int:
-    """Committed frames per rollout: decoded minus the dropped tail."""
-    dropped = dropped_tail_frames(overlap_frames)
-    novel = decoded_frames - dropped
-    if novel <= 0:
-        raise ValueError(
-            f"CausVid rollout decodes {decoded_frames} frames but drops {dropped} "
-            f"(overlap {overlap_frames}) — nothing would be committed"
-        )
-    return novel
-
-
-def split_tail_novel(decoded_frames: int, overlap_frames: int) -> tuple[int, int]:
-    """Return (dropped_tail, novel_committed) for one rollout's decoded video."""
-    dropped = dropped_tail_frames(overlap_frames)
-    return (dropped, novel_frames_per_rollout(decoded_frames, overlap_frames))
-
-
-def reencode_window_frames(overlap_frames: int) -> int:
-    """Committed tail frames needed to VAE-re-encode ``overlap`` latent frames.
-
-    Numerically identical to :func:`dropped_tail_frames` by construction:
-    ``(window - 1) / 4 + 1 == overlap`` always, so re-encoding the window
-    yields exactly ``overlap`` latent frames for a resume rebuild.
-    """
-    return dropped_tail_frames(overlap_frames)
+# Moved to voyage.workers.video_causvid_frames (issue 036):
+# dropped_tail_frames + novel_frames_per_rollout + split_tail_novel +
+# reencode_window_frames — facades above re-export them verbatim.
 
 
 def validate_latent_shape(latent_shape: list[int]) -> list[int]:

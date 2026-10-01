@@ -67,6 +67,11 @@ exclude = ["issues/"]
 # no-mass-fix constraint stands: files outside the 034 scope carry
 # per-file exemptions below, each a follow-up in issues/034 — delete the
 # entry (not the rule) as the owning pass converts the file.
+# Issue 031 (ACCEPTED-RESIDUAL 2026-10-01): green `ruff check .` covers
+# these 16 families only — ANN,D,PLR2004-full,PT,S,PERF,N stay dark
+# (PERF 11 / N 51 / PT 112 as-read 2026-10-01). Retry order PERF->N->PT
+# once the owning tracks clear the blocking sites (supervisor + worker/
+# test owners); adopting a family needs EVERY site in clean owned files.
 select = ["E", "F", "I", "UP", "B", "A", "C4", "DTZ", "W", "BLE", "TRY", "EM", "SIM", "RUF100", "S101", "T201"]
 ignore = [
   # Zoomy parity: user-facing error messages embed values inline and read
@@ -108,6 +113,8 @@ ignore = [
 "voyage/workers/director.py" = ["BLE", "TRY004", "TRY300", "RUF100", "T201"]
 "voyage/workers/video_causvid.py" = ["BLE", "TRY004", "S101", "T201"]
 "voyage/workers/video_ltxv.py" = ["TRY004", "TRY301", "S101", "T201", "RUF100"]
+"voyage/workers/video_ltx25.py" = ["TRY004", "S101", "T201"]
+"voyage/workers/video_ltx23.py" = ["TRY004", "S101", "T201"]
 "voyage/workers/augment_worker.py" = ["T201"]
 "voyage/workers/audio_acestep.py" = ["TRY004"]
 "tests/test_observability.py" = ["RUF100"]
@@ -168,6 +175,13 @@ module = [
   "open_clip.*",
   "soundfile",
   "soundfile.*",
+  "PIL",
+  "PIL.*",
+  "comfy",
+  "comfy.*",
+  "folder_paths",
+  "nodes",
+  "execution",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"

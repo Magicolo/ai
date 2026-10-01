@@ -634,3 +634,276 @@ def run_model_augment_chunks(
         multiplier=interp_factor,
     )
     return run_augment_chunks(chunks, worker)
+
+
+def model_pass_active(use_model_pass: bool, weights: AugmentWeights) -> bool:
+    """Whether knob-on + provisioned legs selects the tensor chunk encode (issue 166).
+
+    DESIGN §§56-57: pure torch-free selection — True only when the opt-in
+    knob is on AND at least one leg resolved (half-provisioned still runs
+    the available leg via `enhance_frames`; both absent keeps the ffmpeg
+    fallback byte-identical). `finalize_run` consults this after
+    `resolve_augment_weights`; False never touches torch.
+    """
+    if not isinstance(use_model_pass, bool):
+        raise TypeError(f"use_model_pass must be a bool (got {type(use_model_pass).__name__})")
+    if not isinstance(weights, AugmentWeights):
+        raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
+    return bool(use_model_pass and (weights.film is not None or weights.realesrgan is not None))
+
+
+def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
+    """Read decoded PNG frames into torch float tensors in [0, 1] (issue 166).
+
+    DESIGN §§56-57: the finalize model pass decodes segment videos to PNGs
+    via ffmpeg (stdlib side), then enhances tensors via `enhance_frames`
+    (torch side) — this is the bridge. Lazy PIL/numpy/torch imports so the
+    module stays stdlib-only until the tensor path is selected (the ffmpeg
+    fallback never imports them). All frames must share dimensions; mismatch
+    fails loud instead of mixing silently into a chunk.
+    """
+    if not isinstance(frame_paths, list) or not frame_paths:
+        raise ValueError(f"frame_paths needs at least one PNG path (got {frame_paths!r})")
+    try:
+        import importlib
+
+        Image = importlib.import_module("PIL.Image")
+    except ImportError as exc:
+        raise MediaError(f"model pass needs Pillow for PNG frames ({exc})") from exc
+    try:
+        import torch
+    except ImportError as exc:
+        raise MediaError(f"model pass needs torch for tensors ({exc})") from exc
+    tensors: list[Any] = []
+    expected_size: tuple[int, int] | None = None
+    for frame_path in frame_paths:
+        if not isinstance(frame_path, Path):
+            raise TypeError(f"frame path must be a Path (got {type(frame_path).__name__})")
+        with Image.open(frame_path) as opened:
+            converted = opened.convert("RGB")
+            if expected_size is None:
+                expected_size = converted.size
+            elif converted.size != expected_size:
+                raise MediaError(
+                    f"frame size mismatch: {frame_path} is {converted.size}, "
+                    f"expected {expected_size} (chunks need uniform geometry)"
+                )
+            width, height = converted.size
+            raw = converted.tobytes()
+        import numpy
+
+        flat = numpy.frombuffer(raw, dtype=numpy.uint8)
+        try:
+            shaped = flat.reshape((height, width, 3)).copy()
+        except ValueError as exc:
+            raise MediaError(f"cannot reshape PNG {frame_path} to RGB ({exc})") from exc
+        tensor = torch.from_numpy(shaped).permute(2, 0, 1).to(dtype=torch.float32).div(255.0)
+        tensors.append(tensor)
+    return tensors
+
+
+def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]:
+    """Write enhanced float tensors in [0, 1] back to PNG frames (issue 166).
+
+    DESIGN §§56-57: the return bridge — `enhance_frames` yields CPU float32
+    `(3, H, W)` tensors, the chunk encoder needs PNGs. Lazy PIL/numpy/torch
+    (same stdlib-only rule as the load bridge); clamps to [0, 1] like the
+    worker's native scale-4 path so bicubic-downscaled legs cannot ring past
+    the range. Returns the written paths in order (`frame_%06d.png`).
+    """
+    if not isinstance(frames, list) or not frames:
+        raise ValueError(f"frames needs at least one tensor (got {frames!r})")
+    if not isinstance(dest_dir, Path):
+        raise TypeError(f"dest_dir must be a Path (got {type(dest_dir).__name__})")
+    try:
+        import importlib
+
+        Image = importlib.import_module("PIL.Image")
+    except ImportError as exc:
+        raise MediaError(f"model pass needs Pillow for PNG frames ({exc})") from exc
+    try:
+        import torch
+    except ImportError as exc:
+        raise MediaError(f"model pass needs torch for tensors ({exc})") from exc
+    import numpy
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for position, frame in enumerate(frames):
+        tensor = torch.as_tensor(frame, dtype=torch.float32).clamp(0.0, 1.0)
+        if tensor.ndim != 3 or tensor.shape[0] != 3:
+            raise MediaError(
+                f"enhanced frame {position} must be (3, H, W) (got shape {tuple(tensor.shape)})"
+            )
+        array = tensor.permute(1, 2, 0).mul(255.0).round().byte().cpu().numpy()
+        if not isinstance(array, numpy.ndarray):
+            raise MediaError(f"enhanced frame {position} did not render to an array")
+        height, width, _ = array.shape
+        image = Image.frombytes("RGB", (width, height), array.tobytes())
+        dest = dest_dir / f"frame_{position:06d}.png"
+        image.save(dest)
+        if not dest.exists() or dest.stat().st_size == 0:
+            raise MediaError(f"enhanced PNG write produced empty output {dest}")
+        written.append(dest)
+    return written
+
+
+def _write_chunk_concat_list(entries: list[Path], dest: Path) -> Path:
+    """Write a concat-demuxer list for chunk mp4s (issue 166).
+
+    Mirrors `media.write_concat_list` entry-for-entry (single-quote escaping)
+    without importing `media` — `media` already imports this module for the
+    CRF ladder, so reusing it here would cycle the import (same reason the
+    preset vocabulary is mirrored in `CHUNK_PRESETS`).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lines = "".join(
+        f"file '{str(entry).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
+        for entry in entries
+    )
+    dest.write_text(lines, encoding="utf-8")
+    return dest
+
+
+def run_finalize_model_pass(
+    segment_videos: list[Path],
+    weights: AugmentWeights,
+    *,
+    source_fps: float,
+    upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
+    multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    crf: int = CHUNK_CRF_DEFAULT,
+    preset: str = CHUNK_PRESET_DEFAULT,
+    work_dir: Path,
+    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+    devices: tuple[str, ...] | None = None,
+) -> tuple[Path, int]:
+    """Decode segments, enhance tensors chunked, encode chunks, concat (issue 166).
+
+    DESIGN §§56-57: the present-legs tensor path `finalize_run` selects via
+    `model_pass_active` — decode (ffmpeg, per segment in order) to PNGs,
+    tensors via the load bridge, `run_model_augment_chunks` (upscale via
+    SRVGG + FILM mids on each chunk's device, OOM-halving preserved,
+    VRAM-flat via `chunk_frames` windows), PNGs via the write bridge,
+    `ffmpeg_encode_chunk` per chunk at `round(source_fps * multiplier)`,
+    concat-demuxer stream copy to one intermediate. Returns the intermediate
+    video + its fps; the caller applies the presentation vf
+    (scale/pad/fps, no minterpolate — FILM already interpolated) so the
+    shipped box still matches `plan_augmentation` exactly. Absent-legs and
+    knob-off callers never reach here (they keep the single vf encode).
+    """
+    if not isinstance(segment_videos, list) or not segment_videos:
+        raise ValueError(f"segment_videos needs at least one video (got {segment_videos!r})")
+    for segment_video in segment_videos:
+        if not isinstance(segment_video, Path):
+            raise TypeError(f"segment video must be a Path (got {type(segment_video).__name__})")
+        if not segment_video.is_file():
+            raise MediaError(f"segment video missing: {segment_video}")
+    if not isinstance(weights, AugmentWeights):
+        raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
+    if weights.film is None and weights.realesrgan is None:
+        raise MediaError("model pass needs at least one provisioned leg (got none)")
+    rate = _require_fps("source_fps", source_fps)
+    if rate is None or rate <= 0.0:
+        raise ValueError(f"source_fps must be a positive fps (got {source_fps!r})")
+    target_scale = _require_upscale_factor(upscale_factor)
+    interp_factor = _require_interp_multiplier(multiplier)
+    quality = _require_count("crf", crf, CRF_MINIMUM)
+    if quality > CRF_MAXIMUM:
+        raise ValueError(f"crf must be <= {CRF_MAXIMUM} (got {quality})")
+    speed = validate_chunk_preset(preset)
+    if not isinstance(work_dir, Path):
+        raise TypeError(f"work_dir must be a Path (got {type(work_dir).__name__})")
+    window = _require_count("chunk_frames", chunk_frames, 1)
+    resolved_devices = augment_devices() if devices is None else devices
+    if not resolved_devices:
+        raise MediaError("model pass needs at least one device (got none)")
+    intermediate_fps = int(round(rate * interp_factor))
+    if intermediate_fps < 1:
+        raise ValueError(f"intermediate fps must be >= 1 (got {rate} * {interp_factor})")
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    decoded_paths: list[Path] = []
+    for position, segment_video in enumerate(segment_videos):
+        decode_dir = work_dir / f"decode_{position:02d}"
+        decode_dir.mkdir(parents=True, exist_ok=True)
+        proc = run_capture(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(segment_video),
+                "-vsync",
+                "0",
+                str(decode_dir / "frame_%06d.png"),
+            ]
+        )
+        if proc.returncode != 0:
+            raise MediaError(f"model-pass decode failed for {segment_video}: {proc.stderr[-2000:]}")
+        chunk_frames_found = sorted(decode_dir.glob("frame_*.png"))
+        if not chunk_frames_found:
+            raise MediaError(f"model-pass decode produced no frames for {segment_video}")
+        decoded_paths.extend(chunk_frames_found)
+
+    source_tensors = load_png_frames_as_tensors(decoded_paths)
+    plan = augment_plan(
+        len(source_tensors), chunk=window, multiplier=interp_factor, devices=resolved_devices
+    )
+    if not plan:
+        raise MediaError("model pass planned zero chunks (no source frames)")
+    source_by_chunk = {
+        chunk.index: source_tensors[chunk.start_frame : chunk.start_frame + chunk.source_frames]
+        for chunk in plan
+    }
+    enhanced_by_chunk = run_model_augment_chunks(
+        plan,
+        weights,
+        source_by_chunk,
+        use_model_pass=True,
+        upscale_factor=target_scale,
+        multiplier=interp_factor,
+    )
+    chunk_videos: list[Path] = []
+    for chunk, enhanced in zip(plan, enhanced_by_chunk, strict=True):
+        enhanced_dir = work_dir / f"enhanced_{chunk.index:02d}"
+        written = write_tensors_as_png_frames(list(enhanced), enhanced_dir)
+        if len(written) != chunk.expected_frames:
+            raise MediaError(
+                f"model pass chunk {chunk.index} produced {len(written)} frames "
+                f"(expected {chunk.expected_frames})"
+            )
+        chunk_video = work_dir / f"chunk_{chunk.index:02d}.mp4"
+        ffmpeg_encode_chunk(
+            enhanced_dir / "frame_%06d.png",
+            chunk_video,
+            intermediate_fps,
+            crf=quality,
+            preset=speed,
+        )
+        chunk_videos.append(chunk_video)
+    concat_list = _write_chunk_concat_list(chunk_videos, work_dir / "chunks.txt")
+    intermediate = work_dir / "model_intermediate.mp4"
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c",
+            "copy",
+            str(intermediate),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"model-pass chunk concat failed: {proc.stderr[-2000:]}")
+    if not intermediate.exists() or intermediate.stat().st_size == 0:
+        raise MediaError(f"model-pass concat produced empty output {intermediate}")
+    return (intermediate, intermediate_fps)

@@ -259,7 +259,11 @@ The video renderer is a replaceable subsystem. The production application must n
 |---|---|---|---|---|---|
 | `longlive2` | Wan2.2-TI2V-5B / LongLive 2.0 | causal AR block append | persistent GPU KV cache, reconstructable from recovery data | 24 fps | true infinite/streaming architecture; baseline correctness target |
 | `ltxv` | LTX-Video 0.9.8 2B distilled | video-prefix conditioning / extension | no required persistent diffusion KV cache; restart by replaying the prefix clip | validate 24 or native-supported FPS | low-VRAM, fast iteration, simple crash recovery |
+> As-built (ltx-integration-2026-10-01): two LTX backends join the table — `ltx25` (LTX-2.5 22B distilled Q3_K_M GGUF, 1216×704@24, 96f, `reconstructable_prefix`) and `ltx23` (LTX-2.3 22B distilled Q3_K_M GGUF, same geometry/accounting). Backend count 3→5; `ltxv` stays the default. Both run ComfyUI in-process inside the `voyage-ltx` worker image (pinned ComfyUI @2f35f4a + ComfyUI-GGUF @6ea2651 + gemma4 patch) — the §4 "no ComfyUI runtime dependency" non-goal is held by containment (never a host dependency, never on the `voyage` image path). Quantization/TE/VAE are implicit per backend (Q3-only; OOM is a clean failure, no fallback ladder). Both generate joint audio, so their rows pair `audio_backend=fake` + `sfx_backend=fake` and the supervisor skips the ACE-Step/MMAudio stacks via `JOINT_AUDIO_BACKENDS` (manual `voyage sfx` stays available).
+
 | `causvid` | Wan2.1-T2V-1.3B + CausVid causal DMD | autoregressive chunk rollout with `start_latents` overlap | no required long-lived GPU cache between rollouts; continuation reconstructed from latent prefix | upstream scripts use 16 fps | fast causal continuation and straightforward long-video rollouts |
+| `ltx25` | LTX-2.5 22B distilled (Abiray Q3_K_M GGUF, Gemma4-Q2_K TE, conv VAE) | 25-frame frozen-prefix conditioning (`LTXVImgToVideoInplace`, strength 1.0) | no persistent diffusion state; continuation reconstructed from the 25-frame tail + `recovery.pt` | 1216×704@24 quality path (Mode A two-stage) | high-quality joint audio-visual segments on 16 GB |
+| `ltx23` | LTX-2.3 22B distilled (unsloth Q3_K_M GGUF, Gemma3-Q2_K DualCLIP TE, distilled VAEs) | same frozen-prefix mechanism, profile `ltx23` | same reconstructable-prefix discipline | same Mode-A geometry | fallback family; only one with a viable 2-GPU TE split |
 
 The default backend must **not** be hard-coded by architecture. `voyage benchmark video` should produce a machine-specific benchmark report and `voyage init` should record the selected backend explicitly in the run manifest.
 
@@ -1104,6 +1108,7 @@ Use filesystem checkpointing and explicit RPC instead.
 ---
 
 # 12. Python environments
+> As-built (final-2026-10-01, issue 031): ACCEPTED-RESIDUAL — select stays 16 families, gap declared in `Voyage/pyproject.toml` comment with PERF->N->PT retry list (078/087 precedent).
 
 Prefer three environments.
 
@@ -3059,6 +3064,8 @@ Capture stderr and include the relevant last lines in `MediaError`.
 ---
 
 # 56. Finalization
+> As-built (final-2026-10-01, issue 036): CLOSED media slice — `voyage/media_audio.py` owns the 935-line audio-join block verbatim (test patch-sites re-homed), `voyage/media.py` keeps facades.
+> As-built (final-2026-10-01, issue 166): CLOSED+PROVEN — present-legs tensor encode selected on knob-on via `resolve_augment_weights` → `augment.py` chunk worker (cuda:1 fp16 numerics + eyeball + flat VRAM proof).
 > As-built (batch-2026-10-01, issue 152): parity mechanism found — `afade` runs in its input's native sample format, so s16-fed fades truncate to the s16 grid while s32-fed (fold blends 2+) keep precision (≤1 s16 LSB, second-and-later overlaps only); chained pairwise stages with an `aformat=s32` barrier per stage == production fold byte-for-byte (N=4 and N=8, max=0). Recorded NOT landed — needs the pin owner's 31-input-scale no-hang proof + ≤2-input pin relaxation first; the pairwise probe-memo fold stands.
 
 > As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_*` aliases the augment CRF ladder; `resolve_finalize_settings()` is the single scalar/options= contract (768/432/24 defaults retained for the zero-floor stream-copy fast path); `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`).
@@ -3756,6 +3763,7 @@ One component owns each piece of mutable state.
 ---
 
 # 73. Ownership model
+> As-built (final-2026-10-01, issue 081): CLOSED — verbatim pattern exhausted 7/7 (proposal/prefetch/commit_types/tape/routing+streaming-derivation/plan_info/lock; `voyage/supervisor.py` 2760->2587L); remainder must-stay (stateful groups need future pattern decision, shim/map/compat/run_id contract-bound, legacy absent).
 > As-built (batch-2026-10-01, issue 081): `supervisor.py` 2666→2587L via 3 verbatim extractions + 1 derivation (non-quiet tree, foreign hunks preserved) — new `voyage/supervisor_routing.py` (69L: `VIDEO`/`AUDIO_WORKER_MODULES`, `audio/video_worker_module`, `STREAMING_VIDEO_BACKENDS` now derived from `BACKEND_REGISTRY` per 023/083, value-identical `('ltxv', 'causvid')`), `voyage/supervisor_plan_info.py` (82L: stateless `segment_plan_info`, §§73/18.2), `voyage/supervisor_lock.py` (49L: stateless `read_lock_holder`, §73) — each with facade re-export + delegation + agreement tests (6/5/7); split index now reads proposal/prefetch/commit-types/tape/routing/plan-info/lock. Remainder is stateful-only (commit pipeline, lifecycle hub, audio-coverage) and needs a future stateful-group pattern; `sha256_file` shim stays (`cli_validate.py` importer); worker-map merge needs a 023-owner design decision.
 
 ```text
@@ -4267,6 +4275,7 @@ Use modern Python.
 ---
 
 # 82. Type design rules
+> As-built (final-2026-10-01, issue 035): CLOSED — `call()` is `RpcPayload->RpcResult` with supervisor cast-bridge at `_call_with_restart` + `bench.py`/`cli_observe.py` `Mapping` covariance; remaining `Any` sites must-stay by design (fd juggling, hub-kwarg invariance, `json.loads` idiom).
 
 > As-built (batch-8-2026-09-30, issue 118): worker/RPC boundaries validate wire types exactly (`checked_request` discipline — presence plus exact type, bools never satisfy int) and raise `TypeError` before any coercion; `None`, numeric strings, truncated floats, and `"false"` strings never execute with invented values.
 > As-built (batch-8-2026-09-30, issue 119): contract models validate value domains at parse time, not just ordering — metric bands and style/audio/transition scalars are unit-bounded where the inspector compares 0..1 metrics against them, so one bad director decision fails loudly at validation instead of silently biasing every segment.
@@ -4328,6 +4337,7 @@ GPU-specific packages remain in workers.
 ---
 
 # 84. Model version pinning
+> As-built (final-2026-10-01, issue 036): CLOSED workers slice — `voyage/video_ltxv_validators.py` + `voyage/video_causvid_frames.py` extracted verbatim+facade+TDD; registry split set complete (082).
 
 > As-built (batch-7-2026-09-30, issues 084/085): per-family split target — `voyage/registry_records.py` owns pins + `_record_*`/`_describe_*` builders (767L); `model_registry.py` keeps dataclasses + `MODEL_SPECS` assembly + download/verify/manifest core (1270L); future per-family `registry_{ltxv,causvid,qwen,audio,sfx,augment}.py` target recorded.
 > As-built (batch-14-2026-10-01, issue 082): `registry_ltxv.py` (84L) + `registry_audio.py` (105L) extracted move-verbatim + facade + agreement tests; remaining families: director triple (shared MINILM), causvid+WAN21, SFX triple.
@@ -8006,8 +8016,8 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   test in `test_stage_a_telemetry.py` (17/17 with the file). Gates: 43
   scoped green; full suite 1632 passed with 16 TUI/worker_perf
   load-flakes on a loaded box (none in scope; clean on re-run).
-  Boba resume (9 segs + finalize) is GPU work, parked until the user
-  approves per the GPU-prompt rule.
+   Boba resume (9 segs + finalize) is GPU work, parked until the user
+   approves per the GPU-prompt rule.
 - Commit-time take-joint compensation done 2026-10-01 (boba seg21 root
   cause): the commit slice walk joined abutting slices with a bare
   crossfade, absorbing `fade` seconds per joint (out = sum - fade) — the
@@ -8204,3 +8214,23 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - 166 FINALIZE THREADING WIRED (see §§56-57 as-built): opt-in `use_model_pass` (default off) runs `AugmentConfig` → config (`resolve_config` / `apply_draft_overrides` via `is_provided`, `--no-augment` forces False; `[augment] use_model_pass = false` TOML) → CLI (`--use-model-pass` `store_true` default None via shared `_add_augment_args`, all finalizing verbs incl. `stop --finalize` handoff; `cmd_finalize` passes `config.augment.use_model_pass` + `config.video.models_dir`; `cmd_generate` fan-out) → TUI (`use_model_pass` checkbox `flag-use-model-pass` + FIELD_HELP + tooltip + FLAG_HELP_FIELDS + `_read_form` + last-settings persistence) → `FinalizeOptions.use_model_pass` (appended last — positional compatibility kept; strict-bool `__post_init__`) → `ResolvedFinalizeSettings` (`resolve_finalize_settings` scalar-wins) → `finalize_run(use_model_pass=None, models_dir=None)` (consults `resolve_augment_weights(models_dir)` only when on; absent legs / no dir = ffmpeg fallback, never an error). Identity proof (real ffmpeg, fake-backend 1-segment commits, sha256): explicit-False == default AND knob-on with empty models dir == knob-off (plus seam test: off never consults the seam, on resolves exactly once; strict-bool rejections at every layer; pre-change determinism probed first so equality assertions are meaningful). TDD: `tests/test_issue_166_finalize_knob.py` (11 tests) red→green; companion pin updates (`test_augment_config` exact-dump + `--no-augment` pin, `test_cli_tui_split` 25→26 children, `test_tui` seven→eight flag ids + toggle coverage). Chunk-scale model pass behind it (`augment.py`: `enhance_frames` + `make_enhance_chunk_worker` + `run_model_augment_chunks`, idle-CUDA proven — 210 frames flat at 0.372 GB peak, fp16 numerics within 0.00327 mean-abs, eyeball true-blend). Residual (GPU-box + tensor encode): when legs ARE provisioned the knob still encodes via the ffmpeg vf path (resolve consulted, tensor chunk encode not selected); wiring the present-legs selection plus the idle-CUDA proof (LTXV 768x512 segments → 1280x720@32, fp16 numeric + eyeball + VRAM-flat) is the remaining slice.
 - 088 TUI fold + 089 mypy 8/8 (tail-only; DESIGN proposals: none): `tests/test_tui_state.py` (26 tests) → `tests/test_tui.py` (33→59 defs, verbatim + banner + autouse-fixture NOTE; pre-delete 89/89, post-delete 89/89; gates.sh entry removed in the same edit) — TUI remainder `test_tui_app` 33 Pilot stays solo per the issue's own demotion recipe. 089 closed all 8 mypy legs (34→0: `test_video_common` 6 + `test_causvid_worker` 14 + `test_commit_hardening` 5 + `test_finalize_encode_rank2` 1 + `test_ledger_rotation_rank2` 4 + `test_novelty_leniency` 1 + `test_stage_a_telemetry` 2 + `test_perf_regressions` 1) via 8 facade-only voyage re-exports (`logrotate`/`concepts` `fsync_dir`, `prompts.StyleSpec`, `vision.metrics.probe`, `workers.audio_acestep` `subprocess`, `workers.video_ltxv`/`video_causvid` TAIL/TAPE_FILENAME + CAUSVID_COMMIT/CHECKPOINT_FILE, `supervisor.validate_video`) + 5 test-side fixes; gates.sh mypy list 68→154→162 modules; lock legs MOOT per batch-2 068 refutation (httpx2/httpcore2 genuine distributions, tomli omission marker-correct). 088 residuals: augment quad (foreign hunk in `test_augment_models.py` — retry post-land), video-worker quartet (needs explicit fold target), audio remainder (no same-area target), finalize/commit (owner `test_finalize_fastpath.py` foreign-dirty at fold time — now quiet).
 - Batch tail: 031 DEFERRED (PERF 10 / N 51 / PT 111 — batch-12 `cli_observe.py` handoff holds, no owned-clean site exists); 036 TRACKED (no 036-seam extraction this batch — quota filled by 081/082/088 work; signal table otherwise unchanged).
+
+## Final closeout (2026-10-01)
+
+- 031 ACCEPTED-RESIDUAL (see §12 as-built): select stays 16 families, gap declared in `Voyage/pyproject.toml` comment with PERF->N->PT retry list (078/087 precedent).
+- 035 CLOSED (see §82 as-built): `voyage/rpc.py call()` is `RpcPayload->RpcResult` with supervisor cast-bridge at `_call_with_restart` + `bench.py`/`cli_observe.py` `Mapping` covariance.
+- 036 CLOSED (see §84 + §56 as-builts): workers `voyage/video_ltxv_validators.py` + `voyage/video_causvid_frames.py` verbatim+facade+TDD, registry split complete (082); media `voyage/media_audio.py` owns the 935-line join verbatim, `voyage/media.py` keeps facades.
+- 081 CLOSED (see §73 as-built): verbatim 7/7 exhausted, `voyage/supervisor.py` 2760->2587L; remainder must-stay by contract.
+- 088 CLOSED (see Batch resolve-all as-built): folds landed, assertion net-zero; augment-quad/video-quartet remainders carry verbatim-block cause.
+- 089 CLOSED (legs green on final tree): all 8 mypy legs 34->0 via facade-only `voyage` re-exports + test-side fixes; `gates.sh` mypy list 68->154->162.
+- 152 RESOLVED-VERIFIED (see §56 as-built): N=31 CPU ffmpeg proof byte-identical via `voyage/media.py` `_join_audio_single_graph` + `tests/test_issue_152_single_graph.py` (3 tests).
+- 166 CLOSED+PROVEN (see §56 as-built): present-legs tensor encode selected on knob-on via `resolve_augment_weights` → `augment.py` chunk worker (cuda:1 fp16 numerics + eyeball + flat VRAM proof).
+
+## LTX backend integration (2026-10-01)
+
+- User request (verbatim): "integrate both C1 and C2 to the voyage project as backend 'ltx25' and 'ltx23'; parameterization for quantization and the text encoder and VAE must be implicit; also make the quality path the default; implement the most native mechanism for video continuation for each; take advantage of their audio generation capacity which may mean that for those backends, the other audio generative models can be omitted; ltx25 and ltx23 should produce long lasting fully audio-visual high quality videos; do integrate with the upscaling/interpolation post processing if needed". Follow-up directives (verbatim): "if the upscaling and interpolation processes generate a video with higher specs than 1280x720@32, preserve the higher specs; 1280x720@32 is a minimum quality requirement, not a ceiling" (floors-as-minimum — RECORDED requirement, finalize `plan_augmentation` change still open) and "let's not duplicate the models so move the models from '../../video/ltx-experiments and clean up the unused models".
+- Locked decisions: ComfyUI in-process execution; default Mode A 1216×704@24, 96 novel frames (121f windows, 25-frame carry); Q3-only per family (no fallback rung — OOM is a clean failure); full audio omission with manual `voyage sfx` kept; models consolidated into `~/.cache/voyage-models/ltx25/` + `ltx23/` (~98 GB unused rungs deleted, experiment tree kept working via symlink-back).
+- Landed: registry pins (`registry_ltx25.py`/`registry_ltx23.py` + `MODEL_SPECS` + download/verify + `models_ensure` `JOINT_AUDIO_BACKENDS` skipping acestep/mmaudio); `voyage-ltx:latest` worker image (CUDA 13 + py3.11 + torch 2.14/cu130 + ComfyUI @2f35f4a + ComfyUI-GGUF @6ea2651 + gemma4 patch, smoke gate passes); workers `video_ltx25.py`/`video_ltx23.py` + validators + 28 tests (standard `standard_serve_map` contract, §5.3 tapes, ffmpeg-direct `_save_mp4` since imageio is absent by design, executor `cache_args` lru+ram+ram_inactive per pinned `main.py`); supervisor joint-audio bypass (`RenderedVideo.joint_audio_path`, `_cover_audio` joint branch writing segment `audio.wav` with empty takes, swap untouched since ltx rows pair `fake`); config rows (`ltx25-704p`/`ltx23-704p`, latent `(1,128,16,19,11)`) + `_LTX_NOVEL_BLOCK_FRAMES=96` + routing modules + CLI `--backend` + TUI `BACKENDS` (image-aware gpu_warning: `voyage-ltx` vs `voyage-video`) + `qualify.sh` + docs (`BACKENDS.md` table+sections, `ARCHITECTURE.md`, `UPSTREAM_LTX25/LTX23_NOTES.md`, `MODELS.md`, this §5.1 table).
+- Proofs (all on RTX 4060 Ti 16 GB, evidence in `Voyage/LTX2.md` + `ltx2-experiments/results/`): Spike A Mode-A-121f PASS (peak 14933 MiB, locks 96-novel); Spike B 3-segment handover PASS (seam 0.93x/1.02x vs 3x gate, Mechanism 1 frozen-prefix sufficient); live ltx25 worker test FULL PASS (INIT 3.8s, fresh 121f + continued 96f @1216×704 h264 + joint 48kHz stereo audio.wav, seam 10.2/255, clean evict, peak ~14.8 GiB).
+- Open: ltx23 live worker test; ltx23-specific Mode-A-121f VRAM probe (row marked provisional); floors-as-minimum finalize change; full `gates.sh` (blocked by another agent's in-flight `test_adapter_contract.py` F401s — foreign, untouched per §9); Phase 5 GPU qual legs for both backends.
+- Tree note: concurrent agents are splitting `supervisor*.py` and editing shared tests in this tree — ltx scope is additive-only (new files + registry/CLI/TUI rows + bypass branch); never touch their hunks.

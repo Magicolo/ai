@@ -32,12 +32,12 @@ def _committed_run(run_dir: Path, count: int) -> None:
 
 
 def _stub_probe(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> None:
-    import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
     def _fake_probe(_path: Path) -> dict[str, Any]:
         return payload
 
-    monkeypatch.setattr(media_module, "probe", _fake_probe)
+    monkeypatch.setattr(media_audio_module, "probe", _fake_probe)
 
 
 def _video_payload(
@@ -195,8 +195,9 @@ def test_189_slice_take_rejects_empty_exit_zero_output(
 ) -> None:
     """An exit-0 ffmpeg that writes no slice must fail at slice time."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
-    monkeypatch.setattr(media_module, "run_capture", _completed_no_output)
+    monkeypatch.setattr(media_audio_module, "run_capture", _completed_no_output)
     take = tmp_path / "take.wav"
     take.write_bytes(b"fake-take")
     with pytest.raises(MediaError, match="empty"):
@@ -207,12 +208,13 @@ def test_189_slice_take_accepts_real_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
     def _writes_slice(argv: list[str]) -> subprocess.CompletedProcess[str]:
         Path(argv[-1]).write_bytes(b"fake-slice-payload")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(media_module, "run_capture", _writes_slice)
+    monkeypatch.setattr(media_audio_module, "run_capture", _writes_slice)
     take = tmp_path / "take.wav"
     take.write_bytes(b"fake-take")
     dest = media_module.slice_take(take, 0.0, 2.0, tmp_path / "slice.wav", 48000, 2)
@@ -223,8 +225,9 @@ def test_189_assemble_single_slice_rejects_empty_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
-    monkeypatch.setattr(media_module, "run_capture", _completed_no_output)
+    monkeypatch.setattr(media_audio_module, "run_capture", _completed_no_output)
     lonely = tmp_path / "lonely.wav"
     lonely.write_bytes(b"fake-slice")
     with pytest.raises(MediaError, match="empty"):

@@ -17,16 +17,18 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
+from voyage.atomic import JsonValue
 from voyage.config import load_config
 from voyage.errors import MediaError
 from voyage.hashing import sha256_file
 from voyage.media import validate_audio
+from voyage.rpc import RpcPayload, RpcResult
 from voyage.supervisor import Supervisor
 
 
@@ -50,11 +52,11 @@ def _lie_about_video(supervisor: Supervisor, video_block: dict[str, object]) -> 
     """Wrap the video worker to report a crafted `video` block."""
     original = supervisor._video.call
 
-    def _lie(op: str, payload: dict[str, object], timeout: float | None = None) -> dict[str, Any]:
+    def _lie(op: str, payload: RpcPayload, timeout: float | None = None) -> RpcResult:
         result = original(op, payload, timeout=timeout)
         if op == "generate_blocks":
             result = dict(result)
-            result["video"] = video_block
+            result["video"] = cast(JsonValue, video_block)
         return result
 
     return _lie

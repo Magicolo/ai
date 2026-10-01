@@ -123,12 +123,13 @@ def test_validate_dir_as_sha256_returns_error_not_raise(tmp_path: Path) -> None:
 def test_probe_invalid_json_raises_media_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Truncated ffprobe stdout maps to MediaError, never raw JSONDecodeError."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.errors import MediaError
 
     def _truncated(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, "{truncated", "")
 
-    monkeypatch.setattr(media_module, "run_capture", _truncated)
+    monkeypatch.setattr(media_audio_module, "run_capture", _truncated)
     with pytest.raises(MediaError, match="invalid JSON"):
         media_module.probe(Path("clip.mp4"))
 
@@ -136,12 +137,13 @@ def test_probe_invalid_json_raises_media_error(monkeypatch: pytest.MonkeyPatch) 
 def test_probe_garbage_stdout_raises_media_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-JSON stdout with exit 0 maps to MediaError."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.errors import MediaError
 
     def _garbage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, "not json at all", "")
 
-    monkeypatch.setattr(media_module, "run_capture", _garbage)
+    monkeypatch.setattr(media_audio_module, "run_capture", _garbage)
     with pytest.raises(MediaError):
         media_module.probe(Path("clip.mp4"))
 
@@ -149,13 +151,14 @@ def test_probe_garbage_stdout_raises_media_error(monkeypatch: pytest.MonkeyPatch
 def test_probe_valid_json_still_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     """The taxonomy wrap must not break the happy path."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
 
     payload = json.dumps({"format": {"duration": "1.0"}, "streams": []})
 
     def _valid(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, payload, "")
 
-    monkeypatch.setattr(media_module, "run_capture", _valid)
+    monkeypatch.setattr(media_audio_module, "run_capture", _valid)
     assert media_module.probe(Path("clip.mp4"))["format"]["duration"] == "1.0"
 
 

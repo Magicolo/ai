@@ -80,6 +80,7 @@ def test_single_graph_matches_fold_byte_for_byte(tmp_path: Path) -> None:
 def test_single_graph_uses_one_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """N=4 joins in exactly one ffmpeg spawn (O(N) I/O, not N-1)."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.media import _join_audio_single_graph
 
     stems = [_sine(tmp_path / f"stem{i}.wav", 4.0) for i in range(4)]
@@ -90,7 +91,7 @@ def test_single_graph_uses_one_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyP
         calls.append(list(argv))
         return real(argv)
 
-    monkeypatch.setattr(media_module, "run_capture", _recording)
+    monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     _join_audio_single_graph(stems, tmp_path / "one.wav", 1.0)
     video_calls = [argv for argv in calls if argv and argv[0] == "ffmpeg"]
     assert len(video_calls) == 1
@@ -102,6 +103,7 @@ def test_single_graph_has_s32_barriers_and_no_acrossfade(
 ) -> None:
     """Staged graph carries per-stage s32 barriers and never acrossfade."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.media import _join_audio_single_graph
 
     stems = [_sine(tmp_path / f"stem{i}.wav", 4.0) for i in range(4)]
@@ -113,7 +115,7 @@ def test_single_graph_has_s32_barriers_and_no_acrossfade(
             graphs.append(argv[argv.index("-filter_complex") + 1])
         return real(argv)
 
-    monkeypatch.setattr(media_module, "run_capture", _recording)
+    monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     _join_audio_single_graph(stems, tmp_path / "bar.wav", 1.0)
     assert len(graphs) == 1
     graph = graphs[0]

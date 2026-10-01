@@ -59,6 +59,7 @@ def test_blend_fade_formula_is_single_sourced(tmp_path: Path) -> None:
 def test_blend_pair_accepts_known_durations_without_probing(tmp_path: Path) -> None:
     """Threaded durations skip both ffprobe calls (fallback kept when absent)."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.media import _blend_pair
 
     first = _sine(tmp_path / "a.wav", 4.0)
@@ -69,11 +70,11 @@ def test_blend_pair_accepts_known_durations_without_probing(tmp_path: Path) -> N
         raise AssertionError(f"probe must not run for {path}")
 
     real_probe = media_module.probe
-    media_module.probe = _no_probe
+    media_audio_module.probe = _no_probe
     try:
         _blend_pair(first, second, dest, 1.0, first_seconds=4.0, second_seconds=4.0)
     finally:
-        media_module.probe = real_probe
+        media_audio_module.probe = real_probe
     assert dest.exists() and dest.stat().st_size > 0
 
 
@@ -94,6 +95,7 @@ def test_assemble_fold_probes_each_slice_once(
 ) -> None:
     """3 slices join with 3 probes total, not 3 + 2 per blend."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.media import assemble_segment_audio
 
     slices = [_sine(tmp_path / f"s{i}.wav", 4.0) for i in range(3)]
@@ -105,7 +107,7 @@ def test_assemble_fold_probes_each_slice_once(
         calls += 1
         return real_probe(path)
 
-    monkeypatch.setattr(media_module, "probe", _counting)
+    monkeypatch.setattr(media_audio_module, "probe", _counting)
     timings: list[float] = []
     out = assemble_segment_audio(slices, tmp_path / "window.wav", 1.0, blend_timings=timings)
     assert out.exists()
@@ -178,6 +180,7 @@ def test_build_final_audio_fold_probes_each_window_once(
 ) -> None:
     """3 windows join with 3 window probes, not 2 per blend."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.media import build_final_audio
 
     run_dir = tmp_path / "run"
@@ -191,7 +194,7 @@ def test_build_final_audio_fold_probes_each_window_once(
             calls += 1
         return real_probe(path)
 
-    monkeypatch.setattr(media_module, "probe", _counting)
+    monkeypatch.setattr(media_audio_module, "probe", _counting)
     build_final_audio(run_dir, usable, tmp_path, 24, 48000, 2)
     assert calls <= 3
 
@@ -237,6 +240,7 @@ def test_render_sfx_bed_threads_stem_durations(
 ) -> None:
     """4 stems join with 4 stem probes (not 2 per blend) + 3 timing entries."""
     import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
     from voyage.sfx_finalize import render_sfx_bed, segment_sfx_bounds
 
     run_dir = tmp_path / "run"
@@ -274,7 +278,7 @@ def test_render_sfx_bed_threads_stem_durations(
             stem_probes += 1
         return real_probe(path)
 
-    monkeypatch.setattr(media_module, "probe", _counting)
+    monkeypatch.setattr(media_audio_module, "probe", _counting)
     timings: list[float] = []
     bed = render_sfx_bed(
         run_dir,
