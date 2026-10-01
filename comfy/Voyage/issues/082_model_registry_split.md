@@ -429,3 +429,100 @@ grep -n "_sha256\|_MANIFEST_LOCK\|_repair_manifest" voyage/model_registry.py voy
   module + facade chain + agreement test, with the MINILM
   coupling decided explicitly in both docstrings); manifest-race
   fix shape unchanged from the batch-7 entry.
+
+## Progress log (2026-10-01, director triple — last family)
+
+- Pre-checks live in-container (`voyage:latest`, CPU-only,
+  `docker run --rm -v $PWD:/app -w /app voyage:latest ...` from
+  `Voyage/`): `wc -l voyage/registry_records.py` → 609 at pass
+  start (matches the causvid+sfx close); `git diff --name-only`
+  on owned targets empty before every edit (`Voyage/` carries
+  foreign concurrent hunks in `DESIGN.md`, `LTX2.md`,
+  `supervisor.py`, issues 031/035/081/089/093/152/166,
+  `scripts/gates.sh`, `tests/test_finalize_fastpath.py` +
+  `test_stage_a_telemetry.py` + a `test_commit_slice_compensation.py`
+  addition — all left intact per §9, none inside the director
+  extraction region; verified the final `git diff` on
+  `registry_records.py` shows exactly the 9 own edit sites, 93
+  insertions / 138 deletions). `model_registry.py` untouched
+  (facade chain holds).
+- Batch-15 decision (explicit, in both docstrings): the shared
+  `MINILM_*` pins MOVE into `voyage.registry_director` alongside
+  the QWEN rows — not duplicated, not left behind. Both
+  `_record_director` builders resolve the embedding pins from the
+  one module; silent pin duplication is forbidden.
+- TDD failing-first: wrote
+  `tests/test_registry_director_split.py` (3 agreement tests: 20
+  pins single-sourced, 4 builders single-sourced, both
+  `director-qwen8b` + `director-qwen4b-awq` MODEL_SPECS rows point
+  at family builders — mirroring `test_registry_sfx_split.py`,
+  extended to two spec rows) BEFORE the new module —
+  in-container collection failed with
+  `ModuleNotFoundError: No module named 'voyage.registry_director'`
+  (red), then created the module + re-export until green.
+- Extraction: new `voyage/registry_director.py` (175L, DESIGN §8
+  + §140 GPU-director entry) owns all 7 `QWEN_*` pins + all 7
+  `QWEN4B_AWQ_*` pins + all 6 shared `MINILM_*` pins +
+  `_record_director` + `_describe_director` +
+  `_record_director_awq` + `_describe_director_awq` verbatim;
+  `registry_records.py` re-exports all 24 names via explicit-`as`
+  self-aliases (sorted director block between the causvid and
+  film blocks) and carries move comments at the seven old sites
+  (QWEN pins, AWQ pins, MINILM pins with the batch-15
+  single-source note, 4 builders). `from pathlib import Path` +
+  `from voyage.atomic import JsonValue` deleted there (the
+  director builders were their sole users — same consequence as
+  the causvid+sfx `sha256_file` deletion). `cli_observe.py`
+  resolves `QWEN_*`/`MINILM_*` revisions via call-time `getattr`
+  (facade-safe, zero edits); no worker imports director pins
+  directly (only `model_registry` + `cli_observe` getattr +
+  `doctor` verify entry points).
+- Deliberate deviation from the film recipe, recorded in both
+  docstrings: this row carries no EXPECTED ingest hash (the
+  manifest record carries no sha — same open residual as
+  inspector/audio/sfx/CausVid), so the new module omits the
+  `sha256_file` import (ruff F401 would fire).
+- Gate evidence (in-container `voyage:latest`, CPU-only): new
+  suite 3 passed; combined split/agreement 43 passed
+  (`test_registry_{director,causvid,sfx,ltxv,audio,film,realesrgan,
+  inspector}_split` + `test_registry_split` +
+  `test_registry_pins`); neighbors 89 passed
+  (`test_augment_models` + `test_augment_weight_loading` +
+  `test_checkpoint_safety` + `test_director_models_dir` +
+  `test_causvid_prep` + `test_ltxv` + `test_sfx_contract` +
+  `test_vocoder_allowlist`); live golden probe: MODEL_SPECS keys
+  unchanged (9 rows incl. both director rows), all 20 pins +
+  4 builders identical across `registry_director` /
+  `registry_records` / `model_registry`. Per-file gates:
+  `ruff check` + `ruff format --check` + `mypy strict` clean on
+  all 3 touched files (`registry_director.py`,
+  `registry_records.py`, new test). No `pyproject.toml` change
+  (family module clean under the base rule set). Full `gates.sh`
+  left to the orchestrator. `registry_records.py` 609→564L and
+  now holds zero family definitions (facade + move comments only
+  — verified via grep: no `^QWEN`, `^MINILM`, `^def`,
+  `^from pathlib`, `^from voyage.atomic`).
+
+## Resolution (2026-10-01, director triple — last family)
+
+- Verdict: **RESOLVED** — all per-family splits landed;
+  `registry_records.py` is a pure facade (564L, zero
+  pins/builders).
+- Files changed: `voyage/registry_director.py` (new, 175L),
+  `voyage/registry_records.py` (facade + 7 move comments +
+  `Path`/`JsonValue` import deletion, net −45L),
+  `tests/test_registry_director_split.py` (new, 3 tests).
+- Residual (open, owner-held — recorded, not attempted):
+  in-core manifest read-modify-write race fix +
+  `_MANIFEST_LOCK`/`_repair_manifest` removal (needs the 3
+  `test_containers_rank2.py` repair tests re-pointed; runtime
+  locking behavior change — separate pass).
+- DESIGN proposal (quoted, for the DESIGN owner — not applied
+  here, file is out of scope): "Per-family modules are complete
+  (`registry_director.py` closes the set: film, realesrgan,
+  inspector, ltxv, audio, causvid, sfx, director);
+  `registry_records.py` is now a pure re-export facade. The
+  manifest read-modify-write race fix stays owner-held: move the
+  lock into the registry core, delete the `models_ensure.py`
+  `_MANIFEST_LOCK`/`_repair_manifest` workaround, and re-point
+  the 3 `test_containers_rank2.py` repair tests."

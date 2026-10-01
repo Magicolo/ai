@@ -242,3 +242,33 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
   Files changed: none (this issue file only). DESIGN proposals: none.
 - Residuals: exactly one — `git rm` execution by the orchestrator under
   approval. Nothing else is open.
+
+## Progress log (2026-10-01, record-only maintenance pass — verify-only, no deletion)
+
+- Re-verified live (host reads, no edits — `git rm` NOT run, needs user
+  approval per AGENTS §9): `TASK.md` is the 28-line pointer stub
+  (unchanged since batch 12); `docs/BENCHMARKING.md:69` "Backend
+  qualification" section intact (the §30.4 procedural home); historical
+  DESIGN entries `:6931` + `:8113` intact (methodology history +
+  batch-12 as-built, zero live-spec refs).
+- Dangling-ref sweep: `grep -rn "TASK\.md" --include="*.md"
+  --include="*.py" Voyage/ | grep -v "issues/"` → only the stub's
+  self-rows (`TASK.md:8` history pointer, `TASK.md:27` rm-pending note)
+  + the historical DESIGN entries — no ref repair owed.
+- No test reads `TASK.md` content: no `open`/`Path`/`read` of `TASK.md`
+  anywhere in `tests/` or `voyage/` (grep clean) — the stub is test-safe.
+- Ready-to-execute state for the orchestrator (NOT run here): from repo
+  root `/home/goulade/Projects/ai`, `git rm comfy/Voyage/TASK.md`
+  (deletion needs explicit user approval per AGENTS §9). Post-rm
+  verification: `grep -rn "TASK\.md" Voyage/ --include="*.md"
+  --include="*.py" | grep -v "issues/"` must show only the historical
+  DESIGN entries, then `Voyage/scripts/gates.sh` green. Nothing is lost
+  — full text in `git log --oneline -- Voyage/TASK.md` (recorded in stub).
+
+## Resolution (2026-10-01, record-only maintenance pass)
+
+- Verdict: VERIFIED (stub + BENCHMARKING home intact) + DELETION READY
+  (exact command + post-conditions above; approval still pending).
+  Files changed: none (this issue file only). DESIGN proposals: none.
+- Residuals: exactly one — `git rm` execution by the orchestrator under
+  approval. Nothing else is open.

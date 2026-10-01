@@ -445,3 +445,48 @@ enforcing.
 - Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
   still dark; PERF unblocks when the supervisor sites + worker/test
   sites clear under their owners.
+
+## Progress log (2026-10-01, record-only maintenance pass — fresh re-probe, no adoption)
+
+- Pre-flight (from `/home/goulade/Projects/ai/comfy`): `git diff --name-only`
+  shows only banned/foreign dirty (`Voyage/DESIGN.md`, `Voyage/LTX2.md`,
+  `Voyage/tests/test_stage_a_telemetry.py`, `Voyage/voyage/supervisor.py`)
+  plus untracked `Voyage/tests/test_commit_slice_compensation.py`
+  (other group's file). `Voyage/voyage/` + `Voyage/tests/` + `Voyage/pyproject.toml`
+  otherwise clean — but adoption still needs EVERY site in an owned-clean
+  file, and none qualifies (below). `supervisor.py` never touched (banned).
+- Fresh counts live in-container (`voyage:latest`, CPU-only,
+  `docker run --rm -v $PWD:/app -w /app` from `Voyage/`, no host pip):
+  `ruff check --select PERF --output-format concise .` → **10 hits**
+  (6 PERF401 + 4 PERF203): `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748` (both test-track owned),
+  `voyage/cli_validate.py:223,229`, `voyage/concepts.py:437`,
+  `voyage/models_ensure.py:226`, `voyage/supervisor.py:504,576`
+  (banned file), `voyage/workers/director.py:390,517` (foreign).
+  The batch-12 `cli_observe.py` handoff holds (no hit remains).
+- `ruff check --select N --statistics` → **51** (N806 38 + N801 10 +
+  N802 2 + N818 1, unchanged shape). `ruff check --select PT --statistics`
+  → **111** (PT011 63 + PT018 46 + PT013 1 + PT012 1, unchanged).
+  `ruff check --select ALL --statistics` top rows: D103 889, COM812 829,
+  PLC0415 767, SLF001 626, TRY003 509, PLR2004 421, EM102 374, ANN401 345.
+- Adoption re-checked site-by-site (regions read live, no edits):
+  `cli_validate.py:223,229` are conditional appends inside nested loops
+  with sibling statements (not clean comprehension targets — needs the
+  owner); `concepts.py:437` / `models_ensure.py:226` same conditional-append
+  shape in foreign files; supervisor/director PERF203 are try-except-in-loop
+  restructures (banned/foreign); tests are test-track owned. No owned-clean
+  site exists, so no family is green in isolation and no `select` change made.
+- `Voyage/pyproject.toml:70` select confirmed unchanged (16 families).
+
+## Resolution (2026-10-01, record-only maintenance pass)
+
+- Verdict: DEFERRED (record-only) — PERF 10, N 51, PT 111 as-read above.
+- Files changed: none for 031 (this issue file only). Gate evidence:
+  `select` untouched; `mypy voyage` clean (75 source files);
+  `ruff check .` is RED from 1 pre-existing foreign error
+  (`tests/test_registry_director_split.py:17` I001 import-sort, other
+  group's in-flight split — never touched, not caused here).
+  DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; PERF unblocks when the supervisor sites + worker/test
+  sites clear under their owners.

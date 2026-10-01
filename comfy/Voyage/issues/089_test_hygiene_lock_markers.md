@@ -358,3 +358,23 @@ grep -rn "pytest.mark" tests/ | head -n 20
   `test_supervisor_av_align.py` 1.94/1.85s,
   `test_e1_media_augment.py::test_138_strict...` 1.90s,
   `test_crash_matrix.py::test_repeated_crashes...` 1.78s.
+
+## Progress log (2026-10-01, record-only maintenance pass — lock leg only)
+
+- Lock leg record-only (lockfile FORBIDDEN — never edited, per brief):
+  `requirements.lock:25-26` still `httpcore2==2.13.1` /
+  `httpx2==2.13.1` (host `sed` read); `tomli` conditional still
+  `pyproject.toml:24` (`python_version < '3.11'`) and absent from the
+  lock (host `grep` clean). `slow` marker still registered
+  (`pyproject.toml:185`). Lock track w/068 owns both — untouched.
+- No other 089 leg attempted (slow-tail, mypy-list, cache-guard legs
+  belong to their owning tracks; this pass is the lock record only).
+  No test run for this leg (record-only, no behavior change).
+
+## Resolution (2026-10-01, record-only maintenance pass — lock leg)
+
+- Verdict: DEFERRED (record-only) — lock premises hold, file untouched.
+  Files changed: none for 089 (this issue file only).
+  Gate evidence: n/a (no change). DESIGN proposals: none.
+- Residuals: unchanged — (a) lock typo (`requirements.lock:25-26`) +
+  tomli-freeze note → lock track w/068 (forbidden here).

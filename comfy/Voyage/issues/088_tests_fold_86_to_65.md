@@ -366,3 +366,69 @@ wc -l tests/*.py | sort -rn | head -n 15
   `test_paths` 8) — one per pass with the same discipline (re-read
   live, check mtime/`git log`, keep assertion counts identical, move
   the gates.sh mypy entry with any fold that deletes a listed file).
+
+## Progress log (2026-10-01, final-blend-scale fold pass)
+
+- Premise re-verified live: 170 `test_*.py` files at pass start;
+  `tests/test_final_blend_scale.py` (4 tests, mtime 2026-09-30,
+  last functional commit 703225d) present — the smallest remaining
+  cluster with an explicit singleton recipe (fix candidate 2:
+  `final_blend_scale`→`finalize_fastpath`, same finalize-audio
+  area). Collision check via rg/diff: `_sine_take` defined in BOTH
+  files but byte-identical (verified via diff pre-fold — reused,
+  not duplicated); `_synthetic_run`/`_input_count`/
+  `FRAMES_PER_SEGMENT`/`FPS`/`SEGMENT_SECONDS` only in the source;
+  `_init_run`/`_commit_two`/slice-cache helpers only in the target
+  — no other collisions. Zero importers outside self (`rg
+  test_final_blend_scale` clean except two docstring mentions in
+  `test_issue_152_{blend_probe_memo,wide_manual_join_proof}.py` +
+  the gates.sh mypy entry + issue docs), both files in the
+  `gates.sh` mypy list.
+- Fold landed: fold banner (original module docstring) +
+  constants + 2 helpers + 4 tests moved verbatim (fn names/bodies
+  identical, `_sine_take` dedup documented in a NOTE at the fold
+  site) into `tests/test_finalize_fastpath.py` (target imports
+  extended minimally: `concurrent.futures` only — `json`/
+  `subprocess`/`paths`/`build_final_audio`/`probe` already present;
+  `_blend_pair`/`assemble_segment_audio`/`write_segment_manifest`
+  stay function-local as in the source); the source file deleted.
+  `scripts/gates.sh` mypy entry removed in the same edit (batch-12
+  lesson — verified `bash -n` clean; target entry already present,
+  so only a deletion). As-left: 170 files (fold −1 plus concurrent
+  `test_registry_director_split.py` landing mid-pass), merged file 6→10 tests,
+  test count net-zero at 4 preserved.
+- Gate evidence (in-container, `voyage:latest`, CPU-only): both
+  files together 10/10 pre-delete (9.91s baseline); merged solo
+  10/10 post-delete; neighbors 28 passed
+  (`test_issue_152_blend_probe_memo` +
+  `test_issue_152_wide_manual_join_proof` +
+  `test_supervisor_{proposal,prefetch,commit_types,tape}_helpers`);
+  `ruff check` + `ruff format --check` + `mypy strict` clean on the
+  merged file; `bash -n` clean on `gates.sh`. Foreign hunks in
+  `voyage/supervisor.py` / `tests/test_stage_a_telemetry.py` /
+  `LTX2.md` coexist untouched (full `gates.sh` not run — they would
+  color it).
+
+## Resolution (2026-10-01, final-blend-scale fold pass)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_finalize_fastpath.py` (+147L fold banner/
+  constants/helpers/tests, 6→10 tests), deleted
+  `tests/test_final_blend_scale.py`, `scripts/gates.sh` (mypy-list
+  line: `test_final_blend_scale.py` entry removed).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 10/10 post-delete; `ruff check` + `ruff format --check` +
+  `mypy strict` clean on the merged file; `bash -n` clean on
+  `gates.sh`; neighbors 28 passed.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple:
+  `tests/test_adapter_contract.py` 11 vs
+  `tests/test_backends_adapter.py` 22 vs `tests/test_commit_split.py`
+  7; augment quad remainder; audio validators; TUI trio; video-worker
+  quartet; finalize/commit merges incl. `test_av_alignment_consumer.py`
+  6 → `test_state_integrity.py`; leftover singletons incl.
+  `tests/test_hashing.py` 7 + `tests/test_paths.py` 8 →
+  `test_foundation`/`test_unit.py`) — one per pass with the same
+  discipline (re-read live, check mtime/`git log`, keep assertion
+  counts identical, move the gates.sh mypy entry with any fold that
+  deletes a listed file).

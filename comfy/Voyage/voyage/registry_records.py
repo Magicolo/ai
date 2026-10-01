@@ -10,9 +10,6 @@ name below for backward compatibility.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from voyage.atomic import JsonValue
 from voyage.registry_audio import (
     _ACE_CHECKPOINTS_RELATIVE as _ACE_CHECKPOINTS_RELATIVE,
 )
@@ -129,6 +126,78 @@ from voyage.registry_causvid import (
 )
 from voyage.registry_causvid import (
     _record_causvid as _record_causvid,
+)
+from voyage.registry_director import (
+    MINILM_ALLOW as MINILM_ALLOW,
+)
+from voyage.registry_director import (
+    MINILM_HF_REPO as MINILM_HF_REPO,
+)
+from voyage.registry_director import (
+    MINILM_HF_REVISION as MINILM_HF_REVISION,
+)
+from voyage.registry_director import (
+    MINILM_LICENSE as MINILM_LICENSE,
+)
+from voyage.registry_director import (
+    MINILM_MIN_BYTES as MINILM_MIN_BYTES,
+)
+from voyage.registry_director import (
+    MINILM_SUBDIR as MINILM_SUBDIR,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_ALLOW as QWEN4B_AWQ_ALLOW,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_HF_REPO as QWEN4B_AWQ_HF_REPO,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_HF_REVISION as QWEN4B_AWQ_HF_REVISION,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_LICENSE as QWEN4B_AWQ_LICENSE,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_LICENSE_URL as QWEN4B_AWQ_LICENSE_URL,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_MIN_BYTES as QWEN4B_AWQ_MIN_BYTES,
+)
+from voyage.registry_director import (
+    QWEN4B_AWQ_SUBDIR as QWEN4B_AWQ_SUBDIR,
+)
+from voyage.registry_director import (
+    QWEN_ALLOW as QWEN_ALLOW,
+)
+from voyage.registry_director import (
+    QWEN_HF_REPO as QWEN_HF_REPO,
+)
+from voyage.registry_director import (
+    QWEN_HF_REVISION as QWEN_HF_REVISION,
+)
+from voyage.registry_director import (
+    QWEN_LICENSE as QWEN_LICENSE,
+)
+from voyage.registry_director import (
+    QWEN_LICENSE_URL as QWEN_LICENSE_URL,
+)
+from voyage.registry_director import (
+    QWEN_MIN_BYTES as QWEN_MIN_BYTES,
+)
+from voyage.registry_director import (
+    QWEN_SUBDIR as QWEN_SUBDIR,
+)
+from voyage.registry_director import (
+    _describe_director as _describe_director,
+)
+from voyage.registry_director import (
+    _describe_director_awq as _describe_director_awq,
+)
+from voyage.registry_director import (
+    _record_director as _record_director,
+)
+from voyage.registry_director import (
+    _record_director_awq as _record_director_awq,
 )
 from voyage.registry_film import (
     EXPECTED_FILM_SHA256 as EXPECTED_FILM_SHA256,
@@ -359,58 +428,11 @@ from voyage.registry_sfx import (
     _record_sfx as _record_sfx,
 )
 
-# Phase 3 director LLM (DESIGN §8). Qwen3-8B dense, Apache 2.0, ungated.
-# BF16 weights (~16.4 GiB); served on CPU from system RAM in the director
-# worker process — never on the video GPU.
-QWEN_HF_REPO = "Qwen/Qwen3-8B"
+# Phase 3 director LLM pins live in `voyage.registry_director` (issue 082;
+# re-exported at the top so existing importers keep working).
 
-QWEN_HF_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
-
-QWEN_SUBDIR = "Qwen3-8B"
-
-QWEN_ALLOW = [
-    "model-0000[1-5]-of-00005.safetensors",
-    "model.safetensors.index.json",
-    "config.json",
-    "generation_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-]
-
-QWEN_MIN_BYTES = 15_000_000_000
-
-QWEN_LICENSE = "Apache 2.0"
-
-QWEN_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-8B/blob/main/LICENSE"
-
-# GPU decider (unified worker image). Qwen3-4B AWQ-quantized, Apache 2.0,
-# ungated. Single-shard int4 weights (~2.6 GiB); served on cuda:1 from the
-# director venv — the 8B bf16 OOMs at materialization on a 6GB second GPU
-# (5.49GiB > 5.6GB; probe 2026-09-30: 4B-AWQ loads in 2.5s, 2.8GiB peak,
-# valid first-attempt JSON at temp 0.7).
-QWEN4B_AWQ_HF_REPO = "Qwen/Qwen3-4B-AWQ"
-
-QWEN4B_AWQ_HF_REVISION = "74d4bd2bd4bff9cafc9345221320bffb08b406a3"
-
-QWEN4B_AWQ_SUBDIR = "Qwen3-4B-AWQ"
-
-QWEN4B_AWQ_ALLOW = [
-    "model.safetensors",
-    "config.json",
-    "generation_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-]
-
-QWEN4B_AWQ_MIN_BYTES = 2_000_000_000
-
-QWEN4B_AWQ_LICENSE = "Apache 2.0"
-
-QWEN4B_AWQ_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LICENSE"
+# GPU decider pins live in `voyage.registry_director` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # Phase 5 inspector pins live in `voyage.registry_inspector` (issue 082;
 # re-exported at the top so existing importers keep working).
@@ -418,28 +440,11 @@ QWEN4B_AWQ_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LIC
 # Phase 4 music-stack pins live in `voyage.registry_audio` (issue 082;
 # re-exported at the top so existing importers keep working).
 
-MINILM_HF_REPO = "sentence-transformers/all-MiniLM-L6-v2"
-
-MINILM_HF_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-
-MINILM_SUBDIR = "all-MiniLM-L6-v2"
-
-MINILM_ALLOW = [
-    "model.safetensors",
-    "config.json",
-    "config_sentence_transformers.json",
-    "sentence_bert_config.json",
-    "modules.json",
-    "1_Pooling/config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "vocab.txt",
-]
-
-MINILM_MIN_BYTES = 50_000_000
-
-MINILM_LICENSE = "Apache 2.0"
+# Shared MiniLM embedding pins live in `voyage.registry_director`
+# (issue 082; re-exported at the top so existing importers keep working —
+# batch-15 decision: MINILM moves with the director triple as its single
+# source for both `_record_director` builders; silent pin duplication is
+# forbidden).
 
 # Phase 7 LTXV pins live in `voyage.registry_ltxv` (issue 082;
 # re-exported at the top so existing importers keep working).
@@ -487,27 +492,8 @@ MINILM_LICENSE = "Apache 2.0"
 # re-exported at the top so existing importers keep working).
 
 
-def _record_director(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Phase 3 director stack."""
-    qwen_dir = models_dir / QWEN_SUBDIR
-    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
-    qwen_bytes = sum(part.stat().st_size for part in qwen_shards)
-    minilm_dir = models_dir / MINILM_SUBDIR
-    minilm_weights = minilm_dir / "model.safetensors"
-    return {
-        "repo": QWEN_HF_REPO,
-        "revision": QWEN_HF_REVISION,
-        "model_dir": str(qwen_dir),
-        "checkpoint_bytes": qwen_bytes,
-        "shards": [part.name for part in qwen_shards],
-        "license": QWEN_LICENSE,
-        "license_url": QWEN_LICENSE_URL,
-        "embedding_repo": MINILM_HF_REPO,
-        "embedding_revision": MINILM_HF_REVISION,
-        "embedding_dir": str(minilm_dir),
-        "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
-        "embedding_license": MINILM_LICENSE,
-    }
+# Director record builder lives in `voyage.registry_director`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 # Inspector record builder lives in `voyage.registry_inspector`
@@ -530,47 +516,16 @@ def _record_director(models_dir: Path) -> dict[str, JsonValue]:
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_director(models_dir: Path) -> str:
-    """Exact OK string for the director stack (byte-stable)."""
-    qwen_dir = models_dir / QWEN_SUBDIR
-    qwen_shards = sorted(qwen_dir.glob("model-*-of-*.safetensors"))
-    qwen_bytes = sum(part.stat().st_size for part in qwen_shards)
-    minilm_weights = models_dir / MINILM_SUBDIR / "model.safetensors"
-    return (
-        f"director-qwen8b OK (Qwen3-8B {qwen_bytes / 1024**3:.1f} GiB + MiniLM "
-        f"{minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
-    )
+# Director describe helper lives in `voyage.registry_director`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _record_director_awq(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the GPU decider stack (4B-AWQ + MiniLM)."""
-    qwen_dir = models_dir / QWEN4B_AWQ_SUBDIR
-    weights = qwen_dir / "model.safetensors"
-    minilm_dir = models_dir / MINILM_SUBDIR
-    minilm_weights = minilm_dir / "model.safetensors"
-    return {
-        "repo": QWEN4B_AWQ_HF_REPO,
-        "revision": QWEN4B_AWQ_HF_REVISION,
-        "model_dir": str(qwen_dir),
-        "checkpoint_bytes": weights.stat().st_size if weights.exists() else 0,
-        "license": QWEN4B_AWQ_LICENSE,
-        "license_url": QWEN4B_AWQ_LICENSE_URL,
-        "embedding_repo": MINILM_HF_REPO,
-        "embedding_revision": MINILM_HF_REVISION,
-        "embedding_dir": str(minilm_dir),
-        "embedding_bytes": minilm_weights.stat().st_size if minilm_weights.exists() else 0,
-        "embedding_license": MINILM_LICENSE,
-    }
+# Director AWQ record builder lives in `voyage.registry_director`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
-def _describe_director_awq(models_dir: Path) -> str:
-    """Exact OK string for the GPU decider stack (byte-stable)."""
-    weights = models_dir / QWEN4B_AWQ_SUBDIR / "model.safetensors"
-    minilm_weights = models_dir / MINILM_SUBDIR / "model.safetensors"
-    return (
-        f"director-qwen4b-awq OK (Qwen3-4B-AWQ {weights.stat().st_size / 1024**3:.1f} GiB "
-        f"+ MiniLM {minilm_weights.stat().st_size / 1024**2:.0f} MiB)"
-    )
+# Director AWQ describe helper lives in `voyage.registry_director`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 # Inspector describe helper lives in `voyage.registry_inspector`

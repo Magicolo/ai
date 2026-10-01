@@ -91,7 +91,7 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 - 025 — RESOLVED batch 5 (was: god modules + quadruple registries; unity now test-guarded)
 - 026 — RESOLVED batch 5 (was: prompt staging truncation + blocklist; strict + repeat_transitions knobs + tier-1 markers)
 - 029 — RESOLVED batch 4 (was: inspect rotation + fps=0 divergence; 055 superseded into it, 061 is a sibling, not a duplicate)
-- 036 — PARTIAL batch 15 (tracker)
+- 036 — PARTIAL batch 16 — tracker
 - 039 — RESOLVED batch 7 (was: property-test hygiene; conftest unification + replay opt-in + health-check policy)
 - 040 — RESOLVED batch 7 (was: _init_run ×153 duplication; 153→144 + test_phase2 folded + cap-144 ratchet test)
 - 046 — RESOLVED batch 5 (was: augment chunk linear rescan O(N²); input -ss fast-seek + exact-fallback + fresh dest_dir)
@@ -117,27 +117,27 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 - 077 — RESOLVED batch 6 (was: manifest repair best-effort; atomic merge under _MANIFEST_LOCK with retries + fail-loud unrepaired entries; fetch+merge in download_model stays unlocked)
 - 079 — RESOLVED batch 14 (followup-clean)
 - 080 — RESOLVED batch 7 (was: cli.py 2403L god module; 735L seam + 10 verb modules + seam-dispatch rule)
-- 081 — PARTIAL batch 15 (extraction skipped, +prefetch_shutdown fold)
-- 082 — PARTIAL batch 15 (+causvid +sfx families)
+- 081 — PARTIAL batch 16 — extraction skipped dirty-tree, +final_blend_scale fold
+- 082 — RESOLVED batch 16 — all 8 families split, MINILM single-sourced, manifest-race owner-held residual
 - 083 — RESOLVED batch 7 (was: media/augment finalize split; single homes + resolve_finalize_settings(); full FILM port open)
 - 084 — RESOLVED batch 7 (was: triplicated validators; _validators.py + _resident.py + fake video serve-map port)
 - 085 — RESOLVED batch 7 (was: literal duplication; _DEFAULT_ROW/_RESERVED_FOLDER_NAMES/FLOAT_DUST_EPSILON + 8 agreement tests)
 - 086 — RESOLVED batch 10 (was: tier-1 dead code; placeholders/alias/shims deleted, kept-items recorded)
-- 088 — PARTIAL batch 15 (+prefetch_shutdown fold)
-- 089 — PARTIAL batch 15 (+mypy-list +slow-marks; lock leg record-only)
+- 088 — PARTIAL batch 16 — +final_blend_scale fold
+- 089 — PARTIAL batch 16 — record-only
 - 090 — RESOLVED batch 7 (was: scripts cleanup; lib/common.sh + run.sh audio/sfx gap + qualify.sh backends)
 - 091 — RESOLVED batch 7 (was: missing operator docs; docs/SFX.md + docs/AUGMENT.md per §87)
-- 093 — PARTIAL batch 15 (rm-ready)
+- 093 — PARTIAL batch 16 — rm-ready
 
 ## Rank 3 — lows (policy, precision, docs)
 
 - 028 — FOLDED into 063 batch 5 (was: console stream split; fixed once under 063, no distinct leg)
 - 027 — FOLDED into 062 batch 5 (was: scoreboard overlap; fixed once under 062, no distinct leg)
-- 031 — DOCUMENTED batch 15 (re-probed)
+- 031 — DOCUMENTED batch 16 — PERF10/N51/PT111
 - 032 — RESOLVED batch 7 (was: per-file-ignores incl. RUF100; console.py T201 removed as tripwire, rest logged)
 - 033 — RESOLVED batch 7 (was: mypy gate 4 files; now voyage + 82 test modules)
 - 034 — RESOLVED batch 7 (was: stale tomli-shim ignores + override; wrong-code test ignores stay with owners)
-- 035 — PARTIAL batch 15 (re-probed, still blocked)
+- 035 — PARTIAL batch 16 — still blocked
 - 037 — RESOLVED batch 7 (was: 7 modules lack DESIGN refs; all carry refs + gates.sh check; cli_core.py catch closed same batch)
 - 038 — RESOLVED batch 7 (was: PLR2004 dark; 10 constants + scoped check)
 - 041 — RESOLVED batch 7 (was: coverage floor 65; now 73 per measured-76-minus-3)
@@ -193,13 +193,13 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 
 - 137 — RESOLVED batch 1 (was: RPC timeout desync poisons next call)
 - 143 — RESOLVED batch 8 (was: cmd_init mkdirs before validating; output/style/seed/backend checks pre-mkdir, exit 2)
-- 152 — PROVEN-BLOCKED batch 15 (confirmed)
+- 152 — PROVEN-BLOCKED batch 16 — confirmed
 - 154 — benchmark SFX/augment targets (MEDIUM; RESOLVED batch 9 — sfx+augment CLI targets + bench helpers + soak section)
 - 155 — RESOLVED batch 8 (was: ACE take unbounded; MAX_TAKE_SECONDS=120 validator)
 - 157 — augment preset/fanout (MEDIUM; RESOLVED batch 9 — CHUNK_PRESETS + preset knob + warm-first fan-out)
 - 161 — sfx_caption invisible (MEDIUM; RESOLVED batch 9 render half — console + TUI print sfx: line; video_caption pin residual)
 - 163 — benchmark/soak SFX axes (MEDIUM; RESOLVED batch 9 — soak SFX section + setup axes)
-- 166 — PARTIAL batch 15 (unchanged this batch)
+- 166 — PARTIAL batch 16 — CPU-blocked
 - 150 — RESOLVED batch 8 (was: stale ignores in new test files; 22 deleted + scaffold fix)
 - 138 — RESOLVED batch 8 (was: skip-bad three legs; lenient-with-record contract landed once, joint with 188)
 - 139 — RESOLVED batch 5 (was: recovery-tape discovery unvalidated; empty/un-stat-able tapes skipped with metric; containment already mirrored from 016)
@@ -496,6 +496,18 @@ this pass's four moved to 095-098 with headers fixed. No content lost.
 - 035 — PARTIAL batch 15 (was: PARTIAL batch 14 re-probed call/supervisor/kwargs; re-probed, still blocked)
 - 152 — PROVEN-BLOCKED batch 15 (was: PROVEN-BLOCKED batch 14 pin confirmed; re-confirmed, pairwise fold remains)
 - 166 — PARTIAL batch 15 (was: PARTIAL batch 14 unchanged; unchanged this batch, chunk-scale handoff remains)
+
+## Resolved batch 16
+- 082 — RESOLVED batch 16 (was: PARTIAL batch 15 +causvid +sfx; all 8 families split, MINILM single-sourced, manifest-race owner-held residual)
+- 081 — PARTIAL batch 16 (was: PARTIAL batch 15 extraction skipped +prefetch_shutdown; extraction skipped dirty-tree, +final_blend_scale fold)
+- 036 — PARTIAL batch 16 (was: PARTIAL batch 15 tracker; tracker updated)
+- 088 — PARTIAL batch 16 (was: PARTIAL batch 15 +prefetch_shutdown; +final_blend_scale fold landed)
+- 089 — PARTIAL batch 16 (was: PARTIAL batch 15 +mypy-list +slow-marks; record-only, lock leg remains)
+- 093 — PARTIAL batch 16 (was: PARTIAL batch 15 rm-ready; rm-ready, git rm still pending approval)
+- 031 — DOCUMENTED batch 16 (was: DOCUMENTED batch 15 re-probed; re-probed PERF10/N51/PT111, still blocked)
+- 035 — PARTIAL batch 16 (was: PARTIAL batch 15 re-probed; re-probed, still blocked)
+- 152 — PROVEN-BLOCKED batch 16 (was: PROVEN-BLOCKED batch 15 confirmed; re-confirmed, pairwise fold remains)
+- 166 — PARTIAL batch 16 (was: PARTIAL batch 15 unchanged; unchanged this batch, CPU-blocked chunk-scale handoff remains)
 
 ## Known overlap / dedupe on fix (review decisions — keep both files, fix jointly)
 

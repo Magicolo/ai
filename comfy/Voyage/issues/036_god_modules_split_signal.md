@@ -533,3 +533,84 @@ is folded as their tracker (not deleted) until the remaining splits land.
   triple, deferred by 082 quota — shared-MINILM decision open).
   No 036-owned extraction this pass (quota filled by the two 082
   family splits); signal table otherwise unchanged.
+
+## Progress log (2026-10-01, extraction-skipped + one 088 fold)
+
+- `supervisor.py` 2666 at pass start (+42 vs 2624 — the foreign
+  take-joint compensation hunk, not this track); `git diff
+  --name-only` shows foreign uncommitted hunks in
+  `voyage/supervisor.py` (media imports + slice-walk compensation),
+  `tests/test_stage_a_telemetry.py`, `LTX2.md`, `AGENTS.md`,
+  `DESIGN.md` — all left intact, none in owned scope. The 081
+  extraction was skipped with cause (dirty tree + no
+  verbatim-movable zero-cross-ref block — see 081
+  extraction-skipped entry); no 036-seam extraction this pass.
+- Landed (088): `tests/test_final_blend_scale.py` (4 tests) folded
+  into `tests/test_finalize_fastpath.py` (6→10 tests; explicit
+  singleton recipe per fix candidate 2,
+  `final_blend_scale`→`finalize_fastpath` — the smallest remaining
+  explicit cluster). Moved verbatim: fold banner (original module
+  docstring) + `FRAMES_PER_SEGMENT`/`FPS`/`SEGMENT_SECONDS` +
+  `_synthetic_run` + `_input_count` + 4 tests (fn names/bodies
+  identical); one documented dedup: the source `_sine_take` is
+  byte-identical to the target's (verified via diff pre-fold), so it
+  is reused, not duplicated. Target imports extended minimally
+  (`concurrent.futures` only — `json`/`subprocess`/`paths`/
+  `build_final_audio`/`probe` already present; `_blend_pair`/
+  `assemble_segment_audio`/`write_segment_manifest` stay
+  function-local as in the source). Source deleted;
+  `scripts/gates.sh` mypy entry removed in the same edit
+  (  `bash -n` clean; target entry already present, so deletion only).
+  As-left: 170 `test_*.py` files (fold −1 plus concurrent
+  `test_registry_director_split.py` landing mid-pass), merged file 10 tests, test count
+  net-zero at 4 preserved.
+- Max quota reached (ONE extraction skipped with cause + ONE fold);
+  the 036 remainder stays recorded, not taken.
+
+## Resolution (2026-10-01, extraction-skipped + one 088 fold)
+
+- Verdict: TRACKED — no 036-seam extraction this pass (quota filled
+  by the 081 skip-record + the 088 fold below); signal table above
+  stays current except the test-file count (169 as-left).
+- Files changed (owned scope only):
+  `tests/test_finalize_fastpath.py` (+147L fold banner/constants/
+  helpers/tests, 6→10 tests), deleted
+  `tests/test_final_blend_scale.py`, `scripts/gates.sh` (mypy-list
+  line: `test_final_blend_scale.py` entry removed).
+  Gate evidence: in-container `ruff check` + `ruff format --check`
+  + `mypy strict` clean on the merged file; merged solo 10/10
+  post-delete (10/10 pre-delete across both files — net-zero);
+  neighbors 28 passed (`test_issue_152_blend_probe_memo` +
+  `test_issue_152_wide_manual_join_proof` +
+  `test_supervisor_{proposal,prefetch,commit_types,tape}_helpers`);
+  `bash -n` clean on `gates.sh`. Full `gates.sh` not run (foreign
+  hunks in `supervisor.py`/`test_stage_a_telemetry.py` would color
+  it).
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: the fold
+  is mechanical (same assertions, one fewer file) under the existing
+  issue-088 recipe."
+  Residuals: supervisor commit methods, `media.py` workers/media
+  surface (open since batch 4), video-worker splits, registry
+  director family (082 residual), then test-file clusters per 088 —
+  each a future single-group pass.
+
+## Progress log (2026-10-01, 082 director note — tracker only, no 036-seam change)
+
+- The "registry director family (082 residual)" above has landed
+  under issue 082 (this pass, owned scope: new
+  `voyage/registry_director.py` 175L +
+  `tests/test_registry_director_split.py` 3 green,
+  `registry_records.py` 609→564L via 1 facade (24 names) + 7 move
+  comments + `Path`/`JsonValue` import deletion, now a pure facade
+  with zero family definitions; batch-15 MINILM decision: shared
+  pins move into `registry_director` as the single source for
+  both builders, recorded in both docstrings; per-file `ruff
+  check` + `ruff format --check` + `mypy strict` clean on all 3
+  touched files; 43 split/agreement + 89 neighbor tests green).
+  082 is therefore RESOLVED except the owner-held manifest-race
+  residual (recorded there, not attempted). No 036-owned
+  extraction this pass (quota filled by the one 082 family
+  split); signal table otherwise unchanged except
+  `registry_records.py` 609→564 (facade, done) plus new
+  `registry_director.py` 175 in the split index.

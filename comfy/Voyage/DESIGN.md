@@ -4330,6 +4330,7 @@ GPU-specific packages remain in workers.
 > As-built (batch-7-2026-09-30, issues 084/085): per-family split target — `voyage/registry_records.py` owns pins + `_record_*`/`_describe_*` builders (767L); `model_registry.py` keeps dataclasses + `MODEL_SPECS` assembly + download/verify/manifest core (1270L); future per-family `registry_{ltxv,causvid,qwen,audio,sfx,augment}.py` target recorded.
 > As-built (batch-14-2026-10-01, issue 082): `registry_ltxv.py` (84L) + `registry_audio.py` (105L) extracted move-verbatim + facade + agreement tests; remaining families: director triple (shared MINILM), causvid+WAN21, SFX triple.
 > As-built (batch-15-2026-10-01, issue 082): `registry_causvid.py` (121L) + `registry_sfx.py` (135L) extracted move-verbatim + facade + agreement tests; remaining family: director triple (shared MINILM coupling must be decided explicitly).
+> As-built (batch-16-2026-10-01, issue 082): `registry_director.py` closes the family set — film/realesrgan/inspector/ltxv/audio/causvid/sfx/director; `registry_records.py` now pure facade; manifest-race owner-held.
 
 For every model integration:
 
@@ -8119,3 +8120,11 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Record-only: 031/035/152 (no new DESIGN claims this batch).
 - 093 rm-ready (no new DESIGN claims; `git rm` pending approval).
 - Blocked: 166 (CPU-only; no new DESIGN claims this batch).
+
+## Batch 16 (2026-10-01)
+
+- Resolved: 082 (all 8 families split — film/realesrgan/inspector/ltxv/audio/causvid/sfx/director; MINILM moved as single source; `registry_records.py` now pure facade — see §84 batch-16 as-built).
+- Skip: 081 (dirty tree + nothing verbatim-movable; no DESIGN contract change, folded here only).
+- Fold: 088 (`final_blend_scale`→`finalize_fastpath`; no DESIGN contract change, folded here only).
+- Record-only: 031/035/152 (record-only re-probes; no new DESIGN claims this batch).
+- Records: 089/093/166 (no new DESIGN claims this batch).

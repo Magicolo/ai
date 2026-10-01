@@ -368,3 +368,64 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   023/083; worker-module map merge; deterministic-payload compat;
   legacy-migration threading; `run_id` legacy) — each a future
   single-group pass with its own agreement tests.
+
+## Progress log (2026-10-01, extraction-skipped pass — quota to 088 fold)
+
+- Pre-checks live: `wc -l voyage/supervisor.py` → 2666 at pass start
+  (+42 vs the 2624 tape-pass as-left — the delta is the foreign
+  take-joint compensation hunk, not this track); `git diff --name-only
+  -- voyage/supervisor.py` NON-EMPTY (foreign uncommitted hunks: media
+  imports `ABSORPTION_EPSILON_SECONDS`/`_take_joint_fade` at :55-58 +
+  slice-walk `piece_bounds`/`joint_fade` compensation at :1689-1769),
+  so the quiet-region rule FAILS — no supervisor edit attempted.
+  Concurrent tracks also hold foreign hunks in
+  `tests/test_stage_a_telemetry.py` (read-only, never touched),
+  `LTX2.md`, `AGENTS.md`, `DESIGN.md` — all left intact.
+- Extraction skipped — no block met the verbatim + zero-cross-ref
+  rule (re-verified via rg/sed, same ranking as batch 15):
+  - Routing (`audio_worker_module` :206 / `video_worker_module` :215
+    + `VIDEO_WORKER_MODULES` :125 / `STREAMING_VIDEO_BACKENDS` :132 /
+    `AUDIO_WORKER_MODULES` :140) is module-level and movable in
+    isolation, but it is issue 023's unification area — verified NOT
+    landed (`supervisor.py:132` still hand literal with internal uses
+    at :245/:1429/:2048/:2123; `backends.py:82` still reads "the
+    supervisor track owns the rewire, issue 023"). Untouched per all
+    prior passes' deferral.
+  - `_read_lock_holder` (:373) uses zero `self` in its body (verified
+    via sed — no `self.` lines), but it is an instance method with an
+    internal caller (`supervisor.py:342` from `_held_run_lock`) + 5
+    test call sites (`tests/test_supervisor_hardening.py:227-235`):
+    moving it rewrites every caller, so it is not verbatim-movable,
+    and the `_held_run_lock` call is a cross-reference outside its
+    block.
+  - `_stored_relative` (:404) has 2 internal callers (:1658, :2487) —
+    cross-references outside its block.
+  - `_checked_tape_path` (:417) reads `self._run_dir` (2 `self.`
+    uses) + has an internal caller (:2200) — stateful, not a pure
+    helper.
+  - Every other method (`_held_run_lock`, `_stage`, `_log_metric`,
+    `_pause/_stop_requested`, `_log_rejection`, `_segment_plan_info`,
+    `_write_state_preserving_control_plane`, commit/audio/cover
+    pipeline) reads `self._run_dir` / `self._log_metric` /
+    `self._config` / workers — stateful, not pure helpers.
+- Per the brief the pass quota went to ONE 088 fold instead (see 088
+  final-blend-scale entry): `tests/test_final_blend_scale.py` (4
+  tests) → `tests/test_finalize_fastpath.py` (6→10 tests), gates.sh
+  mypy entry moved in the same edit. No `supervisor.py` edit made.
+
+## Resolution (2026-10-01, extraction-skipped pass)
+
+- Verdict: RECORDED — no extraction this pass (dirty tree + nothing
+  cleanly movable); full god-module decomposition remains open.
+- Files changed: none under this issue (fold files live under 088).
+- DESIGN proposals: "No DESIGN text change proposed: this pass makes
+  no supervisor-seam change; the candidate ranking above
+  (routing-unification per 023 first, then stateful-helper
+  method-groups, never single stateful methods) stands for the next
+  quiet-tree pass."
+- Residuals: unchanged from the tape pass (proposal/prefetch/
+  commit-types/tape landed; commit pipeline methods vs lifecycle vs
+  audio-coverage; `sha256_file` shim; streaming-set derivation per
+  023/083; worker-module map merge; deterministic-payload compat;
+  legacy-migration threading; `run_id` legacy) — each a future
+  single-group pass with its own agreement tests.
