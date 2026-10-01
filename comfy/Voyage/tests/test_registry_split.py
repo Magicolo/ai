@@ -14,6 +14,7 @@ import voyage.registry_records as registry_records
 EXPECTED_SPEC_KEYS = (
     "director-qwen8b",
     "director-qwen4b-awq",
+    "director-qwen35-gguf",
     "inspector-qwen35",
     "audio-acestep",
     "sfx-mmaudio",
@@ -100,6 +101,13 @@ def test_spec_rows_point_at_record_builders() -> None:
     """MODEL_SPECS rows call the single-sourced builders (issue 082)."""
     for key, spec in model_registry.MODEL_SPECS.items():
         assert spec.name == key
+        if key == "director-qwen35-gguf":
+            # Sidecar-track row (DESIGN §140 llama entry): pins + builders
+            # live in model_registry until the family-module move to
+            # registry_director lands — assert identity at that home.
+            assert spec.record_builder is model_registry._record_director_gguf
+            assert spec.success_message is model_registry._describe_director_gguf
+            continue
         assert spec.record_builder is getattr(registry_records, f"_record_{spec_key(key)}")
         assert spec.success_message is getattr(registry_records, f"_describe_{spec_key(key)}")
 

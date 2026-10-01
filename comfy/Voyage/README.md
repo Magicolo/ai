@@ -43,6 +43,7 @@ Fake backends need nothing. Real backends need one download each
 ./scripts/run.sh models download ltx23          # ~20 GB LTX-2.3 Q3 + TE + VAEs (joint A/V)
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
 ./scripts/run.sh models download director-qwen4b-awq  # ~2.6 GB GPU director decider
+./scripts/run.sh models download director-qwen35-gguf # ~3 GB llama-server sidecar GGUF
 ./scripts/run.sh models download audio-acestep    # ACE-Step checkpoints
 ./scripts/run.sh models download sfx-mmaudio      # ~13 GB MMAudio SFX (CC-BY-NC-4.0)
 ./scripts/run.sh models download film             # ~66 MB FILM interpolation (MIT + Apache-2.0)

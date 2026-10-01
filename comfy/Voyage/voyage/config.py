@@ -506,14 +506,31 @@ def parse_min_resolution(raw: str) -> tuple[int, int]:
     return (width, height)
 
 
+DirectorBackendName = Literal["qwen", "deterministic", "llama"]
+"""Director backend vocabulary (the issue-022 Literal-vocabulary pattern):
+the in-process Qwen decider, the weight-free deterministic fallback, and
+the llama-server sidecar (DESIGN §140 llama entry — the supervisor spawns
+the loopback sidecar and injects its endpoint; the worker routes on
+endpoint presence, so the wire backend stays `qwen`)."""
+
+DEFAULT_LLAMA_ENDPOINT = "http://127.0.0.1:8080"
+"""Fixed loopback sidecar base URL (contract — isolated to containers)."""
+
+
 class DirectorConfig(BaseModel):
-    backend: str = "qwen"
+    backend: DirectorBackendName = "qwen"
     model_id: str = "Qwen/Qwen3-8B"
     # Decider placement: the unified worker image runs the Qwen decider on
     # cuda:1 (second GPU) via a 4-bit AWQ model; "cpu" keeps the legacy bf16
     # path (explicit opt-out for single-GPU / CI boxes). The worker falls
     # back to CPU with a loud warning when the device is absent.
     device: str = "cuda:1"
+    # llama-server sidecar base URL (DESIGN §140 llama entry): the
+    # supervisor spawns the loopback sidecar when backend is "llama" and
+    # injects this string into the director init + every decide payload
+    # (`llama_endpoint` key — the worker's opt-in switch). Fixed loopback
+    # by contract (isolated to containers); other backends never read it.
+    llama_endpoint: str = DEFAULT_LLAMA_ENDPOINT
     temperature: float = 0.7
     # Qwen worker: non-thinking mode (no <think> parsing), JSON-only output.
     enable_thinking: bool = False
@@ -533,6 +550,17 @@ class DirectorConfig(BaseModel):
         # the one-line predicate is deliberately duplicated, not shared.
         if value != "cpu" and not value.startswith("cuda"):
             raise ValueError(f"director device must be 'cpu' or 'cuda[:N]' (got {value!r})")
+        return value
+
+    @field_validator("llama_endpoint")
+    @classmethod
+    def _loopback_http(cls, value: str) -> str:
+        # Fail fast at the CLI/config layer: without this, a typo survives
+        # into TOML, ensures the GGUF, then dies deep in the worker's HTTP
+        # client. Scheme check only — the fixed loopback default above is
+        # the contract, but the shape (not the host) is what config owns.
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"llama_endpoint must be an http(s) URL (got {value!r})")
         return value
 
 
@@ -808,6 +836,7 @@ use_model_pass = false
 backend = "{director_backend}"
 model_id = "Qwen/Qwen3-8B"
 device = "{director_device}"
+llama_endpoint = "{DEFAULT_LLAMA_ENDPOINT}"
 temperature = 0.7
 enable_thinking = false
 max_new_tokens = 1024

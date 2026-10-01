@@ -24,6 +24,7 @@ from voyage.cli_models import (
     _download_audio,
     _download_director,
     _download_director_awq,
+    _download_director_gguf,
     _download_film,
     _download_inspector,
     _download_realesrgan,
@@ -102,6 +103,7 @@ from voyage.model_registry import (
     download_audio_models,
     download_causvid_models,
     download_director_awq_models,
+    download_director_gguf_models,
     download_director_models,
     download_film_models,
     download_inspector_models,
@@ -113,6 +115,7 @@ from voyage.model_registry import (
     verify_audio_models,
     verify_causvid_models,
     verify_director_awq_models,
+    verify_director_gguf_models,
     verify_director_models,
     verify_film_models,
     verify_inspector_models,
@@ -176,6 +179,7 @@ __all__ = [
     "_download_audio",
     "_download_director",
     "_download_director_awq",
+    "_download_director_gguf",
     "_download_film",
     "_download_inspector",
     "_download_realesrgan",
@@ -219,6 +223,7 @@ __all__ = [
     "download_audio_models",
     "download_causvid_models",
     "download_director_awq_models",
+    "download_director_gguf_models",
     "download_director_models",
     "download_film_models",
     "download_inspector_models",
@@ -238,6 +243,7 @@ __all__ = [
     "verify_audio_models",
     "verify_causvid_models",
     "verify_director_awq_models",
+    "verify_director_gguf_models",
     "verify_director_models",
     "verify_film_models",
     "verify_inspector_models",
@@ -295,10 +301,11 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     init.add_argument(
         "--director",
-        choices=("qwen", "deterministic"),
+        choices=("qwen", "deterministic", "llama"),
         default="qwen",
         help="director backend written into the run config "
-        "(default qwen; deterministic disables the LLM)",
+        "(default qwen; deterministic disables the LLM; "
+        "llama = loopback llama-server sidecar)",
     )
     init.add_argument(
         "--director-device",
@@ -333,6 +340,7 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
             "ltx25",
             "ltx23",
             "director-qwen8b",
+            "director-qwen35-gguf",
             "audio-acestep",
             "sfx-mmaudio",
             "film",
@@ -499,7 +507,7 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
     run.add_argument(
         "--director",
         default=None,
-        choices=("qwen", "deterministic"),
+        choices=("qwen", "deterministic", "llama"),
         help="override the director backend",
     )
     _add_generation_overrides(run)
@@ -561,7 +569,7 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     gen.add_argument(
         "--director",
         default="qwen",
-        choices=("qwen", "deterministic"),
+        choices=("qwen", "deterministic", "llama"),
         help="director backend (default qwen)",
     )
     _add_generation_overrides(gen)

@@ -8075,6 +8075,29 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   attribution). Proof: `tests/test_stage_c.py` (11, TDD red-first);
   ruff + format + mypy strict clean on all 5 touched files; full pytest
   green except foreign in-flight media-split files (untouched per §9).
+- Llama-director stack done 2026-10-01 (options 2/3/4a, two parallel
+  tracks, uncommitted): Track A — `workers/director.py` gains PLD
+  (`prompt_lookup_num_tokens=10` with TypeError-fallback since GPU
+  acceptance is unproven), interim strict JSON-coercion 4a (`outlines`
+  absent in the test container, so true constrained decoding waits on
+  an image change; replacement point documented), and the llama HTTP
+  client (`_post_llama_chat` seam: `response_format` json_schema
+  `evolution_decision` + thinking-off, `usage` token counts, all
+  failures degrade via the existing §51 chain); `tests/
+  test_director_assisted.py` (16, TDD red-first). Track B — sidecar
+  `voyage/llama_server.py` (start/stop/readiness, verified-real flags
+  only, no shell), `director-qwen35-gguf` registry pin (`bartowski/
+  Qwen_Qwen3.5-4B-GGUF` rev `4168f45`, file
+  `Qwen_Qwen3.5-4B-Q4_K_M.gguf` — the `Qwen_` prefix is load-bearing),
+  pinned nightly b11146 CUDA `llama-server` in `Dockerfile.video`
+  (stdlib fetch + sha gate, `--version` smoke), `llama` backend +
+  `llama_endpoint` plumbing (`models_ensure` pick; wire backend stays
+  `qwen` so the client routes correctly; readiness failure aborts
+  loudly, never falls back). Integration: 59 + 63 scoped green, ruff +
+  format + mypy strict clean, httpx 0.28.1 confirmed in the director
+  venv; full suite 1880 passed (1 pre-existing citation gate).
+  Open: image rebuild + live GPU A/B (needs GPU signal), then commit
+  (needs per-commit approval).
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 

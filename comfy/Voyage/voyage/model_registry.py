@@ -358,6 +358,13 @@ __all__ = [
     "QWEN35_LICENSE_URL",
     "QWEN35_MIN_BYTES",
     "QWEN35_SUBDIR",
+    "QWEN35_GGUF_FILE",
+    "QWEN35_GGUF_HF_REPO",
+    "QWEN35_GGUF_HF_REVISION",
+    "QWEN35_GGUF_LICENSE",
+    "QWEN35_GGUF_LICENSE_URL",
+    "QWEN35_GGUF_MIN_BYTES",
+    "QWEN35_GGUF_SUBDIR",
     "QWEN4B_AWQ_ALLOW",
     "QWEN4B_AWQ_HF_REPO",
     "QWEN4B_AWQ_HF_REVISION",
@@ -401,6 +408,7 @@ __all__ = [
     "_describe_causvid",
     "_describe_director",
     "_describe_director_awq",
+    "_describe_director_gguf",
     "_describe_film",
     "_describe_inspector",
     "_describe_ltx23",
@@ -414,6 +422,7 @@ __all__ = [
     "_record_causvid",
     "_record_director",
     "_record_director_awq",
+    "_record_director_gguf",
     "_record_film",
     "_record_inspector",
     "_record_ltx23",
@@ -427,6 +436,7 @@ __all__ = [
     "download_audio_models",
     "download_causvid_models",
     "download_director_awq_models",
+    "download_director_gguf_models",
     "download_director_models",
     "download_film_models",
     "download_inspector_models",
@@ -442,6 +452,7 @@ __all__ = [
     "verify_checkpoint_against_manifest",
     "verify_checkpoint_sha256",
     "verify_director_awq_models",
+    "verify_director_gguf_models",
     "verify_director_models",
     "verify_film_models",
     "verify_inspector_models",
@@ -529,6 +540,61 @@ def _merge_manifest_record(
     record[key] = value
     manifest_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record
+
+
+# llama-server sidecar weights (DESIGN §140 llama entry). Qwen3.5-4B
+# imatrix GGUF by bartowski (quant of Qwen/Qwen3.5-4B, Apache-2.0,
+# ungated): the Q4_K_M file serves the loopback sidecar the supervisor
+# spawns when the director backend is `llama` (`voyage/llama_server.py`).
+# Provenance (verified 2026-10-01 via the Hub API, no download): repo
+# bartowski/Qwen_Qwen3.5-4B-GGUF at HEAD 4168f45a16a1290d65a4ec0fa312ae917a4c15d6
+# (2026-05-19). The sibling list is authoritative for the filename — the
+# file carries the `Qwen_` prefix (`Qwen_Qwen3.5-4B-Q4_K_M.gguf`, ~3.01 GiB
+# per the model card), so the unprefixed spelling some docs show does NOT
+# exist. Floor holds ~17% headroom below the card size. No EXPECTED ingest
+# hash: the Hub publishes no per-file sha256 (same class as the AWQ row) —
+# `download_model` records the measured sha into the manifest instead, and
+# `verify_model` checks against it (`manifest_checkpoint` on the row).
+# Placement note: pins + builders live here (sidecar-track scope) until
+# the family-module move to `voyage/registry_director.py` lands.
+QWEN35_GGUF_HF_REPO = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+
+QWEN35_GGUF_HF_REVISION = "4168f45a16a1290d65a4ec0fa312ae917a4c15d6"
+
+QWEN35_GGUF_SUBDIR = "Qwen3.5-4B-GGUF"
+
+QWEN35_GGUF_FILE = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+
+QWEN35_GGUF_MIN_BYTES = 2_500_000_000
+
+QWEN35_GGUF_LICENSE = "Apache-2.0"
+
+QWEN35_GGUF_LICENSE_URL = "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF"
+
+
+def _record_director_gguf(models_dir: Path) -> dict[str, JsonValue]:
+    """Manifest value for the llama-server sidecar GGUF (DESIGN §140)."""
+    weights_path = models_dir / QWEN35_GGUF_SUBDIR / QWEN35_GGUF_FILE
+    relative_path = f"{QWEN35_GGUF_SUBDIR}/{QWEN35_GGUF_FILE}"
+    return {
+        "repo": QWEN35_GGUF_HF_REPO,
+        "revision": QWEN35_GGUF_HF_REVISION,
+        "model_dir": str(models_dir / QWEN35_GGUF_SUBDIR),
+        "checkpoint_bytes": weights_path.stat().st_size,
+        "files": [QWEN35_GGUF_FILE],
+        "license": QWEN35_GGUF_LICENSE,
+        "license_url": QWEN35_GGUF_LICENSE_URL,
+        # Recorded sha (071): verify_model checks the checkpoint against it.
+        "checkpoint_sha256": sha256_file(weights_path),
+        "checkpoint_file": relative_path,
+    }
+
+
+def _describe_director_gguf(models_dir: Path) -> str:
+    """Exact OK string for the sidecar GGUF (byte-stable)."""
+    weights_path = models_dir / QWEN35_GGUF_SUBDIR / QWEN35_GGUF_FILE
+    size_gib = weights_path.stat().st_size / 1024**3
+    return f"director-qwen35-gguf OK (Qwen3.5-4B Q4_K_M {size_gib:.1f} GiB)"
 
 
 # Table-driven registry (issue 026): the six download/verify pairs differ
@@ -675,6 +741,24 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             RequiredFile(f"{MINILM_SUBDIR}/vocab.txt", 0),
         ),
         success_message=_describe_director_awq,
+    ),
+    "director-qwen35-gguf": ModelSpec(
+        name="director-qwen35-gguf",
+        manifest_key="director-gguf",
+        snapshots=(),
+        files=(
+            FileSpec(
+                QWEN35_GGUF_HF_REPO,
+                QWEN35_GGUF_HF_REVISION,
+                QWEN35_GGUF_FILE,
+                "",
+                QWEN35_GGUF_SUBDIR,
+            ),
+        ),
+        record_builder=_record_director_gguf,
+        checks=(RequiredFile(f"{QWEN35_GGUF_SUBDIR}/{QWEN35_GGUF_FILE}", QWEN35_GGUF_MIN_BYTES),),
+        success_message=_describe_director_gguf,
+        manifest_checkpoint=f"{QWEN35_GGUF_SUBDIR}/{QWEN35_GGUF_FILE}",
     ),
     "inspector-qwen35": ModelSpec(
         name="inspector-qwen35",
@@ -1294,6 +1378,22 @@ def download_director_awq_models(models_dir: Path) -> dict[str, JsonValue]:
 def verify_director_awq_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the GPU decider stack."""
     return verify_model(models_dir, "director-qwen4b-awq")
+
+
+def download_director_gguf_models(models_dir: Path) -> dict[str, JsonValue]:
+    """Explicit download of the llama-server sidecar GGUF (DESIGN §140).
+
+    Single Q4_K_M file (~3 GiB) into <models>/Qwen3.5-4B-GGUF/. Merges
+    under the `director-gguf` manifest key (never the `director` /
+    `director-awq` keys the other decider stacks own — overwrite
+    semantics would clobber them).
+    """
+    return download_model(models_dir, "director-qwen35-gguf")
+
+
+def verify_director_gguf_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the sidecar GGUF."""
+    return verify_model(models_dir, "director-qwen35-gguf")
 
 
 def download_inspector_models(models_dir: Path) -> dict[str, JsonValue]:

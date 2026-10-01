@@ -102,6 +102,18 @@ Default placement is cuda:1 (the second GPU) via `VOYAGE_DIRECTOR_PYTHON`;
 `--director-device cpu` opts back into the Qwen3-8B CPU path above.
 Full row (subdir, allow-list, size floor): `MODEL_SPECS["director-qwen4b-awq"]`.
 
+## Director — Qwen3.5-4B GGUF sidecar (`models download director-qwen35-gguf`, ~3 GB)
+
+| Artifact | Repo | Revision |
+|----------|------|----------|
+| Q4_K_M sidecar GGUF | [bartowski/Qwen_Qwen3.5-4B-GGUF](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF) (`Qwen_Qwen3.5-4B-Q4_K_M.gguf` — the sibling list is authoritative; the unprefixed spelling does not exist) | `4168f45a16a1290d65a4ec0fa312ae917a4c15d6` |
+
+Apache-2.0. Served by the loopback `llama-server` sidecar when the
+director backend is `llama` (DESIGN §140 llama entry); `voyage generate`
+ensures this file instead of the AWQ stack. Same /models resolution as
+the director pair above (`Qwen3.5-4B-GGUF/`).
+Full row (file, size floor): `MODEL_SPECS["director-qwen35-gguf"]`.
+
 ## Inspector — Qwen3.5-9B VLM (`models download inspector-qwen35`, ~19 GB, optional)
 
 | Artifact | Repo | Revision |

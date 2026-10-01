@@ -28,7 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from voyage import paths
+from voyage import llama_server, paths
 from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
@@ -149,6 +149,24 @@ from voyage.vision.metrics import (
 # Backend routing lives in `voyage.supervisor_routing`
 # (issue 081; re-exported at the top so existing importers keep working).
 
+
+def _director_init_payload(config: ProjectConfig) -> dict[str, Any]:
+    """Director worker init payload: models_dir + device, plus the sidecar
+    endpoint when the llama backend is active (DESIGN §140 llama entry).
+
+    The worker's `handle_init` records `llama_endpoint` (str arms the HTTP
+    branch, None/absent keeps the AWQ path), so the key is sent only for
+    the llama backend — every other backend's payload stays byte-identical.
+    """
+    payload: dict[str, Any] = {
+        "models_dir": config.video.models_dir,
+        "device": config.director.device,
+    }
+    if config.director.backend == "llama":
+        payload["llama_endpoint"] = config.director.llama_endpoint
+    return payload
+
+
 #: Seconds a best-effort gauge probe may take per worker (issue 017).
 #: Gauges are observability, not correctness — at 5 s the three health
 #: probes add at most ~15 s per commit instead of ~30 min at the 600 s
@@ -261,16 +279,17 @@ class Supervisor:
             "voyage.workers.director",
             run_dir,
             self._logs / "director-worker.log",
-            init_payload={
-                "models_dir": config.video.models_dir,
-                "device": config.director.device,
-            },
+            init_payload=_director_init_payload(config),
             timeout=config.voyage.rpc_timeout_seconds,
             # Unified image: the director runs in its own CUDA venv so the
             # Qwen decider serves from the second GPU; unset (slim image,
             # tests) falls back to the supervisor interpreter.
             executable=os.environ.get("VOYAGE_DIRECTOR_PYTHON"),
         )
+        # Loopback llama-server sidecar (DESIGN §140 llama entry): process
+        # handle when the llama backend is active, else None forever — the
+        # AWQ path never touches it.
+        self._llama_sidecar: llama_server.LlamaSidecar | None = None
         self._workers_running = False
         self._stop_flag = False
         # Parallel director prefetch (§20): while segment N renders video
@@ -444,6 +463,31 @@ class Supervisor:
         os.kill(pid, signal.SIGKILL)
         return pid
 
+    def _llama_backend_active(self) -> bool:
+        """Whether this run drives the director through the sidecar."""
+        return self._config.director.backend == "llama"
+
+    def _start_llama_sidecar(self) -> None:
+        """Start the loopback sidecar before the director initializes.
+
+        No-op unless the llama backend is active (or already started).
+        A readiness failure raises `FatalWorkerError`: the run aborts
+        instead of silently falling back to AWQ, which would corrupt the
+        experiment with mixed-backend directives.
+        """
+        if not self._llama_backend_active() or self._llama_sidecar is not None:
+            return
+        try:
+            port = llama_server.port_for_endpoint(self._config.director.llama_endpoint)
+            self._llama_sidecar = llama_server.start(self._config.video.models_dir, port=port)
+        except llama_server.LlamaServerError as exc:
+            raise FatalWorkerError(f"llama sidecar failed to start: {exc}") from exc
+
+    def _stop_llama_sidecar(self) -> None:
+        """Stop the sidecar if running (shutdown unwind is unconditional)."""
+        sidecar, self._llama_sidecar = self._llama_sidecar, None
+        llama_server.stop(sidecar)
+
     def start_workers(self) -> None:
         """Start video/audio/director workers (issue 012).
 
@@ -457,9 +501,14 @@ class Supervisor:
         started: list[SubprocessWorker] = []
         try:
             for worker in (self._video, self._audio, self._director):
+                if worker is self._director:
+                    # Sidecar readiness gates the director init: the worker
+                    # must never initialize against a dead server.
+                    self._start_llama_sidecar()
                 worker.start()
                 started.append(worker)
         except Exception:
+            self._stop_llama_sidecar()
             for worker in reversed(started):
                 try:
                     worker.stop()
@@ -473,7 +522,13 @@ class Supervisor:
     def stop_workers(self) -> None:
         self._video.stop()
         self._audio.stop()
-        self._director.stop()
+        try:
+            self._director.stop()
+        finally:
+            # The sidecar must never outlive the director, even when the
+            # director stop itself fails — otherwise the next run inherits
+            # a stale server on the fixed port.
+            self._stop_llama_sidecar()
         self._workers_running = False
         executor, self._prefetch_executor = self._prefetch_executor, None
         future, self._prefetch_future = self._prefetch_future, None
@@ -1160,6 +1215,16 @@ class Supervisor:
                 "retry_feedback": retry_feedback,
             }
         )
+        if config.director.backend == "llama":
+            # Sidecar decide wiring (DESIGN §140 llama entry): the worker
+            # routes only backend == "qwen" into `_qwen_decide`, where
+            # endpoint presence selects the sidecar branch — so the wire
+            # keeps "qwen" and `llama` stays a supervisor-side selector
+            # (sidecar lifecycle + endpoint injection). Sending
+            # backend="llama" would take the deterministic branch and
+            # silently drop the LLM, so the mapping is explicit here.
+            payload["backend"] = "qwen"
+            payload["llama_endpoint"] = config.director.llama_endpoint
         return payload
 
     def _log_rejection(

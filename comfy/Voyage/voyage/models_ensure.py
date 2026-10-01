@@ -8,7 +8,8 @@ retry/circuit-breaker after minutes of GPU work). This module derives the
 exact stacks the effective run config needs — the video backend's own spec
 plus the FILM/Real-ESRGAN finalize augmentation on CUDA (unless
 `augment_enabled=False`), its paired ACE-Step audio, the qwen director
-unless deterministic, MMAudio SFX only when the finalize pass will run,
+unless deterministic (or the GGUF sidecar file for the llama backend),
+MMAudio SFX only when the finalize pass will run,
 the VLM inspector only when enabled — verifies each via `model_registry`,
 and downloads the missing ones in parallel with per-model console
 progress. Joint-audio video backends (`ltx25`, `ltx23`) render their own
@@ -146,6 +147,16 @@ def required_specs(
         required.append(
             RequiredModel(
                 spec=director_spec,
+                models_dir=_resolve_dir(models_root, config.video.models_dir),
+            )
+        )
+    elif config.director.backend == "llama":
+        # llama-server sidecar (DESIGN §140): the single Q4_K_M GGUF the
+        # supervisor serves on loopback — never the AWQ stack alongside
+        # it (two decider stacks would double the ensure for no reason).
+        required.append(
+            RequiredModel(
+                spec="director-qwen35-gguf",
                 models_dir=_resolve_dir(models_root, config.video.models_dir),
             )
         )

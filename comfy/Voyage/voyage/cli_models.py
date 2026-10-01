@@ -80,6 +80,23 @@ def _download_director_awq(models_dir: Path) -> int:
     return 0
 
 
+def _download_director_gguf(models_dir: Path) -> int:
+    """Download the llama-server sidecar GGUF (DESIGN §140 llama entry)."""
+    print(f"downloading director-qwen35-gguf into {models_dir} ...")
+    from voyage.cli import download_director_gguf_models  # seam dispatch, see issue 080
+
+    try:
+        record = download_director_gguf_models(models_dir)
+    except Exception as exc:
+        print(f"download failed: {exc}", file=sys.stderr)
+        return 1
+    director = record["director-gguf"]
+    assert isinstance(director, dict)
+    print(f"qwen3.5-4b Q4_K_M: {director.get('checkpoint_bytes')} bytes")
+    print(f"manifest: {models_dir / 'manifest.json'}")
+    return 0
+
+
 def _download_audio(models_dir: Path) -> int:
     """Download the Phase 4 music stack (DESIGN §§6, 37, 85)."""
     print(f"downloading audio-acestep into {models_dir} ...")
@@ -179,6 +196,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         verify_audio_models,
         verify_causvid_models,
         verify_director_awq_models,
+        verify_director_gguf_models,
         verify_director_models,
         verify_film_models,
         verify_inspector_models,
@@ -200,7 +218,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("sfx: fake (built-in) | sfx-mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")
         print(
             "director: deterministic (built-in) | director-qwen8b (Qwen3-8B + MiniLM) "
-            "| director-qwen4b-awq (Qwen3-4B-AWQ GPU decider)"
+            "| director-qwen4b-awq (Qwen3-4B-AWQ GPU decider) "
+            "| director-qwen35-gguf (Qwen3.5-4B Q4_K_M llama-server sidecar)"
         )
         print("inspector: skipped (built-in) | inspector-qwen35 (Qwen3.5-9B VLM, experimental)")
         print(
@@ -221,6 +240,8 @@ def cmd_models(args: argparse.Namespace) -> int:
         print(dmessage)
         dawq_ok, dawq_message = verify_director_awq_models(_models_dir(args))
         print(dawq_message)
+        dgguf_ok, dgguf_message = verify_director_gguf_models(_models_dir(args))
+        print(dgguf_message)
         aok, amessage = verify_audio_models(_models_dir(args))
         print(amessage)
         sok, smessage = verify_sfx_models(_models_dir(args))
@@ -239,6 +260,7 @@ def cmd_models(args: argparse.Namespace) -> int:
             and l23ok
             and dok
             and dawq_ok
+            and dgguf_ok
             and aok
             and sok
             and fok
@@ -304,6 +326,8 @@ def cmd_models(args: argparse.Namespace) -> int:
             return _download_director(_models_dir(args))
         if target == "director-qwen4b-awq":
             return _download_director_awq(_models_dir(args))
+        if target == "director-qwen35-gguf":
+            return _download_director_gguf(_models_dir(args))
         if target == "audio-acestep":
             return _download_audio(_models_dir(args))
         if target == "sfx-mmaudio":
@@ -323,6 +347,7 @@ def cmd_models(args: argparse.Namespace) -> int:
                 "ltx23",
                 "director-qwen8b",
                 "director-qwen4b-awq",
+                "director-qwen35-gguf",
                 "audio-acestep",
                 "sfx-mmaudio",
                 "film",

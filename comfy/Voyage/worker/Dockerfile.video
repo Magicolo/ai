@@ -202,6 +202,49 @@ RUN python3.10 -m venv /opt/venvs/director \
         "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
     && /opt/venvs/director/bin/pip install transformers==5.17.0
 
+# llama-server sidecar (Qwen director, DESIGN §140 llama entry): prebuilt
+# CUDA 12.8 binaries for the loopback sidecar the supervisor spawns when
+# the director backend is `llama` (voyage/llama_server.py). Pinned nightly
+# b11146 (the v0.5.0 nightly, 2026-09-23, 168920581 bytes): the
+# ubuntu-cuda-12.8-x64 asset matches this image's CUDA 12.8 base, and the
+# base image already ships cudart 12.8, so only the main tarball is needed
+# (fallback from the same build, if cudart ever goes missing:
+# cudart-llama-b11146-bin-ubuntu-cuda-12.8-x64.tar.gz, 594373356 bytes,
+# sha256 1466daea60aad1144819e151b2bae19d54556cf1da6c129c4f55a5ded2637c25).
+# No curl in this image and apt pins are frozen above, so the fetch uses
+# stdlib python3 (urllib + hashlib) with a hard sha256 gate instead of an
+# unpinned apt package. Layout inside the tarball is build/bin/llama-server
+# (+ .so peers via $ORIGIN rpath — the tree stays intact at /opt/llama.cpp
+# with a symlink, never a bare-binary copy that would orphan the libs).
+# The `test -x` asserts the layout (fail loud on upstream repackaging);
+# `--version` is the CPU-only smoke gate (same class as `voyage doctor`
+# below — prints without touching the GPU).
+# Re-pin procedure: take the ubuntu-cuda-12.8-x64 asset from the newest
+# nightly, update the URL + sha below, rebuild, note in docs/INSTALL.md.
+RUN set -eux; \
+    python3 <<'PYEOF'
+import hashlib
+import tarfile
+import urllib.request
+url = "https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-ubuntu-cuda-12.8-x64.tar.gz"
+expected_sha256 = "c2ab9e19838513ff69d1af8d999ad717dd3c7ee4714ac04c7ed5ab9077c50e4e"
+archive_path = "/tmp/llama-cuda.tar.gz"
+urllib.request.urlretrieve(url, archive_path)
+digest = hashlib.sha256()
+with open(archive_path, "rb") as archive:
+    for chunk in iter(lambda: archive.read(1048576), b""):
+        digest.update(chunk)
+actual_sha256 = digest.hexdigest()
+if actual_sha256 != expected_sha256:
+    raise SystemExit(f"llama.cpp tarball sha mismatch: {actual_sha256}")
+with tarfile.open(archive_path) as archive:
+    archive.extractall("/opt/llama.cpp")
+PYEOF
+    test -x /opt/llama.cpp/build/bin/llama-server; \
+    ln -sfn /opt/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server; \
+    rm -f /tmp/llama-cuda.tar.gz; \
+    llama-server --version
+
 # Run as the invoking host user (issue 053 follow-up): the supervisor and
 # its worker subprocesses share bind mounts with the host ($PWD:/app,
 # /tmp:/tmp, $models:/models), so a root container leaves root-owned
@@ -215,7 +258,7 @@ RUN set -eux; \
   getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
   getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
-  chown -R "${UID}:${GID}" /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs; \
+   chown -R "${UID}:${GID}" /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs /opt/llama.cpp; \
   chmod 755 /opt/causvid/wan_models
 # Least-privilege link farm (issue 075): the shim target above is
 # owner-writable (the chown line) so the pinned `--user` worker can still

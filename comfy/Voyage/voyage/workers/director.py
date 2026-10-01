@@ -75,6 +75,37 @@ DEFAULT_CUDA_MODEL_ID = "Qwen/Qwen3-4B-AWQ"
 GPU (OOM at materialization, 5.49GiB > 5.6GB), while the 4B-AWQ serves at
 2.8GiB peak with valid first-attempt JSON (probe 2026-09-30)."""
 
+PROMPT_LOOKUP_NUM_TOKENS = 10
+"""Draft tokens for prompt-lookup decoding (option 2, DESIGN §§8-9).
+
+Lookahead-style speculative path on the resident AWQ stack (~23s per
+directive today): the model verifies cheap n-gram draft tokens instead of
+autoregressing every step. 10 matches the upstream prompt-lookup default
+order; a stack that rejects the kwarg falls back to plain generate (§51).
+"""
+
+LLAMA_REQUEST_TIMEOUT_SECONDS = 60.0
+"""HTTP timeout for one sidecar chat completion (option 3 client, §51).
+
+Why 60: the in-process AWQ decider answers in ~23s, so the sidecar serves
+the same budget class — 60s leaves headroom for queueing without hanging
+a segment commit behind a dead server (the §51 chain retries, then the
+deterministic fallback renders).
+"""
+
+LLAMA_COMPLETIONS_PATH = "/v1/chat/completions"
+"""OpenAI-compatible chat path the sidecar serves (option 3 contract)."""
+
+LLAMA_DECISION_SCHEMA_NAME = "evolution_decision"
+"""`response_format` schema name pinned with the sidecar track (contract)."""
+
+LLAMA_ENDPOINT_KEY = "llama_endpoint"
+"""Decide/init payload field carrying the sidecar base URL (contract).
+
+`None`/absent/empty means the current in-process AWQ path, untouched —
+the sidecar is opt-in per payload, never a config flip with blast radius.
+"""
+
 
 def _normalize_device(device: object) -> str:
     """Validate a decider placement string (fail fast, never guess)."""
@@ -414,6 +445,129 @@ def _extract_json(text: str) -> dict[str, Any]:
     return parsed
 
 
+def _coerce_decision_json(raw_text: str) -> str:
+    """Coerce chatty model output to canonical parseable JSON (option 4a).
+
+    Interim for the Outlines constrained-decode path (DESIGN §§8-9): the
+    `outlines` package is absent from every voyage image (probed via
+    `find_spec` in the slim container 2026-10-01 — do NOT pip install it;
+    container hygiene §10/§11), so true logit-level constrained decoding
+    cannot run yet. Until the director image gains `outlines`, this strict
+    wrapper is the guarantee: extract the first JSON object (fences and
+    prose tolerated) and re-dump it canonically, so downstream always gets
+    parseable JSON first-try or a `ValueError` the §51 chain retries (then
+    deterministic fallback — never corrupt state). When `outlines` lands,
+    replace this body with an `OutlinesLogitsProcessor` built from
+    `EvolutionDecision.model_json_schema()` (the schema helper the llama
+    branch already wires below) and keep this signature and contract.
+    Token counts are NOT estimated here: both live paths report exact
+    counts (AWQ tensor widths, sidecar `usage` block), so no estimation
+    layer exists to drift.
+    """
+    parsed = _extract_json(raw_text)
+    return json.dumps(parsed, sort_keys=True)
+
+
+def _non_negative_int(value: object) -> int:
+    """Coerce a sidecar `usage` count to a safe int (pure; garbage is 0)."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value >= 0:
+        return int(value)
+    return 0
+
+
+def _build_llama_request_body(
+    user_message: str, temperature: float, max_new_tokens: int
+) -> dict[str, Any]:
+    """Build the exact sidecar chat body (option 3 client, pure).
+
+    Contract pinned with the sidecar track: system prompt + user message,
+    temperature/max_tokens passthrough, a strict `evolution_decision`
+    JSON-schema response format sourced from
+    `EvolutionDecision.model_json_schema()`, and thinking disabled.
+    """
+    return {
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_new_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": LLAMA_DECISION_SCHEMA_NAME,
+                "strict": True,
+                "schema": EvolutionDecision.model_json_schema(),
+            },
+        },
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _post_llama_chat(request_url: str, request_body: dict[str, Any]) -> dict[str, Any]:
+    """POST one chat completion to the sidecar (module-level test seam).
+
+    Why a seam: tests stub this function with a fake transport — no live
+    server, no network in the suite. `httpx` imports lazily (the slim
+    gate image has no httpx; the director venv serves it — a module-scope
+    import would break every slim import of this worker). Explicit timeout,
+    no streaming. Non-200 and misshapen replies raise `RuntimeError` /
+    `ValueError`; transport errors (e.g. `ConnectionError`) propagate
+    unchanged — all are `Exception` subclasses the existing §51 chain
+    already catches, so this branch degrades exactly like the AWQ path
+    (retry, then deterministic fallback) and never raises new types
+    outward past `_qwen_decide`.
+    """
+    httpx_client: Any = importlib.import_module("httpx")
+    response: Any = httpx_client.post(
+        request_url, json=request_body, timeout=LLAMA_REQUEST_TIMEOUT_SECONDS
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"llama-server {request_url} answered status {response.status_code}")
+    parsed: Any = response.json()
+    if not isinstance(parsed, dict):
+        raise ValueError(f"llama-server {request_url} answered a non-object body")
+    return cast("dict[str, Any]", parsed)
+
+
+def _qwen_generate_llama(
+    llama_endpoint: str, user_message: str, temperature: float, max_new_tokens: int
+) -> tuple[str, int, int]:
+    """Serve one completion from the sidecar, keeping the (text, tokens) contract.
+
+    The sidecar guarantees schema-shaped JSON; the reply still runs
+    through `_extract_json` belt-and-braces (a proxy could wrap content)
+    and the option-4a coercion, so both paths return canonical JSON.
+    Counts come from the response `usage` block (0s when absent — the
+    supervisor tolerates zero counts, and exact-when-present beats
+    tokenizer estimation that could drift from the server's counting).
+    """
+    request_url = llama_endpoint.rstrip("/") + LLAMA_COMPLETIONS_PATH
+    request_body = _build_llama_request_body(user_message, temperature, max_new_tokens)
+    parsed = _post_llama_chat(request_url, request_body)
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError(f"llama-server {request_url} answered without choices")
+    first_choice = choices[0]
+    message = first_choice.get("message") if isinstance(first_choice, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"llama-server {request_url} answered without message content")
+    text = _coerce_decision_json(content)
+    usage = parsed.get("usage")
+    if not isinstance(usage, dict):
+        return text, 0, 0
+    return (
+        text,
+        _non_negative_int(usage.get("prompt_tokens")),
+        _non_negative_int(usage.get("completion_tokens")),
+    )
+
+
 def _qwen_generate(
     model_id: str,
     user_message: str,
@@ -422,6 +576,7 @@ def _qwen_generate(
     enable_thinking: bool,
     *,
     device: str,
+    llama_endpoint: str | None = None,
 ) -> tuple[str, int, int]:
     """Generate one completion, reporting token usage (Stage A telemetry).
 
@@ -429,7 +584,19 @@ def _qwen_generate(
     from the live input/output tensor widths — the supervisor aggregates
     them into `segment_committed.director_tokens` so LLM cost is visible
     per segment instead of vanishing into the `director` stage seconds.
+
+    Three client-side upgrades ride this function (DESIGN §§8-9, §51):
+    option 2 adds prompt-lookup decoding to the AWQ `generate` call (with
+    graceful fallback when the stack rejects the kwarg); option 4a coerces
+    the decoded text through `_coerce_decision_json` (interim until the
+    director image gains `outlines`); option 3 serves the whole completion
+    from the llama-server sidecar when `llama_endpoint` is set (exact
+    contract in `_build_llama_request_body`, transport seam in
+    `_post_llama_chat`). `None`/empty endpoint keeps the current AWQ path
+    byte-for-byte, so existing callers and tests are unaffected.
     """
+    if isinstance(llama_endpoint, str) and llama_endpoint:
+        return _qwen_generate_llama(llama_endpoint, user_message, temperature, max_new_tokens)
     _require_module("torch")
     import torch
 
@@ -451,18 +618,29 @@ def _qwen_generate(
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0.0,
         "pad_token_id": tokenizer.eos_token_id,
+        "prompt_lookup_num_tokens": PROMPT_LOOKUP_NUM_TOKENS,
     }
     if temperature > 0.0:
         generate_kwargs.update(
             {"temperature": temperature, "top_p": 0.8, "top_k": 20, "repetition_penalty": 1.0}
         )
-    with torch.inference_mode():
-        output = model.generate(**inputs, **generate_kwargs)
+    try:
+        with torch.inference_mode():
+            output = model.generate(**inputs, **generate_kwargs)
+    except TypeError as generate_error:
+        # Stacks without prompt-lookup support (older transformers/GPTQModel)
+        # reject the kwarg: retry once without it instead of failing the
+        # decide. Anything else re-raises into the §51 chain untouched.
+        if "prompt_lookup_num_tokens" not in str(generate_error):
+            raise
+        del generate_kwargs["prompt_lookup_num_tokens"]
+        with torch.inference_mode():
+            output = model.generate(**inputs, **generate_kwargs)
     prompt_tokens = int(inputs["input_ids"].shape[1])
     generated = output[0][prompt_tokens:]
     completion_tokens = int(generated.shape[0])
-    text = str(tokenizer.decode(generated, skip_special_tokens=True)).strip()
-    return text, prompt_tokens, completion_tokens
+    raw_text = str(tokenizer.decode(generated, skip_special_tokens=True)).strip()
+    return _coerce_decision_json(raw_text), prompt_tokens, completion_tokens
 
 
 def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
@@ -474,6 +652,13 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
     validate_temperature(temperature)
     validate_max_new_tokens(max_new_tokens)
     enable_thinking = bool(payload.get("enable_thinking", False))
+    configured_endpoint = payload.get(LLAMA_ENDPOINT_KEY, _CONFIG.get(LLAMA_ENDPOINT_KEY))
+    if configured_endpoint is not None and not isinstance(configured_endpoint, str):
+        raise TypeError(
+            f"decide field {LLAMA_ENDPOINT_KEY!r} must be str or None, "
+            f"got {type(configured_endpoint).__name__}"
+        )
+    llama_endpoint = configured_endpoint if configured_endpoint else None
     decision_index = int(payload["decision_index"])
     phase = cast(TransitionPhase, str(payload.get("phase", "ESTABLISH")))
     user_message = build_director_user_message(
@@ -504,6 +689,7 @@ def _qwen_decide(payload: dict[str, Any]) -> dict[str, Any]:
                 max_new_tokens,
                 enable_thinking,
                 device=device,
+                llama_endpoint=llama_endpoint,
             )
             data = _extract_json(text)
             data["decision_index"] = decision_index
@@ -586,12 +772,27 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     fails as INVALID_PAYLOAD (fatal) instead of misdirecting every later
     `decide`. Weights stay lazy: a long-lived worker re-`init` with a new
     id reloads on next use (issue 075), and the process can start while
-    video still owns the GPU.
+    video still owns the GPU. The sidecar URL (`llama_endpoint`, option 3)
+    is stored alongside: a non-empty string arms the HTTP branch of
+    `_qwen_generate`, `None`/empty clears back to the AWQ default.
     """
     for key in INIT_STR_KEYS:
         if key in payload and not isinstance(payload[key], str):
             raise TypeError(f"init field {key!r} must be str, got {type(payload[key]).__name__}")
-    unknown = sorted(set(payload) - set(INIT_STR_KEYS))
+    if LLAMA_ENDPOINT_KEY in payload:
+        endpoint_value = payload[LLAMA_ENDPOINT_KEY]
+        if endpoint_value is None:
+            _CONFIG.pop(LLAMA_ENDPOINT_KEY, None)
+        elif isinstance(endpoint_value, str) and endpoint_value:
+            _CONFIG[LLAMA_ENDPOINT_KEY] = endpoint_value
+        elif isinstance(endpoint_value, str):
+            _CONFIG.pop(LLAMA_ENDPOINT_KEY, None)
+        else:
+            raise TypeError(
+                f"init field {LLAMA_ENDPOINT_KEY!r} must be str or None, "
+                f"got {type(endpoint_value).__name__}"
+            )
+    unknown = sorted(set(payload) - set(INIT_STR_KEYS) - {LLAMA_ENDPOINT_KEY})
     if unknown:
         raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(INIT_STR_KEYS)})")
     _CONFIG.update({key: payload[key] for key in INIT_STR_KEYS if key in payload})
