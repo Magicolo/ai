@@ -275,11 +275,15 @@ def _input_count(argv: list[str]) -> int:
 def test_final_blend_never_spawns_wide_acrossfade_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every ffmpeg call in the final blend takes at most 2 audio inputs.
+    """The final blend never uses acrossfade; the wide join is manual only.
 
-    Fails on the old single-graph N-chain (records an 8-input call);
-    passes on the pairwise reduction. Real ffmpeg still runs underneath
-    (recording wrapper delegates), so this also exercises the audio path.
+    Live incident (poulah, 31 segments): one ffmpeg invocation chaining 31
+    `acrossfade` filters deadlocked the scheduler. The join is now a SINGLE
+    wide manual graph (issue 152: chained pairwise `afade`/`adelay`/`amix`
+    stages with `aformat=s32` barriers — byte-identical to the old fold,
+    proven at N=31 CPU-only with no hang), so the pin forbids the
+    `acrossfade` filter class instead of wide inputs. Real ffmpeg still runs
+    underneath (recording wrapper delegates).
     """
     import voyage.media as media_module
 
@@ -300,8 +304,16 @@ def test_final_blend_never_spawns_wide_acrossfade_graph(
         except concurrent.futures.TimeoutError:
             pytest.fail("build_final_audio did not finish in 180s (wide-graph deadlock)")
     assert dest.exists() and dest.stat().st_size > 0
+    assert not any("acrossfade" in arg for argv in calls for arg in argv), (
+        "acrossfade filter must never appear (deadlock class)"
+    )
     wide = [argv for argv in calls if _input_count(argv) > 2]
-    assert wide == [], f"{len(wide)} ffmpeg call(s) with >2 inputs (deadlock risk)"
+    assert len(wide) == 1, f"expected one single-graph join, saw {len(wide)} wide call(s)"
+    assert _input_count(wide[0]) == 8
+    graph = wide[0][wide[0].index("-filter_complex") + 1]
+    assert "afade" in graph and "adelay" in graph and "amix=inputs=2" in graph
+    assert "aformat=sample_fmts=s32" in graph
+    assert "acrossfade" not in graph
 
 
 def test_final_blend_output_matches_video_timeline(tmp_path: Path) -> None:

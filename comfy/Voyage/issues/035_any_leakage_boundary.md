@@ -669,3 +669,95 @@ own plan.
   `voyage/atomic.py:97,110,118` (by design); `voyage/bench.py:16`
   (`_finite_float` — blocked by the `summarize_sfx_windows`
   `list[dict[str, object]]` callers).
+
+## Progress log (2026-10-01, joint call()+supervisor pass — LANDED)
+
+- Pre-flight: `git status` (Voyage dir) shows extensive foreign/concurrent
+  dirty (DESIGN/LTX2/README/docs, issues/081/166, scripts/gates+run,
+  tests/*, voyage/augment+cli+cli_models+media+model_registry+
+  models_ensure+registry_records+sfx_finalize) plus untracked
+  build-ltx/registry_ltx23+25/test_issue_152+166. Own targets
+  (`voyage/rpc.py`, `voyage/supervisor.py`, `voyage/cli_observe.py`,
+  `voyage/bench.py`) were clean at pass start — own hunks below are
+  disjoint from every foreign hunk; foreign regions never touched,
+  never undid foreign work. `model_registry.py`/`models_ensure.py`
+  LTX hunks left intact (hub-kwargs leg stays blocked, not attempted).
+- Baseline live in-container (`voyage:latest`, CPU-only, no host pip):
+  `mypy voyage` clean (81 files); per-file `mypy`+`ruff check` clean
+  on all 4 targets.
+- Step 1, `rpc.py call()` → `RpcPayload`/`RpcResult` (signature only):
+  `mypy voyage` → 11 errors in 2 files (same invariance class as
+  batch-12, line numbers shifted): `supervisor.py:533` (`dict(payload)`
+  `dict[str,object]` → `SupportsKeysAndGetItem` + `dict[str,JsonValue]`
+  return vs `dict[str,object]`), `:1055` (`{"texts": texts}`
+  `list[str]` vs `list[JsonValue]`), `:1066` (`float(value)` JsonValue
+  union into arithmetic), `cli_observe.py:243,245,570,572,617`
+  (`dict[str,JsonValue]` vs `dict[str,object]` at
+  `format_report`/`_persist_benchmark_report`), `:611,612`
+  (`list[str]`/`dict[str,float]` literals vs `JsonValue`).
+- Step 2, coordinated bridge (ONE pass, `mypy voyage` after each edit):
+  `supervisor.py:29` `cast` import; `:533-536` `_call_with_restart`
+  cast-bridge (`cast(dict[str,JsonValue], dict(payload))` in,
+  `cast(dict[str,object], ...)` out — producers/consumers stay
+  `dict[str,object]`, only the RPC seam casts); `:1058-1061` embed
+  payload `cast(dict[str,JsonValue], {"texts": texts})`; `:1073-1078`
+  `float(value)` → explicit `bool`/`(int,float)` guard (same `None`
+  outcome for hostile vectors, no contract change). Probe: 11→9→7
+  (supervisor errors gone, 7 `cli_observe` left).
+- Step 3, `cli_observe` knock-ons: `bench.py:10` `Mapping` import,
+  `:75-76`/`91-92` `format_report`/`report_document` params
+  `dict[str,object]` → `Mapping[str,object]` (covariant — both
+  `dict[str,object]` and `dict[str,JsonValue]` pass; bodies only
+  `.items()`/`dict()`, no behavior change);
+  `cli_observe.py:15` `Mapping` import, `:150-151`
+  `_persist_benchmark_report` → `Mapping`; `:602-618` end-to-end
+  `setup`/`metrics` renamed `e2e_setup`/`e2e_metrics` with explicit
+  `dict[str,object]` (fixes `no-redef` vs the benchmark-branch
+  `metrics: RpcResult` + forces object-join instead of JsonValue
+  inference). Probe: 7→2 (`:612,613` literal pair) → 1 (`no-redef`)
+  → 0. Full `mypy voyage` clean (81 files). One transient
+  `sfx_finalize.py:519,520` `_blend_*` red mid-pass was a concurrent
+  half-edit (import already moved to `_join_audio_single_graph`);
+  re-probe after their hunk landed: clean — not caused here (stash
+  probe: without own 4 files `mypy voyage` clean; with them clean).
+- `rpc.py:346-350` docstring updated (was stale `stays dict[str,Any]`);
+  `ruff format` reflowed `call()` to one line (`:327`).
+- No TDD (annotation + `Mapping`-covariance + explicit-guard refactor,
+  no behavior change — gate evidence below per contract).
+
+## Resolution (2026-10-01, joint call()+supervisor pass)
+
+- Verdict: RESOLVED (joint leg landed) — `call()` is now
+  `RpcPayload → RpcResult`; the supervisor `dict[str,object]` chain
+  bridges at the seam via `cast` (no producer/consumer re-annotation);
+  `bench`/`cli_observe` reporting takes `Mapping[str,object]`
+  (covariant, accepts both sides); embed `float()` is explicitly
+  narrowed; end-to-end metrics are `dict[str,object]`-annotated.
+- Files changed: `voyage/rpc.py` (signature + docstring + format),
+  `voyage/supervisor.py` (`cast` import + `_call_with_restart` bridge +
+  embed cast + value guard), `voyage/bench.py` (`Mapping` import +
+  2 signatures), `voyage/cli_observe.py` (`Mapping` import +
+  `_persist` signature + e2e rename/annotate). No test files changed.
+  Foreign hunks left intact (disjoint regions).
+- Gate evidence (in-container `voyage:latest`, CPU-only, no host pip):
+  per-file `ruff check` + `ruff format --check` + `mypy` clean on all
+  4 files; full `mypy voyage` clean (81 files); full `ruff check .`
+  RED from 2 pre-existing foreign errors only
+  (`tests/test_ltxv_tensor_handoff.py:11` F401 unused `Any`,
+  `voyage/media.py:740` E501 101>100 — neither touched nor caused
+  here); `pytest -p no:cacheprovider -q` 70 passed
+  (`test_scoreboard`+`test_generate_ensure`+`test_registry_pins`+
+  `test_backend_registry`+`test_cli_split`+
+  `test_cli_inspect_metrics`) + 46 passed (`test_benchmark`+
+  `test_benchmark_counts`+`test_cli_benchmark_sfx_augment`+
+  `test_e2_bench_sfx_augment_154_163`+`test_observability`+
+  `test_cli_scoreboard`). DESIGN proposals: none (annotation-only).
+- Residuals (exact, post-edit): `voyage/rpc.py:281,284`
+  (`raw_stdout`/`readable`, by construction); supervisor
+  `dict[str,object]`/`dict[str,Any]` chain stays object-typed by
+  design (bridge via `cast` — full `JsonValue` re-annotation of every
+  producer/consumer remains open but unneeded while green);
+  `voyage/model_registry.py:1149,1159` (`snapshot_kwargs`/
+  `file_kwargs`, batch-12 probe stands); `voyage/atomic.py:97,110,118`
+  (by design); `voyage/bench.py:16` (`_finite_float`, still blocked by
+  the `summarize_sfx_windows list[dict[str,object]]` callers).

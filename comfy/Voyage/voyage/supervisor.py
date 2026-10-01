@@ -26,7 +26,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from voyage import paths
 from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
@@ -63,7 +63,9 @@ from voyage.media import (
     run_capture,
     slice_take,
     validate_audio,
-    validate_video,
+)
+from voyage.media import (
+    validate_video as validate_video,
 )
 from voyage.models import (
     AudioPlan,
@@ -530,7 +532,10 @@ class Supervisor:
         budget = self._config.voyage.max_worker_restarts
         while True:
             try:
-                return worker.call(op, dict(payload))
+                return cast(
+                    dict[str, object],
+                    worker.call(op, cast(dict[str, JsonValue], dict(payload))),
+                )
             except RecoverableWorkerError as exc:
                 used = self._restarts.get(worker_name, 0)
                 if used >= budget:
@@ -1052,7 +1057,11 @@ class Supervisor:
         Hostile/non-finite worker vectors (issue 103) degrade the same way.
         """
         try:
-            result = self._director.call("embed", {"texts": texts}, timeout=EMBED_TIMEOUT_SECONDS)
+            result = self._director.call(
+                "embed",
+                cast(dict[str, JsonValue], {"texts": texts}),
+                timeout=EMBED_TIMEOUT_SECONDS,
+            )
         except VoyageError:
             return None
         vectors = result.get("vectors")
@@ -1063,7 +1072,11 @@ class Supervisor:
             for row in vectors:
                 if not isinstance(row, list):
                     return None
-                values = [float(value) for value in row]
+                values: list[float] = []
+                for value in row:
+                    if isinstance(value, bool) or not isinstance(value, (int, float)):
+                        return None
+                    values.append(float(value))
                 if not all(math.isfinite(value) for value in values):
                     return None
                 cleaned.append(values)

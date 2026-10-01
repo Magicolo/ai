@@ -366,9 +366,55 @@ enforcing.
 - Verdict: DEFERRED (record-only) — PERF 11, N 60, PT 112 as-read
   above. Files changed: none for 031 (this issue file only). Gate
   evidence: `select` untouched. DESIGN proposals: none.
-- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF,
-  N) still dark; PERF unblocks when the supervisor sites +
-  worker/test sites clear under their owners.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; PERF unblocks when the supervisor sites + worker/test
+  sites clear under their owners.
+
+## Progress log (2026-10-01, joint-pass 031 leg — PERF → N → PT re-probe, record-only)
+
+- Pre-flight: same foreign-dirty tree as the 035 joint pass (Voyage-dir
+  `git status`: DESIGN/LTX2/docs, issues/081/166, scripts, tests/*,
+  voyage/augment+cli+cli_models+media+model_registry+models_ensure+
+  registry_records+sfx_finalize + untracked build-ltx/registry_ltx23+25).
+  Own 035 hunks in `voyage/bench.py`/`cli_observe.py`/`rpc.py`/
+  `supervisor.py` are disjoint — no 031 edit attempted inside them
+  beyond the 035 scope. `supervisor.py` PERF sites never touched for
+  031 (try-except-in-loop restructures are behavior-adjacent).
+- Fresh counts live in-container (`voyage:latest`, CPU-only, no host
+  pip): `ruff check --select PERF --output-format concise .` → **10**
+  (6 PERF401 + 4 PERF203): `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748` (test-track), `voyage/cli_validate.py:
+  223,229` (conditional appends with sibling statements, needs owner),
+  `voyage/concepts.py:437` (foreign),
+  `voyage/models_ensure.py:241` (DIRTY foreign LTX hunk — cannot
+  touch), `voyage/supervisor.py:462,537` (banned/behavior-adjacent),
+  `voyage/workers/director.py:390,517` (foreign). The batch-12
+  `cli_observe.py` handoff holds (no hit remains).
+- `ruff check --select N --statistics` → **51** (N806 38 + N801 10 +
+  N802 2 + N818 1, unchanged). `ruff check --select PT --statistics`
+  → **111** (PT011 63 + PT018 46 + PT013 1 + PT012 1, unchanged).
+  `Voyage/pyproject.toml:70` select confirmed unchanged (16 families).
+- Adoption re-checked site-by-site (regions read live, no edits): no
+  owned-clean-green site exists — every PERF site sits in a
+  test-track / foreign / dirty-foreign / banned file; N needs a
+  test-double naming pass + `ProposalRejected` rename decision; PT
+  rides the test-structure track. Own 035 hunks add no new
+  PERF/N/PT: `ruff check --select PERF` on the 4 touched files →
+  only the 2 pre-existing `supervisor.py` PERF203; `--select N`/`PT`
+  → clean on all 4.
+- `select` left unchanged, no per-file-ignores added.
+
+## Resolution (2026-10-01, joint-pass 031 leg)
+
+- Verdict: DEFERRED (record-only) — PERF 10, N 51, PT 111 as-read
+  above. Files changed: none for 031 (this issue file only).
+  Gate evidence: `select` untouched; full `mypy voyage` clean
+  (81 files, incl. own 035 hunks); full `ruff check .` RED from 2
+  foreign errors only (`tests/test_ltxv_tensor_handoff.py:11` F401,
+  `voyage/media.py:740` E501). DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF, N)
+  still dark; PERF unblocks when the supervisor sites + worker/test
+  sites clear under their owners (plus `models_ensure.py` settles).
 
 ## Progress log (2026-10-01, verification-only pass — re-probe counts)
 

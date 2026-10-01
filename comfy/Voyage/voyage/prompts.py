@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import math
 
-from voyage.models import PromptPlan, PromptStage, StyleSpec
+from voyage.models import PromptPlan, PromptStage
+from voyage.models import StyleSpec as StyleSpec
 
 # Motion-pace bands derived from the charter's motion_energy_max (§18.1
 # step 4): at/below calm the camera barely drifts, at/below slow it

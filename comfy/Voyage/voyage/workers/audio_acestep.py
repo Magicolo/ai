@@ -14,7 +14,7 @@ module never imports `torch` at top level. `torch` appears only inside
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess as subprocess
 import tempfile
 import time
 from pathlib import Path

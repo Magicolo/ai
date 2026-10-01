@@ -462,6 +462,13 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="disable all finalize augmentation floors (fps + resolution floors to 0)",
     )
+    parser.add_argument(
+        "--use-model-pass",
+        action="store_true",
+        default=None,
+        help="run the Real-ESRGAN + FILM model pass at finalize when provisioned "
+        "(default: [augment] use_model_pass off; ffmpeg floors only)",
+    )
 
 
 def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:

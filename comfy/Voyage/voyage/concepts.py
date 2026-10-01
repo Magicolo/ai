@@ -28,7 +28,8 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel
 
-from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json, fsync_dir
+from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
+from voyage.atomic import fsync_dir as fsync_dir
 from voyage.errors import StateError
 
 LEGACY_MIGRATION_REMOVE_AFTER = "2026-12-31"

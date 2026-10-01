@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from voyage.errors import MediaError
-from voyage.media import probe
+from voyage.media import probe as probe
 
 HISTOGRAM_BINS = 8
 """Bins per channel for the compact RGB distribution descriptor."""

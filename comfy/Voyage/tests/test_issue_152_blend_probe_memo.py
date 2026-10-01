@@ -69,7 +69,7 @@ def test_blend_pair_accepts_known_durations_without_probing(tmp_path: Path) -> N
         raise AssertionError(f"probe must not run for {path}")
 
     real_probe = media_module.probe
-    media_module.probe = _no_probe  # type: ignore[assignment]
+    media_module.probe = _no_probe
     try:
         _blend_pair(first, second, dest, 1.0, first_seconds=4.0, second_seconds=4.0)
     finally:
@@ -110,7 +110,8 @@ def test_assemble_fold_probes_each_slice_once(
     out = assemble_segment_audio(slices, tmp_path / "window.wav", 1.0, blend_timings=timings)
     assert out.exists()
     assert calls <= 3
-    assert len(timings) == 2
+    # Single-graph (issue 152): N slices join in one spawn, so one timing entry.
+    assert len(timings) == 1
 
 
 def _synthetic_music_run(run_dir: Path, segments: int) -> list[Path]:
@@ -160,7 +161,7 @@ def _synthetic_music_run(run_dir: Path, segments: int) -> list[Path]:
 
 
 def test_build_final_audio_reports_per_blend_timings(tmp_path: Path) -> None:
-    """3 windows blend with 2 timing entries (one per pair)."""
+    """3 windows blend with 1 timing entry (single-graph join, issue 152)."""
     from voyage.media import build_final_audio
 
     run_dir = tmp_path / "run"
@@ -168,7 +169,7 @@ def test_build_final_audio_reports_per_blend_timings(tmp_path: Path) -> None:
     timings: list[float] = []
     out = build_final_audio(run_dir, usable, tmp_path, 24, 48000, 2, blend_timings=timings)
     assert out.exists()
-    assert len(timings) == 2
+    assert len(timings) == 1
     assert all(entry >= 0.0 for entry in timings)
 
 
@@ -293,6 +294,7 @@ def test_render_sfx_bed_threads_stem_durations(
     )
     assert bed.exists()
     assert stem_probes <= 4
-    assert len(timings) == 3
+    # Single-graph (issue 152): N stems join in one spawn, so one timing entry.
+    assert len(timings) == 1
     bed_seconds = float(real_probe(bed).get("format", {}).get("duration", 0.0))
     assert bed_seconds == pytest.approx(25.0, abs=0.6)

@@ -63,7 +63,7 @@ def test_failed_restart_consumes_budget_and_trips_breaker(tmp_path: Path) -> Non
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     config.voyage.max_worker_restarts = 3
     supervisor = Supervisor(run_dir, config)
-    supervisor._video.call = _always_failing_call  # type: ignore[method-assign]
+    supervisor._video.call = _always_failing_call  # type: ignore[assignment]
     supervisor._video.restart = _dead_restart  # type: ignore[method-assign]
     with pytest.raises(FatalWorkerError, match="circuit breaker"):
         supervisor._call_with_restart(supervisor._video, "video", "000000", "generate_blocks", {})
@@ -96,7 +96,7 @@ def test_failed_restart_then_success_recovers(tmp_path: Path) -> None:
         if calls.count("restart") == 1:
             raise RecoverableWorkerError("init boom")
 
-    supervisor._video.call = _flaky_call  # type: ignore[method-assign]
+    supervisor._video.call = _flaky_call  # type: ignore[assignment]
     supervisor._video.restart = _flaky_restart  # type: ignore[method-assign]
     assert supervisor._call_with_restart(supervisor._video, "video", "000000", "op", {}) == {
         "answer": 1
@@ -112,7 +112,7 @@ def test_failed_restart_hook_routes_through_budget(tmp_path: Path) -> None:
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     config.voyage.max_worker_restarts = 2
     supervisor = Supervisor(run_dir, config)
-    supervisor._video.call = _always_failing_call  # type: ignore[method-assign]
+    supervisor._video.call = _always_failing_call  # type: ignore[assignment]
     supervisor._video.restart = lambda: None  # type: ignore[method-assign]
 
     def _dead_hook(segment_id: str) -> None:

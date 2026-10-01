@@ -41,7 +41,12 @@ def _base_config() -> ProjectConfig:
 
 
 def test_augment_defaults() -> None:
-    assert AugmentConfig().model_dump() == {"min_fps": 32, "min_width": 1280, "min_height": 720}
+    assert AugmentConfig().model_dump() == {
+        "min_fps": 32,
+        "min_width": 1280,
+        "min_height": 720,
+        "use_model_pass": False,
+    }
     assert _base_config().augment == AugmentConfig()
 
 
@@ -224,10 +229,11 @@ def test_augment_overrides_mapping() -> None:
     assert _augment_overrides(_parse(["run", "--run", "r", "--min-resolution", "0"])) == {
         "min_resolution": "0"
     }
-    # --no-augment wins over explicit floors (both to 0).
+    # --no-augment wins over explicit floors (both to 0) and forces the pass off.
     assert _augment_overrides(_parse(["run", "--run", "r", "--min-fps", "60", "--no-augment"])) == {
         "min_fps": 0,
         "min_resolution": "0",
+        "use_model_pass": False,
     }
     # TUI/hand-built namespaces: Unset blanks and missing attrs are absent.
     assert _augment_overrides(argparse.Namespace(min_fps=Unset, min_resolution=Unset)) == {}

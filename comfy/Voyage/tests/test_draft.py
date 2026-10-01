@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from voyage.config import (
     DraftConfig,
+    ProjectConfig,
     VideoConfig,
     apply_draft_overrides,
     default_config_toml,
@@ -14,7 +17,7 @@ from voyage.config import (
 )
 
 
-def _base_config(tmp_path):  # type: ignore[no-untyped-def]
+def _base_config(tmp_path: Path) -> ProjectConfig:
     toml_path = tmp_path / "voyage.toml"
     toml_path.write_text(default_config_toml("draft-test", "line art", 7), encoding="utf-8")
     config, _ = load_config(toml_path)
@@ -29,12 +32,12 @@ def test_draft_profile_defaults() -> None:
     assert draft.take_seconds == 45.0
 
 
-def test_no_flags_leaves_config_unchanged(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_no_flags_leaves_config_unchanged(tmp_path: Path) -> None:
     config = _base_config(tmp_path)
     assert apply_draft_overrides(config).model_dump() == config.model_dump()
 
 
-def test_draft_flag_applies_profile(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_draft_flag_applies_profile(tmp_path: Path) -> None:
     out = apply_draft_overrides(_base_config(tmp_path), draft=True)
     assert (out.video.width, out.video.height) == (640, 352)
     assert out.video.latent_shape == [1, 8, 48, 22, 40]
@@ -46,7 +49,7 @@ def test_draft_flag_applies_profile(tmp_path) -> None:  # type: ignore[no-untype
     assert out.audio.take_seconds > out.audio.ahead_seconds
 
 
-def test_targeted_overrides_without_draft(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_targeted_overrides_without_draft(tmp_path: Path) -> None:
     out = apply_draft_overrides(
         _base_config(tmp_path), director="deterministic", blocks=2, take_seconds=30.0
     )
@@ -55,13 +58,13 @@ def test_targeted_overrides_without_draft(tmp_path) -> None:  # type: ignore[no-
     assert out.audio.take_seconds == 30.0
 
 
-def test_overrides_compose_on_top_of_draft(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_overrides_compose_on_top_of_draft(tmp_path: Path) -> None:
     out = apply_draft_overrides(_base_config(tmp_path), draft=True, blocks=3)
     assert (out.video.width, out.video.height) == (640, 352)
     assert out.video.blocks_per_segment == 3
 
 
-def test_invalid_overrides_rejected(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_invalid_overrides_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         apply_draft_overrides(_base_config(tmp_path), blocks=0)
     with pytest.raises(ValidationError):
@@ -76,7 +79,7 @@ def test_local_attn_size_defaults_to_continuity_capacity() -> None:
     assert VideoConfig().local_attn_size == 16
 
 
-def test_local_attn_size_survives_draft_profile(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_local_attn_size_survives_draft_profile(tmp_path: Path) -> None:
     out = apply_draft_overrides(_base_config(tmp_path), draft=True)
     assert out.video.local_attn_size == 16
     with pytest.raises(ValidationError):

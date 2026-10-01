@@ -156,7 +156,12 @@ def test_057_append_line_flushes_and_syncs(tmp_path: Path, monkeypatch: pytest.M
     fsynced: list[int] = []
     dir_calls: list[Path] = []
     real_fsync = os.fsync
-    monkeypatch.setattr(os, "fsync", lambda fd: fsynced.append(fd) or real_fsync(fd))
+
+    def _recording_fsync(fd: int) -> None:
+        fsynced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _recording_fsync)
     monkeypatch.setattr(
         rotate, "fsync_dir", lambda directory: dir_calls.append(Path(directory)), raising=False
     )
@@ -228,10 +233,15 @@ def test_101_concepts_append_syncs_directory_entry(
 
     dir_calls: list[Path] = []
     real = concepts_module.fsync_dir
+
+    def _recording_fsync_dir(directory: Path) -> None:
+        dir_calls.append(Path(directory))
+        real(directory)
+
     monkeypatch.setattr(
         concepts_module,
         "fsync_dir",
-        lambda directory: dir_calls.append(Path(directory)) or real(directory),
+        _recording_fsync_dir,
     )
     store = ConceptStore(tmp_path / "novelty")
     store.append("a calm reef", accepted=True, vector=[1.0, 0.0])

@@ -59,6 +59,8 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             min_fps=config.augment.min_fps,
             min_width=config.augment.min_width,
             min_height=config.augment.min_height,
+            use_model_pass=config.augment.use_model_pass,
+            models_dir=config.video.models_dir,
         )
     except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)

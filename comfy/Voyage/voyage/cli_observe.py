@@ -12,6 +12,7 @@ import argparse
 import datetime
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from voyage import paths
@@ -147,7 +148,7 @@ def _presentation_setup(config: ProjectConfig) -> dict[str, object]:
 
 
 def _persist_benchmark_report(
-    run_dir: Path, stem: str, title: str, setup: dict[str, object], metrics: dict[str, object]
+    run_dir: Path, stem: str, title: str, setup: Mapping[str, object], metrics: Mapping[str, object]
 ) -> Path | None:
     """Tee a benchmark/soak report JSON into the run logs (issue 060).
 
@@ -598,7 +599,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         config, _digest = _load_run(run_dir)
         committed = Supervisor(run_dir, config).run_segments(segments)
         events = _read_all_metric_events(run_dir)
-        setup = {
+        e2e_setup: dict[str, object] = {
             "backend": "fake",
             "warmup": warmup,
             "measured": segments,
@@ -607,14 +608,14 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             **_benchmark_env(),
             "note": "throwaway run (TemporaryDirectory): no logs/ artifact, stdout is the record",
         }
-        metrics = {
+        e2e_metrics: dict[str, object] = {
             "segments": committed,
             "stages": _stage_means(events),
             "gauges": summarize_gauges(
                 [event for event in events if event.get("event") == "resource_gauges"]
             ),
         }
-        print(format_report("end-to-end", setup, metrics))
+        print(format_report("end-to-end", e2e_setup, e2e_metrics))
         return 0
 
 

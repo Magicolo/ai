@@ -460,3 +460,156 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
   unchanged until then); (3) prove on idle-CUDA with the provisioned
   host weights incl. the fp16 numeric + eyeball the FILM resolution
   left open.
+
+## Progress log (2026-10-01, this pass — chunk-scale inference WIRED, idle-CUDA proven)
+
+- GPU + weights probe FIRST (2026-10-01T05:00:46Z): `nvidia-smi` shows
+  4060 Ti 15724 MiB free / 0% util + 2060 5733 MiB free / 0% util (both
+  idle); `~/.cache/voyage-models/frame_interpolation/film_net_fp16.safetensors`
+  66M (68,882,302 bytes) + `realesrgan/RealESRGAN_x4plus_anime_6B.pth`
+  18M (17,938,799 bytes) both present — GPU+weights exist, so the
+  remainder is ownable (not BLOCKED).
+- TDD red first: new `tests/test_issue_166_chunk_worker.py` failed at
+  collection (`AttributeError: module 'voyage.augment' has no attribute
+  'make_enhance_chunk_worker'` + `enhance_frames` + `run_model_augment_chunks`,
+  7 failed, 1 skipped in slim `voyage:latest`), green after the
+  implementation (7 passed, 1 skipped in slim; 8 passed in `voyage-video`
+  with the models volume — the provisioned CPU leg runs there).
+- Wired (append-only in `voyage/augment.py`, 0 removed lines save the
+  `Any` import widening): `enhance_frames` (opt-in `use_model_pass=False`
+  default returns input unchanged torch-free — ffmpeg stays the default;
+  True runs realesrgan upscale then FILM `(multiplier-1)` mids per pair at
+  evenly spaced moments on `device`, absent legs skip), plus
+  `make_enhance_chunk_worker` (closes over chunk-index source frames,
+  forwards `device=chunk.device`, missing index raises `KeyError`) and
+  `run_model_augment_chunks` (thin `run_augment_chunks` wrapper preserving
+  order, `[]` on empty plan). No `media.py` / `config.py` / CLI touch —
+  `finalize_run` contract unchanged by construction (hot-file rule holds).
+- Idle-CUDA proof (`voyage-video:latest`, `--gpus all`, `/models` ro,
+  no host pip — `pip install pytest` ran ephemeral in the container
+  overlay only): `torch 2.8.0+cu128 cuda_available True`, both legs
+  resolve from `/models`; fp16 numerics — 16px gradient pair
+  (`upscale 1`, `multiplier 2`): CPU fp32 vs CUDA fp16 both finite
+  `(3,16,16)x3`, ranges 0.515 vs 0.514 / 0.435 vs 0.432,
+  mean-abs diffs 0.00027/0.00327/0.00020 (no blowout), `inference_precision`
+  `cuda:0=fp16` / `cpu=fp32`; full recipe — 5x32px `upscale 2` +
+  `multiplier 4` gives 17 frames `(5-1)*4+1` at `(3,64,64)`, all finite,
+  per-frame means descend smoothly 0.6407→0.5072, 731 ms, VRAM max
+  0.107 GB; eyeball — 64px diagonal pair `upscale 2` + `multiplier 2`
+  gives 3x`(3,128,128)`, means 0.3526/0.4410/0.5017 (mid between
+  endpoints), `mid_vs_before 0.2588` + `mid_vs_after 0.2981` both <
+  `before_vs_after 0.519` (true blend, not copy), PNGs saved to
+  `/tmp/opencode/eyeball_166/frame_*.png` (7.9K/17K/11K — distinct
+  content, viewed: clean gradients + plausible FILM blend banding);
+  chunk-scale OOM — 70 frames via `run_model_augment_chunks` gives
+  3 chunks (32/32/6 → 125/125/21 = 271 = 277-6 boundary skips), all
+  finite, 2216 ms, VRAM max 0.372 GB; 210 frames gives 7 chunks
+  (125x6+69 = 819), all finite, 5098 ms, VRAM max still 0.372 GB
+  (flat — chunking bounds memory, caches 1+1 resident, no leak) plus
+  `_run_stacked` halving still `[2,1,1]`. GPU released after
+  (15724 MiB free, 0% util).
+- Gates (in-container): `ruff check` + `ruff format --check` + `mypy`
+  strict clean on `voyage/augment.py` + `tests/test_issue_166_chunk_worker.py`
+  (one `ruff format` reflow, own hunks only); slim pytest 90 passed,
+  9 skipped (166-chunk 7+1, resolve, contract, runner, plan, models,
+  weight-loading — provisioned/torch legs skip by design); video pytest
+  66 passed (chunk 8 + resolve + contract + runner, provisioned legs run).
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: CHUNK-SCALE INFERENCE WIRED + IDLE-CUDA PROVEN — any caller
+  can now map `models_dir` via `resolve_augment_weights` to
+  `run_model_augment_chunks` with `use_model_pass=True` for the model
+  legs or `False` (default) for byte-identical ffmpeg fallback. Files
+  changed: `voyage/augment.py` (+178, append-only), new
+  `tests/test_issue_166_chunk_worker.py` (8 tests), this issue file.
+  Test evidence: TDD red→green above; per-file gates green both images.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§56-57, to
+  extend the "both weights strict-load" note): "The model pass runs
+  chunk-scale through `run_model_augment_chunks` behind opt-in
+  `use_model_pass` (default False — ffmpeg stays the default): resolved
+  Real-ESRGAN + FILM legs upscale then interpolate per chunk on the
+  planned device (fp16 on CUDA, fp32 on CPU, OOM-halving preserved,
+  210-frame run flat at 0.372 GB peak), absent legs keep the ffmpeg
+  fallback."
+- Residuals (finalize threading — NOT this pass, hot-file rule):
+  thread the opt-in knob into `FinalizeOptions` / `finalize_run`
+  (`voyage/media.py`) + CLI/TUI (`--model-augment` style, default off)
+  so `finalize_run` resolves `config.video.models_dir` and selects the
+  model chunk worker when provisioned, else the current ffmpeg vf path;
+  then re-prove on a real finalize (LTXV 768x512 segments → 1280x720@32)
+  with the same fp16 + eyeball + VRAM-flat gates.
+
+## Progress log (2026-10-01, this pass — finalize threading WIRED, byte-identity proven)
+
+- Foreign-hunk check FIRST (`git diff --name-only`): `voyage/media.py`
+  (issue-152 single-graph join) + `voyage/cli.py` (ltx23/ltx25 models) +
+  `tests/test_tui.py` (088 folds) carry concurrent uncommitted work —
+  all own hunks verified disjoint by hunk header (`media` mine at
+  `FinalizeOptions` line ~1216+, theirs at audio-join lines ~70-960;
+  `cli` mine in `_add_augment_args`, theirs in the models parser;
+  `test_tui` mine in the flag pins, theirs in the import/tail folds).
+- TDD red first: new `tests/test_issue_166_finalize_knob.py` failed 9/11
+  at collection/call (`unexpected keyword argument 'use_model_pass'`,
+  missing attrs/flags), green after (11 passed in-container slim
+  `voyage:latest`, CPU-only, no host pip — one `ruff --fix` + reflow
+  cycle on own files only).
+- Wired (one name everywhere, default OFF): `AugmentConfig.use_model_pass`
+  + `[augment] use_model_pass = false` TOML + `resolve_config` /
+  `apply_draft_overrides` override (absent-encoding via `is_provided`,
+  `--no-augment` forces False); `FinalizeOptions.use_model_pass` (appended
+  last — positional compatibility kept; strict-bool `__post_init__`) +
+  `ResolvedFinalizeSettings.use_model_pass` + `resolve_finalize_settings`
+  scalar-wins rule; `finalize_run(use_model_pass=None,
+  models_dir=None)` consults `resolve_augment_weights(models_dir)` only
+  when on (absent legs / no dir = ffmpeg fallback, never an error);
+  CLI `--use-model-pass` (`store_true`, default None so absent stays
+  absent) via shared `_add_augment_args` (all finalizing verbs incl.
+  `stop --finalize` handoff) + `_augment_overrides` mapping +
+  `cmd_finalize` passing `config.augment.use_model_pass` +
+  `config.video.models_dir` + `cmd_generate` fan-out to both child
+  namespaces; TUI `use_model_pass` checkbox (`flag-use-model-pass`,
+  checked = True, unchecked = Unset/stored-wins) + FIELD_HELP + tooltip
+  + FLAG_HELP_FIELDS + `_read_form` + last-settings persistence.
+- Identity proof (real ffmpeg, fake-backend 1-segment commits, sha256):
+  explicit-False == default (fast path, zeros floors) AND knob-on with an
+  empty models dir == knob-off (default floors, re-encode path) — plus a
+  seam test (knob off never consults `resolve_augment_weights`, knob on
+  resolves exactly once with the given dir) and strict-bool rejections at
+  every layer. Pre-change determinism probed first (two default finalizes
+  → identical sha) so the equality assertions are meaningful.
+- Gates (in-container slim): `ruff check` + `ruff format --check` clean
+  on all 12 touched files; `mypy` strict clean on all touched package
+  files + both mypy-listed test modules; scoped pytest green — new 11 +
+  augment family + media/config + finalize/generate + CLI/TUI + state +
+  registry (189 + 94 + 89 Pilot + 59, zero failures). Existing-test
+  companion edits (default-off preservation): `test_augment_config`
+  exact-dump + `--no-augment` pin, `test_cli_tui_split` form-ids pin +
+  25→26 children, `test_tui` flag-ids pin (seven→eight) + toggle
+  coverage for the new box.
+
+## Resolution (2026-10-01, this pass)
+
+- Verdict: FINALIZE THREADING WIRED — the opt-in knob runs
+  `AugmentConfig` → config → CLI/TUI → `FinalizeOptions` →
+  `finalize_run` → registry seam end to end with ffmpeg output preserved
+  in every CPU-provable case. Files changed: `voyage/config.py`,
+  `voyage/media.py`, `voyage/cli.py`, `voyage/cli_core.py`,
+  `voyage/cli_finalize.py`, `voyage/cli_generate.py`,
+  `voyage/tui_state.py`, `voyage/tui.py`, new
+  `tests/test_issue_166_finalize_knob.py` (11 tests), three pin updates
+  (`test_augment_config`, `test_cli_tui_split`, `test_tui`), this issue
+  file. Test evidence: TDD red→green above; per-file gates green.
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§56-57, to
+  extend the chunk-scale note): "Finalize carries opt-in `use_model_pass`
+  (default off) from `[augment]` through the CLI/TUI into `finalize_run`,
+  which resolves `config.video.models_dir` via `resolve_augment_weights`
+  and keeps the ffmpeg vf path whenever a leg is absent — knob-off and
+  knob-on-absent finalize byte-identically."
+- Residuals (GPU-box + tensor encode — NOT this pass): when legs ARE
+  provisioned the knob still encodes via the ffmpeg vf path (the resolve
+  is consulted, the tensor chunk encode is not selected); wiring the
+  present-legs selection plus the idle-CUDA proof (LTXV 768x512 segments
+  → 1280x720@32, fp16 numeric + eyeball + VRAM-flat, same gates as the
+  chunk-scale pass) is the remaining slice. `models_ensure.py`
+  default-gating stays with the registry owner.

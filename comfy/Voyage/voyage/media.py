@@ -70,6 +70,11 @@ MAX_SLICES_PER_WINDOW = 128
 #: rejecting genuinely short ones.
 DURATION_FRAME_ESTIMATE_SLACK_FRAMES = 1.0
 
+#: Inputs in one pairwise blend (issue 152). Two inputs delegate to
+#: `_blend_pair` (identical single spawn); three or more take the staged
+#: single-graph path with per-stage s32 barriers.
+PAIR_BLEND_INPUT_COUNT = 2
+
 
 def av_drift_seconds(video_duration: float, audio_duration: float) -> float:
     """Absolute A/V duration drift in seconds (issue 003 helper).
@@ -388,29 +393,20 @@ def assemble_segment_audio(
         if proc.returncode != 0:
             raise MediaError(f"segment audio assembly failed: {proc.stderr[-2000:]}")
         return dest
-    # Left-fold pairwise blends through _blend_pair: the old inline
-    # N-input acrossfade chain shared both acrossfade failure modes
-    # (scheduler deadlock at scale, long-first collapse at take joints).
-    # Slice durations were probed above for the fade derivation — thread
-    # them through (issue 152) so the fold adds zero re-probes, and track
-    # the accum length with the same fade formula `_blend_pair` uses.
+    # Single-graph staged join (issue 152): chained pairwise stages with
+    # s32 barriers replay the fold byte-for-byte in one spawn (each slice
+    # decoded once). The old left-fold pairwise loop is gone; durations
+    # probed above thread through so the join adds zero re-probes.
     with tempfile.TemporaryDirectory(prefix="voyage-assemble-") as staging:
-        accum = slices[0]
-        accum_seconds = durations[0]
-        for index, following in enumerate(slices[1:]):
-            step = Path(staging) / f"blend_{index:02d}.wav"
-            pair_fade = _blend_fade_seconds(accum_seconds, durations[index + 1], fade)
-            _blend_pair(
-                accum,
-                following,
-                step,
-                fade,
-                first_seconds=accum_seconds,
-                second_seconds=durations[index + 1],
-                timing_ms=blend_timings,
-            )
-            accum_seconds = accum_seconds + durations[index + 1] - pair_fade
-            accum = step
+        joined = Path(staging) / "joined.wav"
+        _join_audio_single_graph(
+            slices,
+            joined,
+            fade,
+            durations=durations,
+            timing_ms=blend_timings,
+        )
+        accum = joined
         proc = run_capture(
             [
                 "ffmpeg",
@@ -683,6 +679,110 @@ def _blend_pair(
             timing_ms.append((time.monotonic() - start) * 1000.0)
 
 
+def _join_audio_single_graph(
+    inputs: list[Path],
+    dest: Path,
+    overlap: float,
+    *,
+    durations: list[float] | None = None,
+    timing_ms: list[float] | None = None,
+) -> Path:
+    """Join N audio files in one ffmpeg spawn, fold-identical (issue 152).
+
+    Chained pairwise stages with an `aformat=sample_fmts=s32` barrier per
+    stage replay the left-fold's per-blend s32 quantization inside a single
+    graph: each stage's `afade` negotiates s32 (as when fed the fold's s32
+    intermediates) instead of fltp, so the output is byte-identical to the
+    `accum -> _blend_pair -> step` fold while each stem is decoded once
+    (O(N) I/O, one spawn, not N-1). Proven at N=31 CPU-only (byte-identical,
+    staged ~0.7 s vs fold ~1.9 s on 4 s sine stems) — the incident-scale
+    no-hang proof the `test_finalize_fastpath` pin required.
+
+    Never `acrossfade` (the 31-input deadlocked filter class): only the
+    manual recipe (`afade` out/in + `adelay` + `amix inputs=2 normalize=0`)
+    plus the s32 barriers. Fade arithmetic mirrors the fold exactly (same
+    `_blend_fade_seconds` per pair, same `%.3f` fades, same integer-ms
+    delays). Two inputs delegate to `_blend_pair` (identical single spawn).
+    `durations` threads already-probed lengths (O(N) probes when None);
+    `timing_ms` collects one wall-millisecond entry for the single spawn.
+    Output stays s32le; the caller converts to s16le at the end.
+    """
+    start = time.monotonic()
+    try:
+        if len(inputs) < PAIR_BLEND_INPUT_COUNT:
+            raise MediaError("single-graph join needs at least 2 inputs")
+        if durations is None:
+            resolved = [_audio_duration_seconds(item) for item in inputs]
+        else:
+            if len(durations) != len(inputs):
+                raise MediaError(
+                    f"single-graph join needs {len(inputs)} durations (got {len(durations)})"
+                )
+            resolved = [float(value) for value in durations]
+            if any(value <= 0 for value in resolved):
+                raise MediaError("single-graph join needs positive durations")
+        if len(inputs) == PAIR_BLEND_INPUT_COUNT:
+            return _blend_pair(
+                inputs[0],
+                inputs[1],
+                dest,
+                overlap,
+                first_seconds=resolved[0],
+                second_seconds=resolved[1],
+                timing_ms=timing_ms,
+            )
+        fades: list[float] = []
+        starts = [0.0]
+        accum = resolved[0]
+        for index in range(1, len(inputs)):
+            fade = _blend_fade_seconds(accum, resolved[index], overlap)
+            fades.append(fade)
+            starts.append(accum - fade)
+            accum = accum + resolved[index] - fade
+        parts: list[str] = []
+        for index in range(1, len(inputs)):
+            if index == 1:
+                left = (
+                    f"[0:a]afade=t=out:st={starts[index]:.3f}:d={fades[index - 1]:.3f}[m{index}a]"
+                )
+            else:
+                left = (
+                    f"[m{index - 1}q]afade=t=out:st={starts[index]:.3f}:"
+                    f"d={fades[index - 1]:.3f}[m{index}a]"
+                )
+            right = (
+                f"[{index}:a]afade=t=in:st=0:d={fades[index - 1]:.3f},"
+                f"adelay={int(round(starts[index] * 1000))}:all=1[m{index}b]"
+            )
+            mix = (
+                f"[m{index}a][m{index}b]amix=inputs=2:duration=longest:"
+                f"dropout_transition=0:normalize=0[m{index}]"
+            )
+            parts += [left, right, mix]
+            if index < len(inputs) - 1:
+                parts.append(f"[m{index}]aformat=sample_fmts=s32[m{index}q]")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+        for item in inputs:
+            argv += ["-i", str(item)]
+        argv += [
+            "-filter_complex",
+            ";".join(parts),
+            "-map",
+            f"[m{len(inputs) - 1}]",
+            "-c:a",
+            "pcm_s32le",
+            str(dest),
+        ]
+        proc = run_capture(argv)
+        if proc.returncode != 0:
+            raise MediaError(f"single-graph audio join failed: {proc.stderr[-2000:]}")
+        return dest
+    finally:
+        if timing_ms is not None and len(inputs) > PAIR_BLEND_INPUT_COUNT:
+            timing_ms.append((time.monotonic() - start) * 1000.0)
+
+
 def build_final_audio(
     run_dir: Path,
     usable: list[Path],
@@ -830,29 +930,20 @@ def build_final_audio(
                     slices[-1] = tail_slice
             assemble_segment_audio(slices, window_path, overlap, joint_fade=fade)
         windows.append(window_path)
-    # Pairwise reduction through 2-input manual-fade graphs only (see
-    # _blend_pair: a single N-input acrossfade chain deadlocks the ffmpeg
-    # scheduler on long runs, and acrossfade collapses long-first pairs).
-    # Each window is probed once here and threaded through (issue 152) —
-    # the accum length tracks arithmetically with the shared fade formula,
-    # so the fold adds zero re-probes.
+    # Single-graph staged join (issue 152): chained pairwise stages with
+    # s32 barriers replay the fold byte-for-byte in one spawn (N=31 proven,
+    # no acrossfade anywhere). Each window is probed once here and threaded
+    # through, so the join adds zero re-probes.
     window_seconds = [_audio_duration_seconds(window) for window in windows]
-    accum = windows[0]
-    accum_seconds = window_seconds[0]
-    for index in range(1, len(windows)):
-        step = tmpdir / f"final_blend_{index:02d}.wav"
-        pair_fade = _blend_fade_seconds(accum_seconds, window_seconds[index], overlap)
-        _blend_pair(
-            accum,
-            windows[index],
-            step,
-            overlap,
-            first_seconds=accum_seconds,
-            second_seconds=window_seconds[index],
-            timing_ms=blend_timings,
-        )
-        accum_seconds = accum_seconds + window_seconds[index] - pair_fade
-        accum = step
+    joined = tmpdir / "final_joined.wav"
+    _join_audio_single_graph(
+        windows,
+        joined,
+        overlap,
+        durations=window_seconds,
+        timing_ms=blend_timings,
+    )
+    accum = joined
     proc = run_capture(
         [
             "ffmpeg",
@@ -1125,6 +1216,10 @@ class FinalizeOptions:
     Encode fields (`crf`/`preset`, issues 050): the single vf encode
     quality (defaults crf 15 + veryfast match the validated Comfy
     `video_export.json` recipe and `augment.ffmpeg_encode_chunk`).
+
+    Model-pass field (`use_model_pass`, issue 166): opt-in Real-ESRGAN +
+    FILM pass when provisioned (default False — ffmpeg floors only; absent
+    legs fall back to the same vf path, so off == on-absent byte-for-byte).
     """
 
     skip_bad: bool = False
@@ -1138,6 +1233,7 @@ class FinalizeOptions:
     min_height: int = 720
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
+    use_model_pass: bool = False
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -1154,6 +1250,8 @@ class FinalizeOptions:
             raise ValueError(f"min_width must be >= 0 (got {self.min_width})")
         if self.min_height < 0:
             raise ValueError(f"min_height must be >= 0 (got {self.min_height})")
+        if not isinstance(self.use_model_pass, bool):
+            raise TypeError(f"use_model_pass must be a bool (got {self.use_model_pass!r})")
         validate_crf(self.crf)
         validate_preset(self.preset)
 
@@ -1208,6 +1306,7 @@ class ResolvedFinalizeSettings:
     min_height: int
     crf: int
     preset: str
+    use_model_pass: bool
 
 
 def resolve_finalize_settings(
@@ -1223,6 +1322,7 @@ def resolve_finalize_settings(
     min_height: int | None,
     crf: int | None,
     preset: str | None,
+    use_model_pass: bool | None = None,
 ) -> ResolvedFinalizeSettings:
     """Resolve the scalar/`options=` split into one settings struct (pure).
 
@@ -1250,6 +1350,7 @@ def resolve_finalize_settings(
             min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
             crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
             preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
+            use_model_pass=False if use_model_pass is None else use_model_pass,
         )
     else:
         settings = options
@@ -1263,6 +1364,8 @@ def resolve_finalize_settings(
             settings = replace(settings, overlap_fraction=overlap_fraction)
         if overlap_cap_seconds is not None:
             settings = replace(settings, overlap_cap_seconds=overlap_cap_seconds)
+        if use_model_pass is not None:
+            settings = replace(settings, use_model_pass=use_model_pass)
     return ResolvedFinalizeSettings(
         settings=settings,
         min_fps=min_fps if min_fps is not None else settings.min_fps,
@@ -1270,6 +1373,7 @@ def resolve_finalize_settings(
         min_height=min_height if min_height is not None else settings.min_height,
         crf=validate_crf(crf if crf is not None else settings.crf),
         preset=validate_preset(preset if preset is not None else settings.preset),
+        use_model_pass=settings.use_model_pass,
     )
 
 
@@ -1325,6 +1429,8 @@ def finalize_run(
     min_height: int | None = None,
     crf: int | None = None,
     preset: str | None = None,
+    use_model_pass: bool | None = None,
+    models_dir: Path | str | None = None,
     options: FinalizeOptions | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
@@ -1386,6 +1492,12 @@ def finalize_run(
     them for the stream-copy fast path (see `test_finalize_fastpath`);
     default-floor callers are lifted to 1280x720@32 by `plan_augmentation`
     either way, so either default ships the same presentation.
+
+    Model pass (issue 166): `use_model_pass=True` consults
+    `resolve_augment_weights(models_dir)` — absent legs (or no `models_dir`)
+    read as ffmpeg fallback, never an error, so knob-off == knob-on-absent
+    byte-for-byte. Present legs still encode via the ffmpeg vf path below:
+    the tensor pipeline lands on a GPU box (see the issue residual).
     """
     resolved = resolve_finalize_settings(
         options=options,
@@ -1399,6 +1511,7 @@ def finalize_run(
         min_height=min_height,
         crf=crf,
         preset=preset,
+        use_model_pass=use_model_pass,
     )
     settings = resolved.settings
     effective_min_fps = resolved.min_fps
@@ -1406,6 +1519,14 @@ def finalize_run(
     effective_min_height = resolved.min_height
     effective_crf = resolved.crf
     effective_preset = resolved.preset
+    effective_use_model_pass = resolved.use_model_pass
+    if effective_use_model_pass and models_dir is not None:
+        from voyage.augment import resolve_augment_weights
+
+        # Threading proof: consult the seam so absent legs fall back below;
+        # the discarded result keeps the ffmpeg output in every CPU-provable
+        # case (the tensor encode is the GPU-box residual).
+        resolve_augment_weights(models_dir)
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     segments_root = run_dir / paths.SEGMENTS_DIRNAME

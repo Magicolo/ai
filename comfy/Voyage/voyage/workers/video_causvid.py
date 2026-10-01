@@ -59,8 +59,12 @@ from numpy.typing import NDArray
 from voyage.hashing import sha256_file as shared_sha256_file
 from voyage.hashing import sha256_text as shared_sha256_text
 from voyage.model_registry import (
-    CAUSVID_CHECKPOINT_FILE,
-    CAUSVID_COMMIT,
+    CAUSVID_CHECKPOINT_FILE as CAUSVID_CHECKPOINT_FILE,
+)
+from voyage.model_registry import (
+    CAUSVID_COMMIT as CAUSVID_COMMIT,
+)
+from voyage.model_registry import (
     CAUSVID_HF_REPO,
     CAUSVID_HF_REVISION,
     CAUSVID_LICENSE,
@@ -70,7 +74,8 @@ from voyage.model_registry import (
 )
 from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
-from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
+from voyage.workers.video_common import TAIL_FILENAME as TAIL_FILENAME
+from voyage.workers.video_common import TAPE_FILENAME as TAPE_FILENAME
 
 RECOVERY_PROFILE = "causvid"
 STATE_MODE = "reconstructable_prefix"

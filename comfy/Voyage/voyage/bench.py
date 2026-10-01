@@ -7,6 +7,7 @@ numbers, the CLI renders them, and the soak harness trends them.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 _VRAM_WORKERS = ("video", "audio", "director")
@@ -72,8 +73,8 @@ def timing_stats_ex(seconds: list[float]) -> dict[str, float | int]:
 
 def format_report(
     title: str,
-    setup: dict[str, object],
-    metrics: dict[str, object],
+    setup: Mapping[str, object],
+    metrics: Mapping[str, object],
 ) -> str:
     """Render a §104-style report: setup block then measured metrics."""
     lines = [f"benchmark {title}"]
@@ -88,8 +89,8 @@ def format_report(
 
 def report_document(
     title: str,
-    setup: dict[str, object],
-    metrics: dict[str, object],
+    setup: Mapping[str, object],
+    metrics: Mapping[str, object],
 ) -> dict[str, object]:
     """JSON-serializable benchmark/soak report document (issue 060).
 

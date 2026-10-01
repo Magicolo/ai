@@ -566,3 +566,176 @@ wc -l tests/*.py | sort -rn | head -n 15
   - All residuals keep assertion counts identical (nothing moved);
     next passes use the same discipline. `gates.sh` list is fully
     consistent (no dangling paths).
+
+## Progress log (2026-10-01, tui-state fold + collapse-support pass)
+
+- Premise re-verified live: 165 `test_*.py` at pass start (growth vs
+  163 as-left — 2 concurrent-agent untracked files
+  `test_issue_152_single_graph.py` /
+  `test_issue_166_chunk_worker.py` landing mid-pass, left untouched
+  per the untracked rule); `tests/test_augment_models.py` still
+  carries the foreign uncommitted +2-line hunk
+  (`verify_ltx25_models`/`verify_ltx23_models`, matching their
+  untracked `voyage/registry_ltx23.py` + `voyage/registry_ltx25.py`)
+  — augment quad still SKIPPED per the never-fold-foreign rule.
+- Fold landed: `tests/test_tui_state.py` (26 tests) → `tests/test_tui.py`
+  (33→59 defs, same TUI area as the prior satellite folds). Verified
+  live first: mtime/`git log` (state 2026-09-30, tui 2026-10-01),
+  zero importers outside self (`rg test_tui_state` clean except the
+  target's docstring mention + gates.sh entry + issue docs), no test
+  fn collisions (26 vs 33, disjoint), no helper collisions
+  (`_filled_state` only in source; `_valid_state`/`_isolated_home`/
+  `_customized_base` only in target), both files in the gates.sh mypy
+  list (source added by the paired 089 leg this same pass, so the
+  list move is a pure deletion). Moved verbatim (fn names/bodies
+  identical, original module docstring kept as a banner at the fold
+  site with the autouse-fixture NOTE); target imports extended
+  minimally (7 missing `tui_state` names added alongside the existing
+  import — no other churn); source file deleted. `scripts/gates.sh`
+  mypy entry removed in the same edit (batch-12 lesson — verified
+  `bash -n` clean; target entry kept).
+- TDD/gates (in-container, `voyage:latest`, CPU-only, no host pip):
+  pre-delete both-together 89/89 passed (33+26 defs with parametrized
+  expansions); merged solo 89/89 post-delete (net-zero, same 89
+  instances); `ruff check` + `ruff format --check` + `mypy strict`
+  clean on the merged file; `bash -n` clean on `gates.sh`.
+  As-left: 164 `test_*.py` files (fold −1 plus the 2 untracked
+  concurrent adds), merged file 59 defs.
+- 089-collapse support landed in the same pass (test-scope only, own
+  `tests/` + owned `scripts/gates.sh` list lines): 17 error files
+  fixed to per-file green (unused-ignore removals, ignore-code
+  corrections `method-assign`→`assignment` / `arg-type`→`call-overload`,
+  `ndarray[Any, Any]` annotations, `_base_config` typing,
+  `Frame: TypeAlias`, `comparison-overlap` ignores, intentional-invalid
+  `arg-type` ignores) — see 089 log for the per-file list. This
+  unblocks future folds (e.g. audio planner is now clean) but creates
+  no new fold target by itself.
+- Never touched: `000_INDEX.md`, `DESIGN.md`, `AGENTS.md`, other
+  issues' files, any `voyage/*` source (only `tests/*` + the owned
+  `scripts/gates.sh` list lines), foreign dirty hunks
+  (`test_augment_models.py`, `test_generate_ensure.py`,
+  `test_registry_split.py`, `test_run_sh.py`,
+  `test_finalize_fastpath.py`, all `voyage/*` hunks) and untracked
+  files. Never committed. No host pip (all probes/tests via
+  `docker run --rm -v $PWD:/app -w /app voyage:latest`).
+
+## Resolution (2026-10-01, tui-state fold + collapse-support pass)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues;
+  collapse-support fixes unblock follow-ups).
+  Files changed: `tests/test_tui.py` (+303L fold banner/helper/
+  26 tests, 33→59 defs), deleted `tests/test_tui_state.py`,
+  `scripts/gates.sh` (mypy-list line: `test_tui_state.py` entry
+  removed); plus the 17 test-scope mypy fixes listed in the 089 log
+  (own `tests/` scope, each per-file green with pytest evidence).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 89/89 post-delete (matches the 89/89 both-together baseline);
+  `ruff check` + `ruff format --check` + `mypy strict` clean on the
+  merged file; `bash -n` clean on `gates.sh`.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple DONE
+  prior pass; augment quad remainder SKIPPED — foreign hunk in
+  `test_augment_models.py`, retry once their track lands; video-worker
+  quartet SKIPPED — `test_causvid_worker` 14 + `test_video_common` 6
+  incl. `TAIL_FILENAME`/`TAPE_FILENAME`/`CAUSVID_COMMIT`/
+  `CAUSVID_CHECKPOINT_FILE` attr-defined needing `voyage/workers/*`
+  re-exports (voyage-source scope, forbidden); audio remainder —
+  no same-area fold target left (validators done; planner/accounting/
+  workers/acestep are distinct areas, all now mypy-clean for future
+  passes); TUI remainder `test_tui_app` 33 Pilot stays solo per the
+  issue's own demotion recipe (file-marked slow, load-flaky);
+  finalize/commit remainder SKIPPED — `test_commit_hardening` 5 +
+  `test_finalize_encode_rank2` 1 both attr-defined needing
+  voyage-source re-exports) — one per pass with the same discipline
+  (re-read live, check mtime/`git log`, keep assertion counts
+  identical, move the gates.sh mypy entry with any fold that deletes
+  a listed file).
+
+## Progress log (2026-10-01, remainders assessment + unblock pass)
+
+- Premise: `git diff` checked FIRST (repo root
+  `/home/goulade/Projects/ai`); the paired 089 leg in this same
+  pass closed all 8 mypy blocks with facade-only voyage
+  re-exports (see 089 log: mypy 34→0, 138/138 pytest, 8 gates.sh
+  entries). Every remaining 088 cluster re-probed live against
+  the current tree (164 `test_*.py` files; counts re-read, not
+  remembered):
+  - Augment quad remainder (`test_augment_config` 33 +
+    `test_augment_plan` 11 + `test_augment_models` 13 +
+    `test_augment_runner` 39 + `test_augment_weight_loading` 6):
+    STILL SKIPPED — the foreign `+2`-line hunk in
+    `tests/test_augment_models.py`
+    (`verify_ltx25_models`/`verify_ltx23_models`, matching their
+    untracked `voyage/registry_ltx23.py` +
+    `voyage/registry_ltx25.py`) is still uncommitted. Rule:
+    never fold out of a file another agent just edited. Retry
+    once their track lands (re-read + `git diff` first).
+  - Video-worker quartet (`test_causvid_worker` 32 +
+    `test_video_common` 10 + `test_ltxv` 21 +
+    `test_ltxv_tensor_handoff` 11): mypy block GONE (paired 089
+    leg fixed all 24 errors), but NO FOLD landed — the issue
+    never enumerates a fold target for this cluster (no
+    "X → Y" recipe), and `test_ltxv_tensor_handoff.py` carries
+    an uncommitted hunk (the paired collapse-pass ndarray fix,
+    own line but still dirty). One-per-pass follow-up with an
+    explicit target.
+  - Audio remainder (`test_audio_planner` 13 +
+    `test_audio_accounting` 6 + `test_audio_workers` 8 +
+    `test_audio_acestep_cwd` 2): NO FOLD — validators done, the
+    four are distinct areas with no enumerated same-area target;
+    `test_audio_planner.py` carries an uncommitted hunk
+    (paired collapse-pass ndarray fix). All four are now
+    mypy-clean (paired leg + collapse) for future passes.
+  - TUI remainder (`test_tui_app` 33 Pilot): STAYS SOLO per the
+    issue's own demotion recipe (tui_app = only Pilot;
+    file-marked slow, load-flaky). Closed by design, not
+    blocked.
+  - Finalize/commit remainder (`test_commit_hardening` 20 +
+    `test_finalize_encode_rank2` 8; `test_finalize_fastpath` 10
+    stays as the area owner): SKIPPED — the owner target
+    `tests/test_finalize_fastpath.py` carries an uncommitted
+    foreign hunk (issue-152 single-graph join rewrite, +8/-3
+    lines), and `test_commit_hardening.py` was just touched by
+    the paired 089 leg (ignore-code fixes, dirty). Folding
+    dirty-into-dirty violates the quiet-regions rule. Retry once
+    both settle.
+  - Leftover singletons: NONE — every enumerated singleton
+    (`stage_timings`, `sfx_parser_parity`, `prefetch_summary`,
+    `prefetch_shutdown`, `final_blend_scale`, `unset`,
+    `generate_blocks_request`, `hashing`, `paths`,
+    `av_alignment_consumer`, `integration`) is already folded.
+    The remaining ≤3-test files on disk are concurrent-track
+    split suites outside this issue's scope (never fold
+    untracked/foreign files).
+- No fold landed this pass (zero files moved, assertion counts
+  untouched); the pass's value is the unblock (all 8 mypy legs
+  green + listed, so every cluster above is now foldable on
+  mypy grounds — only edit-collision and missing-target causes
+  remain). Discipline kept throughout: re-read live, `git diff`
+  before every edit, quiet regions only, no `voyage/*` behavior
+  change, no untracked-file folds.
+- Never touched: `000_INDEX.md`, `DESIGN.md`, `AGENTS.md`, other
+  issues' files, foreign dirty hunks, untracked files. Never
+  committed. No host pip (all probes/tests via
+  `docker run --rm -v $PWD:/app -w /app voyage:latest`).
+
+## Resolution (2026-10-01, remainders assessment + unblock pass)
+
+- Verdict: unblocked, not folded (no mechanical cluster met the
+  quiet-target recipe this pass). Files changed for 088: none
+  (the paired 089 leg's 8 re-exports + 5 test fixes + 8 gates.sh
+  entries are recorded in 089). Gate evidence: 089 per-file
+  gates green (mypy 34→0, ruff + format clean, 138/138 pytest);
+  no fold gates apply (nothing moved).
+  DESIGN proposals: none.
+- Residuals (exact causes, each probed live): augment quad —
+  foreign hunk in `test_augment_models.py` (retry post-land);
+  video-worker quartet — needs an explicit fold target (mypy
+  clear); audio remainder — no same-area target (all mypy
+  clean); TUI app — stays solo by design; finalize/commit —
+  owner `test_finalize_fastpath.py` foreign-dirty + hardening
+  just-touched (retry once quiet); singletons — none left.
+  Next passes use the same discipline (re-read live, check
+  mtime/`git log`, keep assertion counts identical, move the
+  gates.sh mypy entry with any fold that deletes a listed
+  file).

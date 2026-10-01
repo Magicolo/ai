@@ -551,10 +551,6 @@ def test_causvid_reported_novel_and_conditioning_win() -> None:
 # (import source unchanged).
 
 
-def _init_run(run_dir: Path, run_id: str = "commit-split") -> None:
-    initialize_run_directory(run_dir, run_id=run_id)
-
-
 def _started_supervisor(run_dir: Path) -> Supervisor:
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     supervisor = Supervisor(run_dir, config)
@@ -575,7 +571,7 @@ def test_supervisor_sha256_delegates_to_hashing(tmp_path: Path) -> None:
 def test_propose_segment_returns_staged_plan(tmp_path: Path) -> None:
     """`_propose_segment` accepts a decision and maps stages to blocks (020)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
         config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
@@ -598,7 +594,7 @@ def test_propose_segment_returns_staged_plan(tmp_path: Path) -> None:
 def test_render_video_goes_through_adapter(tmp_path: Path) -> None:
     """The commit video path calls the adapter with the fake payload (023)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
         config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
@@ -666,7 +662,7 @@ def test_render_video_goes_through_adapter(tmp_path: Path) -> None:
 def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
     """`_cover_audio` + `_commit_segment` commit exactly one segment (020)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
         config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
@@ -772,7 +768,7 @@ def _stub_video_call(
 def test_render_video_streaming_overlay_uses_staged_prompts(tmp_path: Path) -> None:
     """Streaming payloads carry the staged plan, not one prompt tripled (023)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _streaming_supervisor(run_dir)
     seen: list[dict[str, Any]] = []
     hooks: list[Any] = []
@@ -816,7 +812,7 @@ def test_render_video_streaming_overlay_uses_staged_prompts(tmp_path: Path) -> N
 def test_render_video_rejects_implausible_report(tmp_path: Path) -> None:
     """The 006 ceiling survives the adapter move (the adapter alone accepts)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _streaming_supervisor(run_dir)
     seen: list[dict[str, Any]] = []
     hooks: list[Any] = []
@@ -845,7 +841,7 @@ def test_render_video_rejects_implausible_report(tmp_path: Path) -> None:
 def test_render_video_rejects_foreign_tape(tmp_path: Path) -> None:
     """Tape confinement survives the adapter move (the result drops tapes)."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _streaming_supervisor(run_dir)
     seen: list[dict[str, Any]] = []
     hooks: list[Any] = []

@@ -284,17 +284,17 @@ def _test_session(
     torch = _FakeTorch()
     pipeline = _FakePipeline()
     session = CausvidSession.__new__(CausvidSession)
-    session._torch = torch  # type: ignore[attr-defined]
-    session._device = "cuda:0"  # type: ignore[attr-defined]
-    session._latent_shape = [1, 21, 16, 60, 104]  # type: ignore[attr-defined]
-    session._overlap_frames = 3  # type: ignore[attr-defined]
-    session._num_frame_per_block = 3  # type: ignore[attr-defined]
-    session._config_sha256 = "0" * 64  # type: ignore[attr-defined]
-    session._pipeline = pipeline  # type: ignore[attr-defined]
-    session._start_latents = None  # type: ignore[attr-defined]
-    session._pending_tail_path = None  # type: ignore[attr-defined]
-    session._pending_overlap = 3  # type: ignore[attr-defined]
-    session._last_prompt = None  # type: ignore[attr-defined]
+    session._torch = torch
+    session._device = "cuda:0"
+    session._latent_shape = [1, 21, 16, 60, 104]
+    session._overlap_frames = 3
+    session._num_frame_per_block = 3
+    session._config_sha256 = "0" * 64
+    session._pipeline = pipeline
+    session._start_latents = None
+    session._pending_tail_path = None
+    session._pending_overlap = 3
+    session._last_prompt = None
     return session, torch, pipeline, recorded
 
 
@@ -703,7 +703,7 @@ def test_handle_benchmark_reports_generated_vs_committed(
     session, _torch, _pipeline, _media = _test_session(monkeypatch)
     del _torch, _pipeline
     sentinel = object()
-    session._start_latents = sentinel  # type: ignore[attr-defined]
+    session._start_latents = sentinel
     fake_cuda = types.SimpleNamespace(
         reset_peak_memory_stats=lambda: None,
         max_memory_allocated=lambda: 6 * 1024**3,

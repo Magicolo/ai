@@ -34,7 +34,7 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from voyage.errors import MediaError
 
@@ -457,3 +457,180 @@ def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
             f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}", REALESRGAN_ANIME_MIN_BYTES
         ),
     )
+
+
+_MODEL_UPSCALE_FACTORS = (1, 2, 4)
+"""Targets servable from one x4 Real-ESRGAN pass (mirrors the worker vocabulary torch-free)."""
+
+
+def _require_model_pass_flag(use_model_pass: bool) -> bool:
+    """Validate the opt-in knob: strict bool, ffmpeg stays the default when False."""
+    if not isinstance(use_model_pass, bool):
+        raise TypeError(f"use_model_pass must be a bool (got {type(use_model_pass).__name__})")
+    return use_model_pass
+
+
+def _require_upscale_factor(upscale_factor: int) -> int:
+    """Validate the presentation upscale target torch-free (1, 2, or 4 from one x4 pass)."""
+    if isinstance(upscale_factor, bool) or not isinstance(upscale_factor, int):
+        raise TypeError(f"upscale_factor must be an int (got {type(upscale_factor).__name__})")
+    if upscale_factor not in _MODEL_UPSCALE_FACTORS:
+        raise ValueError(
+            f"upscale_factor must be one of {_MODEL_UPSCALE_FACTORS} (got {upscale_factor})"
+        )
+    return upscale_factor
+
+
+def _require_interp_multiplier(multiplier: int) -> int:
+    """Validate the FILM interpolation multiplier: ints only, at least 1 (1 = no mids)."""
+    if isinstance(multiplier, bool) or not isinstance(multiplier, int):
+        raise TypeError(f"multiplier must be an int (got {type(multiplier).__name__})")
+    if multiplier < 1:
+        raise ValueError(f"multiplier must be >= 1 (got {multiplier})")
+    return multiplier
+
+
+def enhance_frames(
+    frames: list[Any],
+    weights: AugmentWeights,
+    *,
+    device: str,
+    upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
+    multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    use_model_pass: bool = False,
+) -> list[Any]:
+    """Upscale then interpolate one chunk's frames via the provisioned legs (issue 166).
+
+    DESIGN §§56-57: the chunk-scale inference seam — `resolve_augment_weights`
+    provides the legs, this function consumes them. `use_model_pass=False`
+    (default) returns the input frames unchanged without importing torch, so
+    ffmpeg stays the default and slim/CPU callers prove the fallback. With
+    `use_model_pass=True`, each non-None leg runs on `device` (the chunk's
+    device — the cuda:0/cuda:1 SFX pairing): Real-ESRGAN upscales first (the
+    2x video-export recipe), then FILM interpolates `(multiplier - 1)` mids
+    per adjacent pair at evenly spaced moments (`multiplier=4` gives
+    0.25/0.5/0.75, matching `(n-1)*m+1`). Absent legs skip (same frames out),
+    so a half-provisioned stack still runs the available leg.
+    """
+    if not isinstance(weights, AugmentWeights):
+        raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
+    if not isinstance(device, str) or not device:
+        raise TypeError(f"device must be a non-empty str (got {device!r})")
+    model_enabled = _require_model_pass_flag(use_model_pass)
+    target_scale = _require_upscale_factor(upscale_factor)
+    interp_factor = _require_interp_multiplier(multiplier)
+    if not isinstance(frames, list) or not frames:
+        raise ValueError(f"enhance_frames needs at least one frame (got {frames!r})")
+    if not model_enabled:
+        return list(frames)
+    if weights.film is None and weights.realesrgan is None:
+        return list(frames)
+    from voyage.workers import augment_worker
+
+    working: list[Any] = list(frames)
+    if weights.realesrgan is not None:
+        working = augment_worker.upscale_frames(
+            working, weights.realesrgan, scale=target_scale, device=device
+        )
+    if weights.film is not None and len(working) > 1 and interp_factor > 1:
+        moments = [(position + 1) / interp_factor for position in range(interp_factor - 1)]
+        blended: list[Any] = []
+        for position in range(len(working) - 1):
+            blended.append(working[position])
+            for moment in moments:
+                blended.append(
+                    augment_worker.interpolate_pair(
+                        working[position],
+                        working[position + 1],
+                        weights.film,
+                        moment=moment,
+                        device=device,
+                    )
+                )
+        blended.append(working[-1])
+        working = blended
+    return working
+
+
+def make_enhance_chunk_worker(
+    source_frames: Mapping[int, list[Any]],
+    weights: AugmentWeights,
+    *,
+    use_model_pass: bool = False,
+    upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
+    multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+) -> Callable[[AugmentChunk, str], list[Any]]:
+    """Build the `run_augment_chunks` worker that enhances one chunk's frames.
+
+    The worker closes over `source_frames` (chunk index to its source frames)
+    and `weights`; on each call it enhances `source_frames[chunk.index]` with
+    `device=chunk.device` (never the passed-through string — they match by
+    construction, but the chunk plan is the pairing contract). Missing chunk
+    indices fail loud with `KeyError` so a mis-staged plan never encodes
+    silence. Torch-free until `use_model_pass=True` with a leg present (the
+    enhance path lazy-imports the worker then).
+    """
+    if not isinstance(source_frames, Mapping):
+        raise TypeError(f"source_frames must be a mapping (got {type(source_frames).__name__})")
+    if not isinstance(weights, AugmentWeights):
+        raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
+    model_enabled = _require_model_pass_flag(use_model_pass)
+    target_scale = _require_upscale_factor(upscale_factor)
+    interp_factor = _require_interp_multiplier(multiplier)
+
+    def _worker(chunk: AugmentChunk, worker_device: str) -> list[Any]:
+        del worker_device
+        if not isinstance(chunk, AugmentChunk):
+            raise TypeError(f"chunk must be AugmentChunk (got {type(chunk).__name__})")
+        try:
+            chunk_source = source_frames[chunk.index]
+        except KeyError as exc:
+            raise KeyError(
+                f"no source frames for chunk {chunk.index} (have {sorted(source_frames)})"
+            ) from exc
+        return enhance_frames(
+            list(chunk_source),
+            weights,
+            device=chunk.device,
+            upscale_factor=target_scale,
+            multiplier=interp_factor,
+            use_model_pass=model_enabled,
+        )
+
+    return _worker
+
+
+def run_model_augment_chunks(
+    chunks: list[AugmentChunk],
+    weights: AugmentWeights,
+    source_frames: Mapping[int, list[Any]],
+    *,
+    use_model_pass: bool = False,
+    upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
+    multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+) -> list[list[Any]]:
+    """Run chunk enhancement through `run_augment_chunks`, preserving chunk order.
+
+    Opt-in knob `use_model_pass` (default False — ffmpeg stays the default):
+    False returns each chunk's source frames unchanged via the real chunk
+    runner (order + warm-first + fan-out all exercised, zero torch); True
+    runs the provisioned legs per chunk on their planned devices. Empty plans
+    return `[]` without touching the runner.
+    """
+    if not isinstance(chunks, list):
+        raise TypeError(f"chunks must be a list (got {type(chunks).__name__})")
+    if not isinstance(weights, AugmentWeights):
+        raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
+    model_enabled = _require_model_pass_flag(use_model_pass)
+    target_scale = _require_upscale_factor(upscale_factor)
+    interp_factor = _require_interp_multiplier(multiplier)
+    if not chunks:
+        return []
+    worker = make_enhance_chunk_worker(
+        source_frames,
+        weights,
+        use_model_pass=model_enabled,
+        upscale_factor=target_scale,
+        multiplier=interp_factor,
+    )
+    return run_augment_chunks(chunks, worker)

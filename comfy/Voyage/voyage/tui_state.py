@@ -104,6 +104,8 @@ FIELD_HELP = {
     "min_fps": "Floor output fps at finalize (untouched/32 = stored config; 0 disables).",
     "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1280x720" '
     '(untouched/1280x720 = stored config; "0" disables).',
+    "use_model_pass": "Model augment pass at finalize (Real-ESRGAN upscale + "
+    "FILM interpolate when provisioned; off = ffmpeg floors only).",
     "no_download": "Fail instead of downloading missing models (verify only). "
     "Off by default — checked runs never touch the network for weights.",
     "no_sfx": "Skip the finalize-time SFX pass even when [sfx] is configured. "
@@ -156,6 +158,7 @@ class GenerateFormState:
     drift_every_n: str = ""
     min_fps: str = "32"
     min_resolution: str = "1280x720"
+    use_model_pass: bool = False
     verbose: bool = False
     no_color: bool = False
     no_download: bool = False
@@ -353,6 +356,12 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         min_resolution=(
             Unset if min_resolution_raw in ("", _DEFAULT_MIN_RESOLUTION) else min_resolution_raw
         ),
+        # Opt-in model pass (issue 166): checked means on (True); unchecked
+        # stays absent (Unset — stored TOML wins, off by default), mirroring
+        # the floor fields above. no_augment stays False — the TUI has no
+        # disable-all checkbox (set 0 / "0" explicitly or pass --no-augment
+        # on the CLI, which also forces the pass off).
+        use_model_pass=True if state.use_model_pass else Unset,
         no_augment=False,
         verbose=state.verbose,
         no_color=state.no_color,
@@ -529,6 +538,7 @@ def save_last_settings(state: GenerateFormState, path: Path | None = None) -> No
             f"drift_every_n = {_toml_string(state.drift_every_n)}",
             f"min_fps = {_toml_string(state.min_fps)}",
             f"min_resolution = {_toml_string(state.min_resolution)}",
+            f"use_model_pass = {'true' if state.use_model_pass else 'false'}",
             f"verbose = {'true' if state.verbose else 'false'}",
             f"no_color = {'true' if state.no_color else 'false'}",
             f"no_download = {'true' if state.no_download else 'false'}",
@@ -594,6 +604,7 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
         drift_every_n=_string_field(parsed, "drift_every_n", defaults.drift_every_n),
         min_fps=_string_field(parsed, "min_fps", defaults.min_fps),
         min_resolution=_string_field(parsed, "min_resolution", defaults.min_resolution),
+        use_model_pass=_boolean_field(parsed, "use_model_pass", defaults.use_model_pass),
         verbose=_boolean_field(parsed, "verbose", defaults.verbose),
         no_color=_boolean_field(parsed, "no_color", defaults.no_color),
         no_download=_boolean_field(parsed, "no_download", defaults.no_download),

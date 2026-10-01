@@ -324,9 +324,7 @@ class SubprocessWorker:
             if newline_at >= 0:
                 return bytes(buffer[: newline_at + 1]).decode("utf-8", errors="replace")
 
-    def call(
-        self, op: str, payload: dict[str, Any], timeout: float | None = None
-    ) -> dict[str, Any]:
+    def call(self, op: str, payload: RpcPayload, timeout: float | None = None) -> RpcResult:
         """Send one request, return the result dict.
 
         `timeout` (default: the worker's configured timeout) bounds waiting
@@ -345,9 +343,12 @@ class SubprocessWorker:
         a late line but a protocol break and stays Fatal, as does calling
         a worker that was never started.
 
-        `payload` stays `dict[str, Any]` (not `RpcPayload`) for now: callers
-        hold `dict[str, object]`, which is not JSON-shaped, and those call
-        sites belong to other passes (issue 036 follow-up).
+        `payload` is `RpcPayload` (`dict[str, JsonValue]`, issue 035):
+        JSON-shaped by contract. Callers holding `dict[str, object]`
+        bridge with an explicit `cast` at the `_call_with_restart` seam
+        (supervisor) — `dict` invariance means no implicit conversion —
+        and `list[str]`/`dict[str, float]` literals need the same
+        (embed/texts, end-to-end metrics).
 
         A malformed request (non-str `op`, non-dict `payload`) fails fast
         here as FatalWorkerError (issue 007 supervisor side): retrying the

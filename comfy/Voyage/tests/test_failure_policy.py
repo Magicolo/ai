@@ -54,7 +54,7 @@ def test_restart_budget_exhaustion_opens_circuit_breaker(tmp_path: Path) -> None
         calls.append(op)
         raise RecoverableWorkerError("always fails")
 
-    supervisor._video.call = _flaky  # type: ignore[method-assign]
+    supervisor._video.call = _flaky  # type: ignore[assignment]
     supervisor._video.restart = lambda: calls.append("restart")  # type: ignore[method-assign]
     with pytest.raises(FatalWorkerError, match="circuit breaker"):
         supervisor._call_with_restart(supervisor._video, "video", "000000", "generate_blocks", {})
@@ -74,7 +74,7 @@ def test_zero_budget_fails_fast_without_restart(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config)
 
     restarts: list[str] = []
-    supervisor._video.call = _always_fail  # type: ignore[method-assign]
+    supervisor._video.call = _always_fail  # type: ignore[assignment]
     supervisor._video.restart = lambda: restarts.append("restart")  # type: ignore[method-assign]
     with pytest.raises(FatalWorkerError, match="circuit breaker"):
         supervisor._call_with_restart(supervisor._video, "video", "000000", "generate_blocks", {})
@@ -88,9 +88,9 @@ def test_repeated_failure_aborts_failed_not_running(tmp_path: Path) -> None:
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     config.voyage.max_worker_restarts = 0
     supervisor = Supervisor(run_dir, config)
-    supervisor._video.call = _always_fail  # type: ignore[method-assign]
-    supervisor._audio.call = _always_fail  # type: ignore[method-assign]
-    supervisor._director.call = _always_fail  # type: ignore[method-assign]
+    supervisor._video.call = _always_fail  # type: ignore[assignment]
+    supervisor._audio.call = _always_fail  # type: ignore[assignment]
+    supervisor._director.call = _always_fail  # type: ignore[assignment]
     with pytest.raises(VoyageError):
         supervisor.run_segments(1)
     state = read_state(run_dir)
@@ -159,7 +159,7 @@ def test_resume_failure_gets_second_chance(tmp_path: Path) -> None:
             raise RecoverableWorkerError("resume boom")
         return {}
 
-    supervisor._video.call = _flaky_resume  # type: ignore[method-assign]
+    supervisor._video.call = _flaky_resume  # type: ignore[assignment]
     supervisor._video.restart = lambda: calls.append("restart")  # type: ignore[method-assign]
     supervisor._resume_video_worker("000001")
     assert calls.count("resume") == 2
@@ -186,7 +186,7 @@ def test_resume_failures_consume_the_same_budget(tmp_path: Path) -> None:
         calls.append(op)
         raise RecoverableWorkerError("resume always fails")
 
-    supervisor._video.call = _dead_resume  # type: ignore[method-assign]
+    supervisor._video.call = _dead_resume  # type: ignore[assignment]
     supervisor._video.restart = lambda: calls.append("restart")  # type: ignore[method-assign]
     with pytest.raises(FatalWorkerError, match="circuit breaker"):
         supervisor._resume_video_worker("000001")

@@ -115,6 +115,7 @@ FLAG_HELP_FIELDS = {
     "flag-skip-bad": "skip_bad",
     "flag-no-download": "no_download",
     "flag-no-sfx": "no_sfx",
+    "flag-use-model-pass": "use_model_pass",
     "flag-verbose": "verbose",
     "flag-no-color": "no_color",
 }
@@ -736,6 +737,12 @@ class VoyageApp(App[None]):
             tooltip=FIELD_HELP["no_sfx"],
         )
         yield Checkbox(
+            "Use model augment pass at finalize (needs provisioned weights)",
+            value=self.initial_state.use_model_pass,
+            id="flag-use-model-pass",
+            tooltip=FIELD_HELP["use_model_pass"],
+        )
+        yield Checkbox(
             "Verbose console lines behind the TUI",
             value=self.initial_state.verbose,
             id="flag-verbose",
@@ -833,6 +840,7 @@ class VoyageApp(App[None]):
             drift_every_n=_read_text_field(self, "#field-drift"),
             min_fps=_read_text_field(self, "#field-min-fps"),
             min_resolution=_read_text_field(self, "#field-min-resolution"),
+            use_model_pass=_read_flag_field(self, "#flag-use-model-pass"),
             verbose=_read_flag_field(self, "#flag-verbose"),
             no_color=_read_flag_field(self, "#flag-no-color"),
             no_download=_read_flag_field(self, "#flag-no-download"),

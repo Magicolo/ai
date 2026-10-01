@@ -167,7 +167,7 @@ def test_worker_tail_tape_constants_match_common() -> None:
 class _FakeTorchTensor:
     """Minimal torch-tensor stand-in: permute/float/cpu/numpy chain."""
 
-    def __init__(self, array: np.ndarray) -> None:
+    def __init__(self, array: np.ndarray[Any, Any]) -> None:
         self._array = array
 
     def dim(self) -> int:
@@ -186,7 +186,7 @@ class _FakeTorchTensor:
     def cpu(self) -> _FakeTorchTensor:
         return self
 
-    def numpy(self) -> np.ndarray:
+    def numpy(self) -> np.ndarray[Any, Any]:
         return self._array
 
 

@@ -409,11 +409,17 @@ class AugmentConfig(BaseModel):
     meaningless, so the model rejects it. The media consumer that reads
     these floors lands in a later slice; this track only plumbs them
     through TOML + CLI + TUI.
+
+    `use_model_pass` (issue 166) is the opt-in model pass: Real-ESRGAN
+    upscale + FILM interpolate via `resolve_augment_weights` when
+    provisioned, ffmpeg floors only when off (default) or when the legs
+    are absent.
     """
 
     min_fps: int = 32
     min_width: int = 1280
     min_height: int = 720
+    use_model_pass: bool = False
 
     @field_validator("min_fps", "min_width", "min_height")
     @classmethod
@@ -741,6 +747,9 @@ model_size = "large_44k_v2"
 min_fps = 32
 min_width = 1280
 min_height = 720
+# Opt-in model pass (issue 166): Real-ESRGAN upscale + FILM interpolate
+# when provisioned; off (false) keeps the ffmpeg floors only.
+use_model_pass = false
 
 [director]
 backend = "{director_backend}"
@@ -818,6 +827,7 @@ def resolve_config(
     video_caption: str | None | UnsetType = Unset,
     min_fps: int | None | UnsetType = Unset,
     min_resolution: str | None | UnsetType = Unset,
+    use_model_pass: bool | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issues 022 + 025): backend preset,
     then the stored [draft] overlay, then targeted overrides — in that
@@ -881,18 +891,22 @@ def resolve_config(
     if is_provided(video_caption):
         video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
     augment = config.augment
-    if is_provided(min_fps) or is_provided(min_resolution):
+    if is_provided(min_fps) or is_provided(min_resolution) or is_provided(use_model_pass):
         resolved_fps = augment.min_fps
         resolved_width = augment.min_width
         resolved_height = augment.min_height
+        resolved_model_pass = augment.use_model_pass
         if is_provided(min_fps):
             resolved_fps = min_fps
         if is_provided(min_resolution):
             resolved_width, resolved_height = parse_min_resolution(min_resolution)
+        if is_provided(use_model_pass):
+            resolved_model_pass = use_model_pass
         augment = AugmentConfig(
             min_fps=resolved_fps,
             min_width=resolved_width,
             min_height=resolved_height,
+            use_model_pass=resolved_model_pass,
         )
     return config.model_copy(
         update={
@@ -921,6 +935,7 @@ def apply_draft_overrides(
     video_caption: str | None | UnsetType = Unset,
     min_fps: int | None | UnsetType = Unset,
     min_resolution: str | None | UnsetType = Unset,
+    use_model_pass: bool | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Apply the draft profile + targeted run overrides (fast loop).
 
@@ -942,6 +957,7 @@ def apply_draft_overrides(
         video_caption=video_caption,
         min_fps=min_fps,
         min_resolution=min_resolution,
+        use_model_pass=use_model_pass,
     )
 
 

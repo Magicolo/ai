@@ -165,14 +165,14 @@ def test_unexpected_exception_backstops_to_failed(tmp_path: Path) -> None:
         def _zero_divide(path: Path, width: int, height: int, fps: int) -> dict[str, Any]:
             raise ZeroDivisionError("float division by zero")
 
-        supervisor_module.validate_video = _zero_divide  # type: ignore[method-assign]
+        supervisor_module.validate_video = _zero_divide  # type: ignore[assignment]
         try:
             with pytest.raises(FatalWorkerError, match="ZeroDivisionError"):
                 supervisor.run_segments(1)
         finally:
             import voyage.media as media_module
 
-            supervisor_module.validate_video = media_module.validate_video  # type: ignore[method-assign]
+            supervisor_module.validate_video = media_module.validate_video
     finally:
         supervisor.stop_workers()
     failed = read_state(run_dir)

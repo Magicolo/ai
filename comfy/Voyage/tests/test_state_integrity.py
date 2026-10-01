@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -342,13 +343,9 @@ def test_commit_rejects_av_drifted_audio(tmp_path: Path, monkeypatch: pytest.Mon
 # Fake backends render real media with ffmpeg, so validation, checksums,
 # DONE markers, state advance, and finalizer concat are all exercised.
 # """
-# NOTE: source `_init_run` (fixed run_id "itest", seed 7) differs from this
-# file's parameterized `_init_run` — kept as `_itest_init_run` per the
-# quintet prefix precedent (assertions byte-identical).
-
-
-def _itest_init_run(run_dir: Path) -> None:
-    initialize_run_directory(run_dir, run_id="itest", seed=7)
+# NOTE: source run initializer (fixed run_id "itest", seed 7) differs from
+# this file's parameterized initializer — kept inline per the quintet
+# prefix precedent (assertions byte-identical).
 
 
 def test_workers_answer_health(tmp_path: Path) -> None:
@@ -377,7 +374,8 @@ def test_director_worker_decides(tmp_path: Path) -> None:
                 "backend": "deterministic",
             },
         )
-        assert result["destination"]["canonical_name"] == "b"
+        destination = cast(dict[str, Any], result["destination"])
+        assert destination["canonical_name"] == "b"
         assert result["fallback"] is True
     finally:
         worker.stop()
@@ -385,7 +383,7 @@ def test_director_worker_decides(tmp_path: Path) -> None:
 
 def test_commit_one_segment_end_to_end(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    _itest_init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="itest", seed=7)
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
@@ -415,7 +413,7 @@ def test_commit_one_segment_end_to_end(tmp_path: Path) -> None:
 def _committed_run(tmp_path: Path, segment_count: int) -> Path:
     """Commit `segment_count` fake segments; caller owns no workers after return."""
     run_dir = tmp_path / "run"
-    _itest_init_run(run_dir)
+    initialize_run_directory(run_dir, run_id="itest", seed=7)
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()

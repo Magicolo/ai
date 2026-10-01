@@ -42,7 +42,8 @@ from voyage.hashing import sha256_file as shared_sha256_file
 from voyage.model_registry import LTXV_COMMIT, LTXV_HF_REVISION, LTXV_TE_REPO, LTXV_TE_REVISION
 from voyage.workers import video_common
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
-from voyage.workers.video_common import TAIL_FILENAME, TAPE_FILENAME
+from voyage.workers.video_common import TAIL_FILENAME as TAIL_FILENAME
+from voyage.workers.video_common import TAPE_FILENAME as TAPE_FILENAME
 
 DIT_FILENAME = "ltxv-2b-0.9.8-distilled.safetensors"
 UPSC_FILENAME = "ltxv-spatial-upscaler-0.9.8.safetensors"

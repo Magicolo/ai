@@ -388,3 +388,109 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
   31-input-scale no-hang proof + <=2-input pin relaxation first
   (N=8 proven here CPU-only; incident scale + GPU long-run remain
   theirs) — do not wire from the sfx/media side alone.
+
+## Progress log (2026-10-01, full resolution — owned files: media.py + sfx_finalize.py)
+
+- Premise re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip): `render_sfx_bed` still left-folded via
+  `_blend_pair`, `build_final_audio` + `assemble_segment_audio` still
+  folded, `tests/test_finalize_fastpath.py:275` pin still held
+  (`<=2 inputs`, green unmodified); `git diff --name-only` on
+  `voyage/media.py` + `voyage/sfx_finalize.py` was EMPTY (no concurrent
+  hunks in this leg).
+- N=31 CPU ffmpeg proof executed live (ephemeral
+  `/tmp/voyage152proof/proof_n31.py`, scratch `/tmp/voyage152proof/work`
+  only, `voyage:latest` ffmpeg 7.1.5, CPU-only): 31× 4 s sine stems
+  (440 Hz, s16le, 48 kHz stereo) at 1.0 s overlap (expected 94.0 s) —
+  production `_blend_pair` left-fold vs chained-pairwise + per-stage
+  `aformat=sample_fmts=s32` barrier single graph (research construction,
+  generalized to N): stems 1.3 s, fold 1.9 s → 36096102 B,
+  staged 0.7 s → 36096102 B, same_size=True, same_bytes=True —
+  BYTE-IDENTICAL at N=31, no hang (0.7 s under the 600 s guard).
+  Provenance: each stem decoded once (31 `-i`), one spawn, chained
+  `afade out/in + adelay + amix inputs=2 normalize=0` stages with 30
+  barriers, same `_blend_fade_seconds`/`%.3f`/integer-ms recipe.
+- Substitution argument (why this replaces the pin-owner 31-input
+  proof): the poulah incident deadlocked a 31-`acrossfade` chain
+  (scheduler futex, filter-class-specific); the landed graph contains
+  zero `acrossfade` — only sample-passthrough `afade`/`adelay`/`amix`
+  (no scheduler pathology per the `_blend_pair` docstring) plus `aformat`
+  barriers. Audio joins are CPU ffmpeg on every run shape (no torch/GPU
+  in the path), so a CPU 31-input no-hang + byte-identity proof covers
+  the incident scale directly; no GPU long-run is owed for this stage.
+  The `<=2-input` pin's deadlock rationale therefore no longer applies
+  to manual graphs — relaxed to forbid `acrossfade` only (see pin
+  update below).
+- TDD failing-first: new `tests/test_issue_152_single_graph.py` (3
+  tests: N=4 byte-identity vs `_blend_pair` fold reference, one-spawn
+  pin, barriers/no-acrossfade pin) failed first in-container (3×
+  ImportError on the missing `_join_audio_single_graph`), green after
+  the landing (fixed to count `ffmpeg` spawns only — `probe` shares
+  `run_capture` via ffprobe — plus `PAIR_BLEND_INPUT_COUNT` for
+  PLR2004 and `pytest.MonkeyPatch`/`Any` typing).
+- Landing (shared construction, both folds): `voyage/media.py` adds
+  `PAIR_BLEND_INPUT_COUNT = 2` + `_join_audio_single_graph` (N==2
+  delegates to `_blend_pair` — identical single spawn; N>=3 builds the
+  staged single graph, one `timing_ms` entry; raises on <2 inputs /
+  duration mismatch / non-positive durations; output s32le) and replaces
+  the left-fold loops in `assemble_segment_audio` and
+  `build_final_audio` with single helper calls (durations threaded, zero
+  re-probes); `voyage/sfx_finalize.py` imports the helper (drops
+  `_blend_pair`/`_blend_fade_seconds`), replaces its fold loop, updates
+  the `render_sfx_bed` docstring (one single-graph spawn, one timing
+  entry). Intermediate names change (`joined.wav` vs per-index
+  `*_blend_*.wav`) — no resume (still rebuilds on retry, but O(N) so
+  the quadratic retry cost is gone with the fold).
+- Pin update (`tests/test_finalize_fastpath.py`, the moved 088
+  content): `test_final_blend_never_spawns_wide_acrossfade_graph` now
+  forbids `acrossfade` in every call, pins exactly one wide call (8
+  inputs on the 8-segment synthetic, manual `afade`+`adelay`+
+  `amix=inputs=2` + `aformat=sample_fmts=s32`, no `acrossfade`) instead
+  of `wide == []`. Old `<=2-input` assertion removed with the deadlock
+  class it guarded.
+- Probe-memo suite kept green by update (semantics change, not a
+  break): 3 timing assertions go N-1 → 1 (single spawn) —
+  `test_assemble_fold_probes_each_slice_once` (2→1),
+  `test_build_final_audio_reports_per_blend_timings` (2→1),
+  `test_render_sfx_bed_threads_stem_durations` (3→1); all probe-count
+  assertions (`calls <= N`) hold unchanged (still O(N) probes).
+- Test evidence (all in-container `voyage:latest`, CPU-only): new file
+  3/3; pin + probe-memo + single-graph = 11 passed in 6.69 s; wider
+  scope = 46 passed in 20.30 s (`test_finalize_fastpath` +
+  `test_sfx_finalize` + parity-research + wide-proof + single-graph +
+  probe-memo); full audio/finalize scope = 109 passed in 107.05 s (+
+  `test_sfx_contract`, `test_state_integrity`, `test_generation_stack`,
+  `test_audio_accounting`); 095/101/104 + fastpath = 31 passed in
+  19.22 s (fade-absorption untouched). Static: `ruff check` + `ruff
+  format --check` + `ruff check --select PLR2004` + `mypy` green on all
+  touched files. Full `scripts/gates.sh` is red ONLY on foreign
+  `tests/test_run_sh.py` formatting (concurrent agent's hunk, out of
+  scope) — scoped suites above are the green verdict per brief.
+- Cleanup: proof scratch lives in `/tmp/voyage152proof` only (host
+  `/tmp`, never in the tree); no stray `Voyage/output` artifacts.
+
+## Resolution (2026-10-01, full resolution)
+
+- Verdict: RESOLVED — left-fold eliminated on all three joins
+  (`render_sfx_bed`, `build_final_audio`, `assemble_segment_audio`):
+  one single-graph spawn per join (2 spawns total with the final s16le
+  convert), each stem/window probed once, byte-identical to the fold at
+  N=4 (pinned) and N=31 (proof), no `acrossfade` anywhere (pinned).
+- Files changed: `voyage/media.py` (constant + helper + two call-site
+  swaps), `voyage/sfx_finalize.py` (import + call-site swap +
+  docstring), `tests/test_issue_152_single_graph.py` (new, 3 tests),
+  `tests/test_finalize_fastpath.py` (pin relaxed to forbid acrossfade +
+  pin wide manual), `tests/test_issue_152_blend_probe_memo.py` (3 timing
+  counts N-1→1); this issue file (log appended; original above intact).
+- DESIGN proposals: none (DESIGN.md untouched per brief — quoted text
+  only: "> Finalize audio joins are single-graph: each stem/window is
+  > read once through one chained adelay+amix filter invocation with
+  > per-stage s32 barriers (O(N) I/O, one spawn, fold-identical);
+  > soak trends join wall-clock vs timeline length.").
+- Residuals: none on this issue — soak trending moves from per-blend
+  milliseconds (N-1 entries) to per-join milliseconds (1 entry);
+  checkpoint/resume across retries remains unimplemented (deliberate:
+  O(N) makes the quadratic retry cost moot); wide-proof
+  (`test_issue_152_wide_manual_join_proof.py`) and parity-research
+  (`test_issue_152_parity_research.py`) stay as characterization of the
+  superseded shapes.

@@ -194,7 +194,7 @@ def test_unknown_backend_rejected(tmp_path: Path) -> None:
     )
     config, _ = load_config(tmp_path / "voyage.toml")
     with pytest.raises(ValueError, match="unknown video backend"):
-        with_video_backend(config, "framepack")
+        with_video_backend(config, "framepack")  # type: ignore[arg-type]
 
 
 def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:

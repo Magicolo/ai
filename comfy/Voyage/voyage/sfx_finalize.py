@@ -31,8 +31,7 @@ from voyage.errors import MediaError
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     _audio_duration_seconds,
-    _blend_fade_seconds,
-    _blend_pair,
+    _join_audio_single_graph,
     probe,
     run_capture,
 )
@@ -362,10 +361,12 @@ def render_sfx_bed(
     on cuda:0/cuda:1 when num_workers=2 (small on both — see
     SFX_DUAL_MODEL_SIZE; two workers need two visible GPUs, gated below
     via `augment_devices`). Stems persist under audio/sfx/ with ledger
-    entries; the bed joins stems with manual-fade `_blend_pair`s and
-    verifies timeline-exactness before returning. Each stem is probed once
-    and threaded through the fold (issue 152); `blend_timings` collects one
-    wall-millisecond entry per pair for soak trending.
+    entries; the bed joins stems in one single-graph spawn (issue 152:
+    chained pairwise stages with s32 barriers, byte-identical to the old
+    fold, each stem decoded once) and verifies timeline-exactness before
+    returning. Each stem is probed once and threaded through the join;
+    `blend_timings` collects the single join wall-milliseconds for soak
+    trending.
     """
     from voyage.rpc import SubprocessWorker
 
@@ -510,23 +511,16 @@ def render_sfx_bed(
         if proc.returncode != 0:
             raise MediaError(f"sfx bed copy failed: {proc.stderr[-2000:]}")
         return bed
-    accum = stems[0]
     stem_seconds = [_audio_duration_seconds(stem) for stem in stems]
-    accum_seconds = stem_seconds[0]
-    for index in range(1, len(stems)):
-        step = tmpdir / f"sfx_blend_{index:02d}.wav"
-        pair_fade = _blend_fade_seconds(accum_seconds, stem_seconds[index], SFX_WINDOW_OVERLAP)
-        _blend_pair(
-            accum,
-            stems[index],
-            step,
-            SFX_WINDOW_OVERLAP,
-            first_seconds=accum_seconds,
-            second_seconds=stem_seconds[index],
-            timing_ms=blend_timings,
-        )
-        accum_seconds = accum_seconds + stem_seconds[index] - pair_fade
-        accum = step
+    joined = tmpdir / "sfx_joined.wav"
+    _join_audio_single_graph(
+        stems,
+        joined,
+        SFX_WINDOW_OVERLAP,
+        durations=stem_seconds,
+        timing_ms=blend_timings,
+    )
+    accum = joined
     proc = run_capture(
         [
             "ffmpeg",

@@ -7,6 +7,7 @@ from __future__ import annotations
 import subprocess
 import wave
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -193,10 +194,10 @@ def _impulse_take(dest: Path, seconds: float, impulse_sample: int) -> Path:
     return dest
 
 
-def _read_samples(path: Path) -> np.ndarray:
+def _read_samples(path: Path) -> np.ndarray[Any, Any]:
     with wave.open(str(path), "rb") as handle:
         frames = handle.readframes(handle.getnframes())
-    return np.frombuffer(frames, dtype=np.int16).reshape(-1, 2)
+    return np.frombuffer(frames, dtype=np.int16).reshape(-1, 2)  # type: ignore[no-any-return]
 
 
 def test_slice_take_keeps_sub_millisecond_timestamps(tmp_path: Path) -> None:

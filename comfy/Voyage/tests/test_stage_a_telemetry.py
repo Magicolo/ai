@@ -340,6 +340,6 @@ def test_gauges_skip_director_while_prefetch_in_flight(tmp_path: Path) -> None:
     supervisor._audio.call = _recorder("audio")  # type: ignore[method-assign]
     supervisor._director.call = _recorder("director")  # type: ignore[method-assign]
     pending: Future[dict[str, Any] | None] = Future()
-    supervisor._prefetch_future = pending  # type: ignore[assignment]
+    supervisor._prefetch_future = pending
     supervisor._sample_gauges("000000")
     assert sorted(calls) == ["audio", "video"]

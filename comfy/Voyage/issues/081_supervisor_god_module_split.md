@@ -630,3 +630,143 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   - `run_id` legacy (`:540` in `_log_metric`) — single line inside
     the `_log_metric` hub (20+ callers); moving needs the hub
     (forbidden single-stateful) or a method split. Stays.
+
+## Progress log (2026-10-01, remainder-resolution pass — must-stay verdicts, no moves)
+
+- Pre-checks live (`docker run --rm -v /home/goulade/Projects/ai/comfy/Voyage:/app
+  -w /app voyage:latest`, CPU-only; git from `/home/goulade/Projects/ai`):
+  `wc -l comfy/Voyage/voyage/supervisor.py` → 2587 (unchanged since the
+  full-resolution pass); `git diff --name-only` NO LONGER lists
+  `comfy/Voyage/voyage/supervisor.py` — the take-joint compensation hunk
+  (media imports + slice-walk `piece_bounds`/`joint_fade`, ex-`:55-58` /
+  `:1686-1768`) is now COMMITTED (`d04bdb5 Voyage commit-time take-joint
+  compensation`), so the file is QUIET for this pass (verified via `git
+  diff --stat -- comfy/Voyage/voyage/supervisor.py` → empty + `git diff --
+  comfy/Voyage/voyage/supervisor.py | grep "^@@ "` → empty). No
+  supervisor edit was still made: a full AST `self.`-use + caller + dirt
+  rescan over all 45 methods finds ZERO further verbatim-movable groups
+  (every non-delegated method reads `self`; see per-item counts below),
+  so per the brief each remainder item is closed with a must-stay verdict
+  + live evidence, not forced. Concurrent tree holds only non-supervisor
+  hunks (`DESIGN.md`, `LTX2.md`, `README.md`, `docs/*`, `scripts/run.sh`,
+  `tests/test_*`, `voyage/cli*.py`, `model_registry.py`,
+  `models_ensure.py`, `registry_records.py`, `tango/Tango`) + untracked
+  `registry_ltx23/25.py`, `build-ltx.sh`, ltx worker files — none in owned
+  scope, all left intact. Never touched: `000_INDEX.md`, `DESIGN.md`,
+  `AGENTS.md`, `scripts/gates.sh`, non-supervisor `voyage/*` source.
+  Never committed. No host pip (all python via `voyage:latest`).
+- TDD note: no new test module was written — TDD red-first applies to
+  verbatim moves, and no candidate met the verbatim + zero-cross-ref rule
+  (proof below). Existing agreement suites serve as the regression
+  evidence (36 + 80 passed, see gates).
+- Per-item live re-verification (all in-container unless noted):
+  - Stateful commit-pipeline method groups — MUST STAY (verbatim rule +
+    never-single-stateful). AST `self.` counts live: `_decide_payload` 1,
+    `_accept_director_decision` 11, `_propose_segment` 13, `_render_video`
+    8, `_cover_audio` 2, `_commit_segment` 12, `_commit_one_segment_locked`
+    13, `commit_one_segment` 3, `_with_audio_gpu` 14,
+    `_best_effort_audio_teardown` 7, inspect trio 2/4/3,
+    `_adopt_unaccounted_segment` 10,
+    `_write_state_preserving_control_plane` 2, `_embed_texts` 1,
+    `_log_rejection` 2, prefetch trio 10/1/12, `_sample_gauges` 6,
+    `_resume_video_worker` 4, `_latest_recovery_tape` 8,
+    `_call_with_restart` 9. Every body reads `self._run_dir` /
+    `self._config` / `self._log_metric` / workers; moving one method
+    rewrites its signature (`self.` → params, not verbatim) and moving a
+    group needs mixin inheritance (novel pattern, MRO risk) — forbidden.
+    Needs a future stateful-group pattern decision, one group per
+    quiet-tree pass.
+  - Lifecycle remainder — MUST STAY (same cause). AST live:
+    `_held_run_lock` 4 (incl. the `self._read_lock_holder` call),
+    `_stored_relative` 1 + callers at `:1656`-class slice sites,
+    `_checked_tape_path` 2 + worker-tape callers, `start_workers` 7,
+    `stop_workers` 9, `run_segments` 25, `_stage` 2, `_log_metric` 2 (hub,
+    39 `self._log_metric` fan-out sites live via `grep -c`), `_rotate_
+    worker_logs` 1, `_pause/_stop_requested` 2/2. All stateful +
+    cross-refs outside any single contiguous block.
+  - Audio-coverage group (`_ensure_audio_coverage` 7,
+    `_with_audio_gpu` 14, `_best_effort_audio_teardown` 7,
+    `_cover_audio` 2) — MUST STAY (stateful; prior "dirty-region defer"
+    now SUPERSEDED: the foreign hunk LANDED as `d04bdb5`, region is
+    quiet, re-verified empty diff — but the methods remain stateful:
+    `self._run_dir` / `self._with_audio_gpu` / `self._stored_relative` /
+    `self._log_metric` throughout the 226-line `1518-1744` body). The
+    only `self`-free sub-block (joint-fade compensation `1695-1726`)
+    is an in-method slice of a stateful method — extracting it splits
+    the method (same violation as deterministic-compat). Moves with a
+    future stateful audio-group pattern decision.
+  - `sha256_file` shim (`:52` re-export) — MUST STAY (live importer).
+    `voyage/cli_validate.py:23` carries `from voyage.supervisor import
+    sha256_file`, used at `:70`/`:88`; `cli_validate.py` is
+    non-supervisor source (out of scope). In-container probe:
+    `supervisor.sha256_file is hashing.sha256_file` → True. Removal
+    belongs to the cli track (migrate `cli_validate.py` to
+    `voyage.hashing` first).
+  - Worker-map merge (3 maps → 1 table) — MUST STAY (not verbatim).
+    Live: `VIDEO` keys `['causvid', 'fake', 'ltxv']` vs `AUDIO` keys
+    `['acestep', 'fake']` (different key sets); error contracts differ —
+    `video_worker_module('longlive2')` keeps the 079 migration hint
+    (`... was removed (issue 079); re-init with --backend ltxv ...`)
+    while `audio_worker_module('longlive2')` is the plain unknown-backend
+    message. Merging rewrites messages and breaks
+    `test_longlive2_removed_079` (kept green this pass, see gates).
+    Needs a design decision (single table with per-family hints) by the
+    023 owner.
+  - Deterministic-payload compat (flat fields `1108-1124` inside
+    `_decide_payload` `1074-1125`, 52L, 1 `self.` at `1089`) —
+    MUST STAY (in-method block, not standalone). Extracting splits a
+    stateful method (violates verbatim + never-single-stateful). Moves
+    with a future `_decide_payload` accept group.
+  - `run_id` legacy (`:498` in `_log_metric` `497-499`) — MUST STAY
+    (single line inside the hub). `grep -c 'self._log_metric'
+    voyage/supervisor.py` → 39 fan-out sites; moving needs the hub
+    (forbidden single-stateful) or a method split.
+  - Legacy-migration threading (issue's `:1460`
+    `LEGACY_MIGRATION_REMOVE_AFTER`) — NO ACTION (absent). `grep -rn
+    LEGACY_MIGRATION voyage/supervisor.py` → empty live; the constant
+    lives in `voyage/concepts.py:34` with its time-boxed threading
+    there (`:165/:170`). Remaining `supervisor.py` legacy comments
+    (016 run-relative, `sha256.json`, `CONCEPTS_FILENAME`, legacy
+    manifest) are load-bearing compat, not threading.
+- Gate evidence (in-container `voyage:latest`, CPU-only): per-file `ruff
+  check` clean on all 8 supervisor files; `ruff format --check` clean
+  (8 files already formatted); `mypy strict` clean (`Success: no issues
+  found in 8 source files`). Agreement suites 36 passed
+  (`test_supervisor_routing/plan_info/lock/proposal/prefetch/commit_
+  types/tape_helpers`). Neighbor/hardening 80 passed
+  (`test_supervisor_hardening + test_supervisor_lifecycle +
+  test_commit_hardening + test_failure_policy + test_generation_stack +
+  test_longlive2_removed_079 + test_single_source`, 55.65 s). No
+  full-tree `gates.sh` run (concurrent non-supervisor hunks across
+  15+ files would color it; `scripts/gates.sh` itself is untouched per
+  the brief — orchestrator reconciles).
+
+## Resolution (2026-10-01, remainder-resolution pass)
+
+- Verdict: REMAINDER CLOSED — no verbatim-movable group remains; all
+  seven remainder items carry must-stay verdicts with live evidence
+  above (stateful commit/lifecycle groups, audio-coverage group,
+  `sha256_file` shim, worker-map merge, deterministic compat, `run_id`,
+  legacy threading). Streaming-set derivation stays LANDED (prior
+  pass). No further extraction is possible under the landed
+  move-verbatim + explicit-`as` facade + delegation pattern — the next
+  split needs a stateful-group pattern decision (mixin vs service
+  object), one group per quiet-tree pass, owned outside this issue's
+  verbatim scope.
+- Files changed (own scope only): this issue file (append-only progress
+  log + resolution). No `voyage/*.py` edit, no test-file edit, no
+  `scripts/gates.sh` edit. Never touched: `000_INDEX.md`, `DESIGN.md`,
+  `AGENTS.md`, other issues' files. Never `ruff format` on
+  `issues/*.md`. Never committed. No host pip.
+- DESIGN proposals: "No DESIGN text change proposed: this pass makes no
+  supervisor-seam change; the must-stay verdicts above (with AST
+  `self.` counts, importer paths, and contract diffs) are the durable
+  record for the future stateful-group pattern decision."
+- Residuals: NONE under the verbatim pattern (exhausted — 7/7 split
+  files landed: `supervisor_proposal.py` / `supervisor_prefetch.py` /
+  `supervisor_commit_types.py` / `supervisor_tape.py` /
+  `supervisor_routing.py` (+ streaming derivation) /
+  `supervisor_plan_info.py` / `supervisor_lock.py`; `supervisor.py`
+  2760→2587L across the issue). Future work is a NEW pattern decision
+  (stateful commit vs lifecycle vs audio-coverage groups), explicitly
+  out of scope for verbatim passes.

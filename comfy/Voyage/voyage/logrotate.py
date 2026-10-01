@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage import paths
-from voyage.atomic import fsync_dir
+from voyage.atomic import fsync_dir as fsync_dir
 
 DEFAULT_KEEP_DAYS = 30
 

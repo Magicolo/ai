@@ -414,3 +414,204 @@ grep -rn "pytest.mark" tests/ | head -n 20
   change. DESIGN proposals: none.
 - Residuals: slow-tail / mypy-scope / cache-guard legs per their
   owning tracks (unchanged by this pass).
+
+## Progress log (2026-10-01, mypy-scope-collapse pass)
+
+- Premise: 163 `test_*.py` tracked at pass start (165 with 2
+  concurrent-agent untracked files landing mid-pass, left untouched
+  per the untracked-until-committed rule); gates.sh mypy list held 68
+  test modules; 95 unlisted. Per-file `mypy --strict` audited live
+  in-container (`voyage:latest`, CPU-only, no host pip) for every
+  unlisted file: 70 already clean (Success, no issues) + 25 with
+  errors. Voyage-follow noise re-checked solo (concurrent agents
+  fixed `cli_observe` JsonValue variance mid-pass — early combined
+  runs showed voyage errors, solo re-runs confirmed test-only).
+- Collapse landed in three waves, test-scope only (own `tests/` +
+  owned `scripts/gates.sh` list lines; never `voyage/*`, never
+  foreign hunks, never untracked files):
+  1. 70 clean files added verbatim (no edits — `ruff check` +
+     `ruff format --check` + solo `mypy strict` all green before
+     listing): 134_resume_fallback, 169_block_zero_fresh,
+     audio_acestep_cwd, augment_contract_166, augment_preset_fanout,
+     beat_quantize_ties_121, beats_bpm_cap_120,
+     cli_benchmark_sfx_augment, cli_group_a, cli_inspect_metrics,
+     cli_run_ops_pruning, cli_scoreboard, cli_split,
+     commit_slice_compensation, concepts_pruning,
+     concepts_unicode_117, director_init_strict_127,
+     director_models_dir, e1_media_augment, e2_ace_ceiling_155,
+     e2_augment_worker_157_193, e2_bench_sfx_augment_154_163,
+     e2_causvid_device_124, e2_causvid_overlap_128,
+     e2_tape_fsync_122, e2_vision_edges_126,
+     e2_worker_init_strict_127, feedback_six_metrics_180,
+     init_run_ratchet, issue098_orphan_audio_root,
+     issue195_doctor_coverage, issue197_torn_manifest,
+     issue_140_inspect_frame_logs, issue_142_inspect_failsoft,
+     issue_152_parity_research, issue_152_wide_manual_join_proof,
+     issue_166_resolve_weights, issue_191_sfx_bounds_streams,
+     issue_citation_gate, longlive2_removed_079, ltxv_stage_ms,
+     media_augment_unified_083, models_ranges_119,
+     output_containment, prefetch_invalidated_136_168,
+     registry_audio/causvid/director/film/inspector/ltxv/
+     realesrgan/sfx/split (9 incl. dirty-but-clean
+     `test_registry_split.py`), repaint_similarity_gate,
+     segment_manifest, sfx_caption_render_161, single_source,
+     supervisor_commit_types/lock/plan_info/prefetch/proposal/
+     routing/tape_helpers (7), tail_derive, tape_trust_123_171,
+     tui_app (Pilot, mypy-clean), wire_boundary_118,
+     worker_validators_unified_084.
+  2. 10 mechanical fixes → added (TDD: failing mypy shown first,
+     then per-file `ruff` + `format` + `mypy strict` green + pytest
+     green before listing): lock_manifest_agreement (stale
+     `import-not-found,no-redef` ignore removed; 8/8 pytest),
+     issue_141_manifest_presentation (`no-any-return` ignore on the
+     intentional `json.loads` return; 8/8 with lock file),
+     issue_152_blend_probe_memo (stale `assignment` ignore removed;
+     mypy green — pytest 3 failed on the foreign dirty
+     `voyage/media.py` +128-line hunk, recorded not fixed),
+     audio_planner (`ndarray[Any, Any]` + `no-any-return` ignore;
+     part of the 53-test audio/tensor/draft/precision/hardening
+     batch), ltxv_tensor_handoff (same ndarray pattern + dropped
+     stale `index` ignore), draft (`_base_config` + tmp_path typed,
+     `ProjectConfig` import), precision (same + intentional-invalid
+     `arg-type` ignore kept only where mypy demands),
+     failure_policy + supervisor_hardening (7+3 `method-assign`→
+     `assignment` ignore-code corrections for the JsonValue-typed
+     `.call` slots; 30 passed/1 skipped + 53-batch), media_memory
+     (2 `arg-type`→`call-overload` corrections; 30-batch).
+  3. 7 second-wave fixes → added (same TDD bar): commit_side
+     (stale `arg-type` removed), crash_matrix
+     (`method-assign`→`assignment`), generate (intentional-invalid
+     `framepack` `arg-type` ignore added — the test pins the
+     unknown-backend ValueError), observability + ops_visibility
+     (stale `arg-type` removals), qualification (`Frame: TypeAlias`
+     + import-order repair), tui_state (`comparison-overlap`
+     ignores on the 3 approx-tuple assertions; 128-test batch +
+     43-test generate batch all green).
+- Paired 088 fold (same pass, same discipline): `test_tui_state`
+  26 → `test_tui` 33→59 (see 088 log; pre-delete 89/89,
+  post-delete 89/89, per-file gates green, list entry removed in
+  the same edit). The 2 untracked files were added-then-reverted
+  from the list in-pass once their `??` status was confirmed
+  (untracked-until-committed rule honored).
+- Gate evidence (in-container, `voyage:latest`, CPU-only):
+  `bash -n scripts/gates.sh` clean; list integrity re-verified
+  (every listed path exists — no dangling entries; 154 unique test
+  modules + conftest); per-file `ruff check` + `ruff format
+  --check` + `mypy strict` green on all 87 touched test files;
+  pytest spot batches green (53 + 30/1 + 128 + 43 + 8 + 89
+  merged). Full `gates.sh` green left to the orchestrator (shared
+  file; foreign dirty hunks in `voyage/*` + listed
+  `test_benchmark`/`test_state_integrity`/`test_supervisor_av_align`
+  colored by concurrent tracks, plus the 8 blocked modules below —
+  untouched per scope).
+- As-left: 164 `test_*.py` files on disk (163 tracked + 2 untracked
+  − 1 folded), gates.sh lists 154 test modules + conftest
+  (comment updated 83→156 files). 10 unlisted = 8 blocked + 2
+  untracked-clean (single_graph, chunk_worker — stay out until
+  committed).
+
+## Resolution (2026-10-01, mypy-scope-collapse pass)
+
+- Verdict: collapsed to the test-scope limit (87 modules added:
+  70 clean + 17 fixed; 1 folded out in the paired 088 leg).
+  Files changed: 17 test-scope mypy fixes (list in the log above,
+  each per-file green), `scripts/gates.sh` (mypy list 68→154 test
+  modules, comment count updated, `bash -n` clean), `tests/test_tui.py`
+  (+26 folded tests, paired 088 leg), deleted
+  `tests/test_tui_state.py`; this issue file (append).
+  Gate evidence as in the log above. DESIGN proposals: none.
+- Residuals (exact causes — each probed live solo, all `attr-defined`
+  needing `voyage/*` re-exports, i.e. voyage-source scope forbidden
+  to this pass + other groups' area; transplanting them into listed
+  clean files would turn green gates red):
+  `test_causvid_worker` (14 incl. `CAUSVID_COMMIT`/
+  `CAUSVID_CHECKPOINT_FILE`), `test_video_common` (6 incl.
+  `TAIL_FILENAME`/`TAPE_FILENAME` ×2 workers), `test_commit_hardening`
+  (5 incl. `supervisor.validate_video`), `test_finalize_encode_rank2`
+  (1 `audio_acestep.subprocess`), `test_ledger_rotation_rank2` (4 incl.
+  `logrotate/concepts.fsync_dir`), `test_novelty_leniency` (1
+  `prompts.StyleSpec`), `test_stage_a_telemetry` (2 incl.
+  `prompts.StyleSpec`), `test_perf_regressions` (1
+  `vision.metrics.probe`). Owners: worker/registry tracks.
+   Untracked `test_issue_152_single_graph.py` +
+   `test_issue_166_chunk_worker.py` stay out until committed.
+   Lock legs MOOT per the prior re-verdict (unchanged).
+
+## Progress log (2026-10-01, mypy-legs full-resolution pass)
+
+- Premise: all 8 blocked modules re-probed live FIRST (in-container
+  `voyage:latest`, CPU-only, no host pip): 34 errors total —
+  `test_video_common` 6 (`video_ltxv`/`video_causvid`
+  TAIL/TAPE_FILENAME ×4 attr-defined + 2 ndarray type-arg),
+  `test_causvid_worker` 14 (11 + 1 stale attr-defined unused-ignores
+  + `CAUSVID_COMMIT`/`CAUSVID_CHECKPOINT_FILE` attr-defined),
+  `test_commit_hardening` 5 (`supervisor.validate_video` ×2
+  attr-defined + wrong-code `method-assign` ignores + 1 real
+  `assignment`), `test_finalize_encode_rank2` 1
+  (`audio_acestep.subprocess` attr-defined),
+  `test_ledger_rotation_rank2` 4 (`logrotate`/`concepts` fsync_dir
+  ×2 attr-defined + 2 `func-returns-value` on `append`-in-lambda),
+  `test_novelty_leniency` 1 (`prompts.StyleSpec`),
+  `test_stage_a_telemetry` 2 (`prompts.StyleSpec` + 1 stale
+  `assignment` unused-ignore), `test_perf_regressions` 1
+  (`vision.metrics.probe`). TDD red shown first (34-error output
+  recorded), then fixed. Re-exports are facade-only (`as` aliases,
+  no behavior change) so no failing-test gate applies beyond the
+  mypy red/green.
+- Voyage re-exports (7 clean files + 1 quiet region, `git diff`
+  checked first — the 12 dirty `voyage/*` files' hunks avoid all 8
+  import sites; `supervisor.py` foreign hunks live at the
+  `typing.cast`/embed lines, the media-import block is quiet):
+  `logrotate.fsync_dir as fsync_dir`, `concepts.fsync_dir as
+  fsync_dir` (split line per ruff I001), `prompts.StyleSpec as
+  StyleSpec` (split line), `vision.metrics.probe as probe`,
+  `workers.audio_acestep: import subprocess as subprocess`,
+  `workers.video_ltxv: TAIL/TAPE_FILENAME as` (split lines),
+  `workers.video_causvid: CAUSVID_CHECKPOINT_FILE/CAUSVID_COMMIT
+  as` + `TAIL/TAPE_FILENAME as` (split lines),
+  `supervisor.validate_video as validate_video` (quiet region).
+- Test-side fixes (own scope, all 8 files were quiet — none in
+  `git diff` at pass start): `video_common` 2×
+  `np.ndarray[Any, Any]`; `causvid_worker` 12 stale
+  attr-defined ignores removed (attributes are defined on
+  `CausvidSession.__init__` — verified live); `ledger_rotation`
+  2 lambdas → named `def` recorders (append return-value);
+  `stage_a_telemetry` 1 stale `assignment` ignore removed;
+  `commit_hardening` 168 `method-assign`→`assignment` (real
+  4-arg vs 5-arg stub mismatch), 175 restore-line ignore removed
+  (types match post-re-export). `finalize_encode_rank2`,
+  `novelty_leniency`, `perf_regressions` needed zero test-side
+  edits (voyage-side only).
+- Gates (in-container, `voyage:latest`, CPU-only, no host pip):
+  `mypy --strict` 8/8 clean (was 34 errors); `ruff check` +
+  `ruff format --check` clean on all 16 touched files (ruff
+  `--fix` split the 5 multi-name `as` imports per I001, no other
+  churn); `py_compile` clean on all 8 voyage files; `mypy
+  --strict` clean on all 7 clean voyage files + `supervisor.py`
+  solo clean (foreign hunks type-clean). Pytest: 106 passed
+  (7 files) + 32 passed (`test_causvid_worker` solo) = 138/138.
+  `scripts/gates.sh`: 8 entries added alphabetically in the same
+  edit (`test_causvid_worker`, `test_commit_hardening`,
+  `test_finalize_encode_rank2`, `test_ledger_rotation_rank2`,
+  `test_novelty_leniency`, `test_perf_regressions`,
+  `test_stage_a_telemetry`, `test_video_common`; comment
+  156→164 files), `bash -n` clean, list integrity re-verified
+  (162 modules, zero dangling). Full `gates.sh` green left to
+  the orchestrator (shared file; foreign dirty hunks elsewhere
+  in `voyage/*` + tests would color it).
+- Never touched: `000_INDEX.md`, `DESIGN.md`, `AGENTS.md`, other
+  issues' files, foreign dirty hunks, untracked files. Never
+  committed. No host pip.
+
+## Resolution (2026-10-01, mypy-legs full-resolution pass)
+
+- Verdict: FIXED (all 8 residual legs closed). Files changed: 8
+  voyage re-exports (facade-only) + 5 test-side fixes (3 files
+  needed zero test edits) + `scripts/gates.sh` (8 list entries +
+  count comment). Gate evidence as in the log above (mypy 34→0,
+  ruff + format clean, 138/138 pytest, `bash -n` clean).
+  DESIGN proposals: none.
+- Residuals: none for the 8 legs. Untracked
+  `test_issue_152_single_graph.py` +
+  `test_issue_166_chunk_worker.py` stay out until committed
+  (unchanged). Lock legs MOOT (unchanged).

@@ -34,12 +34,13 @@ def _load_run(run: Path) -> tuple[ProjectConfig, str]:
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
     """CLI augment flags → resolve_config kwargs (Track A).
 
-    `--no-augment` wins over explicit floors (both to 0). Every read
-    goes through getattr + `is_provided` so TUI/hand-built namespaces
-    (Unset blanks, missing attrs) resolve to absent, never to a value.
+    `--no-augment` wins over explicit floors (both to 0) and forces the
+    model pass off. Every read goes through getattr + `is_provided` so
+    TUI/hand-built namespaces (Unset blanks, missing attrs) resolve to
+    absent, never to a value.
     """
     if bool(getattr(args, "no_augment", False)):
-        return {"min_fps": 0, "min_resolution": "0"}
+        return {"min_fps": 0, "min_resolution": "0", "use_model_pass": False}
     overrides: dict[str, Any] = {}
     min_fps = getattr(args, "min_fps", None)
     if is_provided(min_fps):
@@ -47,4 +48,7 @@ def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
     min_resolution = getattr(args, "min_resolution", None)
     if is_provided(min_resolution):
         overrides["min_resolution"] = min_resolution
+    use_model_pass = getattr(args, "use_model_pass", None)
+    if is_provided(use_model_pass):
+        overrides["use_model_pass"] = use_model_pass
     return overrides

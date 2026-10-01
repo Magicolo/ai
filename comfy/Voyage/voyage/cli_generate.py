@@ -242,6 +242,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             min_fps=getattr(args, "min_fps", None),
             min_resolution=getattr(args, "min_resolution", None),
             no_augment=bool(getattr(args, "no_augment", False)),
+            use_model_pass=getattr(args, "use_model_pass", None),
             verbose=console.verbose,
             no_color=getattr(args, "no_color", False),
             progress_sink=sink,
@@ -280,6 +281,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             min_fps=getattr(args, "min_fps", None),
             min_resolution=getattr(args, "min_resolution", None),
             no_augment=bool(getattr(args, "no_augment", False)),
+            use_model_pass=getattr(args, "use_model_pass", None),
             # Console context rides both child stages (issue 147): the run
             # call above already forwards these three, the finalize call
             # dropped them — so generate --verbose went silent exactly
