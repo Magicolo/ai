@@ -3,8 +3,8 @@
 Backends share one contract: given the bounded director input (§20),
 return a validated `EvolutionDecision`. The deterministic fallback holds
 the transition grammar and never corrupts state; the Qwen worker lives
-behind the same schema so the supervisor path (validate → novelty →
-style check → accept) stays identical.
+behind the same schema so the supervisor path (validate → style →
+score → accept) stays identical.
 """
 
 from __future__ import annotations
@@ -32,14 +32,21 @@ PHASE_ORDER: list[TransitionPhase] = [
     "STABILIZE",
 ]
 
+#: Exact forbidden_summary text the supervisor sends when a run allows
+#: concept revisits (item 1): the NOVELTY STEERING section applies only
+#: when the summary is a real visited-worlds list, never for this value.
+REVISITS_ALLOWED_SENTINEL = "(revisits allowed)"
+
 DIRECTOR_SYSTEM_PROMPT = """\
 You are an autonomous audiovisual art director for an infinite voyage.
 The human owns the STYLE CHARTER: you must never alter, dilute, or
 override it. You own subject matter: invent new worlds, design gradual
 transitions, plan music that may evolve more strongly than visuals.
 Rules: the voyage evolves continuously; transitions are gradual and
-describe change mechanisms, never abrupt substitution; old canonical
-concepts are forbidden unless revisits are allowed; output must be
+describe change mechanisms, never abrupt substitution; always propose a
+destination with a different setting, a different dominant element and
+a different mood than every previously visited world, unless revisits
+are allowed; output must be
 machine-readable JSON only, no prose, no markdown fences.
 Caption doctrine: every decision carries three caption families, all
 derived from the style charter + the evolving general prompt
@@ -100,6 +107,17 @@ def build_director_user_message(
         f"CURRENT TRANSITION\n{current_transition}",
         f"RECENT WORLD SUMMARY\n{recent_summary}",
         f"FORBIDDEN CONCEPT SUMMARY\n{forbidden_summary}",
+    ]
+    if forbidden_summary and forbidden_summary != REVISITS_ALLOWED_SENTINEL:
+        # Item 1: steer toward novelty in the prompt (never by rejection).
+        # The sentinel is the exact string the supervisor sends when the
+        # run allows revisits — steering pressure applies only otherwise.
+        sections.append(
+            "NOVELTY STEERING\nPropose a destination with a different "
+            "setting, a different dominant element and a different mood "
+            "than every world in FORBIDDEN CONCEPT SUMMARY above."
+        )
+    sections += [
         f"CURRENT AUDIO STATE\n{audio_state}",
         f"TARGET CONTROLLER METRICS\n{controller_metrics}",
     ]

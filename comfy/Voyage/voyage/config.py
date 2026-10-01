@@ -500,11 +500,8 @@ class VoyageConfig(BaseModel):
     blocks_per_prompt_stage: int = 3
     novelty_threshold: float = 0.85
     novelty_max_attempts: int = 3
-    # Novelty leniency: after this many novelty rejections the last
-    # generation is accepted anyway (novelty_accepted=False) instead of
-    # burning the remaining attempts toward a deterministic fallback.
-    # Schema/empty-stages/style rejections stay hard — only novelty goes
-    # lenient, so the style charter still always wins.
+    # Deprecated (item 1): novelty never rejects, so no cap is read —
+    # kept (with validator and TOML line) so older run dirs still load.
     novelty_max_rejections: int = 2
     max_worker_restarts: int = 3
     rpc_timeout_seconds: float = 600.0

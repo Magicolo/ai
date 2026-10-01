@@ -2,12 +2,14 @@
 
 TDD characterization of the Stage A instrumentation contract: every
 `continue` path of the §74 accept loop emits a `director_rejection`
-metric, exhaustion emits `director_fallback`, a burned attempt-0
-prefetch emits `director_prefetch_rejected`, the Qwen worker reports
-token counts that ride the accepted raw into `segment_committed`, the
-commit→propose gap is broken down by phase, and the audio
-swap/slice/assemble windows are timed. All additive — the existing
-`stages` key set is untouched (pinned by test_stage_timings.py).
+metric (schema/empty-stages/style — novelty never rejects since item 1,
+it scores via `novelty_scored` and always renders), exhaustion emits
+`director_fallback`, a burned attempt-0 prefetch emits
+`director_prefetch_rejected`, the Qwen worker reports token counts that
+ride the accepted raw into `segment_committed`, the commit→propose gap
+is broken down by phase, and the audio swap/slice/assemble windows are
+timed. All additive — the existing `stages` key set is untouched
+(pinned by test_stage_timings.py).
 """
 
 from __future__ import annotations
@@ -134,18 +136,21 @@ def test_style_rejection_emits_metric(tmp_path: Path, monkeypatch: pytest.Monkey
     assert [event["reason"] for event in rejections] == ["style"]
 
 
-def test_novelty_rejection_emits_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A concept-identical candidate emits director_rejection(reason=novelty) with a score."""
+def test_revisit_scores_without_rejection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Item 1: a concept-identical candidate renders — scored, never rejected."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
     store = ConceptStore(run_dir / "novelty")
     store.append("telemetry valley 0", accepted=True, summary="seeded history", segment=0)
-    supervisor = _stubbed_supervisor(run_dir, monkeypatch, [_valid_raw(), _valid_raw(index=1)])
-    _accept(supervisor)
-    rejections = _metric_events(run_dir, "director_rejection")
-    assert [event["reason"] for event in rejections] == ["novelty"]
-    assert isinstance(rejections[0]["score"], float)
-    assert rejections[0]["score"] > 0.9
+    supervisor = _stubbed_supervisor(run_dir, monkeypatch, [_valid_raw()])
+    decision = _accept(supervisor)
+    assert decision.destination_concept == "telemetry valley 0"
+    assert decision.novelty_accepted is False
+    assert _metric_events(run_dir, "director_rejection") == []
+    scored = _metric_events(run_dir, "novelty_scored")
+    assert len(scored) == 1
+    assert isinstance(scored[0]["score"], float)
+    assert scored[0]["score"] > 0.9
 
 
 def test_exhaustion_emits_fallback_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

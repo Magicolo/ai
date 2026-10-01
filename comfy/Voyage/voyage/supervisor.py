@@ -4,8 +4,8 @@ Owns lifecycle and commit state (DESIGN §73). The director proposes,
 the supervisor validates and commits. One segment commit:
 
   1. director decide (via worker) → EvolutionDecision (schema-validated)
-  2. novelty check (bounded retries, then deterministic fallback) → accept/reject
-  3. style check (code-level, §18.1) → staged prompt plan (§18.2)
+  2. style check (code-level, §18.1) → novelty score (recorded, never rejects)
+  3. staged prompt plan (§18.2)
   4. video generate_blocks → audio generate_audio
   5. validate media → write metadata (.partial + fsync + rename)
   6. checksums → DONE (.partial + fsync + rename) → state.json update
@@ -36,6 +36,7 @@ from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
 from voyage.console import SegmentProgress
 from voyage.director import (
+    REVISITS_ALLOWED_SENTINEL,
     DeterministicDirector,
     director_input_from_state,
     format_measured_context,
@@ -1112,7 +1113,7 @@ class Supervisor:
             forbidden_summary=(
                 "; ".join(history[-20:])
                 if not config.voyage.allow_concept_revisit and history
-                else "(revisits allowed)"
+                else REVISITS_ALLOWED_SENTINEL
             ),
             audio_state=(f"style={config.audio.music_style} energy={config.audio.energy}"),
             measured_context=measured_context,
@@ -1179,10 +1180,14 @@ class Supervisor:
         amendments: list[str] | None = None,
         prefetched_raw: dict[str, Any] | None = None,
     ) -> tuple[EvolutionDecision, dict[str, int]]:
-        """§74 transaction: validate → novelty → style → accept.
+        """§74 transaction: validate → style → score → accept.
 
-        Bounded retries with rejection feedback; exhaustion falls back to
-        the local deterministic director. Every rejection is recorded in
+        Bounded retries for schema/style failures, with rejection
+        feedback; exhaustion falls back to the local deterministic
+        director. Novelty never rejects (item 1): the prompt steers
+        toward unvisited worlds, every generation is scored and recorded,
+        and the first schema/style-valid generation renders — revisits
+        carry novelty_accepted=False. Every rejection is recorded in
         the immutable concept history. When the experimental visual
         inspector measured the previous segment, its §43 amendments are
         applied to each stage post-validation, pre-style-check — amended
@@ -1213,11 +1218,8 @@ class Supervisor:
             )
             return hold, {"prompt_tokens": 0, "completion_tokens": 0}
         max_attempts = max(1, config.voyage.novelty_max_attempts)
-        max_novelty_rejections = max(0, config.voyage.novelty_max_rejections)
         novelty_threshold = config.voyage.novelty_threshold
         feedback = ""
-        last_score = 0.0
-        novelty_rejections = 0
         spent_prompt_tokens = 0
         spent_completion_tokens = 0
         prefetch_pending = prefetched_raw is not None and not amendments
@@ -1278,59 +1280,12 @@ class Supervisor:
             vectors = self._embed_texts([decision.destination_concept])
             vector = vectors[0] if vectors else None
             accepted, last_score = store.check_novel(decision.destination_concept, vector)
-            if not accepted and not config.voyage.allow_concept_revisit:
-                novelty_rejections += 1
-                store.append(
-                    decision.destination_concept,
-                    accepted=False,
-                    summary=decision.destination.summary,
-                    vector=vector,
-                    segment=state.next_segment_number,
-                )
-                self._log_rejection(
-                    segment_id, attempt, "novelty", {"score": round(last_score, 3)}, served_prefetch
-                )
-                if novelty_rejections >= max_novelty_rejections:
-                    # Leniency cap reached: take the last generation instead
-                    # of burning the remaining attempts toward a
-                    # deterministic fallback (which evolves nothing). Only
-                    # novelty goes lenient — schema/style already passed, so
-                    # the charter still holds. Recorded accepted (it renders)
-                    # with novelty_accepted=False (it revisits).
-                    record = store.append(
-                        decision.destination_concept,
-                        accepted=True,
-                        summary=f"novelty override after {novelty_rejections} rejections",
-                        vector=vector,
-                        segment=state.next_segment_number,
-                    )
-                    decision.novelty_accepted = False
-                    suffix = f"novelty override (similarity {last_score:.3f}) record {record.id}"
-                    decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
-                    self._log_metric(
-                        {
-                            "event": "novelty_overridden",
-                            "segment_id": segment_id,
-                            "attempt": attempt,
-                            "score": round(last_score, 3),
-                        }
-                    )
-                    return decision, {
-                        "prompt_tokens": spent_prompt_tokens,
-                        "completion_tokens": spent_completion_tokens,
-                    }
-                recent_worlds = store.history_texts()[-8:]
-                feedback = (
-                    f"novelty rejection {novelty_rejections}/{max_novelty_rejections}: "
-                    f"'{decision.destination_concept}' scores {last_score:.3f} "
-                    f"against history (bar is below {novelty_threshold:.2f}) — "
-                    f"too close to an already-visited world. Recently visited "
-                    f"worlds to avoid: {', '.join(recent_worlds) or 'none yet'}. "
-                    f"Propose a destination with a different setting, a different "
-                    f"dominant element and a different mood; keep the style charter. "
-                    f"Director's novelty claim: {decision.novelty.why_new}"
-                )
-                continue
+            # Item 1: novelty never rejects — the prompt steers toward
+            # unvisited worlds, the score is recorded, and the first
+            # schema/style-valid generation always renders. A revisit
+            # simply carries novelty_accepted=False. Single-serve accepts
+            # are also the director speedup: no retry loop burns extra
+            # ~120s+ LLM calls.
             record = store.append(
                 decision.destination_concept,
                 accepted=True,
@@ -1338,13 +1293,24 @@ class Supervisor:
                 vector=vector,
                 segment=state.next_segment_number,
             )
-            decision.novelty_accepted = True
+            decision.novelty_accepted = accepted or config.voyage.allow_concept_revisit
+            kind = "novel" if decision.novelty_accepted else "revisit"
             suffix = (
-                f"novelty similarity {last_score:.3f} "
-                f"(embeddings {'on' if vector is not None else 'fallback'}) "
+                f"novelty {kind} (similarity {last_score:.3f}, "
+                f"embeddings {'on' if vector is not None else 'fallback'}) "
                 f"record {record.id}"
             )
             decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
+            self._log_metric(
+                {
+                    "event": "novelty_scored",
+                    "segment_id": segment_id,
+                    "score": round(last_score, 3),
+                    "threshold": novelty_threshold,
+                    "embedded": vector is not None,
+                    "accepted_novel": decision.novelty_accepted,
+                }
+            )
             return decision, {
                 "prompt_tokens": spent_prompt_tokens,
                 "completion_tokens": spent_completion_tokens,

@@ -8024,6 +8024,26 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   Gates: 59 green across the compensation + Stage A + 095/101/104 +
   leniency + planner files; ruff + format + mypy strict clean on all
   touched files. Boba resume retries seg21 with this fix on the GPU.
+- Novelty steer-and-accept done 2026-10-01 (item 1: director slowness):
+  novelty never rejects — the prompt steers (system prompt now demands a
+  different setting/element/mood than every visited world; builder adds a
+  NOVELTY STEERING section pointing at FORBIDDEN CONCEPT SUMMARY, gated
+  by new `REVISITS_ALLOWED_SENTINEL` shared with the supervisor payload),
+  every generation is scored (`novelty_scored` {score, threshold,
+  embedded, accepted_novel}) and the first schema/style-valid generation
+  renders with truthful `novelty_accepted`. Speed comes from
+  single-serve accepts: no novelty retry loop burns extra ~120s+ LLM
+  calls (boba seg16 burned 474s → fallback under the old regime).
+  `novelty_max_rejections` kept deprecated-unused (validator + TOML line)
+  so older run dirs still load; `novelty_overridden` event retired (no
+  production consumers). Proof: new `tests/test_novelty_steer_accept.py`
+  (7, TDD red-first); `test_novelty_leniency.py` deleted (superseded);
+  `test_stage_a_telemetry.py` revisit test rewritten (score, no
+  rejection); `test_feedback/three_captions/phase3` untouched (`in`
+  assertions). Gates: ruff + format + mypy strict clean; full pytest
+  1730 passed + 1 foreign flake passing alone (augment model-pass
+  selection, shared-box class), 11 skipped; tree format gate blocked by
+  foreign `tests/test_run_sh.py` (untouched per §9).
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 
