@@ -52,7 +52,9 @@ from voyage.errors import (
 from voyage.hashing import sha256_file as sha256_file  # re-export (issue 021, cf. cli.py)
 from voyage.logrotate import append_line, rotate_worker_logs
 from voyage.media import (
+    ABSORPTION_EPSILON_SECONDS,
     AV_ALIGNMENT_TOLERANCE_SECONDS,
+    _take_joint_fade,
     assemble_segment_audio,
     check_av_alignment,
     check_free_space,
@@ -1642,6 +1644,11 @@ class Supervisor:
             slice_dir = Path(slice_tmp)
             slices: list[Path] = []
             take_ids: list[str] = []
+            # Piece bounds record take-coverage coordinates so the joint
+            # compensation below can clamp extensions to real content.
+            piece_bounds: list[tuple[float, float]] = []
+            tail_serving_path: Path | None = None
+            tail_take_start: float = 0.0
             cursor = video_time
             end = video_time + duration
             index = 0
@@ -1662,11 +1669,12 @@ class Supervisor:
                         f"({piece:.6f}s at {cursor:.2f}s) — corrupt takes ledger"
                     )
                 slice_path = slice_dir / f"slice_{index:02d}.wav"
+                serving_path = serving.resolved_path(self._run_dir)
                 slice_take(
                     # Shared 016 convention: run-relative ledger entries
                     # resolve under the current run dir; legacy absolute
                     # entries are used as-is while they exist.
-                    serving.resolved_path(self._run_dir),
+                    serving_path,
                     cursor - serving.covers_from,
                     piece,
                     slice_path,
@@ -1674,6 +1682,9 @@ class Supervisor:
                     audio_cfg.channels,
                 )
                 slices.append(slice_path)
+                piece_bounds.append((cursor, cursor + piece))
+                tail_serving_path = serving_path
+                tail_take_start = serving.covers_from
                 if serving.take_id not in take_ids:
                     take_ids.append(serving.take_id)
                 cursor += piece
@@ -1681,7 +1692,38 @@ class Supervisor:
             audio_out = segment / "audio.wav"
             slice_ms = (time.monotonic() - slice_started) * 1000.0
             assemble_started = time.monotonic()
-            assemble_segment_audio(slices, audio_out, audio_cfg.crossfade_seconds)
+            joint_fade: float | None = None
+            if len(slices) > 1:
+                # A crossfade overlaps unique content, so joining abutting
+                # slices absorbs fade*(joints) seconds and the preview runs
+                # short of the video (boba seg21: 0.959 s drift, unretryable
+                # — same takes, same window, same refusal). Mirror the
+                # issue-095 finalize compensation: extend the tail slice by
+                # exactly the absorption — takes are continuous, so the
+                # extra content is real music — clamped to the take file,
+                # and pass the fade explicitly so assembly consumes exactly
+                # what was added.
+                piece_durations = [piece_end - start for start, piece_end in piece_bounds]
+                joint_fade = _take_joint_fade(min(piece_durations), audio_cfg.crossfade_seconds)
+                absorption = joint_fade * (len(slices) - 1)
+                if absorption >= ABSORPTION_EPSILON_SECONDS and tail_serving_path is not None:
+                    tail_start, tail_end = piece_bounds[-1]
+                    take_file_end = tail_take_start + probed_take_seconds(tail_serving_path)
+                    compensated_end = min(tail_end + absorption, take_file_end)
+                    if compensated_end > tail_end + 1e-6:
+                        tail_slice = slice_dir / f"slice_{len(slices):02d}.wav"
+                        slice_take(
+                            tail_serving_path,
+                            tail_start - tail_take_start,
+                            compensated_end - tail_start,
+                            tail_slice,
+                            audio_cfg.sample_rate,
+                            audio_cfg.channels,
+                        )
+                        slices[-1] = tail_slice
+            assemble_segment_audio(
+                slices, audio_out, audio_cfg.crossfade_seconds, joint_fade=joint_fade
+            )
             assemble_ms = (time.monotonic() - assemble_started) * 1000.0
         self._log_metric(
             {

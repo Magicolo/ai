@@ -8008,6 +8008,22 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   load-flakes on a loaded box (none in scope; clean on re-run).
   Boba resume (9 segs + finalize) is GPU work, parked until the user
   approves per the GPU-prompt rule.
+- Commit-time take-joint compensation done 2026-10-01 (boba seg21 root
+  cause): the commit slice walk joined abutting slices with a bare
+  crossfade, absorbing `fade` seconds per joint (out = sum - fade) — the
+  preview ran 0.959 s short of a 5.04 s video and the 0.6 s A/V gate
+  refused the commit twice with identical geometry (structurally
+  unretryable). The walk now extends the tail slice by exactly the
+  absorption — takes are continuous, so the extra content is real music
+  — clamped to the probed take file, and passes the fade explicitly so
+  assembly consumes exactly what was added (mirrors the issue-095
+  finalize compensation; single-slice stream-copy path untouched).
+  Proof: `tests/test_commit_slice_compensation.py` (2, TDD red-first —
+  pre-fix drift 0.9587 reproduces boba's 0.959 to the millisecond, with
+  a two-take-ids assertion so the straddle cannot pass vacuously).
+  Gates: 59 green across the compensation + Stage A + 095/101/104 +
+  leniency + planner files; ruff + format + mypy strict clean on all
+  touched files. Boba resume retries seg21 with this fix on the GPU.
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 

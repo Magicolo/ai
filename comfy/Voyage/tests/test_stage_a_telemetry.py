@@ -283,7 +283,9 @@ def test_audio_assemble_emits_timing_metric(
         )[2],
     )
     monkeypatch.setattr(
-        supervisor_module, "assemble_segment_audio", lambda slices, dest, crossfade: dest
+        supervisor_module,
+        "assemble_segment_audio",
+        lambda slices, dest, crossfade, joint_fade=None: dest,
     )
     supervisor = Supervisor(run_dir, config)
     decision = EvolutionDecision(
