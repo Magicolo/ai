@@ -191,6 +191,13 @@ PREFETCH_TIMEOUT_SECONDS = 60.0
 #: its own PREFETCH_TIMEOUT_SECONDS instead of stalling shutdown.
 PREFETCH_SHUTDOWN_DRAIN_SECONDS = 2.0
 
+#: Video backends whose resident session cannot survive continuation
+#: blocks (issue 198: ltx25 OOMs in GGUF dequant on the second block in
+#: the same process while a fresh process rebuilt from the recovery tape
+#: renders fine). These get a proactive restart + tape resume between
+#: commits; everyone else keeps the resident session (no reload tax).
+VIDEO_BACKENDS_NEEDING_FRESH_SESSION = frozenset({"ltx25"})
+
 #: Sample resource gauges every K segments (issue 017). 1 keeps the
 #: per-segment cadence the benchmark/soak readers expect; raise it to
 #: thin out probe traffic on long runs (a TOML knob needs config.py,
@@ -785,6 +792,37 @@ class Supervisor:
         )
         self._log_metric({"event": "video_resumed", "tape": str(tape), **result})
 
+    def _should_refresh_video_session(self, count: int | None, committed: int) -> bool:
+        """Whether to refresh the video session before the next commit (issue 198).
+
+        Only backends whose resident session cannot survive continuation
+        blocks — and only when more segments remain in this batch, so a
+        finished batch never pays a pointless reload.
+        """
+        if self._config.video.backend not in VIDEO_BACKENDS_NEEDING_FRESH_SESSION:
+            return False
+        return count is None or committed < count
+
+    def _refresh_video_session(self, segment_id: str) -> None:
+        """Restart the video worker and replay the recovery tape (issue 198).
+
+        Proactive form of the manual-resume path: `restart()` replays init
+        in a fresh process (shedding whatever the resident session
+        accumulated), then `_resume_video_worker` replays causal context
+        from the latest tape (no tape → fresh stream, first segment).
+        The supervisor process — and its prefetch future — survives, so
+        steady-state prefetch keeps hitting across the refresh.
+        """
+        self._video.restart()
+        self._resume_video_worker(segment_id)
+        self._log_metric(
+            {
+                "event": "video_session_refreshed",
+                "segment_id": segment_id,
+                "backend": self._config.video.backend,
+            }
+        )
+
     def _director_probe_blocked(self) -> bool:
         """Whether a director health probe would stall behind LLM work.
 
@@ -954,6 +992,15 @@ class Supervisor:
                         f"segment commit failed with {type(exc).__name__}: {exc}"
                     ) from exc
                 committed.append(segment_id)
+                if self._should_refresh_video_session(count, len(committed)):
+                    # Issue 198: this backend's resident session OOMs on
+                    # continuation blocks while a fresh process renders
+                    # fine — refresh proactively so one invocation covers
+                    # the whole batch (and the prefetch future survives).
+                    pending = read_state(self._run_dir)
+                    self._refresh_video_session(
+                        paths.format_segment_id(pending.next_segment_number)
+                    )
             if stopped and self._stop_flag and not self._stop_requested_via_file():
                 # SIGINT path: rest as PAUSED so `voyage run` resumes cleanly.
                 resting = read_state(self._run_dir)
