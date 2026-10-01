@@ -199,3 +199,33 @@ Static (deterministic): count ffmpeg spawns for an N-window bed — `render_sfx_
   relax the ≤2-input pin with a 31-input-scale proof (this pass proved
   N=8 CPU-only; incident scale + GPU long-run remain open) — owner:
   that file's track; do not attempt from the sfx/media side alone.
+
+## Progress log (2026-10-01, batch 13 — PIN CONFIRMATION ONLY)
+
+- Premise re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip): the ≤2-input pin still holds —
+  `tests/test_final_blend_scale.py::test_final_blend_never_spawns_wide_acrossfade_graph`
+  passes unmodified, as do the probe-memo suite
+  (`tests/test_issue_152_blend_probe_memo.py`) and the wide-join proof
+  (`tests/test_issue_152_wide_manual_join_proof.py`). `git diff HEAD --`
+  on `voyage/sfx_finalize.py` + `voyage/media.py` is EMPTY (no concurrent
+  hunks in this leg) and both files stay UNCHANGED by this leg.
+- Test evidence: `test_final_blend_scale.py` +
+  `test_issue_152_blend_probe_memo.py` + `test_registry_pins.py` = 25
+  passed in-container (shared run); the wider batch-13 neighbor set =
+  117 passed, 8 skipped, with 6 FOREIGN failures in
+  `test_augment_models.py` (all one root: `ImportError: cannot import
+  name 'warn_if_deprecated_backend' from 'voyage.config'` — another
+  group's in-flight config/cli split, zero lines mine).
+- Verdict: PROVEN-BLOCKED, unchanged — hang PASS / parity FAIL stands,
+  pairwise probe-memo fold remains, no behavior change. Nothing to do;
+  moving on per the batch brief.
+
+## Resolution (2026-10-01, batch 13)
+
+- Verdict: confirmed blocked (pin holds, proof split stands). Files
+  changed: none (this issue file only). DESIGN proposals: none (the
+  batch-12 pairwise-fold proposal stands as quoted).
+- Residuals: unchanged — (1) parity rescue research + (2) the
+  `test_final_blend_scale.py:107-136` owner's 31-input-scale proof
+  before any single-graph join lands.

@@ -328,6 +328,90 @@ grep -rln "longlive" tests/ docs/ reports/
   `reports/longlive-audit.md` as dated evidence); (3) reorder
   INSTALL/BACKENDS/MODELS/README ltxv-first; (4) gate `gates.sh` green +
   `grep -rni longlive voyage/ worker/ scripts/ tests/` empty except
-  historical markers. Preconditions: stored-run migration decision for
-  existing longlive2 TOMLs + generate/run-time warn wiring (currently
-  `init`-only).
+   historical markers. Preconditions: stored-run migration decision for
+   existing longlive2 TOMLs + generate/run-time warn wiring (currently
+   `init`-only).
+
+## Progress log (2026-10-01, full-delete owning pass — DONE)
+
+- Quiet-tree check FIRST per the contract: `git rev-parse HEAD` →
+  `da77026`, `git status --porcelain` shows only the foreign
+  `M Voyage/LTX2.md` + pre-existing `../tango/Tango` (both untouched —
+  never opened). No uncommitted hunks on the deletion surface.
+- TDD failing-first (`tests/test_longlive2_removed_079.py`, 5 tests):
+  all 5 FAILED on the unmodified tree (registry still accepted the
+  name), then 5/5 GREEN after the deletion. Stored-run decision per the
+  batch-12 log: HARD ERROR with migration hint, NOT silent remap
+  (geometry 1280x704/29f → 768x512/96f would corrupt timelines; `.pt`
+  tapes can never resume on the JSON-tape path).
+- Migration mechanism (new, single-sourced): `config.REMOVED_VIDEO_BACKENDS
+  = ("longlive2",)` + `config.removed_backend_suffix()` wired into
+  `_video_preset` / `_audio_preset` / `_sfx_preset` (ValueError),
+  `load_config` stored-TOML gate (ConfigurationError), `supervisor.
+  video_worker_module` (ConfigurationError), and `cli_run_ops.cmd_init`
+  (exit 2). Every message names the removed backend + `ltxv` + `tapes`.
+- Deleted: `voyage/workers/video_longlive.py` (1264L, `git rm`),
+  `config` Literal member + `DEPRECATED_VIDEO_BACKENDS` +
+  `warn_if_deprecated_backend` + registry row, `supervisor`
+  `VIDEO_WORKER_MODULES`/`STREAMING_VIDEO_BACKENDS` entries + longlive2
+  init branch (`use_relative_rope` now constant False — the removed
+  backend was the only relative-RoPE renderer), all `cli*.py` refs
+  (incl. `_LONGLIVE_*` planning math, models-verb branches, observe
+  revision tuple), `model_registry` spec row + wrappers + `WAN_*`
+  (Wan2.2 — last consumer gone; closes issue 070 by deletion; `WAN21_*`
+  kept for causvid) + layout keys, `registry_records` pins +
+  builders, `models_ensure` spec map, `doctor` verifier, Dockerfile
+  LongLive clone/shims/PYTHONPATH/ENV/chown (transformers 4.57.6 pin
+  KEPT — LTXV/CausVid probe-verified against it), `run.sh`/`qualify.sh`
+  backends, `build-video.sh` smoke (3→2 workers), six test modules
+  (`test_longlive*`, `test_longlive2_deprecation_079`,
+  `test_e2_longlive_clip_125`, `test_129_tape_atomic`), `gates.sh`
+  mypy entry. Repointed followers: generate/adapter/tui/precision/
+  qualification/registry-pins/registry-split/cli-split/cli-hardening/
+  generate-ensure/augment/checkpoint/enter-trees/perf/worker-perf/
+  recovery/containers/telemetry/tape-trust/acestep-cwd/causvid-worker/
+  benchmark-counts/stage-a. Docs reordered ltxv-first (BACKENDS/MODELS/
+  INSTALL/OPERATIONS/ARCHITECTURE/TROUBLESHOOTING/SFX/BENCHMARKING/
+  README); `video-backends.md` + `UPSTREAM_LONG_LIVE_PATCHES.md` carry
+  HISTORICAL headers (kept verbatim as dated evidence, with
+  `longlive-audit.md`).
+- Residual grep end-state (deliberate, TDD-pinned): `voyage/` mentions
+  the name ONLY in the removal machinery (`config.REMOVED_*` +
+  `removed_backend_suffix` + its docstrings); `worker/` + `scripts/`
+  are clean; `tests/` mentions it ONLY in removal-contract tests
+  (079 TDD + generate-hint + pins-absence); docs/reports mention it
+  ONLY in historical markers/kept evidence. The batch-12 "empty
+  except historical markers" gate is therefore met as: live paths
+  contain zero references; the hint + contract tests + dated evidence
+  are the documented exceptions.
+- Per-file gates (container): `ruff check` + `ruff format --check` +
+  `mypy strict` clean on every touched file (two E501 + one format
+  reflow + 4 ruff fixes — unused noqa/imports — fixed in-pass).
+- Full `Voyage/scripts/gates.sh`: ruff GREEN, format GREEN, mypy
+  (147 files) GREEN, pytest 1688 passed + 10 skipped with exactly ONE
+  TUI Pilot load-flake per run (run 1:
+  `test_mid_run_progress_reaches_log_before_completion`, run 2:
+  `test_slow_run_stays_responsive_and_reaches_monitoring_view` —
+  both pass in isolation in ~seconds; documented shared-box flake
+  class, unrelated to this change — neither references the backend).
+  Cache-guard lesson re-learned: ad-hoc `docker run ruff` without
+  `VOYAGE_CACHE_ENV` leaks `.ruff_cache` into the bind mount — always
+  export the cache env; residue removed before gating.
+- Concurrent-work check at close: other agents landed hunks mid-pass
+  (issues/031/035/036/070/081/082/088/089/093/152/166 logs,
+  `tests/test_integration.py`, `voyage/augment.py`,
+  `test_sfx_parser_parity.py` deleted, untracked registry-split
+  family) — all disjoint from this surface (verified via `git diff`
+  region reads; full gates green WITH their files present). `Voyage/
+  LTX2.md` + `tango/Tango` never touched.
+- Files changed: none committed (per contract — left uncommitted for
+  review).
+
+## Resolution (2026-10-01, full-delete owning pass)
+
+- Verdict: DONE. Full delete executed per §"Resolution candidates"
+  1-4, with the migration-hint mechanism the batch-12 plan deferred.
+- DESIGN proposal (text only — no DESIGN.md write per contract): see
+  the quoted patch in the delivery message (079 §11/backends section:
+  backend table drops the longlive2 row, recovery-format section
+  drops the `.pt` tape, migration note for stored runs).

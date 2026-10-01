@@ -105,40 +105,24 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
     assert config.video.backend == "ltxv"
 
 
-def test_longlive2_preset_pins_native_geometry(tmp_path: Path) -> None:
+def test_removed_longlive2_preset_rejected_with_migration_hint(tmp_path: Path) -> None:
+    """Issue 079: the deleted backend fails fast with a hint, never remaps."""
     from voyage.config import default_config_toml, load_config
 
     (tmp_path / "voyage.toml").write_text(
         default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
     )
     config, _ = load_config(tmp_path / "voyage.toml")
-    longlive = with_video_backend(config, "longlive2")
-    assert longlive.video.backend == "longlive2"
-    assert longlive.video.profile == "longlive2-704p"
-    # Native worker geometry (latent_shape x16 spatial): anything else fails
-    # the commit-time resolution check (qual-longlive2, 2026-09-24).
-    assert (longlive.video.width, longlive.video.height) == (1280, 704)
-    assert longlive.video.device == "cuda:0"
-    # Source config untouched (pure function).
-    assert config.video.backend == "ltxv"
-
-
-def test_frames_per_segment_longlive2_follows_decode_expansion(tmp_path: Path) -> None:
-    """longlive2 duration math must use decoded frames, not segment_frames."""
-    from voyage.config import default_config_toml, load_config
-
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
-    one_block = with_video_backend(config, "longlive2")
-    # 8 latents -> (8-1)*4+1 = 29 frames (measured qual-longlive2).
-    assert _frames_per_segment(one_block) == 29
-    three_blocks = one_block.model_copy(
-        update={"video": VideoConfig(**{**one_block.video.model_dump(), "blocks_per_segment": 3})}
-    )
-    # 24 latents -> (24-1)*4+1 = 93 frames (Phase-2 E2E).
-    assert _frames_per_segment(three_blocks) == 93
+    with pytest.raises(ValueError, match="longlive2"):
+        with_video_backend(config, "longlive2")  # type: ignore[arg-type]
+    try:
+        with_video_backend(config, "longlive2")  # type: ignore[arg-type]
+    except ValueError as exc:
+        message = str(exc).lower()
+        assert "ltxv" in message
+        assert "tape" in message
+    else:  # pragma: no cover
+        raise AssertionError("expected ValueError")
 
 
 def test_run_dir_arg_resolves_absolute(tmp_path: Path) -> None:
@@ -174,7 +158,7 @@ def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
     assert causvid.video.backend == "causvid"
     assert causvid.video.profile == "causvid-480p"
     # Native worker geometry (832x480 @ 16 fps — the worker rejects
-    # anything else, same native-geometry rule as longlive2).
+    # anything else).
     assert (causvid.video.width, causvid.video.height) == (832, 480)
     assert causvid.video.device == "cuda:0"
     # Native 16 fps end-to-end (the worker refuses relabeled timelines).
@@ -221,7 +205,7 @@ def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:
         default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
     )
     config, _ = load_config(tmp_path / "voyage.toml")
-    for backend in ("ltxv", "longlive2"):
+    for backend in ("ltxv", "causvid"):
         applied = with_video_backend(config, backend)
         assert applied.audio.backend == "acestep"
         assert applied.audio.device == "cuda:0"

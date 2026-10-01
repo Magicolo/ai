@@ -79,8 +79,6 @@ def _benchmark_revisions() -> dict[str, object]:
     except ImportError:
         return {"registry": "unknown"}
     names = (
-        "LONGLIVE_COMMIT",
-        "LONGLIVE_HF_REVISION",
         "WAN_HF_REVISION",
         "LTXV_HF_REVISION",
         "LTXV_TE_REVISION",

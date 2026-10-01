@@ -149,7 +149,7 @@ class SubprocessWorker:
 
     `init_op`/`init_payload` are (re)sent after every (re)start so a
     restarted worker rebuilds its session before the next real op — the
-    longlive video worker's resident pipeline depends on this.
+    streaming video workers' resident sessions depend on this.
     """
 
     def __init__(

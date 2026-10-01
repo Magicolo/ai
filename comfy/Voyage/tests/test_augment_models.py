@@ -92,7 +92,7 @@ def test_realesrgan_verify_passes_with_sized_file(tmp_path: Path) -> None:
     assert message.startswith("realesrgan-anime OK")
 
 
-@pytest.mark.parametrize("backend", ["longlive2", "ltxv", "causvid"])
+@pytest.mark.parametrize("backend", ["ltxv", "causvid"])
 def test_cuda_backends_include_augmentation_by_default(backend: VideoBackendName) -> None:
     from voyage.models_ensure import required_specs
 
@@ -185,7 +185,6 @@ def test_models_verify_reports_augment_stacks(
     esrgan = tmp_path / model_registry.REALESRGAN_SUBDIR / model_registry.REALESRGAN_ANIME_FILE
     _write_sized_file(esrgan, model_registry.REALESRGAN_ANIME_MIN_BYTES)
     for name in (
-        "verify_longlive2_bf16",
         "verify_ltxv_models",
         "verify_causvid_models",
         "verify_director_models",

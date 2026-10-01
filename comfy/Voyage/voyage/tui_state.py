@@ -33,7 +33,7 @@ except ImportError:  # Python 3.10 worker image (upstream env)
 from voyage.cli_paths import _RESERVED_FOLDER_NAMES as _RESERVED_FOLDER_NAMES
 from voyage.cli_paths import is_flat_folder_name as _shared_flat_folder_name
 
-BACKENDS = ("ltxv", "longlive2", "causvid", "fake")
+BACKENDS = ("ltxv", "causvid", "fake")
 DIRECTORS = ("qwen", "deterministic")
 QUANTIZATIONS = ("fp8", "bf16")
 
@@ -78,16 +78,14 @@ def _default_settings_path() -> Path:
 # Planning math is NOT duplicated here: _planning_frames_and_fps below calls
 # cli._frames_per_segment (frames) + the config video preset (fps) — the
 # same values cmd_generate plans with. There is no module-level constant
-# to drift (issue 024: the old 25/24 ltxv + flat-48 longlive2 math is gone).
+# to drift (issue 024: the old 25/24 ltxv math is gone).
 # Native frame rate per backend lives in the config video preset; unknown
 # backends plan at 24fps (mirrors _frames_per_segment's segment_frames
 # default).
 
 FIELD_HELP = {
     "backend": "Video backend preset (geometry + device + audio pairing). "
-    "ltxv/longlive2/causvid need the CUDA worker image + a GPU. "
-    "longlive2 is deprecated (issue 079, kept for existing runs only) — "
-    "new runs should use ltxv.",
+    "ltxv/causvid need the CUDA worker image + a GPU.",
     "duration": "Target length, e.g. '5s', '90', '1m30s', '2m', '1h', '1h2m3.5s'. "
     "Rounds up to whole segments, so the video never runs short.",
     "style": "Human-owned style string. Required — baked into the run config and every prompt.",

@@ -32,7 +32,6 @@ from voyage.config import (
     default_config_toml,
     is_provided,
     load_config,
-    warn_if_deprecated_backend,
 )
 from voyage.console import RichSegmentProgress
 from voyage.persistence import build_manifest, initial_state, write_manifest, write_state
@@ -70,14 +69,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 2
     backend_value = getattr(args, "backend", None) or "ltxv"
     if backend_value not in BACKEND_REGISTRY:
+        from voyage.config import removed_backend_suffix
+
         known = ", ".join(sorted(BACKEND_REGISTRY))
-        print(f"error: unknown video backend {backend_value!r} (known: {known})", file=sys.stderr)
+        print(
+            f"error: unknown video backend {backend_value!r} (known: {known})"
+            f"{removed_backend_suffix(str(backend_value))}",
+            file=sys.stderr,
+        )
         return 2
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
     backend: VideoBackendName = cast(VideoBackendName, backend_value)
-    warn_if_deprecated_backend(backend)
     director_backend: str = getattr(args, "director", None) or "qwen"
     director_device: str = getattr(args, "director_device", None) or "cuda:1"
     config_text = default_config_toml(

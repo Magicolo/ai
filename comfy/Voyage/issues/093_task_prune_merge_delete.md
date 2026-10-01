@@ -144,3 +144,28 @@ grep -n "137A\|137B\|137C\|137D\|§30" DESIGN.md TASK.md | head -n 30
   approval can land without re-reading this issue). Nothing else is
   open: no live content unhomed, no dangling refs, no follower
   edits.
+
+## Progress log (2026-09-30, batch 13 — verify-only, this pass)
+
+- Re-verified live (host reads, no edits — deletion forbidden without
+  approval): `TASK.md` is the 28-line pointer stub (title + RETIRED
+  note + git-history pointer + §30.x→DESIGN §y mapping + rm-pending
+  note — zero live content, unchanged since batch 12);
+  `docs/BENCHMARKING.md` "Backend qualification" section intact
+  (`:69`, the §30.4 procedural home); `rg TASK.md` outside
+  `Voyage/issues/` shows only the stub's self-rows + historical
+  DESIGN §140 entries (`DESIGN.md:6926,8092` — methodology history
+  + batch-12 as-built, zero live-spec refs) — no ref repair owed.
+- No test reads `TASK.md` content (only the historical
+  `test_causvid_prep.py:1` docstring mention — left intact).
+  No deletion performed (`git rm` stays pending).
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: VERIFIED (stub + BENCHMARKING home intact) + DELETION STILL
+  PENDING (user approval). Files changed: none (this issue file only).
+  Gate evidence: `rg TASK.md` outside `issues/` — only retired
+  self-pointer + historical DESIGN entries as predicted.
+  DESIGN proposals: none.
+- Residuals: exactly one, unchanged — `git rm Voyage/TASK.md` needs
+  explicit user approval per AGENTS.md §9.

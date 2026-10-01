@@ -15,7 +15,7 @@ from pathlib import Path
 
 def _run_dir_arg(value: str) -> Path:
     # Absolute: workers spawn with CWD=run_dir, so a relative dir doubles up
-    # inside payload paths (qual-longlive2 2026-09-24: generate_blocks
+    # inside payload paths (workers run with CWD=run_dir: generate_blocks
     # circuit-breaker on `output/.../segments/...` missing). Single funnel
     # for every subcommand; mirrors cmd_generate's resolve-once rule.
     return Path(value).resolve()

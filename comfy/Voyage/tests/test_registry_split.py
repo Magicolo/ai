@@ -12,7 +12,6 @@ import voyage.model_registry as model_registry
 import voyage.registry_records as registry_records
 
 EXPECTED_SPEC_KEYS = (
-    "longlive2-bf16",
     "director-qwen8b",
     "director-qwen4b-awq",
     "inspector-qwen35",
@@ -25,7 +24,6 @@ EXPECTED_SPEC_KEYS = (
 )
 
 RECORD_BUILDERS = (
-    "_record_longlive2",
     "_record_director",
     "_record_director_awq",
     "_record_inspector",
@@ -38,7 +36,6 @@ RECORD_BUILDERS = (
 )
 
 DESCRIBE_HELPERS = (
-    "_describe_longlive2",
     "_describe_director",
     "_describe_director_awq",
     "_describe_inspector",
@@ -51,10 +48,7 @@ DESCRIBE_HELPERS = (
 )
 
 PIN_NAMES = (
-    "LONGLIVE_HF_REPO",
-    "LONGLIVE_HF_REVISION",
-    "LONGLIVE_HF_FILE",
-    "WAN_HF_REPO",
+    "WAN21_HF_REPO",
     "QWEN_HF_REPO",
     "QWEN_HF_REVISION",
     "QWEN4B_AWQ_HF_REPO",
@@ -70,7 +64,7 @@ PIN_NAMES = (
 
 
 def test_model_specs_keys_unchanged() -> None:
-    """The registry assembly keeps all ten bundles (issue 082)."""
+    """The registry assembly keeps all nine bundles (issue 082)."""
     assert tuple(sorted(model_registry.MODEL_SPECS)) == tuple(sorted(EXPECTED_SPEC_KEYS))
 
 
@@ -109,9 +103,8 @@ def test_registry_all_covers_surface() -> None:
 
 
 def spec_key(model_key: str) -> str:
-    """MODEL_SPECS key → builder suffix (longlive2-bf16 → longlive2)."""
+    """MODEL_SPECS key → builder suffix (ltxv-2b → ltxv)."""
     mapping = {
-        "longlive2-bf16": "longlive2",
         "director-qwen8b": "director",
         "director-qwen4b-awq": "director_awq",
         "inspector-qwen35": "inspector",

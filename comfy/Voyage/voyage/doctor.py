@@ -290,7 +290,6 @@ def check_models(present_dir: Path | None = None) -> dict[str, Any]:
             "checks": checks,
         }
     verifiers = (
-        ("longlive2-bf16", model_registry.verify_longlive2_bf16),
         ("ltxv-2b", model_registry.verify_ltxv_models),
         ("causvid", model_registry.verify_causvid_models),
         ("director-qwen8b", model_registry.verify_director_models),

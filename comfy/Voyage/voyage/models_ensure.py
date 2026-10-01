@@ -56,7 +56,6 @@ lively without hammering the registry (at most three weight specs plus
 the inspector ever download together)."""
 
 _VIDEO_SPEC_FOR_BACKEND = {
-    "longlive2": "longlive2-bf16",
     "ltxv": "ltxv-2b",
     "causvid": "causvid",
 }

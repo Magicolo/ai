@@ -262,7 +262,121 @@ is folded as their tracker (not deleted) until the remaining splits land.
   `supervisor_commit_types.py` (081 type pattern) alongside
   `registry_records.py` / `supervisor_proposal.py` /
   `supervisor_prefetch.py`."
-  Residuals: `cli_observe.py` 734, `media.py` workers/media surface
-  (open since batch 4), registry remaining 9 families, video-worker
-  splits, then test-file clusters per 088 — each a future single-group
-  pass with the same move-verbatim + facade + agreement-test discipline.
+   Residuals: `cli_observe.py` 734, `media.py` workers/media surface
+   (open since batch 4), registry remaining 9 families, video-worker
+   splits, then test-file clusters per 088 — each a future single-group
+   pass with the same move-verbatim + facade + agreement-test discipline.
+
+## Progress log (2026-09-30, batch 13 — two registry-family extractions)
+
+- Re-measured host `wc -l` at pass start: `registry_records.py` 770
+  (after batch 12's film split). `git diff --name-only` showed only
+  out-of-scope files modified (`LTX2.md`, later a full concurrent
+  flight: `config.py`, `cli_run_ops.py`, `cli_observe.py`, `augment.py`,
+  several issues + tests) — `registry_records.py` itself was quiet, so
+  both extractions went ahead in owned scope. `supervisor.py` was HOT
+  (079 delete surface) and deliberately untouched; `cli_observe.py`,
+  `scoreboard.py`, `model_registry.py`, and all longlive2 lines likewise
+  untouched per the batch brief.
+- Landed (1) realesrgan family (082 residual, next-smallest row):
+  new `voyage/registry_realesrgan.py` (75L, DESIGN §§84-85) owns all 8
+  `REALESRGAN_*` pins + `EXPECTED_REALESRGAN_SHA256` +
+  `_record_realesrgan` + `_describe_realesrgan` verbatim;
+  `registry_records.py` re-exports all 11 names via explicit-`as`
+  self-aliases and carries move comments at the four old sites;
+  `model_registry.py` untouched (its
+  `from voyage.registry_records import ... REALESRGAN_*` chain holds
+  through the facade). TDD: `tests/test_registry_realesrgan_split.py`
+  written first (3 agreement tests mirroring the film suite) — watched
+  fail on collection (`ModuleNotFoundError:
+  voyage.registry_realesrgan`), then green after the move.
+- Landed (2) inspector family (next-smallest decoupled row after
+  realesrgan): new `voyage/registry_inspector.py` (75L, DESIGN
+  §§43-44, 100, 132) owns all 7 `QWEN35_*` pins + `_record_inspector`
+  + `_describe_inspector` verbatim; same facade + move-comment recipe
+  (three old sites). One deliberate deviation from the film pattern:
+  this row carries NO expected ingest hash (the manifest record holds
+  no sha — same open residual as the CausVid checkpoint), so the new
+  module drops the unused `sha256_file` import (ruff F401 would fire)
+  and both docstrings record the residual. `cli_observe.py:91` reads
+  `QWEN35_HF_REVISION` via call-time `getattr(model_registry, ...)` —
+  facade-safe, no touch needed (and the file went foreign-modified
+  mid-pass, left intact per §9). TDD: same red-then-green.
+- Tree incident (foreign, recorded not fixed): mid-pass the image
+  rebuild broke (`voyage doctor` → `ImportError:
+  warn_if_deprecated_backend` from `voyage.config`, deleted by the
+  079/config track while `cli_run_ops.py` still imported it). All
+  in-container evidence below runs against the last green
+  `voyage:latest` (2026-09-30 17:35) with the live tree bind-mounted
+  (`$PWD:/app`, same invocation shape as `scripts/test.sh` minus the
+  rebuild). The foreign group repaired the import chain mid-pass (the
+  download parser/dispatch tests went red→green without any edit
+  here); remaining reds are all on their surfaces (see Resolution).
+- Max TWO reached; the 036 remainder (cli_observe branches, media
+  surface, video workers, test-file clusters) stays recorded, not
+  taken.
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: TRACKED — no 036-seam extraction this pass (quota filled by
+  the two 082 family splits below); signal table in the batch-12 entry
+  stays current except `registry_records.py` 770→747.
+- Files changed (owned scope only): `voyage/registry_realesrgan.py`
+  (new, 75L), `voyage/registry_inspector.py` (new, 75L),
+  `voyage/registry_records.py` (2 facades + 7 move comments, net
+  −23L), `tests/test_registry_realesrgan_split.py` (new, 3 tests),
+  `tests/test_registry_inspector_split.py` (new, 3 tests).
+  `model_registry.py`, `supervisor.py`, `cli_observe.py`,
+  `scoreboard.py` untouched.
+  Gate evidence: in-container `ruff check` + `ruff format --check` +
+  `mypy strict` clean on all 5 touched files; 15/15 split/agreement
+  tests green (`test_registry_{inspector,realesrgan,film,records}_split`);
+  neighbors 65 green (`test_augment_weight_loading`,
+  `test_checkpoint_safety`, `test_director_models_dir`,
+  `test_augment_models` download/verify paths). 3 reds, all foreign
+  (079 longlive2-removal surface, verified by failure signature +
+  foreign diff, none import from the touched files):
+  `test_cuda_backends_include_augmentation_by_default[longlive2]` +
+  `test_longlive.py::test_video_worker_module_map`
+  (`ConfigurationError: unknown video backend 'longlive2' — removed
+  (issue 079)`) + `test_models_verify_reports_augment_stacks`
+  (`AttributeError: voyage.cli has no attribute
+  'verify_longlive2_bf16'`). Full `gates.sh` not runnable (foreign
+  image-build breakage above); per-file gates + scoped suites are the
+  verdict.
+  DESIGN proposals (quoted, for the DESIGN owner — not applied here,
+  file is out of scope): "No DESIGN text change proposed: both new
+  modules follow existing contracts (DESIGN §§84-85 augment weights;
+  DESIGN §§43-44, 100, 132 visual inspector) and the issue-082
+  move-verbatim + re-export + agreement-test convention; a future
+  split index should list `registry_realesrgan.py` and
+  `registry_inspector.py` alongside `registry_film.py`."
+  Residuals: `registry_records.py` 747 with 7 families remaining
+  (ltxv, causvid+wan21, sfx triple, director triple, audio pair,
+  longlive+wan — longlive2 lines frozen for the 079 owner), plus the
+  036 remainder above — each a future single-group pass.
+
+## Addendum (2026-09-30, same pass — 079 longlive2 removal landed mid-pass)
+
+- After the batch-13 edits above, the 079 group landed the longlive2
+  removal inside owned-adjacent files: `model_registry.py` 1264→1188
+  (longlive2 spec row + `LONGLIVE_*` imports gone) and
+  `registry_records.py` 747→665 (longlive+wan pins + builders gone).
+  Per §9 nothing of theirs was touched or reverted; my regions were
+  re-verified intact after their landing (20 facade imports + all 7
+  move comments present by grep).
+- Failure set changed character with their landing (recorded, not
+  fixed — their scope): `tests/test_registry_split.py` (batch-7
+  agreement suite, not this pass's file) now fails 4 tests on stale
+  longlive2 expectations (`EXPECTED_SPEC_KEYS` still lists
+  `longlive2-bf16`; `model_registry` no longer exports
+  `LONGLIVE_HF_REPO`) and `test_checkpoint_safety.py` fails 2
+  longlive-named tests — all on the 079 removal surface. My 9
+  agreement tests (`test_registry_{inspector,realesrgan,film}_split`)
+  stay GREEN against the post-removal tree, and per-file gates stay
+  clean on all 4 fully-owned files plus joint `registry_records.py`
+  (`ruff check` + `ruff format --check` + `mypy strict`). Updating
+  the stale `test_registry_split.py` expectations belongs to the 079
+  owner, not this track.
+- Never committed; `000_INDEX.md` / `DESIGN.md` / `AGENTS.md`
+  untouched (verified via `git diff --name-only`).

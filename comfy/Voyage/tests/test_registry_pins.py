@@ -25,10 +25,10 @@ from voyage import model_registry
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DOCKERFILE = REPO_ROOT / "worker" / "Dockerfile.video"
 
-# The single floating pip row the 067 fix deliberately keeps: LongLive's
-# upstream requirements.txt cannot be frozen without a GPU-box build (its
-# pins must compile against the host GPU family). Any NEW `-r` row fails.
-LONGLIVE_REQUIREMENTS_ROW = "/opt/longlive/requirements.txt"
+# Issue 079 deleted the only `-r requirements.txt` row with the longlive2
+# backend (its upstream requirements could never be frozen without a GPU-box
+# build). No `-r` row remains: any NEW one fails.
+_NO_REQUIREMENT_ROWS: list[str] = []
 
 _OPTIONS_WITH_VALUE = frozenset(
     {
@@ -102,34 +102,21 @@ def test_video_dockerfile_has_no_floating_pins() -> None:
     """Issue 067: every video-image pip row is frozen exact (GPU-box freeze)."""
     floating, requirement_files = _scan_pip_rows(VIDEO_DOCKERFILE)
     assert floating == [], f"floating pip rows in worker/Dockerfile.video: {sorted(floating)}"
-    assert requirement_files == [LONGLIVE_REQUIREMENTS_ROW]
+    assert requirement_files == _NO_REQUIREMENT_ROWS
 
 
-def test_wan_revision_constant_exists_and_is_used() -> None:
-    """Issue 070: the Wan2.2 base revision has a named home wired into fetch."""
-    assert hasattr(model_registry, "WAN_HF_REVISION")
-    spec = model_registry.MODEL_SPECS["longlive2-bf16"]
-    assert spec.snapshots[0].repo_id == model_registry.WAN_HF_REPO
-    assert spec.snapshots[0].revision == model_registry.WAN_HF_REVISION
+def test_wan22_pins_removed_with_longlive2_backend() -> None:
+    """Issue 079 closes 070 by deletion: the floating Wan2.2 base is gone."""
+    assert not hasattr(model_registry, "WAN_HF_REVISION")
+    assert not hasattr(model_registry, "WAN_HF_REPO")
+    assert "longlive2-bf16" not in model_registry.MODEL_SPECS
 
 
-def test_wan_revision_is_recorded_in_manifest(tmp_path: Path) -> None:
-    """Issue 070: the manifest carries wan_revision (None = still floating)."""
-    generator = tmp_path / "longlive2" / model_registry.LONGLIVE_HF_FILE
-    generator.parent.mkdir(parents=True)
-    generator.write_bytes(b"generator-bytes")
-    record = model_registry._record_longlive2(tmp_path)
-    assert record["wan_repo"] == model_registry.WAN_HF_REPO
-    assert "wan_revision" in record
-    assert record["wan_revision"] == model_registry.WAN_HF_REVISION
+def test_floating_snapshot_set_is_empty() -> None:
+    """Issue 070 closed (characterization, not TDD): no floating snapshot remains.
 
-
-def test_floating_snapshot_set_is_exactly_wan22() -> None:
-    """Issue 070 (characterization, not TDD): the only floating snapshot is Wan2.2.
-
-    Passes before and after the 070 change — it is the regression gate that
-    fails if a NEW floating row appears, and must shrink to the empty set
-    the day WAN_HF_REVISION is pinned to a 40-hex revision.
+    The only floating row was Wan2.2 (longlive2-bf16); issue 079 deleted the
+    backend with it. Fails if a NEW floating row appears.
     """
     floating = {
         (name, snapshot.repo_id)
@@ -137,7 +124,7 @@ def test_floating_snapshot_set_is_exactly_wan22() -> None:
         for snapshot in spec.snapshots
         if snapshot.revision is None
     }
-    assert floating == {("longlive2-bf16", model_registry.WAN_HF_REPO)}
+    assert floating == set()
 
 
 def _install_hub_stub(monkeypatch: pytest.MonkeyPatch, payload: bytes) -> None:

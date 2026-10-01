@@ -23,41 +23,37 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from voyage.errors import ConfigurationError
 
-VideoBackendName = Literal["fake", "longlive2", "ltxv", "causvid"]
+VideoBackendName = Literal["fake", "ltxv", "causvid"]
 """Video backend vocabulary (issue 022): every backend field, the registry,
 and the streaming set are keyed by this — a typo fails at typecheck
 instead of after GPU init."""
 
-DEPRECATED_VIDEO_BACKENDS: tuple[str, ...] = ("longlive2",)
-"""Video backends kept for existing runs but closed to new work (issue 079).
+REMOVED_VIDEO_BACKENDS: tuple[str, ...] = ("longlive2",)
+"""Video backends removed outright (issue 079, full delete).
 
-`ltxv` is the default since 2026-09-29; `longlive2` is the heaviest
-legacy (1264L worker, own `.pt` tape, checkpoint-load OOM in archived
-issue 096). Full deletion needs `supervisor.py` hunks that conflict with
-concurrent Stage-A telemetry work plus coordinated edits across the
-registry, CLI, TUI, model registry, Dockerfile, scripts, and six test
-modules — so this pass deprecates (warn on selection) and retains the
-row. Deletion stays open as the recorded residual in the issue file.
+`longlive2` was the heaviest legacy (1264L worker, own `.pt` tape,
+checkpoint-load OOM in archived issue 096). Silent remap to `ltxv` is
+FORBIDDEN: it changes geometry mid-run (1280x704/29f -> 768x512/96f),
+invalidating committed segment durations, while longlive `.pt` tapes can
+never resume on the ltxv JSON-tape path. Stored `backend = "longlive2"`
+runs must fail fast with the migration hint below.
 """
 
 
-def warn_if_deprecated_backend(backend: str) -> None:
-    """Warn when a deprecated video backend is selected (issue 079).
+def removed_backend_suffix(backend: str) -> str:
+    """Migration-hint suffix for removed backends (issue 079), else empty.
 
-    Pure advisory: existing longlive2 runs keep working (registry row,
-    worker, and resume path untouched); new `init --backend longlive2`
-    callers get a `DeprecationWarning` pointing at `ltxv`. Silent for
-    every live backend.
+    Pure string helper so every unknown-backend site (`_video_preset`,
+    `_audio_preset`, `_sfx_preset`, `load_config`, `video_worker_module`,
+    `cmd_init`) shares one hint instead of restating it.
     """
-    import warnings
-
-    if backend in DEPRECATED_VIDEO_BACKENDS:
-        warnings.warn(
-            f"video backend {backend!r} is deprecated (issue 079) and kept "
-            "for existing runs only; new runs should use 'ltxv'",
-            DeprecationWarning,
-            stacklevel=2,
+    if backend in REMOVED_VIDEO_BACKENDS:
+        return (
+            ' — video backend "longlive2" was removed (issue 079); '
+            "re-init with --backend ltxv (tapes do not transfer; "
+            "existing segments stay valid media, only continuation stops)"
         )
+    return ""
 
 
 AudioBackendName = Literal["fake", "acestep"]
@@ -152,14 +148,11 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # /32 and /64 clean for the two-stage multiscale pipeline; 1024x576
     # was tried 2026-09-24 but needs ~15.6 GB in the forward — beyond the
     # 16 GB card even via the dynamic-fp8 fallback — so it stays reverted
-    # until a memory-optimization pass lands); longlive2 renders native
-    # 1280x704 (latent_shape x16 spatial — the worker ignores the request
-    # geometry), so the preset pins that geometry: anything else fails the
-    # commit-time resolution check (qual-longlive2, 2026-09-24); ltxv is
-    # the config default (2026-09-29 backend decision), spelled out for
-    # explicitness; causvid renders
+    # until a memory-optimization pass lands).
+    # ltxv is the config default (2026-09-29 backend decision), spelled
+    # out for explicitness; causvid renders
     # native 832x480 @ 16 fps (the worker rejects anything else — same
-    # native-geometry rule as longlive2).
+    # native-geometry rule a removed backend once enforced).
     # fps + latent_shape ride the row too (default_config_toml writes them
     # into voyage.toml — hardcoding 24/[1,8,48,44,80] there made the
     # causvid preset a lie: the supervisor sent fps 24 and the worker
@@ -178,21 +171,6 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         sfx_device="cpu",
         state_mode="independent_clip",
         streaming=False,
-    ),
-    "longlive2": BackendRecord(
-        profile="longlive2-704p",
-        width=1280,
-        height=704,
-        fps=24,
-        segment_frames=29,
-        latent_shape=(1, 8, 48, 44, 80),
-        device="cuda:0",
-        audio_backend="acestep",
-        audio_device="cuda:0",
-        sfx_backend="mmaudio",
-        sfx_device="cuda:0",
-        state_mode="persistent_kv",
-        streaming=True,
     ),
     "ltxv": BackendRecord(
         profile="ltxv-512p",
@@ -247,10 +225,8 @@ class VideoConfig(BaseModel):
     fps: int = _DEFAULT_ROW.fps
     segment_frames: int = _DEFAULT_ROW.segment_frames
     device: str = _DEFAULT_ROW.device
-    # LongLive backend only: host path (or /models mount in the worker
-    # image) holding wan_models/ + longlive2/, and the latent shape the
-    # pipeline denoises. [1,8,48,44,80] decodes to 1280x704 (x16 spatial;
-    # 8 latents -> 8 frames chunked, 29 causal).
+    # Host path (or /models mount in the worker image) holding the
+    # backend's weights, and the latent shape the pipeline denoises.
     models_dir: str = "/models"
     latent_shape: list[int] = Field(default_factory=lambda: list(_DEFAULT_ROW.latent_shape))
     # Phase 2: DiT blocks per committed segment (1 block = 8 latents).
@@ -724,7 +700,7 @@ seed = {seed}
 min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}
 
 [video]
-# "ltxv" (CUDA) | "longlive2" (CUDA) | "causvid" (CUDA, 16 fps) | "fake" (built-in testsrc)
+# "ltxv" (CUDA) | "causvid" (CUDA, 16 fps) | "fake" (built-in testsrc)
 backend = "{backend}"
 profile = "{profile}"
 width = {width}
@@ -809,6 +785,15 @@ def load_config(path: Path) -> tuple[ProjectConfig, str]:
         raise ConfigurationError(f"config file not found: {path}") from exc
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigurationError(f"cannot parse config {path}: {exc}") from exc
+    video_section = raw.get("video")
+    if isinstance(video_section, dict):
+        stored_backend = video_section.get("backend")
+        if isinstance(stored_backend, str) and stored_backend in REMOVED_VIDEO_BACKENDS:
+            known = ", ".join(sorted(BACKEND_REGISTRY))
+            raise ConfigurationError(
+                f"invalid config {path}: unknown video backend {stored_backend!r} "
+                f"(known: {known}){removed_backend_suffix(stored_backend)}"
+            )
     try:
         config = ProjectConfig.model_validate(raw)
     except Exception as exc:
@@ -1001,7 +986,9 @@ def _video_preset(backend: str) -> dict[str, str | int | list[int]]:
         return _VIDEO_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_VIDEO_BACKEND_PRESETS))
-        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+        raise ValueError(
+            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
+        ) from None
 
 
 def _audio_preset(backend: str) -> dict[str, str]:
@@ -1010,7 +997,9 @@ def _audio_preset(backend: str) -> dict[str, str]:
         return _AUDIO_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_AUDIO_BACKEND_PRESETS))
-        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+        raise ValueError(
+            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
+        ) from None
 
 
 def _sfx_preset(backend: str) -> dict[str, str]:
@@ -1024,7 +1013,9 @@ def _sfx_preset(backend: str) -> dict[str, str]:
         return _SFX_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_SFX_BACKEND_PRESETS))
-        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
+        raise ValueError(
+            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
+        ) from None
 
 
 def with_video_backend(config: ProjectConfig, backend: VideoBackendName) -> ProjectConfig:

@@ -144,3 +144,83 @@ grep -n "_sha256\|_MANIFEST_LOCK\|_repair_manifest" voyage/model_registry.py voy
 ## Refs
 
 - Issues 065 (stale install lists), 021-analog hashing canonical (`voyage/hashing.py:30`); `voyage/hashing.py`, `voyage/models_ensure.py`
+
+## Progress log (2026-09-30, batch 13 — realesrgan + inspector families)
+
+- Pre-checks live: `wc -l voyage/registry_records.py` → 770 at pass
+  start; `git diff --name-only -- voyage/registry_records.py` showed
+  only own edits at every step (concurrent flight holds foreign hunks
+  in `config.py`, `cli_run_ops.py`, `cli_observe.py`, `augment.py`,
+  issues + tests — none inside either extraction region; verified the
+  final `git diff` on `registry_records.py` shows exactly the 8 own
+  edit sites, 74 insertions / 97 deletions). `model_registry.py`
+  untouched both times (facade chain holds); longlive2 lines untouched
+  (079 owner).
+- TDD failing-first, twice: wrote
+  `tests/test_registry_realesrgan_split.py` then
+  `tests/test_registry_inspector_split.py` (3 agreement tests each:
+  pins single-sourced, builders single-sourced, MODEL_SPECS row points
+  at family builders — mirroring `test_registry_film_split.py`)
+  BEFORE the new modules — in-container collection failed with
+  `ModuleNotFoundError: No module named 'voyage.registry_realesrgan'`
+  (red) and `... 'voyage.registry_inspector'` (red), then created
+  each module + re-export until green.
+- Extraction (1): new `voyage/registry_realesrgan.py` (75L, DESIGN
+  §§84-85) owns all 8 `REALESRGAN_*` pins +
+  `EXPECTED_REALESRGAN_SHA256` + `_record_realesrgan` +
+  `_describe_realesrgan` verbatim (the next-smallest single-file row
+  per the batch-12 residual); `registry_records.py` re-exports all 11
+  names via explicit-`as` self-aliases (sorted between the film and —
+  later — inspector blocks) and carries move comments at the four old
+  sites. `sha256_file`/`Path`/`JsonValue` imports stay (used by the 7
+  remaining families).
+- Extraction (2): new `voyage/registry_inspector.py` (75L, DESIGN
+  §§43-44, 100, 132) owns all 7 `QWEN35_*` pins + `_record_inspector`
+  + `_describe_inspector` verbatim (next-smallest decoupled row; the
+  ltxv/causvid/sfx/director/audio rows are bigger and coupled, the
+  longlive+wan rows frozen for 079); same facade + move comments
+  (three old sites). Deviation from the film recipe, recorded in both
+  docstrings: no EXPECTED hash exists for this row (manifest record
+  carries no sha — same open residual as the CausVid checkpoint), so
+  the module omits the `sha256_file` import. `cli_observe.py:91`
+  resolves `QWEN35_HF_REVISION` through the facade at call time
+  (`getattr(model_registry, ...)`), so the benchmark-revisions path is
+  unchanged with zero edits to that (foreign-owned, mid-pass
+  modified) file.
+- Gate evidence (in-container `voyage:latest` 2026-09-30 + bind mount,
+  CPU-only — the image rebuild is foreign-broken this pass, see 036):
+  new suites 3+3 passed; combined split/agreement 15 passed
+  (`test_registry_{inspector,realesrgan,film,records}_split`);
+  neighbors `test_augment_models` + `test_augment_weight_loading` +
+  `test_checkpoint_safety` + `test_director_models_dir` +
+  `test_longlive` 65 passed, 3 foreign-failed (all 079
+  longlive2-removal surface: `test_cuda_backends_...[longlive2]` +
+  `test_video_worker_module_map` raise `ConfigurationError: unknown
+  video backend 'longlive2'`, `test_models_verify_reports...` raises
+  `AttributeError: voyage.cli has no attribute
+  'verify_longlive2_bf16'` — none import from the touched files).
+  Per-file gates: `ruff check` + `ruff format --check` + `mypy
+  strict` clean on all 5 touched files (`registry_realesrgan.py`,
+  `registry_inspector.py`, `registry_records.py`, both new tests).
+  No `pyproject.toml` change (family modules are clean under the base
+  rule set — `registry_film.py` carries no per-file entry either).
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: **partial** — second and third per-family splits landed;
+  `registry_records.py` 770→747L (facade imports outweigh each moved
+  block singly; the payoff compounds as the remaining 7 follow).
+- Files changed: `voyage/registry_realesrgan.py` (new, 75L),
+  `voyage/registry_inspector.py` (new, 75L),
+  `voyage/registry_records.py` (2 facades + 7 move comments, net
+  −23L), `tests/test_registry_realesrgan_split.py` (new, 3 tests),
+  `tests/test_registry_inspector_split.py` (new, 3 tests).
+- Residual (open, ordered): (1) remaining 7 per-family splits
+  (ltxv, causvid+wan21, sfx triple, director triple, audio pair,
+  longlive+wan — same recipe; longlive2 lines stay frozen for the 079
+  owner); (2) in-core manifest read-modify-write race fix (unchanged).
+- DESIGN proposal (not applied, see return report): per-family
+  modules continue the `registry_film.py` pattern (one to two
+  families per pass, facade chain `registry_<family>` →
+  `registry_records` → `model_registry`, agreement test per family);
+  manifest-race fix shape unchanged from the batch-7 entry.

@@ -1,4 +1,9 @@
-# UPSTREAM_LONG_LIVE_PATCHES — LongLive runtime modifications
+# UPSTREAM_LONG_LIVE_PATCHES — historical: removed-backend runtime modifications (issue 079)
+
+> HISTORICAL (issue 079): the `longlive2` backend was full-deleted
+> (`voyage/workers/video_longlive.py` gone, registry/Dockerfile/tests
+> updated). This file is kept as dated evidence of the patches the
+> removed worker carried — do not treat any path below as live.
 
 Upstream: [NVlabs/LongLive](https://github.com/NVlabs/LongLive),
 pinned at `6b36d20ec6f7958d29d11a704dfa64611a9f2572`

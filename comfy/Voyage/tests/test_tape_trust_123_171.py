@@ -7,9 +7,8 @@ ever recomputes it — a 1-byte-corrupt tail is adopted silently.
 
 Shared-contract delivery in `voyage.workers.video_common` (the one module
 both supervisor and workers can import) + supervisor gates. Worker
-call-site wiring (ltxv/causvid `parse_recovery_tape`, longlive
-`_load_recovery_tape`) is a logged residual — those files are out of
-scope. CPU-only: sparse files + JSON tapes, no torch.
+call-site wiring (ltxv/causvid `parse_recovery_tape`) is covered by the
+live worker tests. CPU-only: sparse files + JSON tapes, no torch.
 """
 
 from __future__ import annotations

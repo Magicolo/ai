@@ -439,7 +439,6 @@ def test_models_info_reports_bundles_and_license(
     assert main(["models", "info"]) == 0
     out = capsys.readouterr().out
     for expected in (
-        "longlive2-bf16",
         "ltxv-2b",
         "causvid",
         "model_registry.py",

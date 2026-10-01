@@ -74,7 +74,7 @@ crash recovery → 3-segment visual review) via the backend-agnostic
 driver:
 
 ```bash
-./scripts/qualify.sh [--backend ltxv|longlive2|causvid] [--segments N] <absolute-run-dir>
+./scripts/qualify.sh [--backend ltxv|causvid] [--segments N] <absolute-run-dir>
 ```
 
 `<run-dir>` must be absolute (workers spawn with CWD=run_dir, so a

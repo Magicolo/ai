@@ -190,3 +190,43 @@ grep -rn "pytest.mark" tests/ | head -n 20
   scripts track once `test_integration.py:119` unused-ignore is fixed
   by its owner (remove the stale ignore or retype the
   `FinalizeOptions` call — NOT this pass: `media.py` is foreign).
+
+## Progress log (2026-09-30, batch 13)
+
+- (089 leg) Ad-hoc mypy run first (in-container, `voyage:latest`,
+  CPU-only, no host pip): `mypy --strict tests/test_integration.py`
+  → `test_integration.py:119: error: Unused "type: ignore" comment
+  [unused-ignore]` (1 error, same line as batch 12 — still unused,
+  condition met). Removed the stale ignore on line 119 ONLY
+  (`options = FinalizeOptions(joint_style=joint_style)`); line 127
+  (`FinalizeOptions(joint_style="crossfade-everything")`) still
+  carries its ignore (mypy reports no unused-ignore there — it covers
+  a real arg-type error, left intact).
+- Fastpath legs re-timed (in-container, `--durations=10`):
+  `test_finalize_fastpath.py` 6 tests in 7.35s — 4 ffmpeg legs
+  1.37–2.08s (was 1.27–1.99s batch 12), 2 fast legs <0.3s (mixed
+  file, so file-level marking rejected; per-test marking left to the
+  slow-budget decision — still below threshold, unmarked).
+- Lock legs re-verified (host grep, no edit — forbidden):
+  `requirements.lock:25-26` still `httpcore2==2.13.1` /
+  `httpx2==2.13.1`; `tomli` conditional still `pyproject.toml:24`
+  and absent from the lock. Lock track w/068 owns both.
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: partial (stale-ignore leg landed; fastpath/lock record-only).
+  Files changed: `tests/test_integration.py` (1 ignore comment
+  removed, line 119 only).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): `mypy
+  --strict tests/test_integration.py` clean post-edit (no errors);
+  `ruff check` + `ruff format --check` clean; `pytest
+  tests/test_integration.py` 6/6 (4 fast in 1.36s + 2 slow
+  16.19s/8.70s finalize pair in 24.96s).
+  DESIGN proposals: none.
+- Residuals (exact handoff): (a) lock typo + tomli-freeze note → lock
+  track w/068 (forbidden here); (b) per-test `slow` marking for the
+  4 fastpath ffmpeg legs (1.37–2.08s as-read) + 4 validate legs in
+  `test_media_robustness_rank2.py` (not re-timed this pass) — mark
+  when the slow budget tightens; (c) mypy-scope collapse → scripts
+  track (the blocking unused-ignore is now gone — collapse is
+  unblocked whenever its owner takes it).

@@ -191,3 +191,67 @@ wc -l tests/*.py | sort -rn | head -n 15
   discipline (re-read live, check mtime/`git log`, keep assertion
   counts identical, move the gates.sh mypy entry with any fold that
   deletes a listed file).
+
+## Progress log (2026-09-30, batch 13)
+
+- Premise re-verified live: 170 `test_*.py` files at pass start
+  (growth vs 166 as-left — concurrent agents still adding files);
+  singleton `test_sfx_parser_parity.py` (2 tests, mtime 2026-09-29,
+  last commit d7b4086) present — the smallest remaining cluster per
+  the issue's singleton recipe (`test_sfx_parser_parity` 2 tests →
+  `test_augment_config` pattern). No helper collisions (`_sfx_defaults`
+  only in the source; `_augment_defaults`/`_parse`/`_base_config` only
+  in the target — verified via rg), zero importers outside self (`rg
+  test_sfx_parser_parity` clean except the target's docstring mention
+  + the gates.sh mypy entry), both files in the `gates.sh` mypy list.
+  No longlive2 lines in either file (verified via grep) — the 079
+  delete surface is untouched.
+- Fold landed: `_sfx_defaults` helper + 2 tests moved verbatim (fn
+  names/bodies identical, original module docstring kept as a banner
+  per the batch-8 quintet precedent) into `tests/test_augment_config.py`
+  (target imports already a superset: `argparse` + `build_parser`
+  present — no import churn); the source file deleted.
+  `scripts/gates.sh` mypy entry removed in the same edit (batch-12
+  lesson — verified `bash -n` clean). As-left: 172 files (fold −1
+  plus 3 concurrent-agent untracked files landing mid-pass:
+  `test_issue_166_resolve_weights.py`,
+  `test_longlive2_removed_079.py`, `test_registry_realesrgan_split.py`),
+  test count net-zero at 2 preserved.
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: fixed (one mechanical cluster folded, trajectory continues).
+  Files changed: `tests/test_augment_config.py` (+31L fold banner/helper/
+  tests), deleted `tests/test_sfx_parser_parity.py`,
+  `scripts/gates.sh` (mypy-list line: `test_sfx_parser_parity.py` entry
+  removed).
+  Gate evidence (in-container, `voyage:latest`, CPU-only): merged
+  solo 49/49 post-delete (`test_augment_config.py`: 31 defs incl.
+  parametrized expansions + 2 moved); `ruff check` + `ruff format
+  --check` + `mypy strict` clean on the merged file; `bash -n` clean
+  on `gates.sh`; neighbors `test_sfx_contract` + `test_sfx_finalize` +
+  `test_augment_plan` + `test_augment_models` 55 passed.
+  DESIGN proposals: none.
+- Residuals: remaining clusters per the issue (adapter triple, augment
+  quad remainder, audio validators, TUI trio, video-worker quartet,
+  finalize/commit merges, leftover singletons incl. `test_prefetch_summary`
+  5 tests, `test_hashing` 8 + `test_paths` 8) — one per pass with the same
+  discipline.
+
+## Progress log (2026-09-30, batch 13 — post-pass collision note)
+
+- After the fold landed green (49/49, ruff + format + mypy-strict
+  clean), a concurrent agent's uncommitted `voyage/*` hunk broke the
+  import chain: `voyage/cli_run_ops.py:28` imports
+  `warn_if_deprecated_backend` from `voyage/config.py`, which their
+  dirty `config.py`/`cli.py` hunk (079/longlive2 surface: untracked
+  `test_longlive2_removed_079.py` present) no longer provides — so
+  `tests/test_augment_config.py` (imports `voyage.cli`) now fails at
+  collection with `ImportError` in-container. Foreign-caused, not this
+  pass: own diff touches only `tests/` + the gates.sh list line, never
+  `voyage/*`; `py_compile` clean on both touched test files (host +
+  container); `ruff check` + `ruff format --check` still clean;
+  `tests/test_integration.py` (no cli import chain) still 4/4 fast
+  green post-hunk. No voyage/* edit made (forbidden) and no foreign
+  hunk undone — the 49/49 evidence above stands as this fold's gate,
+  re-run clean once their surface lands.

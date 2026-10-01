@@ -19,7 +19,6 @@ from voyage.hashing import sha256_file
 from voyage.registry_records import (
     _ACE_CHECKPOINTS_RELATIVE,
     _ACE_LM_RELATIVE,
-    _WAN22_RELATIVE,
     ACE_CHECKPOINTS_SUBDIR,
     ACE_LM17_MIN_BYTES,
     ACE_LM_ALLOW,
@@ -45,7 +44,6 @@ from voyage.registry_records import (
     CAUSVID_LICENSE_URL,
     CAUSVID_SUBDIR,
     EXPECTED_FILM_SHA256,
-    EXPECTED_LONGLIVE_SHA256,
     EXPECTED_LTXV_DIT_SHA256,
     EXPECTED_LTXV_UPSC_SHA256,
     EXPECTED_REALESRGAN_SHA256,
@@ -57,13 +55,6 @@ from voyage.registry_records import (
     FILM_MIN_BYTES,
     FILM_REPO_PATH,
     FILM_SUBDIR,
-    LONGLIVE_COMMIT,
-    LONGLIVE_COMMIT_SHORT,
-    LONGLIVE_HF_FILE,
-    LONGLIVE_HF_REPO,
-    LONGLIVE_HF_REVISION,
-    LONGLIVE_LICENSE,
-    LONGLIVE_LICENSE_URL,
     LTXV_COMMIT,
     LTXV_COMMIT_SHORT,
     LTXV_DIT_FILE,
@@ -147,18 +138,12 @@ from voyage.registry_records import (
     WAN21_SUBDIR,
     WAN21_T5_MIN_BYTES,
     WAN21_VAE_MIN_BYTES,
-    WAN_ALLOW,
-    WAN_HF_REPO,
-    WAN_HF_REVISION,
-    WAN_LICENSE,
-    WAN_SUBDIR,
     _describe_audio,
     _describe_causvid,
     _describe_director,
     _describe_director_awq,
     _describe_film,
     _describe_inspector,
-    _describe_longlive2,
     _describe_ltxv,
     _describe_realesrgan,
     _describe_sfx,
@@ -168,7 +153,6 @@ from voyage.registry_records import (
     _record_director_awq,
     _record_film,
     _record_inspector,
-    _record_longlive2,
     _record_ltxv,
     _record_realesrgan,
     _record_sfx,
@@ -205,7 +189,6 @@ __all__ = [
     "CAUSVID_LICENSE_URL",
     "CAUSVID_SUBDIR",
     "EXPECTED_FILM_SHA256",
-    "EXPECTED_LONGLIVE_SHA256",
     "EXPECTED_LTXV_DIT_SHA256",
     "EXPECTED_LTXV_UPSC_SHA256",
     "EXPECTED_REALESRGAN_SHA256",
@@ -219,13 +202,6 @@ __all__ = [
     "FILM_REPO_PATH",
     "FILM_SUBDIR",
     "FileSpec",
-    "LONGLIVE_COMMIT",
-    "LONGLIVE_COMMIT_SHORT",
-    "LONGLIVE_HF_FILE",
-    "LONGLIVE_HF_REPO",
-    "LONGLIVE_HF_REVISION",
-    "LONGLIVE_LICENSE",
-    "LONGLIVE_LICENSE_URL",
     "LTXV_COMMIT",
     "LTXV_COMMIT_SHORT",
     "LTXV_DIT_FILE",
@@ -316,14 +292,8 @@ __all__ = [
     "WAN21_SUBDIR",
     "WAN21_T5_MIN_BYTES",
     "WAN21_VAE_MIN_BYTES",
-    "WAN_ALLOW",
-    "WAN_HF_REPO",
-    "WAN_HF_REVISION",
-    "WAN_LICENSE",
-    "WAN_SUBDIR",
     "_ACE_CHECKPOINTS_RELATIVE",
     "_ACE_LM_RELATIVE",
-    "_WAN22_RELATIVE",
     "_collect_missing",
     "_describe_audio",
     "_describe_causvid",
@@ -331,7 +301,6 @@ __all__ = [
     "_describe_director_awq",
     "_describe_film",
     "_describe_inspector",
-    "_describe_longlive2",
     "_describe_ltxv",
     "_describe_realesrgan",
     "_describe_sfx",
@@ -343,7 +312,6 @@ __all__ = [
     "_record_director_awq",
     "_record_film",
     "_record_inspector",
-    "_record_longlive2",
     "_record_ltxv",
     "_record_realesrgan",
     "_record_sfx",
@@ -356,7 +324,6 @@ __all__ = [
     "download_director_models",
     "download_film_models",
     "download_inspector_models",
-    "download_longlive2_bf16",
     "download_ltxv_models",
     "download_model",
     "download_realesrgan_models",
@@ -372,7 +339,6 @@ __all__ = [
     "verify_director_models",
     "verify_film_models",
     "verify_inspector_models",
-    "verify_longlive2_bf16",
     "verify_ltxv_models",
     "verify_model",
     "verify_realesrgan_models",
@@ -442,16 +408,6 @@ def verify_checkpoint_against_manifest(
             "for external volumes)"
         )
     verify_checkpoint_sha256(checkpoint, recorded)
-
-
-def download_longlive2_bf16(models_dir: Path) -> dict[str, JsonValue]:
-    """Explicit download (DESIGN §85). Returns a manifest-ready record dict."""
-    return download_model(models_dir, "longlive2-bf16")
-
-
-def verify_longlive2_bf16(models_dir: Path) -> tuple[bool, str]:
-    """Check presence (+ size sanity) of every required weight file."""
-    return verify_model(models_dir, "longlive2-bf16")
 
 
 def _merge_manifest_record(
@@ -533,7 +489,7 @@ class ShardFloor:
 class ModelSpec:
     """One registry row: how to fetch it, check it and describe it."""
 
-    name: str  # CLI target, e.g. "longlive2-bf16"
+    name: str  # CLI target, e.g. "ltxv-2b"
     manifest_key: str
     snapshots: tuple[SnapshotSpec, ...]
     files: tuple[FileSpec, ...]
@@ -545,36 +501,6 @@ class ModelSpec:
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
-    "longlive2-bf16": ModelSpec(
-        name="longlive2-bf16",
-        manifest_key="video",
-        snapshots=(SnapshotSpec(WAN_HF_REPO, WAN_HF_REVISION, _WAN22_RELATIVE, tuple(WAN_ALLOW)),),
-        files=(
-            FileSpec(LONGLIVE_HF_REPO, LONGLIVE_HF_REVISION, LONGLIVE_HF_FILE, "", "longlive2"),
-        ),
-        record_builder=_record_longlive2,
-        checks=(
-            RequiredFile(f"longlive2/{LONGLIVE_HF_FILE}", 1_000_000_000),
-            RequiredFile(
-                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00001-of-00003.safetensors", 0
-            ),
-            RequiredFile(
-                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00002-of-00003.safetensors", 0
-            ),
-            RequiredFile(
-                f"{_WAN22_RELATIVE}/diffusion_pytorch_model-00003-of-00003.safetensors", 0
-            ),
-            RequiredFile(f"{_WAN22_RELATIVE}/diffusion_pytorch_model.safetensors.index.json", 0),
-            RequiredFile(f"{_WAN22_RELATIVE}/config.json", 0),
-            RequiredFile(f"{_WAN22_RELATIVE}/configuration.json", 0),
-            RequiredFile(f"{_WAN22_RELATIVE}/Wan2.2_VAE.pth", 0),
-            RequiredFile(f"{_WAN22_RELATIVE}/models_t5_umt5-xxl-enc-bf16.pth", 0),
-            RequiredGlob(f"{_WAN22_RELATIVE}/google/umt5-xxl/*"),
-        ),
-        success_message=_describe_longlive2,
-        expected_hashes=(ExpectedHash(f"longlive2/{LONGLIVE_HF_FILE}", EXPECTED_LONGLIVE_SHA256),),
-        manifest_checkpoint=f"longlive2/{LONGLIVE_HF_FILE}",
-    ),
     "director-qwen8b": ModelSpec(
         name="director-qwen8b",
         manifest_key="director",
@@ -1022,7 +948,7 @@ def _manifest_hash_mismatches(models_dir: Path, spec: ModelSpec) -> list[str]:
 
     Covers every shape the record builders write: per-file ``checkpoint_shas``
     dicts (ltxv) and single ``checkpoint_sha256`` + ``manifest_checkpoint``
-    rows (longlive2/causvid/film/realesrgan). No manifest, no entry, or no
+    rows (causvid/film/realesrgan). No manifest, no entry, or no
     sha for this key means no baseline exists — nothing to check (the
     ingest-time constants in ``download_model`` and the load-time
     ``verify_checkpoint_against_manifest`` are the closed gates; torn or
@@ -1241,14 +1167,12 @@ def verify_realesrgan_models(models_dir: Path) -> tuple[bool, str]:
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     """Every models-tree root the registry downloads (086).
 
-    Covers all shipped stacks: Wan2.2 + LongLive generator, Wan2.1 +
-    CausVid DMD, LTXV DiT/upscaler + its PixArt text encoder, Qwen3-8B
-    director, Qwen3.5-9B inspector, MiniLM embeddings, ACE-Step music,
-    MMAudio SFX, FILM interpolation, Real-ESRGAN anime upscaler.
+    Covers all shipped stacks: Wan2.1 + CausVid DMD, LTXV DiT/upscaler +
+    its PixArt text encoder, Qwen3-8B director, Qwen3.5-9B inspector,
+    MiniLM embeddings, ACE-Step music, MMAudio SFX, FILM interpolation,
+    Real-ESRGAN anime upscaler.
     """
     return {
-        "wan_dir": str(models_dir / "wan_models" / WAN_SUBDIR),
-        "generator_ckpt": str(models_dir / "longlive2" / LONGLIVE_HF_FILE),
         "wan21_dir": str(models_dir / WAN21_SUBDIR),
         "causvid_dir": str(models_dir / CAUSVID_SUBDIR),
         "ltxv_dir": str(models_dir / LTXV_SUBDIR),

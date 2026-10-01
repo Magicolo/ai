@@ -39,7 +39,6 @@ finalizer concat path, and checksums run exactly as in production.
 | Role | Backend | Image | Notes |
 |------|---------|-------|-------|
 | video | `ltxv` (default) | `voyage-video:latest` | 2B-distilled T2V + tail-conditioned extensions, bf16-first (fp8 fallback) |
-| video | `longlive2` | `voyage-video:latest` | resident BF16+FP8 stream, `fp8`\|`bf16` quantization |
 | video | `causvid` | `voyage-video:latest` | DMD causal generator + Wan2.1-1.3B base, 832×480 @ 16 fps native, bf16 |
 | audio | `acestep` | `voyage-video:latest` | turbo config, 0.6 B planner offloaded to CPU |
 | sfx | `mmaudio` | `voyage-video:latest` | finalize-time video-synced effects, 8 s windows / 1 s fades, amix −6 dB (see `docs/SFX.md`) |
@@ -51,7 +50,7 @@ Select in TOML (`config.video.backend`, `config.audio.backend`,
 
 ## LTXV chaining model (`ltxv`, Phase 7 alternative)
 
-Resident session like `longlive2` (multi-block payload, resume hook,
+Resident session (multi-block payload, resume hook,
 acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
 `voyage/supervisor.py`), but chaining is explicit, not KV-cache: block 0
 renders text-to-video from cached CPU T5 bf16 embeds
@@ -68,14 +67,14 @@ old torch-pickle tapes — unresumable by design) with profile `ltxv`
 (tapes never resume across backends or numerics); `scene_cut` forces a
 fresh start. Native 768×512; draft 640×352 verified. Needs
 `models download ltxv-2b`. The `benchmark` op saves/restores tail state
-around its probes, so unlike longlive it does not advance any stream —
+around its probes, so it does not advance any stream —
 safe to run mid-sequence.
 
 ## CausVid chaining model (`causvid`, Stream D alternative)
 
- Resident session like `longlive2` (multi-block payload, resume hook,
- acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
- `voyage/supervisor.py`), but chaining is explicit, not KV-cache: each
+  Resident session (multi-block payload, resume hook,
+  acestep GPU swap — see `STREAMING_VIDEO_BACKENDS` in
+  `voyage/supervisor.py`), but chaining is explicit, not KV-cache: each
  rollout renders from fresh `torch.randn([1, 21, 16, 60, 104])` bf16 noise
  on CUDA via `pipeline.inference(noise, text_prompts, return_latents=True,
  start_latents=...)`, then continuation state advances as
@@ -98,5 +97,5 @@ safe to run mid-sequence.
   feed the director context, amendments apply post-validation with a
   provisional `style_similarity_min = 0.60`. Advisory only — retry→skip,
   never blocks a commit. Needs `models download inspector-qwen35`.
-- **`longlive2-bf16` recovery profile**: tapes never resume across
-  numerics — a `fp8` tape will not load under `bf16` and vice versa.
+- **Recovery profiles** (`ltxv`, `causvid`): tapes never resume across
+  backends or numerics.

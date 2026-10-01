@@ -1,4 +1,4 @@
-"""Benchmark count validation across all five workers (issue 060).
+"""Benchmark count validation across all four workers (issue 060).
 
 CPU-only: invalid counts must raise `ValueError` before any session/stack
 check, so these tests need no GPU, no models, and no resident session.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from voyage.workers import audio_acestep, video_causvid, video_longlive, video_ltxv
+from voyage.workers import audio_acestep, video_causvid, video_ltxv
 from voyage.workers import director as director_worker
 from voyage.workers.loop import validate_benchmark_counts
 
@@ -44,12 +44,6 @@ def test_audio_benchmark_validates_before_loading_stack(
     monkeypatch.setattr(audio_acestep, "_require_stack", _boom)
     with pytest.raises(ValueError, match="warmup >= 0 and measured >= 1"):
         audio_acestep.handle_benchmark({"warmup": 0, "measured": 0})
-
-
-def test_longlive_benchmark_validates_before_session_check() -> None:
-    assert video_longlive._SESSION is None
-    with pytest.raises(ValueError, match="warmup >= 0 and measured >= 1"):
-        video_longlive.handle_benchmark({"warmup": 0, "measured": 0})
 
 
 def test_ltxv_benchmark_validates_before_session_check() -> None:

@@ -79,13 +79,6 @@ def parse_duration(raw: str) -> float:
 # lands (worker-reported frames remain the timeline truth).
 _LTXV_NOVEL_BLOCK_FRAMES = 96
 
-# LongLive Wan temporal VAE: L latents decode to (L-1)*4+1 frames, one block
-# appends 8 latents (measured: 29f per 1-block segment, 93f per 3-block
-# segment — qual-longlive2 + Phase-2 E2E, 2026-09-24/22).
-_LONGLIVE_LATENTS_PER_BLOCK = 8
-
-_LONGLIVE_DECODE_EXPANSION = 4
-
 # CausVid DMD rollout: 81 decoded frames per rollout, the last
 # 4*(overlap-1)+1 are the conditioning tail (9 at overlap 3) — 72 novel
 # committed per rollout, uniform including rollout 0 (upstream long-video
@@ -98,9 +91,6 @@ def _frames_per_segment(config: ProjectConfig) -> int:
     """Committed frames per segment for duration math (backend-specific)."""
     if config.video.backend == "ltxv":
         return _LTXV_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
-    if config.video.backend == "longlive2":
-        latents = _LONGLIVE_LATENTS_PER_BLOCK * config.video.blocks_per_segment
-        return (latents - 1) * _LONGLIVE_DECODE_EXPANSION + 1
     if config.video.backend == "causvid":
         return _CAUSVID_NOVEL_PER_ROLLOUT * config.video.blocks_per_segment
     return config.video.segment_frames

@@ -132,15 +132,14 @@ def test_streaming_payload_expands_per_block() -> None:
 
 def test_streaming_payload_scene_cut_defaults_false() -> None:
     transport, calls = _stub_transport({"video": {"frames": 49, "fps": 24}})
-    config = _video_config(backend="longlive2", blocks_per_segment=2)
-    adapter = VideoBackendAdapter(transport, "longlive2", config)
-    request = _request(state_mode="persistent_kv")
+    config = _video_config(backend="ltxv", blocks_per_segment=2)
+    adapter = VideoBackendAdapter(transport, "ltxv", config)
+    request = _request(state_mode="reconstructable_prefix")
     adapter.generate_segment(request, Path("seg/video.mp4"))
     assert calls[0][1]["scene_cuts"] == [False, False]
 
 
 def test_backend_state_modes_cover_spec_trio() -> None:
-    assert BACKEND_STATE_MODES["longlive2"] == "persistent_kv"
     assert BACKEND_STATE_MODES["ltxv"] == "reconstructable_prefix"
     assert BACKEND_STATE_MODES["causvid"] == "reconstructable_prefix"
     assert BACKEND_STATE_MODES["fake"] == "independent_clip"
@@ -154,10 +153,10 @@ def test_capabilities_report_backend_mode_and_streaming() -> None:
         "independent_clip",
         False,
     )
-    live_caps = VideoBackendAdapter(transport, "longlive2", _video_config()).capabilities()
+    live_caps = VideoBackendAdapter(transport, "ltxv", _video_config()).capabilities()
     assert (live_caps.backend, live_caps.state_mode, live_caps.streaming) == (
-        "longlive2",
-        "persistent_kv",
+        "ltxv",
+        "reconstructable_prefix",
         True,
     )
 

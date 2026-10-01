@@ -4,21 +4,21 @@
 # Env:
 #   VOYAGE_IMAGE  container image (default voyage:latest, the slim CPU image;
 #                 auto-selected to voyage-video:latest when a CUDA backend
-#                 -- ltxv, longlive2, acestep, mmaudio -- is requested,
+#                 -- ltxv, acestep, mmaudio -- is requested,
 #                 unless set;
 #                 bare `run.sh` (the launcher TUI, backend picked
 #                 interactively) also defaults to voyage-video when the host
 #                 has a GPU, so ltxv works with no explicit variables)
 #   VOYAGE_GPUS   set to 1 to pass --gpus all (auto-enabled for CUDA backends
 #                 and GPU-box bare launches unless set; needed for
-#                 longlive2/ltxv/acestep/mmaudio)
+#                 ltxv/acestep/mmaudio)
 #   VOYAGE_DRY_RUN  set to 1 to print the resolved image/gpu selection and
 #                 exit (test seam; never runs docker)
 #   VOYAGE_MODELS host models dir mounted at /models (default ~/.cache/voyage-models)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Backend-aware defaults: the CUDA worker stacks (torch + LongLive/LTXV/ACE)
+# Backend-aware defaults: the CUDA worker stacks (torch + LTXV/ACE)
 # only exist in voyage-video. Detect the requested backend from
 # --backend <name> / --backend=<name> (defaulting to ltxv for `generate`);
 # for run-like commands with --run DIR, read it from DIR/voyage.toml.
@@ -63,16 +63,16 @@ fi
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/voyage.toml" ]; then
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "longlive2", "causvid", "acestep", "mmaudio"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
+    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
 fi
 needs_cuda=0
 case "${requested_backend:-}" in
-  ltxv|longlive2|causvid|acestep|mmaudio) needs_cuda=1 ;;
+  ltxv|causvid|acestep|mmaudio) needs_cuda=1 ;;
 esac
 # Bare launcher TUI: the backend is picked interactively inside the TUI, so
 # no CLI signal exists. On a GPU box assume the CUDA stack so bare `run.sh`
-# can generate with ltxv/longlive2 and no explicit variables; explicit
+# can generate with ltxv and no explicit variables; explicit
 # VOYAGE_IMAGE / VOYAGE_GPUS always win. On GPU-less boxes stay slim (the
 # TUI still runs fake-backend smoke runs; picking a CUDA backend there
 # fast-fails to the form with the relaunch hint). The probe is a cheap

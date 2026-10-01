@@ -89,7 +89,7 @@ appended (e.g. the CUDA-stack reason), never a stuck view.
   `1h2m3.5s`; fractional/combined/bare/whitespace-padded all parse); rounds
   up to whole segments, so the video never runs short.
 - Backend — video preset (geometry + device + audio pairing),
-  with a visible `▾` affordance; `ltxv`/`longlive2` need the CUDA
+  with a visible `▾` affordance; `ltxv`/`causvid` need the CUDA
   worker image + a GPU.
 - Director — `qwen` drifts the story every Nth segment,
   `deterministic` holds the style.
@@ -149,7 +149,7 @@ ignored — persistence can never break the UI
 
 ### GPU warning
 
-CUDA backends (`ltxv`, `longlive2`) show a one-line warning under the
+CUDA backends (`ltxv`, `causvid`) show a one-line warning under the
 backend dropdown (`#gpu-warning` via `tui_state.gpu_warning`): they
 need the CUDA worker image (`VOYAGE_IMAGE=voyage-video`) plus a GPU
 (`--gpus all`). Other backends show nothing.
@@ -174,13 +174,13 @@ Duration is human-readable (`5s`, `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`;
 fractional `2.5m`/`1.5h`, combined `1h2m3.5s`, bare `90`, whitespace-padded
 all parse). Segment count rounds **up**, so the video is never
 shorter than requested. Backend presets set geometry/device automatically
-(`ltxv`: 768×512 on `cuda:0`; `longlive2`: default geometry on `cuda:0`;
-`fake`: CPU smoke runs) and pair the audio backend too (`ltxv`/`longlive2`
+(`ltxv`: 768×512 on `cuda:0`; `causvid`: 832×480 @ 16 fps on `cuda:0`;
+`fake`: CPU smoke runs) and pair the audio backend too (`ltxv`/`causvid`
 get real ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Extra run flags (`--draft`, `--director`,
 `--blocks`, `--take-seconds`, `--quantization`) pass through. Validation
 failure aborts before finalize unless `--skip-bad`; on a GPU box with no
 visible GPU a warning is printed (the worker will fail at init). `run.sh`
-selects the container automatically: a CUDA backend (`ltxv`, `longlive2`,
+selects the container automatically: a CUDA backend (`ltxv`, `causvid`,
 `acestep` — from `--backend` or the run's `voyage.toml`) switches to
 `voyage-video:latest` with `--gpus all` and pins `-w /app`, unless
 `VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. Bare `run.sh` (the TUI,

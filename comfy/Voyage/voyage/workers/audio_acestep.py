@@ -66,8 +66,8 @@ def _redirect_upstream_writes() -> Path:
     tmp dir (created once per process, reused across re-inits) moves those
     writes out of the run. All voyage paths are absolute (payload
     `output_path` invariant, `TemporaryDirectory` staging, absolute
-    `models_dir`), so the chdir is side-effect free — the `video_longlive` /
-    `video_causvid` `_enter_*_tree` precedent. Runs before any ACE-Step
+    `models_dir`), so the chdir is side-effect free — the `video_causvid`
+    `_enter_causvid_tree` precedent. Runs before any ACE-Step
     library call; idempotent.
     """
     global _upstream_cache_dir

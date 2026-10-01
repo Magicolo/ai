@@ -49,7 +49,7 @@ run reuses the same segment number and overwrites the media in place.
 
 ## GPU time-sharing
 
-`longlive2` + `acestep` cannot co-reside on 16 GB. The supervisor
+`ltxv`/`causvid` video + `acestep` cannot co-reside on 16 GB. The supervisor
 sequence is: evict video → render audio take → evict audio → rebuild
 video from tape. `del` alone frees nothing — eviction is
 `del` + `gc.collect()` + `torch.cuda.empty_cache()`.

@@ -1,12 +1,12 @@
-"""Stream B §137A qualification harness for the `longlive2` backend.
+"""Stream B §137A qualification harness for the video backends.
 
 CPU-runnable in the slim image (no torch/GPU): pure metric helpers with
 unit tests, plus a fake-backend protocol dry-run proving the GPU-run
 procedure (smoke → resolution/FPS → VRAM/RAM → steady state → crash
 recovery → 3-segment visual review) works end to end.
 
-The GPU leg itself (real `longlive2` numbers) is driven by
-`scripts/qualify.sh` on an idle 4060 Ti and recorded in
+The GPU legs themselves (real backend numbers) are driven by
+`scripts/qualify.sh` on an idle GPU and recorded in
 `reports/video-backends.md`. Nothing here invents GPU numbers: every
 GPU-gated field stays PENDING until measured.
 
@@ -346,10 +346,9 @@ def test_fake_kill_recovery_dry_run(tmp_path: Path) -> None:
 
 
 def test_report_skeleton() -> None:
-    """The report exists with a longlive2 leg and an explicit empty LTXV leg."""
+    """The report exists with a historical backend leg and the §137A skeleton."""
     assert REPORT_PATH.exists(), f"missing {REPORT_PATH}"
     text = REPORT_PATH.read_text(encoding="utf-8").lower()
-    assert "longlive2" in text
     assert "137a" in text
     assert "ltxv leg" in text
     assert "pending" in text

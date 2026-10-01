@@ -47,58 +47,66 @@ from voyage.registry_film import (
 from voyage.registry_film import (
     _record_film as _record_film,
 )
-
-LONGLIVE_COMMIT = "6b36d20ec6f7958d29d11a704dfa64611a9f2572"
-
-LONGLIVE_COMMIT_SHORT = "6b36d20"
-
-# Merged BF16 generator checkpoint (base AR + DMD LoRA merged). Ungated.
-LONGLIVE_HF_REPO = "Efficient-Large-Model/LongLive-2.0-5B"
-
-LONGLIVE_HF_REVISION = "8521079b863720a57c1a8d9b19c8d9e6ccb04c0f"
-
-LONGLIVE_HF_FILE = "model_bf16.pt"
-
-LONGLIVE_LICENSE = "NVIDIA Open Model License Agreement"
-
-LONGLIVE_LICENSE_URL = (
-    "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/"
+from voyage.registry_inspector import (
+    QWEN35_ALLOW as QWEN35_ALLOW,
 )
-
-# Base Wan model providing T5 encoder, tokenizer, VAE and arch config.
-# Ungated. Downloaded as a subset (diffusion shards + VAE + T5 + tokenizer).
-WAN_HF_REPO = "Wan-AI/Wan2.2-TI2V-5B"
-
-# Still floating (issue 070): every sibling snapshot pins a full 40-hex
-# revision, but the Wan2.2 base downloads `main` at whatever it points to
-# on provision day, so two provisions can yield different base weights with
-# identical manifests. Pin procedure (needs network + provisioned bytes —
-# the volume was pruned 2026-09-24, so nothing below is resolvable CPU-only):
-#   1. resolve the verified main commit:
-#      python -c "from huggingface_hub import HfApi;
-#                 print(HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha)"
-#   2. re-provision the Wan subset at that revision, sha256 the shards to
-#      confirm they match the running volume, then set this constant to the
-#      40-hex revision (the SnapshotSpec + manifest record already read it).
-#   3. shrink tests/test_registry_pins.py's floating set to the empty set.
-# Do NOT invent a hash — a wrong pin fails every provision loudly.
-WAN_HF_REVISION: str | None = None
-
-WAN_SUBDIR = "Wan2.2-TI2V-5B"
-
-WAN_ALLOW = [
-    "diffusion_pytorch_model-00001-of-00003.safetensors",
-    "diffusion_pytorch_model-00002-of-00003.safetensors",
-    "diffusion_pytorch_model-00003-of-00003.safetensors",
-    "diffusion_pytorch_model.safetensors.index.json",
-    "config.json",
-    "configuration.json",
-    "Wan2.2_VAE.pth",
-    "models_t5_umt5-xxl-enc-bf16.pth",
-    "google/umt5-xxl/*",
-]
-
-WAN_LICENSE = "Apache 2.0 (see repo LICENSE; record exact text at download)"
+from voyage.registry_inspector import (
+    QWEN35_HF_REPO as QWEN35_HF_REPO,
+)
+from voyage.registry_inspector import (
+    QWEN35_HF_REVISION as QWEN35_HF_REVISION,
+)
+from voyage.registry_inspector import (
+    QWEN35_LICENSE as QWEN35_LICENSE,
+)
+from voyage.registry_inspector import (
+    QWEN35_LICENSE_URL as QWEN35_LICENSE_URL,
+)
+from voyage.registry_inspector import (
+    QWEN35_MIN_BYTES as QWEN35_MIN_BYTES,
+)
+from voyage.registry_inspector import (
+    QWEN35_SUBDIR as QWEN35_SUBDIR,
+)
+from voyage.registry_inspector import (
+    _describe_inspector as _describe_inspector,
+)
+from voyage.registry_inspector import (
+    _record_inspector as _record_inspector,
+)
+from voyage.registry_realesrgan import (
+    EXPECTED_REALESRGAN_SHA256 as EXPECTED_REALESRGAN_SHA256,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_ANIME_FILE as REALESRGAN_ANIME_FILE,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_ANIME_MIN_BYTES as REALESRGAN_ANIME_MIN_BYTES,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_HF_REPO as REALESRGAN_HF_REPO,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_HF_REVISION as REALESRGAN_HF_REVISION,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_LICENSE as REALESRGAN_LICENSE,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_LICENSE_URL as REALESRGAN_LICENSE_URL,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_SUBDIR as REALESRGAN_SUBDIR,
+)
+from voyage.registry_realesrgan import (
+    REALESRGAN_UPSTREAM_URL as REALESRGAN_UPSTREAM_URL,
+)
+from voyage.registry_realesrgan import (
+    _describe_realesrgan as _describe_realesrgan,
+)
+from voyage.registry_realesrgan import (
+    _record_realesrgan as _record_realesrgan,
+)
 
 # Phase 3 director LLM (DESIGN §8). Qwen3-8B dense, Apache 2.0, ungated.
 # BF16 weights (~16.4 GiB); served on CPU from system RAM in the director
@@ -153,37 +161,8 @@ QWEN4B_AWQ_LICENSE = "Apache 2.0"
 
 QWEN4B_AWQ_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3-4B-AWQ/blob/main/LICENSE"
 
-# Phase 5 visual inspector (DESIGN §§43-44, 100, 132). Qwen3.5-9B
-# multimodal VLM, Apache 2.0, ungated. BF16 weights (~19 GiB); served on
-# CPU from system RAM in the director worker — never on the video GPU.
-# The allow-list MUST include chat_template.jinja: the Qwen3.5 processor
-# needs it and snapshot_download without it fails the inspector load
-# (Step 0 probe lesson). Shard names carry a `model.safetensors-` prefix
-# (unlike Qwen3-8B's `model-` prefix), hence the distinct shard glob.
-QWEN35_HF_REPO = "Qwen/Qwen3.5-9B"
-
-QWEN35_HF_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-
-QWEN35_SUBDIR = "Qwen3.5-9B"
-
-QWEN35_ALLOW = [
-    "model.safetensors-*-of-*.safetensors",
-    "model.safetensors.index.json",
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "chat_template.jinja",
-    "preprocessor_config.json",
-    "video_preprocessor_config.json",
-]
-
-QWEN35_MIN_BYTES = 18_000_000_000
-
-QWEN35_LICENSE = "Apache 2.0"
-
-QWEN35_LICENSE_URL = "https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/LICENSE"
+# Phase 5 inspector pins live in `voyage.registry_inspector` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # Phase 4 music stack (DESIGN §§6, 37). ACE-Step 1.5 turbo DiT + 0.6B
 # planner LM (spec V1: 2B turbo + 0.6B LM, 8GB floor; XL rejected).
@@ -451,42 +430,18 @@ MMAUDIO_CLIP_LICENSE = "Apple AMLR (research, see repo LICENSE)"
 # top so existing importers keep working).
 #
 
-# Real-ESRGAN anime 6B: xinntao/Real-ESRGAN v0.2.2.4 release asset (RRDBNet
-# 6-block, 4x, 17,938,799 bytes, BSD-3-Clause (c) 2021 Xintao Wang),
-# re-hosted 1:1 on the Hub — xinntao ships no HF repo, so the registry pins
-# the amd mirror (its card records the upstream release URL + sha256
-# f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da).
-# Floor holds ~15% headroom below measured.
-REALESRGAN_HF_REPO = "amd/realesrgan-x4plus-anime-6b"
-
-REALESRGAN_HF_REVISION = "b14ff5f8ecb5a4b56ce4049a58d0bca1f8814690"
-
-REALESRGAN_SUBDIR = "realesrgan"
-
-REALESRGAN_ANIME_FILE = "RealESRGAN_x4plus_anime_6B.pth"
-
-REALESRGAN_ANIME_MIN_BYTES = 15_000_000
-
-REALESRGAN_UPSTREAM_URL = (
-    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/"
-    "RealESRGAN_x4plus_anime_6B.pth"
-)
-
-REALESRGAN_LICENSE = "BSD 3-Clause (c) 2021 Xintao Wang"
-
-REALESRGAN_LICENSE_URL = "https://huggingface.co/amd/realesrgan-x4plus-anime-6b/blob/main/LICENSE"
+# Real-ESRGAN pins live in `voyage.registry_realesrgan` (issue 082;
+# re-exported at the top so existing importers keep working).
 
 # Expected ingest hashes (issue 071): `download_model` verifies these BEFORE
 # merging the manifest record, so a poisoned first fetch can never become the
-# attested baseline. Provenance per row: the LongLive generator hash is
-# manifest-attested (the pruned provisioned volume's manifest.json "video"
-# record, itself fetched at the pinned LONGLIVE_HF_REVISION via FileSpec, so
-# hub-side integrity held at fetch time); the LTXV/FILM/Real-ESRGAN hashes
+# attested baseline. Provenance per row: the LTXV/FILM/Real-ESRGAN hashes
 # were measured live 2026-09-30 from the provisioned volume (all FileSpec
 # pinned-revision fetches). No constant exists for the CausVid DMD checkpoint:
 # its manifest record carries no sha and the weight file was pruned
 # 2026-09-24 — re-provision, measure, and add it here (residual).
-EXPECTED_LONGLIVE_SHA256 = "ec9063a44ea3c91e8ff55edcdd58dba3f1bcf6ac9091249629cb57fcebe35fd8"
+# (A removed video backend's generator hash lived here until issue
+# 079 deleted it with the backend.)
 
 EXPECTED_LTXV_DIT_SHA256 = "76aa8c4786af752fa6f951947129d5290c3c6c0b2fadcadea6b5e114ae2cad8f"
 
@@ -495,33 +450,12 @@ EXPECTED_LTXV_UPSC_SHA256 = "5b076031c6f860db9037a54f3bb819f10bfb5532ea26a6d3006
 # EXPECTED_FILM_SHA256 lives in `voyage.registry_film` (issue 082;
 # re-exported at the top so existing importers keep working).
 
-EXPECTED_REALESRGAN_SHA256 = "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
-
-_WAN22_RELATIVE = f"wan_models/{WAN_SUBDIR}"
+# EXPECTED_REALESRGAN_SHA256 lives in `voyage.registry_realesrgan`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 _ACE_CHECKPOINTS_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}"
 
 _ACE_LM_RELATIVE = f"{ACE_MAIN_SUBDIR}/{ACE_CHECKPOINTS_SUBDIR}/{ACE_LM_SUBDIR}"
-
-
-def _record_longlive2(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the LongLive 2.0 stack (fetch part lives in the table)."""
-    wan_dir = models_dir / "wan_models" / WAN_SUBDIR
-    generator_path = models_dir / "longlive2" / LONGLIVE_HF_FILE
-    return {
-        "repo": LONGLIVE_HF_REPO,
-        "revision": LONGLIVE_HF_REVISION,
-        "model_id": LONGLIVE_HF_FILE,
-        "checkpoint_sha256": sha256_file(generator_path),
-        "checkpoint_bytes": generator_path.stat().st_size,
-        "license": LONGLIVE_LICENSE,
-        "license_url": LONGLIVE_LICENSE_URL,
-        "code_commit": LONGLIVE_COMMIT,
-        "wan_repo": WAN_HF_REPO,
-        "wan_revision": WAN_HF_REVISION,  # None = still floating (issue 070)
-        "wan_dir": str(wan_dir),
-        "wan_license": WAN_LICENSE,
-    }
 
 
 def _record_director(models_dir: Path) -> dict[str, JsonValue]:
@@ -547,19 +481,8 @@ def _record_director(models_dir: Path) -> dict[str, JsonValue]:
     }
 
 
-def _record_inspector(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Phase 5 VLM inspector."""
-    target_dir = models_dir / QWEN35_SUBDIR
-    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
-    weights_bytes = sum(part.stat().st_size for part in shards)
-    return {
-        "repo": QWEN35_HF_REPO,
-        "revision": QWEN35_HF_REVISION,
-        "dir": str(target_dir),
-        "bytes": weights_bytes,
-        "license": QWEN35_LICENSE,
-        "license_url": QWEN35_LICENSE_URL,
-    }
+# Inspector record builder lives in `voyage.registry_inspector`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 def _record_audio(models_dir: Path) -> dict[str, JsonValue]:
@@ -648,12 +571,6 @@ def _record_sfx(models_dir: Path) -> dict[str, JsonValue]:
     }
 
 
-def _describe_longlive2(models_dir: Path) -> str:
-    """Exact OK string for the LongLive 2.0 stack (byte-stable)."""
-    size_gib = (models_dir / "longlive2" / LONGLIVE_HF_FILE).stat().st_size / 1024**3
-    return f"longlive2-bf16 OK (generator {size_gib:.1f} GiB + Wan subset)"
-
-
 def _describe_director(models_dir: Path) -> str:
     """Exact OK string for the director stack (byte-stable)."""
     qwen_dir = models_dir / QWEN_SUBDIR
@@ -697,12 +614,8 @@ def _describe_director_awq(models_dir: Path) -> str:
     )
 
 
-def _describe_inspector(models_dir: Path) -> str:
-    """Exact OK string for the VLM inspector (byte-stable)."""
-    target_dir = models_dir / QWEN35_SUBDIR
-    shards = sorted(target_dir.glob("model.safetensors-*-of-*.safetensors"))
-    weights_bytes = sum(part.stat().st_size for part in shards)
-    return f"inspector-qwen35 OK (Qwen3.5-9B {weights_bytes / 1024**3:.1f} GiB)"
+# Inspector describe helper lives in `voyage.registry_inspector`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 def _describe_audio(models_dir: Path) -> str:
@@ -740,31 +653,13 @@ def _describe_causvid(models_dir: Path) -> str:
 # at the top so existing importers keep working).
 
 
-def _record_realesrgan(models_dir: Path) -> dict[str, JsonValue]:
-    """Manifest value for the Real-ESRGAN anime upscaler weights (Track C)."""
-    weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
-    relative_path = f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}"
-    return {
-        "repo": REALESRGAN_HF_REPO,
-        "revision": REALESRGAN_HF_REVISION,
-        "model_dir": str(models_dir / REALESRGAN_SUBDIR),
-        "checkpoint_bytes": weights_path.stat().st_size,
-        "files": [REALESRGAN_ANIME_FILE],
-        "upstream_url": REALESRGAN_UPSTREAM_URL,
-        "license": REALESRGAN_LICENSE,
-        "license_url": REALESRGAN_LICENSE_URL,
-        # Recorded sha (071): verify_model checks the checkpoint against it.
-        "checkpoint_sha256": sha256_file(weights_path),
-        "checkpoint_file": relative_path,
-    }
+# Real-ESRGAN record builder lives in `voyage.registry_realesrgan`
+# (issue 082; re-exported at the top so existing importers keep working).
 
 
 # FILM describe helper lives in `voyage.registry_film` (issue 082;
 # re-exported at the top so existing importers keep working).
 
 
-def _describe_realesrgan(models_dir: Path) -> str:
-    """Exact OK string for the Real-ESRGAN anime weights (byte-stable)."""
-    weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
-    size_mib = weights_path.stat().st_size / 1024**2
-    return f"realesrgan-anime OK (anime 6B {size_mib:.0f} MiB)"
+# Real-ESRGAN describe helper lives in `voyage.registry_realesrgan`
+# (issue 082; re-exported at the top so existing importers keep working).

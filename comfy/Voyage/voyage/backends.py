@@ -4,7 +4,7 @@ The supervisor talks to *workers* over sync JSONL RPC (`generate_blocks`;
 voyage/workers/loop.py, voyage/rpc.py); workers own backend objects.
 Fake backends generate real tiny media with ffmpeg so the whole
 persistence/validation/finalize path is exercised without GPUs.
-Real LongLive / ACE-Step adapters implement the same interface in
+Real ACE-Step adapters implement the same interface in
 their own worker environments later.
 
 Stream C (config/interface duality): the merged spec sketches an async
@@ -377,8 +377,8 @@ class VideoBackendAdapter:
         otherwise the request's frames stand in. When the worker reports
         explicit novel/conditioning counts (causvid's 72-novel accounting),
         those win; otherwise conditioning is 0 committed duplicates as built
-        (ltxv chains via tail PNG, longlive appends to one stream — the
-        proposal's prefix-overlap replay was not built).
+        (ltxv chains via tail PNG — the proposal's prefix-overlap replay
+        was not built).
         Worker-reported fps wins so a future 16 fps backend is never
         relabeled (TASK §19.5).
         """

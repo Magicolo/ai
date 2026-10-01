@@ -11,7 +11,7 @@ with all four MAIN_MODEL_COMPONENTS (turbo DiT + VAE + text encoder +
 the 1.7B default LM, which only satisfies the handler's gate) plus the
 0.6B planner LM submodel. The stack is resident while held (~12.3GB on
 cuda:0) and must be evicted before the video DiT reloads — sequential
-residency, never co-resident with LongLive.
+residency, never co-resident with the video DiT.
 """
 
 from __future__ import annotations

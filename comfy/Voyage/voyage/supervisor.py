@@ -119,13 +119,12 @@ from voyage.vision.metrics import (
 
 VIDEO_WORKER_MODULES = {
     "fake": "voyage.workers.video",
-    "longlive2": "voyage.workers.video_longlive",
     "ltxv": "voyage.workers.video_ltxv",
     "causvid": "voyage.workers.video_causvid",
 }
-"""Backend name → worker module. longlive2/ltxv/causvid only exist in the CUDA image."""
+"""Backend name → worker module. ltxv/causvid only exist in the CUDA image."""
 
-STREAMING_VIDEO_BACKENDS = ("longlive2", "ltxv", "causvid")
+STREAMING_VIDEO_BACKENDS = ("ltxv", "causvid")
 """Backends whose worker holds a resident session across blocks/segments.
 
 These get the multi-block prompts/seeds payload, the resume-hook restart
@@ -212,8 +211,11 @@ def video_worker_module(backend: str) -> str:
     try:
         return VIDEO_WORKER_MODULES[backend]
     except KeyError:
+        from voyage.config import removed_backend_suffix
+
         raise ConfigurationError(
             f"unknown video backend {backend!r} (known: {sorted(VIDEO_WORKER_MODULES)})"
+            f"{removed_backend_suffix(backend)}"
         ) from None
 
 
@@ -240,14 +242,6 @@ class Supervisor:
                 "models_dir": config.video.models_dir,
                 "device": config.video.device,
             }
-        if config.video.backend == "longlive2":
-            video_init.update(
-                {
-                    "latent_shape": list(config.video.latent_shape),
-                    "quantization": config.video.quantization,
-                    "local_attn_size": config.video.local_attn_size,
-                }
-            )
         self._video = SubprocessWorker(
             video_module,
             run_dir,
@@ -753,8 +747,8 @@ class Supervisor:
         next segment on garbage. Returns True (adopt) whenever the tape
         carries no hash, the tail file is absent (the derive path
         materializes it — absence is not corruption), or the tape is not
-        JSON at all (torch `.pt` longlive tapes, torn JSON — 139/197's
-        territory, never masked here): only a clean parse with both keys
+        JSON at all (torn JSON — 139/197's territory, never masked
+        here): only a clean parse with both keys
         present and a present-but-mismatched tail returns False.
         """
         try:
@@ -2162,8 +2156,8 @@ class Supervisor:
         ):
             segment_result = adapter.generate_segment(request, video_out)
         # Truthful frame accounting: the worker reports what it rendered
-        # (longlive's decoded count depends on the VAE chunking, not the
-        # request), so the timeline always matches reality. Reports are
+        # (a worker's decoded count can depend on internal chunking, not
+        # the request), so the timeline always matches reality. Reports are
         # clamped (issue 006): an unbounded count would send the
         # audio-coverage loop slicing thousands of pieces and corrupt the
         # timeline, and a foreign tape would burn restart budget on doomed
@@ -2462,7 +2456,9 @@ class Supervisor:
                 "frames": frames,
                 # §23: RoPE mode is a first-class record — never change it
                 # silently across resume; compare on recovery.
-                "use_relative_rope": config.video.backend == "longlive2",
+                # (A removed video backend was the only relative-RoPE
+                # renderer; every live backend records False.)
+                "use_relative_rope": False,
                 # Backend identity pins every segment to the renderer that
                 # produced it (tapes never resume across backends — the
                 # worker rejects foreign profiles loudly).

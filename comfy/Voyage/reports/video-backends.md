@@ -1,6 +1,11 @@
 # Video backend qualification (DESIGN §137A)
 
-Stream B owns the **longlive2** leg; Stream A owns the LTXV leg. A backend
+> HISTORICAL MARKER (issue 079): the `longlive2` leg below is dated
+> evidence from 2026-09-24 — the backend was full-deleted (worker,
+> registry, Dockerfile, tests). Nothing below is a live path; the
+> live legs are LTXV/CausVid. Kept verbatim for the numbers.
+
+Stream B owned the **longlive2** leg (historical); Stream A owns the LTXV leg. A backend
 becomes operationally preferable only on measured numbers — no static
 ranking here overrides benchmark results. Every GPU-gated field below is
 either measured or marked PENDING; nothing is invented.
@@ -27,7 +32,7 @@ jumps for fresh-scene failures, so 3x is a conservative gate).
 | Video image | voyage-video:latest (local build, ID `6a55a3691940`, no registry digest) | `docker images` |
 | Host RAM / OS-kernel | 62 GiB / 6.8.0-139-generic | `free` / `uname -r` |
 
-## longlive2 leg (Stream B)
+## longlive2 leg (Stream B — HISTORICAL, backend removed by issue 079)
 
 Fixed configuration (pins quoted from `voyage/model_registry.py`, not measured):
 

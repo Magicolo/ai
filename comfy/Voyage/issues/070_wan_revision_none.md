@@ -217,3 +217,67 @@ Voyage/voyage/model_registry.py:~455-471 (_record_longlive2): records repo/revis
   against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
   `tests/test_registry_pins.py` floating-set to empty. Do NOT pick the
   revision from the Hub API alone without byte verification.
+
+## Progress log (2026-10-01, batch 13 — RE-PROBE ONLY)
+
+- Probe executed live, no host pip (host `ls`, in-container
+  `voyage:latest` read-only), dated 2026-10-01T01:49:31Z:
+  `ls ~/.cache/voyage-models/` → 12 entries (`PixArt-XL-2-1024-MS`,
+  `Qwen3-4B-AWQ`, `Qwen3-8B`, `Qwen3.5-9B`, `acestep`,
+  `all-MiniLM-L6-v2`, `frame_interpolation`, `ltx25-gguf`, `ltxv-2b`,
+  `manifest.json`, `mmaudio`, `realesrgan`) — `wan_models/` ABSENT and
+  `longlive2/` ABSENT (both `ls` → "No such file or directory",
+  `$VOYAGE_MODELS` unset). Prune date 2026-09-24 still in effect; no Wan
+  bytes re-provisioned since.
+- In-container values: `WAN_HF_REVISION` → `None`
+  (`voyage.registry_records`); `MODEL_SPECS['longlive2-bf16'].snapshots[0]`
+  → `('Wan-AI/Wan2.2-TI2V-5B', None)` (reads the constant, no inline
+  `None`); manifest records `"wan_revision": None` (visible gap).
+- Verdict: STILL-BLOCKED — no verified bytes exist to measure a shard
+  sha256 against. Per the contract NO hash was invented (a wrong pin
+  fails every provision loudly). No code change. Gate evidence:
+  adjacent `tests/test_registry_pins.py` green in the batch-13 neighbor
+  run (shared line — 117 passed incl. the 070 pin/gate tests).
+
+## Resolution (2026-10-01, batch 13)
+
+- Verdict: blocked (still-blocked with fresh probe output above). Files
+  changed: none (this issue file only). DESIGN proposals: none.
+- Residuals (exact handoff, GPU+network owner): unchanged — re-provision
+  the Wan2.2 subset at the verified main commit
+  (`HfApi().model_info('Wan-AI/Wan2.2-TI2V-5B').sha`), sha256 the shards
+  against the provisioned bytes, set the 40-hex `WAN_HF_REVISION`, shrink
+  the floating-set gate to empty. Do NOT pick the revision from the Hub
+  API alone without byte verification.
+
+## Correction (2026-10-01, same pass — SUPERSEDED BY 079 DELETE)
+
+- The probe above was accurate at 2026-10-01T01:49:31Z and is now stale:
+  mid-pass the 079 group landed the longlive2 delete in the live tree
+  (`voyage/workers/video_longlive.py` deleted, `longlive2-bf16` gone
+  from `MODEL_SPECS`, `WAN_HF_REPO` / `WAN_HF_REVISION` /
+  `LONGLIVE_HF_FILE` gone from the registry namespace — verified live
+  in-container `voyage:latest`, CPU-only, no host pip).
+- Fresh live facts (same container): `sorted(MODEL_SPECS)` = 9 rows
+  (`audio-acestep`, `causvid`, `director-qwen4b-awq`,
+  `director-qwen8b`, `film`, `inspector-qwen35`, `ltxv-2b`,
+  `realesrgan-anime`, `sfx-mmaudio`); floating-snapshot scan = `[]`
+  (ZERO rows with `revision is None`); `hasattr(model_registry,
+  'WAN_HF_REVISION')` = `False`. There is no floating Wan2.2 revision
+  left to pin — nothing to invent, nothing to gate.
+- Consequence: the 070 pin/gate tests in `tests/test_registry_pins.py`
+  (constant-exists, manifest-record, floating-set) now fail with
+  `AttributeError` on the deleted names (3 failed in-container) —
+  FOREIGN fallout of the 079 delete, not this leg. Updating or removing
+  those tests belongs to the 079 owner (longlive2 lines are explicitly
+  out of this leg's scope per the batch brief); this leg touches
+  neither the tests nor any longlive2 line.
+- Verdict: SUPERSEDED — resolved-by-deletion. Files changed: none (this
+  issue file only). DESIGN proposals: none.
+- Residual (exact handoff, 079 owner): complete the delete consistently
+  — remove or repurpose the orphaned 070 gate tests
+  (`test_wan_revision_constant_exists_and_is_used`,
+  `test_wan_revision_is_recorded_in_manifest`,
+  `test_floating_snapshot_set_is_exactly_wan22`) and confirm no
+  `wan_revision` / `longlive2` references survive in manifests, docs,
+  or gates.

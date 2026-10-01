@@ -468,3 +468,38 @@ own plan.
   `file_kwargs`, probe errors at `:960`/`:971`); `voyage/atomic.py:
   97,110,118` (write/read sides, by design). Scoreboard leg: none
   (landed at `scoreboard.py:114,118,172-176`).
+
+## Progress log (2026-09-30, batch 13 — re-probe blocked legs only)
+
+- Re-probed live (host grep + prior-pass mypy probe evidence — no
+  source edits outside owned files; every leg below lives in
+  `voyage/*`, forbidden this pass, so record-only):
+  leg 1 `voyage/rpc.py:327-329 call()` still `payload:
+  dict[str, Any] -> dict[str, Any]` (deferral comment intact;
+  `raw_stdout`/`readable: Any` at `:281,:284` stay by construction);
+  leg 2 supervisor chain intact (`_log_metric` `:540`,
+  `_call_with_restart` `:562/:564`, `gauges` `:816`, `extra`
+  `:1204`, `_with_audio_gpu` `:1439/:1441`, `payload` `:1660`,
+  plus `dict[str, Any]` `:237`/`video_init`, `:259`/`audio_init`,
+  `:296`, `:1011`, `:1037`, `:1155`, `:1239`, `:1291`, `:1899`,
+  `:1903`, `:2129`, `:2138`, `:2459` — same invariant chain);
+  leg 3 scoreboard already landed (batch 12: `:114,118,168`
+  `JsonValue`-valued, `cast` import — no remaining leg);
+  leg 4 hub kwargs still `dict[str, Any]`
+  (`model_registry.py:953,963`, probe errors at `:960`/`:971` —
+  `JsonValue` union too wide for the hub signatures, same class as
+  batch 12).
+- No leg is unblocked AND in a `tests/` or owned file: the only
+  landed leg (scoreboard) is already done, and every still-blocked
+  site lives in `voyage/*`. No fix attempted, none owed.
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: DEFERRED (record-only) — all legs residual with live
+  evidence above. Files changed: none for 035 (this issue file
+  only). Gate evidence: n/a (no change). DESIGN proposals: none.
+- Residuals (exact, post-probe line numbers): `voyage/rpc.py:327-329`
+  + `:281,:284`; `voyage/supervisor.py:540,562/564,816,1204,1439/
+  1441,1660` + `dict[str, Any]` `:237,:259,:296,:1011,:1037,:1155,:
+  1239,:1291,:1899,:1903,:2129,:2138,:2459`; `voyage/model_registry.py:
+  953,963`; `voyage/atomic.py:97,110,118` (by design).

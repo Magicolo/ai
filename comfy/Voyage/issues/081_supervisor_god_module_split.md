@@ -232,3 +232,14 @@ wc -l voyage/supervisor.py; grep -n "def _ensure_audio_coverage\|def _commit_seg
   per 023/083 — still open, verified this pass; worker-module map
   merge; deterministic-payload compat block; legacy-migration
   threading; `run_id` legacy) — each a future single-group pass.
+
+## Progress log (2026-09-30, batch 13 — record only, no supervisor work)
+
+- No supervisor-side extraction this pass, by brief: `supervisor.py`
+  is HOT (another group owns the 079 delete surface including
+  supervisor hunks — the tree shows heavy concurrent flight in
+  `config.py`/`cli_*`/`augment.py` mid-pass). Recorded, not taken:
+  the commit-pipeline/augment-helper remainder from the batch-12
+  residual stands unchanged. This track's batch-13 quota went to two
+  082 registry-family splits (realesrgan + inspector, see 082); 036
+  carries the pass verdict and the foreign-tree incident log.

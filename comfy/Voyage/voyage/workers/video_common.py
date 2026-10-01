@@ -1,16 +1,16 @@
 """Shared video-worker scaffolding.
 
-Extracted from `video_longlive.py` / `video_ltxv.py` / `video_causvid.py`,
-whose operational skeleton (mp4 writes, atomic JSON tape writes, benchmark
+Extracted from `video_ltxv.py` / `video_causvid.py` (plus a removed third
+worker, issue 079), whose operational skeleton (mp4 writes, atomic JSON tape writes, benchmark
 warmup+measured loops, `serve()` dispatch maps) was copy-pasted three ways
 and had already diverged on tape keys and profile fields. Workers keep
 their generate/denoise logic and session classes; everything here is
 plumbing that must change once, not three times.
 
-Deliberate non-shares (documented, not migrated): LongLive's recovery tape
-is a torch `.pt` tensor bundle (not JSON — see its `_load_recovery_tape`),
-and its segment mp4 write uses `imageio.get_writer` inside `generate_blocks`
-— both stay in `video_longlive.py`.
+Deliberate non-share (documented, not migrated): the removed worker's
+recovery tape was a torch `.pt` tensor bundle (not JSON) and its
+segment mp4 write used `imageio.get_writer` inside `generate_blocks`
+(issue 079 — both deleted with the backend).
 
 On-demand tail derivation (run-file pruning, DESIGN §§5.3-5.4):
 `generate_blocks` (ltxv + causvid) no longer persists `video_tail.mp4`
@@ -277,8 +277,8 @@ def verify_conditioning_tail_sha(segment_dir: Path, tape: dict[str, Any]) -> Non
 EMBED_CACHE_CAPACITY = 8
 """Resident text-embed entries per worker session (issues 014, 030).
 
-Every distinct prompt costs a CPU T5 encode (minutes on longlive, ~25 s
-on ltxv); the cache avoids re-encoding repeats within a session, and the
+Every distinct prompt costs a CPU T5 encode (~25 s on ltxv); the cache
+avoids re-encoding repeats within a session, and the
 bound keeps drift-every-N runs from pinning VRAM monotonically. Entries
 are stored CPU-side — callers move to the worker device on use — so an
 entry costs host RAM (~4 MB), never resident VRAM.

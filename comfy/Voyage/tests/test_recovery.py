@@ -18,7 +18,6 @@ from voyage.persistence import (
     write_state,
 )
 from voyage.supervisor import Supervisor
-from voyage.workers.video_longlive import SCENE_CUT_PREFIX, apply_scene_cut_prefix
 
 
 def _init_run(run_dir: Path, run_id: str = "recovery") -> None:
@@ -93,18 +92,12 @@ def test_pause_mid_run_stops_at_boundary(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 remainder: scene-cut prefix, tape lookup, restart hook (issue 088
+# Phase 2 remainder: tape lookup, restart hook (issue 088
 # fold — moved verbatim from tests/test_phase2.py so recovery owns the
 # whole restart/resume surface; all against fake backends, no GPU).
+# (The scene-cut prompt-prefix helper lived on a removed video
+# backend — scene cuts are boolean payload flags on the live backends.)
 # ---------------------------------------------------------------------------
-
-
-def test_scene_cut_prefix_applied_once(tmp_path: Path) -> None:
-    del tmp_path
-    assert apply_scene_cut_prefix("a meadow", True) == SCENE_CUT_PREFIX + "a meadow"
-    assert apply_scene_cut_prefix("a meadow", False) == "a meadow"
-    already = SCENE_CUT_PREFIX + "a meadow"
-    assert apply_scene_cut_prefix(already, True) == already
 
 
 def _tape_run(run_dir: Path) -> Supervisor:

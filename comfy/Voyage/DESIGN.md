@@ -251,6 +251,7 @@ V1 should be intentionally small and boring.
 ## 5.1 Video generator backend architecture
 
 > As-built (batch-7-2026-09-30): `config.BACKEND_REGISTRY` declared single owner of the streaming set and worker-module maps (test-gated by `tests/test_single_source.py`); supervisor-side literal derivation deferred to the supervisor-split pass.
+> As-built (batch-13-2026-10-01, issue 079): `longlive2` (1280×704@24, 29f, `persistent_kv`) is deleted — the backends table keeps `fake` / `ltxv` (default, 768×512@24, 96f, `reconstructable_prefix`) / `causvid` (832×480@16, 72f, `reconstructable_prefix`). Only tape format is the JSON `write_tape_atomic` record (`recovery.pt` filename kept for discovery; old pickle tapes unresumable by design). Stored runs with `backend="longlive2"` fail fast at load (re-init with `--backend ltxv`; tapes do not transfer; existing segments stay valid media). Backend count 4→3.
 
 The video renderer is a replaceable subsystem. The production application must not assume that every video generator is a persistent KV-cache stream. Three concrete backends are now first-class design targets:
 
@@ -1054,6 +1055,7 @@ This may become useful if long-term world memory later requires retrieval beyond
 # 11. System architecture
 
 > As-built (batch-7-2026-09-30, issue 079): `longlive2` deprecated since 2026-09-30 (kept for existing runs; `voyage init --backend longlive2` warns toward `ltxv`); `ltxv` is the default.
+> As-built (batch-13-2026-10-01, issue 079): the deprecation above is now a full delete — the 3-backend table (`fake` / `ltxv` default / `causvid`), JSON-only tape format, and stored-run migration are recorded in the §5.1 table note (same batch/issue tag); no table is duplicated here.
 
 ## 11.1 Process model
 
@@ -3066,6 +3068,7 @@ Capture stderr and include the relevant last lines in `MediaError`.
 > As-built (batch-8-2026-09-30, issue 190): `finalize_run` knob precedence is uniform — an explicit scalar wins over `options` for every parameter and `None` means use `options`; an explicit `overlap_fraction=0` behaves as a hard splice whichever path built the settings.
 > As-built (batch-10-2026-09-30, issue 166): the Real-ESRGAN anime-6B weight loads strict into the upstream-named RRDB builder at its measured depth (6 body blocks) and upscales end to end; the augmentation floor is executable for upscale. FILM stays fail-loud until the full upstream port lands — default CUDA runs still fetch a FILM weight no loader accepts.
 > As-built (batch-11-2026-09-30, issue 166): both pinned augment weights now strict-load and run end to end — Real-ESRGAN anime-6B upscales and FILM interpolates (fp16 on CUDA, fp32 on CPU, OOM-halving preserved) — so the augmentation floors are executable; the remaining step is wiring finalize weights→loader, plus a live-GPU fp16 numeric and quality eyeball the next time a CUDA box is available.
+> As-built (batch-13-2026-10-01, issue 166): finalize resolves its model pass through `resolve_augment_weights(config.video.models_dir)` — each leg is a loader-ready path or `None` when weights are absent, and absent legs keep the ffmpeg fallback (default-off unless provisioned); the registry-to-loader seam is production code.
 
 The final output is produced only by:
 
@@ -8091,3 +8094,10 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Proven-blocked: 152 (wide MANUAL-fade N=8 no-hang but not bit-identical — see §56 batch-12 correction; fold stays pairwise).
 - Partial: 035 (`scoreboard_rows` return narrowed — see §82 batch-12 as-built), 036/081/082 (`registry_film.py` + `supervisor_commit_types.py` extractions; 088 one cluster fold; 089 slow-marks + cache guard), 093 (TASK.md → pointer stub; `git rm` pending user approval).
 - Blocked: 079-delete (quiet tree, decision made — hard error with migration hint; ~24 non-owned follower files need a joint pass), 070 (wan_models absent), 031 (PERF 11 / N 60 / PT 111 — owned `cli_observe` site landed, rest foreign/dirty).
+
+## Batch 13 (2026-10-01)
+
+- Resolved: 079 (full delete executed; 070 superseded by deletion — Wan2.2 pins gone with the worker; see §5.1/§11 batch-13 as-builts).
+- Partial: 036/081/082 (+`registry_realesrgan.py` +`registry_inspector.py` +registry-film pattern extractions; no DESIGN text change per convention, folded here only), 088 (+`sfx_parser_parity` fold), 089 (+`integration:119` ignore removed), 166 (`resolve_augment_weights` registry-to-loader seam — see §§56-57 batch-13 as-built).
+- Record-only: 031/035 (no DESIGN text change).
+- Blocked-remain: 152-proven (pairwise fold stands until parity proven — see §56 batch-12 correction; no new note, standing note already present).

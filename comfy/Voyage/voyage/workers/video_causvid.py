@@ -106,7 +106,7 @@ def _enter_causvid_tree(models_dir: Path) -> None:
     resolved against the process CWD (repo root). The supervisor spawns
     workers with CWD=run_dir, so anchor the repo root, link its
     ``wan_models/Wan2.1-T2V-1.3B/`` at our ``Wan2.1-T2V-1.3B`` models volume,
-    and chdir there (longlive `_enter_longlive_tree` precedent). All voyage
+    and chdir there. All voyage
     paths are absolute, so the chdir is side-effect free.
     """
     repo_root = Path(os.environ.get("VOYAGE_CAUSVID_DIR", DEFAULT_CAUSVID_DIR))

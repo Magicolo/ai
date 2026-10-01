@@ -5,7 +5,7 @@ relative to the worker process CWD, and workers spawn with CWD=run_dir — so
 every music render littered the run directory. The worker redirects its own
 CWD to a dedicated tmp dir at init (before any ACE-Step library call); all
 voyage paths are absolute, so the chdir is side-effect free (the
-`video_longlive`/`video_causvid` `_enter_*_tree` precedent).
+`video_causvid` `_enter_causvid_tree` precedent).
 """
 
 from __future__ import annotations

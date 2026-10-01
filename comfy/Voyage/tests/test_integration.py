@@ -116,7 +116,7 @@ def test_finalize_options_explicit_joint_style(tmp_path: Path) -> None:
     run_dir = _committed_run(tmp_path, 2)
     for joint_style in ("blend", "hard-splice"):
         output_path = tmp_path / f"final-{joint_style}.mp4"
-        options = FinalizeOptions(joint_style=joint_style)  # type: ignore[arg-type]
+        options = FinalizeOptions(joint_style=joint_style)
         assert finalize_run(run_dir, output_path, options=options) == output_path
         info = validate_video(output_path, 1280, 720, 32)
         assert info["duration"] > 0

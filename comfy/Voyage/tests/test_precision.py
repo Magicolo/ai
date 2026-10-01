@@ -1,8 +1,9 @@
 """Precision option: fp8 (default) vs bf16 DiT weights (slice 4).
 
 fp8 W8A8 dynamic activation quantization proved to be the highlight-blowout
-amplifier (bf16 probe renders clean); the worker therefore offers a bf16
-mode with its own recovery profile so tapes never resume across numerics.
+amplifier (bf16 probe renders clean). The config still carries the
+quantization knob (a removed video backend derived its recovery
+profile from it so tapes never resumed across numerics — issue 079).
 """
 
 import pytest
@@ -14,7 +15,6 @@ from voyage.config import (
     default_config_toml,
     load_config,
 )
-from voyage.workers.video_longlive import profile_for_quantization
 
 
 def _base_config(tmp_path):  # type: ignore[no-untyped-def]
@@ -35,13 +35,6 @@ def test_accepts_bf16() -> None:
 def test_rejects_unknown_quantization() -> None:
     with pytest.raises(ValidationError):
         VideoConfig(**{"quantization": "int4"})
-
-
-def test_profile_mapping() -> None:
-    assert profile_for_quantization("fp8") == "longlive2-bf16-fp8"
-    assert profile_for_quantization("bf16") == "longlive2-bf16"
-    with pytest.raises(ValueError, match="unknown quantization"):
-        profile_for_quantization("int4")
 
 
 def test_toml_carries_fp8_default() -> None:

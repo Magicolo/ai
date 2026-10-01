@@ -4,19 +4,7 @@ All pins live in code in `voyage/model_registry.py` (the single source of
 truth); this file mirrors them for humans. Every repo is **ungated** —
 no token required. Verify local files with `voyage models verify`.
 
-## Video — LongLive 2.0 (`models download longlive2-bf16`, ~48 GB)
-
-| Artifact  | Repo / file | Revision |
-|-----------|-------------|----------|
-| Generator | [Efficient-Large-Model/LongLive-2.0-5B](https://huggingface.co/Efficient-Large-Model/LongLive-2.0-5B) | `8521079b863720a57c1a8d9b19c8d9e6ccb04c0f` |
-| Base VAE/text weights | [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) (`wan_models/` subdir) | pinned snapshot in registry |
-
-Code (not weights): [NVlabs/LongLive](https://github.com/NVlabs/LongLive)
-at `6b36d20ec6f7958d29d11a704dfa64611a9f2572`, cloned in
-`worker/Dockerfile.video`. Runtime patches on top: see
-`docs/UPSTREAM_LONG_LIVE_PATCHES.md`.
-
-## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB)
+## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB, default)
 
 | Artifact  | Repo / file | Revision |
 |-----------|-------------|----------|

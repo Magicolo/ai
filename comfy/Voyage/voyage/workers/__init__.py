@@ -5,7 +5,6 @@ Each worker is a long-lived process started by the supervisor via
 
 - `voyage.workers.video`: fake video backend (CPU).
 - `voyage.workers.video_ltxv`: LTXV video backend (CUDA, default).
-- `voyage.workers.video_longlive`: LongLive video backend (CUDA, deprecated).
 - `voyage.workers.video_causvid`: CausVid video backend (CUDA).
 - `voyage.workers.audio`: fake audio backend (CPU).
 - `voyage.workers.audio_acestep`: ACE-Step music backend (CUDA).

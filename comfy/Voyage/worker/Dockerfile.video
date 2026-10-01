@@ -7,7 +7,7 @@
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04@sha256:2a015be069bda4de48d677b6e3f271a2794560c7d788a39a18ecf218cae0751d
 
 # Phase 1 video worker env: CUDA 12.8 + Python 3.10 + torch 2.8.0/cu128 +
-# TorchAO FP8 PTQ + LongLive@6b36d20 + voyage package. Eager mode
+# TorchAO FP8 PTQ + voyage package. Eager mode
 # (torch_compile off); flash-attn 2 is MANDATORY (upstream attention asserts
 # it — no SDPA fallback). Layer order keeps slow builds cached across
 # voyage-code edits (requirements + FA before COPY).
@@ -40,9 +40,7 @@ RUN pip install "pip==25.0.1" \
 # (`docker run --rm voyage-video:latest pip freeze`, image 63b8c37d).
 # Every direct row below is `==`-pinned to that freeze — floors (`>=`) are
 # not pins. Re-freeze procedure on the next GPU build: rebuild, run
-# `pip freeze`, update the pins below, note in docs/INSTALL.md. Residuals:
-# the LongLive `-r requirements.txt` row still floats (vendoring a hashed
-# copy needs the same GPU-box freeze — see the note there), and transitive
+# `pip freeze`, update the pins below, note in docs/INSTALL.md. Transitive
 # deps ride the direct rows (a full `--require-hashes` lockfile is the
 # follow-up, same as issue 011 for the slim image).
 RUN pip install torchao==0.13.0 "huggingface_hub[cli]==0.36.2" "pydantic==2.10.6"
@@ -53,21 +51,11 @@ RUN pip install torchao==0.13.0 "huggingface_hub[cli]==0.36.2" "pydantic==2.10.6
 # `clone <url>` + `checkout` trusts the transport with no verification).
 # License surface: the CausVid DMD checkpoint pulled at runtime is
 # CC BY-NC-SA 4.0 (non-commercial, share-alike — see model_registry.py
-# CAUSVID_LICENSE + docs/MODELS.md); the LongLive/LTXV/ACE-Step stacks
+# CAUSVID_LICENSE + docs/MODELS.md); the LTXV/ACE-Step stacks
 # carry their own upstream licenses — check before redistributing images.
 #
-# LongLive at the pinned commit (DESIGN §140). Full requirements (matches
-# upstream env; heavy but reproducible). The upstream requirements.txt
-# itself still floats (issue 067 residual): hashing it (`--require-hashes`)
-# or vendoring a hashed copy needs the same GPU-box freeze as the pins
-# above — never `pip install -r` a second requirements file here (see the
-# CausVid note below for why). tests/test_registry_pins.py allowlists this
-# single `-r` row and fails on any other floating spec.
-RUN git clone --depth 1 https://github.com/NVlabs/LongLive /opt/longlive \
-    && git -C /opt/longlive fetch --depth 1 origin 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
-    && git -C /opt/longlive checkout 6b36d20ec6f7958d29d11a704dfa64611a9f2572 \
-    && git -C /opt/longlive rev-parse --verify HEAD \
-    && pip install -r /opt/longlive/requirements.txt
+# (A removed video backend's clone + requirements row lived here until
+# issue 079 deleted the backend with it.)
 
 # Python headers for JIT builds at runtime (triton compiles its CUDA utils
 # on first use; gcc alone is not enough). Placed late so the heavy torch /
@@ -88,7 +76,7 @@ RUN pip install flash-attn==2.8.3.post1 --no-build-isolation
 # lacks (probe-verified 2026-09-22 under torch 2.8.0+cu128: 30s take in
 # 4.3s, peak 12.84GB — identical to torch 2.10). torchaudio must match
 # torch 2.8.0 from the cu128 index; the rest are stable leaf deps.
-# Verified-fetch clone (issue 055): see the LongLive note above.
+# Verified-fetch clone (issue 055): see the clone note above.
 RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
     && git -C /opt/ACE-Step-1.5 fetch --depth 1 origin ca1e85fe9430179831e6bc6be790c332190a3866 \
     && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
@@ -97,8 +85,8 @@ RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-St
     && pip install torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
-# sentence-transformers pulls transformers 5.x, which breaks LongLive's
-# transformers-4.x imports (x_clip_loss) — pin back. Phase 3 E2E used
+# sentence-transformers pulls transformers 5.x, which breaks the pinned
+# transformers-4.x stack — pin back. Phase 3 E2E used
 # 4.57.6; MiniLM embedding is verified against it below.
 RUN pip install transformers==4.57.6
 
@@ -112,9 +100,9 @@ RUN pip install transformers==4.57.6
 # a second requirements file here, same rule as the CausVid note);
 # only the inference closure lands explicitly (open_clip CLIP tower,
 # librosa/torchdiffeq/accelerate). Its requirements land BEFORE the
-# transformers pin below is re-asserted, so the 4.57.6 LongLive needs
+# transformers pin below is re-asserted, so the 4.57.6 pin
 # always wins.
-# Verified-fetch clone (issue 055): see the LongLive note above.
+# Verified-fetch clone (issue 055): see the clone note above.
 RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
     && git -C /opt/mmaudio fetch --depth 1 origin 974010a026c731054592d8f777218bd9d85a6c24 \
     && git -C /opt/mmaudio checkout 974010a026c731054592d8f777218bd9d85a6c24 \
@@ -129,8 +117,8 @@ RUN pip install transformers==4.57.6
 # LTXV 2B-distilled alternative backend (Phase 7, DESIGN §140): native
 # ltx-video library at the probe-verified pin (NOT diffusers — the image
 # has no LTX pipelines). --no-deps: ltx-video demands
-# transformers>=4.47.2,<4.52.0, which would downgrade the 4.57.6 LongLive
-# needs; the T5 code path used here is stable across 4.x (probe-verified).
+# transformers>=4.47.2,<4.52.0, which would downgrade the 4.57.6 pin
+# above; the T5 code path used here is stable across 4.x (probe-verified).
 # The [inference] extra (imageio[ffmpeg], av, torchvision) plus
 # sentencepiece/einops/timm land explicitly below.
 # NOTE (issue 055): the pip-git fetch below is the same unverified-fetch
@@ -152,7 +140,7 @@ RUN pip install --no-deps "ltx-video[inference] @ git+https://github.com/Lightri
 # confirmed by grepping the cloned sources at the pin). export_to_video
 # (diffusers) and TextDataset (causvid.data) from the upstream demo script
 # are NOT needed — Voyage has its own ffmpeg media I/O.
-# Verified-fetch clone (issue 055): see the LongLive note above.
+# Verified-fetch clone (issue 055): see the clone note above.
 RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
     && git -C /opt/causvid fetch --depth 1 origin adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
     && git -C /opt/causvid checkout adb6a5ecd07666b4d0290042915c8406e6d5ce22 \
@@ -172,8 +160,8 @@ RUN git clone --depth 1 https://github.com/tianweiy/CausVid /opt/causvid \
 # I/O; torchvision already needs it, so this is explicit, never a bump).
 RUN pip install "safetensors==0.8.0" "Pillow==12.3.0"
 
-# Pre-created wan_models links (causvid-perms fix): the worker shims
-# (`_enter_causvid_tree` / `_enter_longlive_tree`) must satisfy upstream's
+# Pre-created wan_models link (causvid-perms fix): the worker shim
+# (`_enter_causvid_tree`) must satisfy upstream's
 # CWD contract with a `wan_models/` symlink inside the repo clone, but the
 # clones are root-owned while workers run as the host-mapped `voyager`
 # user — a runtime mkdir/symlink there dies with Errno 13. Pre-creating
@@ -182,8 +170,7 @@ RUN pip install "safetensors==0.8.0" "Pillow==12.3.0"
 # The link-farm modes below stay 755 (issue 075): owner-write covers the
 # non-default-mount fallback, group/other stay read-execute.
 RUN mkdir -p /opt/causvid/wan_models \
-    && ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B \
-    && ln -sfn /models/wan_models /opt/longlive/wan_models
+    && ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B
 
 # Console progress (rich) + launcher TUI (textual) land first (issue 054):
 # pure-leaf installs before any COPY, so voyage-code edits never reinstall
@@ -198,7 +185,7 @@ COPY voyage/ /app/voyage/
 RUN pip install --no-deps -e /app
 
 # Director decider venv (GPU director): the main env pins transformers
-# 4.57.6 for LongLive, but the Qwen decider needs transformers 5.17.0
+# 4.57.6, but the Qwen decider needs transformers 5.17.0
 # (native AWQ-via-gptqmodel path) — irreconcilable in one site-packages,
 # so the director worker runs in this isolated venv on the second GPU.
 # Pins are probe-verified 2026-09-30 on sm_75 (RTX 2060): torch 2.11.0+cu128
@@ -221,37 +208,35 @@ RUN python3.10 -m venv /opt/venvs/director \
 # renders behind. A real user carrying the host's UID/GID (build args,
 # forwarded by scripts/build-video.sh from `id`; defaults 1000) keeps
 # every written file host-owned. Rebuild after a host-uid change. Placed
-# late so the slow torch/LongLive/flash-attn layers above stay cached.
+# late so the slow torch/flash-attn layers above stay cached.
 ARG UID=1000
 ARG GID=1000
 RUN set -eux; \
   getent group "${GID}" >/dev/null || groupadd --gid "${GID}" voyager; \
   getent passwd "${UID}" >/dev/null || useradd --uid "${UID}" --gid "${GID}" --no-create-home --shell /bin/bash voyager; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
-  chown -R "${UID}:${GID}" /opt/longlive /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs; \
-  chmod 755 /opt/longlive; \
+  chown -R "${UID}:${GID}" /opt/causvid /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs; \
   chmod 755 /opt/causvid/wan_models
-# Least-privilege link farms (issue 075): the two shim targets above are
+# Least-privilege link farm (issue 075): the shim target above is
 # owner-writable (the chown line) so the pinned `--user` worker can still
 # re-point non-default mounts, but group/other get read-execute only —
 # the old `chmod 777` let any in-container process plant importable code
-# on PYTHONPATH (/opt/longlive). Cross-UID runs against a stale image
+# on PYTHONPATH (/opt/causvid). Cross-UID runs against a stale image
 # (no rebuild after a host-uid change) now fail loud with Errno 13 on the
 # shim write instead of silently succeeding world-writable — rebuild.
 ENV HOME=/home/voyager
 USER voyager
 
-ENV PYTHONPATH=/opt/longlive:/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
+ENV PYTHONPATH=/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
     VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
-    VOYAGE_LONGLIVE_DIR=/opt/longlive \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# WORKDIR /app (issue 053): the old /opt/longlive CWD swallowed relative
+# WORKDIR /app (issue 053): an upstream-repo CWD swallowed relative
 # outputs on bare `docker run` (only run.sh's `-w /app` saved it). Safe:
 # the workers satisfy upstream's CWD contract themselves at runtime
-# (`_enter_longlive_tree` / `_enter_causvid_tree` chdir into the repo
-# trees with absolute voyage paths, so the chdir is side-effect free).
+# (`_enter_causvid_tree` chdirs into the repo tree with absolute voyage
+# paths, so the chdir is side-effect free).
 # Keep `-w /app` in run.sh as belt-and-braces.
 WORKDIR /app
 

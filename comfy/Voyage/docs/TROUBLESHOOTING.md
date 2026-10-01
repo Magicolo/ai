@@ -20,7 +20,8 @@
   permissions, worker interpreters, or ACE-Step runtime availability —
   and `models verify` remains the
   authority for weight files (doctor only summarizes presence + size).
-- transformers must be 4.57.6 in the video image (5.x breaks LongLive).
+- transformers is pinned to 4.57.6 in the video image (the LTXV/CausVid
+  stack is probe-verified against it; 5.x lives only in the director venv).
 - `quantization`: `bf16` fits and kills the fp8 highlight blowout;
   saturated extremes can still blow out — prompt care at peak brights.
 

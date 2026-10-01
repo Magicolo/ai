@@ -131,15 +131,6 @@ def test_plan_summary_reports_block_math() -> None:
     assert "192 frames" in plan_summary(state)
 
 
-def test_plan_summary_longlive2_reports_29f_at_24fps() -> None:
-    state = _valid_state()
-    state.backend = "longlive2"
-    summary = plan_summary(state)
-    assert "longlive2" in summary
-    assert "29f/segment" in summary
-    assert "24fps" in summary
-
-
 def test_plan_summary_reports_bad_input() -> None:
     state = GenerateFormState(style="x", duration="soon")
     assert plan_summary(state).startswith("cannot plan:")

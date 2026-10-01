@@ -1,11 +1,12 @@
-"""Repo-tree entry shims tolerate root-owned /opt checkouts (causvid perms).
+"""Repo-tree entry shim tolerates root-owned /opt checkouts (causvid perms).
 
-`_enter_causvid_tree` and `_enter_longlive_tree` link a `wan_models/`
-symlink inside the upstream repo clone (`/opt/causvid`, `/opt/longlive`).
-Those clones are root-owned while the worker runs as the host user
+`_enter_causvid_tree` links a `wan_models/`
+symlink inside the upstream repo clone (`/opt/causvid`).
+The clone is root-owned while the worker runs as the host user
 (`--user` pin, issue 053 follow-up), so any write there raises
 `PermissionError: [Errno 13]`. When the symlink is already correct the
-shims must perform zero writes (skip the unlink/recreate) and just chdir.
+shim must perform zero writes (skip the unlink/recreate) and just chdir.
+(A removed backend's twin shim died with it, issue 079.)
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from voyage.workers import video_causvid, video_longlive
+from voyage.workers import video_causvid
 
 needs_non_root = pytest.mark.skipif(
     os.geteuid() == 0, reason="read-only dirs stay writable for root"
@@ -53,30 +54,6 @@ def test_causvid_entry_skips_write_when_link_correct(
         _restore_writable(repo_root)
 
 
-@needs_non_root
-def test_longlive_entry_skips_write_when_link_correct(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo_root = tmp_path / "longlive"
-    repo_root.mkdir(parents=True)
-    models_dir = tmp_path / "models"
-    wanted = models_dir / "wan_models"
-    wanted.mkdir(parents=True)
-    link = repo_root / "wan_models"
-    link.symlink_to(wanted)
-    monkeypatch.setattr(video_longlive, "VOYAGE_LONGLIVE_DIR", repo_root)
-    repo_root.chmod(0o555)
-    previous = Path.cwd()
-    try:
-        video_longlive._enter_longlive_tree(models_dir)
-        assert Path.cwd() == repo_root
-        assert link.is_symlink()
-        assert Path(os.readlink(link)) == wanted
-    finally:
-        os.chdir(previous)
-        _restore_writable(repo_root)
-
-
 def test_causvid_entry_repoints_stale_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = tmp_path / "causvid"
     models_dir = tmp_path / "models"
@@ -92,25 +69,5 @@ def test_causvid_entry_repoints_stale_link(tmp_path: Path, monkeypatch: pytest.M
         video_causvid._enter_causvid_tree(models_dir)
         assert Path.cwd() == repo_root
         assert Path(os.readlink(anchor)) == wanted
-    finally:
-        os.chdir(previous)
-
-
-def test_longlive_entry_repoints_stale_link(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo_root = tmp_path / "longlive"
-    repo_root.mkdir(parents=True)
-    models_dir = tmp_path / "models"
-    wanted = models_dir / "wan_models"
-    wanted.mkdir(parents=True)
-    link = repo_root / "wan_models"
-    link.symlink_to(tmp_path / "elsewhere")
-    monkeypatch.setattr(video_longlive, "VOYAGE_LONGLIVE_DIR", repo_root)
-    previous = Path.cwd()
-    try:
-        video_longlive._enter_longlive_tree(models_dir)
-        assert Path.cwd() == repo_root
-        assert Path(os.readlink(link)) == wanted
     finally:
         os.chdir(previous)

@@ -180,56 +180,6 @@ def test_047_upscale_reports_load_vs_infer_ms(
 
 
 # ---------------------------------------------------------------------------
-# 048 — longlive true chunked decode
-# ---------------------------------------------------------------------------
-
-
-def test_048_no_full_segment_cat() -> None:
-    """generate_blocks never concatenates the full-segment latents."""
-    from voyage.workers import video_longlive as worker
-
-    source = inspect.getsource(worker.LongLiveSession.generate_blocks)
-    assert "torch.cat" not in source
-    assert "cat(block_latents" not in source
-
-
-def test_048_decode_chunk_plan_tiles_contiguously() -> None:
-    """Pure chunk math: windows partition [0, total) with the block-sized default."""
-    from voyage.workers.video_longlive import (
-        VAE_DECODE_CHUNK_LATENTS,
-        split_latent_chunks,
-    )
-
-    assert VAE_DECODE_CHUNK_LATENTS == 8
-    assert list(split_latent_chunks(24, 8)) == [(0, 8), (8, 8), (16, 8)]
-    assert list(split_latent_chunks(20, 8)) == [(0, 8), (8, 8), (16, 4)]
-    covered = 0
-    for start, count in split_latent_chunks(93, 8):
-        assert start == covered
-        covered += count
-    assert covered == 93
-
-
-def test_048_no_vae_tiling_enabled() -> None:
-    """Tiling stays a measure-only probe: never enabled blindly in the worker."""
-    from voyage.workers import video_longlive as worker
-
-    source = inspect.getsource(worker.LongLiveSession.generate_blocks)
-    assert "enable_vae_tiling" not in source
-    assert "enable_vae_slicing" not in source
-
-
-def test_048_decode_streams_per_chunk() -> None:
-    """Per-chunk decode carries write+del (no co-resident full copies)."""
-    from voyage.workers import video_longlive as worker
-
-    source = inspect.getsource(worker.LongLiveSession.generate_blocks)
-    assert "decode_to_pixel_chunk" in source
-    assert "append_data" in source
-    assert source.count("del ") >= 2
-
-
-# ---------------------------------------------------------------------------
 # 153 — SFX stem cache fuzzy match + tmp+replace + prune/validate dedupe
 # ---------------------------------------------------------------------------
 

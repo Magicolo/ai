@@ -396,3 +396,64 @@ def run_augment_chunks(
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_DEVICES, len(devices))) as pool:
         rest = list(pool.map(lambda chunk: worker(chunk, chunk.device), chunks[1:]))
     return [first, *rest]
+
+
+@dataclass(frozen=True)
+class AugmentWeights:
+    """Resolved model-pass weight paths for one finalize (issue 166).
+
+    DESIGN §§56-57: the production seam between the registry (pinned
+    FILM + Real-ESRGAN weights) and the torch loaders in
+    `voyage.workers.augment_worker`. Each leg is a loader-ready path or
+    `None` when the weights are absent — the caller keeps the ffmpeg
+    fallback then (default-off unless provisioned), so a missing stack
+    reads as "skip the model pass", never as an error.
+    """
+
+    film: Path | None
+    realesrgan: Path | None
+
+
+def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
+    """Map `models_dir` to loader-ready augment weight paths (torch-free).
+
+    DESIGN §§56-57 (issue 166): a leg resolves only when its file exists
+    with at least the registry floor bytes — zero-byte (torn) and
+    truncated downloads read as not provisioned, mirroring
+    `augment_worker._require_weights`. Never imports torch (supervisor
+    section 12 GPU ban holds at module scope — the registry pins are
+    stdlib-only, imported lazily so this module's top level stays so);
+    never raises for absent weights. The model-pass chunk worker passes
+    these paths to `augment_worker.upscale_frames` / `interpolate_pair`;
+    `finalize_run` itself is untouched (ffmpeg path stays the default —
+    the inference wiring is a later slice, see the issue handoff).
+    """
+    if isinstance(models_dir, str):
+        base = Path(models_dir)
+    elif isinstance(models_dir, Path):
+        base = models_dir
+    else:
+        raise TypeError(f"models_dir must be a Path or str (got {type(models_dir).__name__})")
+
+    from voyage.registry_film import FILM_MIN_BYTES, FILM_REPO_PATH
+    from voyage.registry_realesrgan import (
+        REALESRGAN_ANIME_FILE,
+        REALESRGAN_ANIME_MIN_BYTES,
+        REALESRGAN_SUBDIR,
+    )
+
+    def _present(relative: str, floor_bytes: int) -> Path | None:
+        candidate = base / relative
+        try:
+            if candidate.is_file() and candidate.stat().st_size >= floor_bytes:
+                return candidate
+        except OSError:
+            return None
+        return None
+
+    return AugmentWeights(
+        film=_present(FILM_REPO_PATH, FILM_MIN_BYTES),
+        realesrgan=_present(
+            f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}", REALESRGAN_ANIME_MIN_BYTES
+        ),
+    )

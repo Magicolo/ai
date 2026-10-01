@@ -59,8 +59,6 @@ from voyage.cli_planning import (
     _CUDA_VIDEO_BACKENDS,
     _DURATION_EXAMPLES,
     _DURATION_PATTERN,
-    _LONGLIVE_DECODE_EXPANSION,
-    _LONGLIVE_LATENTS_PER_BLOCK,
     _LTXV_NOVEL_BLOCK_FRAMES,
     _cuda_offenders,
     _cuda_stack_error,
@@ -107,7 +105,6 @@ from voyage.model_registry import (
     download_director_models,
     download_film_models,
     download_inspector_models,
-    download_longlive2_bf16,
     download_ltxv_models,
     download_realesrgan_models,
     download_sfx_models,
@@ -117,7 +114,6 @@ from voyage.model_registry import (
     verify_director_models,
     verify_film_models,
     verify_inspector_models,
-    verify_longlive2_bf16,
     verify_ltxv_models,
     verify_realesrgan_models,
     verify_sfx_models,
@@ -140,8 +136,6 @@ __all__ = [
     "_CUDA_VIDEO_BACKENDS",
     "_DURATION_EXAMPLES",
     "_DURATION_PATTERN",
-    "_LONGLIVE_DECODE_EXPANSION",
-    "_LONGLIVE_LATENTS_PER_BLOCK",
     "_LTXV_NOVEL_BLOCK_FRAMES",
     "_ORPHAN_PATTERNS",
     "_RESERVED_FOLDER_NAMES",
@@ -224,7 +218,6 @@ __all__ = [
     "download_director_models",
     "download_film_models",
     "download_inspector_models",
-    "download_longlive2_bf16",
     "download_ltxv_models",
     "download_realesrgan_models",
     "download_sfx_models",
@@ -242,7 +235,6 @@ __all__ = [
     "verify_director_models",
     "verify_film_models",
     "verify_inspector_models",
-    "verify_longlive2_bf16",
     "verify_ltxv_models",
     "verify_realesrgan_models",
     "verify_sfx_models",
@@ -289,7 +281,7 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     init.add_argument(
         "--backend",
-        choices=("fake", "longlive2", "ltxv", "causvid"),
+        choices=("fake", "ltxv", "causvid"),
         default="ltxv",
         help="video backend preset written into the run config",
     )
@@ -328,7 +320,6 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
         nargs="?",
         default="ltxv-2b",
         choices=[
-            "longlive2-bf16",
             "ltxv-2b",
             "causvid",
             "director-qwen8b",
@@ -508,7 +499,7 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     gen.add_argument(
         "--backend",
-        choices=("fake", "longlive2", "ltxv", "causvid"),
+        choices=("fake", "ltxv", "causvid"),
         default="ltxv",
         help="video backend preset written into the run config",
     )

@@ -308,7 +308,6 @@ def test_no_swap_breakdown_without_gpu_swap(
     config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
     assert config.audio.backend != "acestep" or config.video.backend not in (
         "ltxv",
-        "longlive2",
         "causvid",
     )
     supervisor = Supervisor(run_dir, config)

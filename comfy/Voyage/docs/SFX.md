@@ -124,7 +124,7 @@ defaults to `cuda:0` (`voyage/workers/sfx_mmaudio.py:40`); the
 
 `run.sh` selects `voyage-video:latest` + `--gpus all` for any CUDA
 backend in `[video]`/`[audio]`/`[sfx]` (`scripts/run.sh:69-70`,
-`ltxv|longlive2|causvid|acestep|mmaudio`); `fake`/`fake`/`fake` stays
+`ltxv|causvid|acestep|mmaudio`); `fake`/`fake`/`fake` stays
 slim. A CUDA backend in an image without torch fails fast with the
 `voyage-video` pointer (`_require_cuda_stack`, `voyage/cli.py:1386`),
 never a late worker error.

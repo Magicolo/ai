@@ -20,8 +20,8 @@ filename for supervisor discovery; JSON content — old torch-pickle tapes
 are unresumable by design).
 
 Precision: bf16 first; on CUDA OOM the DiT is quantized in place with
-torchao dynamic fp8 (the slice-4-verified longlive recipe — W8-only eager
-dequant OOMs on sm89, dynamic W8A8 does not) and the block retried once.
+torchao dynamic fp8 (W8-only eager dequant OOMs on sm89, dynamic W8A8
+does not) and the block retried once.
 """
 
 from __future__ import annotations
@@ -581,7 +581,7 @@ class LTXVSession:
                 raise
             if self._fp8_fallback:
                 raise
-            # gc before empty_cache (the video_longlive-documented order):
+            # gc before empty_cache (documented order):
             # without it the cache release frees ~0 bytes under cycles.
             gc.collect()
             torch.cuda.empty_cache()
@@ -1021,7 +1021,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     """Time warmup + measured single-segment probes with VRAM peaks (§104).
 
     Probes are fresh text-to-video renders (scene cut, no resident tail), so
-    unlike longlive this does NOT advance any stream — safe to run on a live
+    this does NOT advance any stream — safe to run on a live
     session between segments (still prefer scratch). Requires `init` first.
     Each probe commits a full 121-frame fresh segment (no prefix to drop).
     """

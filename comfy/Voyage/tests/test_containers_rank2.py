@@ -93,17 +93,15 @@ def test_video_image_has_no_world_writable_code_dirs() -> None:
 
 
 def test_video_image_locks_opt_trees_to_owner_write() -> None:
-    """Both shim link farms stay owner-writable, group/other read-execute."""
+    """The shim link farm stays owner-writable, group/other read-execute."""
     content = VIDEO_DOCKERFILE_PATH.read_text(encoding="utf-8")
-    assert "chmod 755 /opt/longlive" in content
     assert "chmod 755 /opt/causvid/wan_models" in content
 
 
 def test_video_image_still_precreates_runtime_links() -> None:
-    """The skip-when-correct steady state both shims rely on (075 guard rail)."""
+    """The skip-when-correct steady state the shim relies on (075 guard rail)."""
     content = VIDEO_DOCKERFILE_PATH.read_text(encoding="utf-8")
     assert "ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B" in content
-    assert "ln -sfn /models/wan_models /opt/longlive/wan_models" in content
 
 
 def test_video_image_pins_every_apt_package() -> None:

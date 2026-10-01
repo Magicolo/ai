@@ -113,7 +113,7 @@ def test_build_parser_is_repeatable() -> None:
 
 @pytest.mark.parametrize(
     "backend",
-    ["fake", "longlive2", "ltxv", "causvid"],
+    ["fake", "ltxv", "causvid"],
 )
 def test_frames_per_segment_matches_registry_at_single_block(backend: str) -> None:
     """Steady-state planning equals the registry row at blocks=1 (085)."""
@@ -155,7 +155,7 @@ def test_seam_dispatch_names_are_single_sourced() -> None:
     assert cli.download_realesrgan_models is model_registry.download_realesrgan_models
     assert cli.download_ltxv_models is model_registry.download_ltxv_models
     assert cli.verify_film_models is model_registry.verify_film_models
-    assert cli.verify_longlive2_bf16 is model_registry.verify_longlive2_bf16
+    assert cli.verify_ltxv_models is model_registry.verify_ltxv_models
 
 
 def test_cli_all_covers_surface() -> None:

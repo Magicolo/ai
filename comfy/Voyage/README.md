@@ -7,8 +7,8 @@ JSONL-RPC protocol:
 
 - **director** — picks the next concept/shot (deterministic built-in, or
   Qwen3-8B + MiniLM novelty embeddings);
-- **video** — renders frames (fake testsrc built-in, LongLive 2.0
-  causal stream, LTXV 2B tail-chained extensions, or CausVid DMD causal
+- **video** — renders frames (fake testsrc built-in,
+  LTXV 2B tail-chained extensions, or CausVid DMD causal
   rollouts — all on CUDA);
 - **audio** — renders a slow loop of music takes (fake sine built-in, or
   ACE-Step 1.5 on CUDA) plus video-synced SFX.
@@ -24,7 +24,7 @@ No `pip install` on the host, ever.
 
 ```bash
 ./scripts/build.sh          # slim CPU image (supervisor + fake backends)
-./scripts/build-video.sh    # CUDA image: torch + LongLive + ACE-Step + director venv (Qwen decider on cuda:1)
+./scripts/build-video.sh    # CUDA image: torch + ACE-Step + director venv (Qwen decider on cuda:1)
 ./scripts/gates.sh          # ruff + format-check + mypy strict + pytest
 ```
 
@@ -37,8 +37,7 @@ Fake backends need nothing. Real backends need one download each
 (all ungated Hugging Face repos, pinned revisions in `docs/MODELS.md`):
 
 ```bash
-./scripts/run.sh models download longlive2-bf16   # ~48 GB video weights
-./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights
+./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights (default)
 ./scripts/run.sh models download causvid        # ~28 GB CausVid DMD + Wan2.1-1.3B base
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
 ./scripts/run.sh models download director-qwen4b-awq  # ~2.6 GB GPU director decider
@@ -62,7 +61,7 @@ VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
 # ltxv (the default) renders native 768x512 @ 24 fps; finalize lifts to
 # >=1280x720 @ >=32 fps via the augmentation floors (see docs/AUGMENT.md;
 # --no-augment keeps native geometry). --backend fake needs no GPU.
-# --backend longlive2|causvid need their models downloaded first (see above).
+# --backend causvid needs its models downloaded first (see above).
 ```
 
 Step-by-step (for pause/resume and unbounded runs):
@@ -85,7 +84,7 @@ Omit `--segments` to run until `voyage pause` / `voyage stop` / SIGINT.
 GPU run: `VOYAGE_IMAGE=voyage-video:latest VOYAGE_GPUS=1 ./scripts/run.sh …`
 Fast iteration: add `--draft` (640×352, 1 block/segment, 45 s takes).
 
-`generate` flags: `--backend ltxv|longlive2|causvid|fake` (default ltxv),
+`generate` flags: `--backend ltxv|causvid|fake` (default ltxv),
 `--duration 5s` (e.g. `5s`, `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`; rounds
 up to whole segments), `--draft`, `--director qwen|deterministic`,
 `--blocks`, `--take-seconds`, `--quantization fp8|bf16`,
@@ -132,6 +131,6 @@ pick `fake` on GPU-less boxes for CPU smoke runs.
 - `docs/OPERATIONS.md` — runbook: run/pause/resume/stop/recover/finalize.
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — benchmark/soak protocol and reports.
-- `docs/UPSTREAM_LONG_LIVE_PATCHES.md` — LongLive runtime patches.
+- `docs/UPSTREAM_LONG_LIVE_PATCHES.md` — historical: removed-backend runtime patches (issue 079).
 - `docs/UPSTREAM_CAUSVID_NOTES.md` — CausVid integration notes.
 - `docs/UPSTREAM_LTXV_NOTES.md` — LTXV integration notes.

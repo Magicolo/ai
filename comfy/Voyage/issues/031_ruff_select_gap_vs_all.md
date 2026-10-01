@@ -333,3 +333,39 @@ enforcing.
   list (ANN, D, PLR2004-full, PT, S, PERF, N) still dark.
   PERF unblocks when the supervisor sites + worker/test sites
   clear under their owners.
+
+## Progress log (2026-09-30, batch 13 — re-probe counts only)
+
+- Re-probed live in-container (`voyage:latest`, CPU-only, no host
+  pip — record-only, no source edits outside owned files):
+  `ruff check --select PERF --output-format concise .` → **11 hits**
+  (7 PERF401 + 4 PERF203):
+  `tests/test_issue_citation_gate.py:55`,
+  `tests/test_tui_app.py:748` (both PERF401, test-track owned),
+  `voyage/cli_validate.py:223,229`,
+  `voyage/concepts.py:437`, `voyage/models_ensure.py:227`,
+  `voyage/supervisor.py:505,577` (banned file),
+  `voyage/workers/director.py:390,517`,
+  `voyage/workers/video_longlive.py:389` (hot track — the other
+  group's 079 surface, never touched). The batch-12 owned handoff
+  (`cli_observe.py` probe helper) holds — no `cli_observe.py` PERF
+  hit remains.
+- `ruff check --select N --statistics` → **60** (N806 38 + N801 16 +
+  N802 5 + N818 1, unchanged shape). `ruff check --select PT
+  --statistics` → **112** (PT011 63 + PT018 46 + PT017/PT013/PT012 1
+  each — PT018 +1 vs batch 12). `ruff check --select ALL
+  --statistics` top: D103 934, COM812 873, PLC0415 788, SLF001 587,
+  TRY003 531, PLR2004 452, ANN401 421, EM102 384 (drifted up with
+  tree growth; full 40-line capture in the run output).
+- `Voyage/pyproject.toml:70` select confirmed unchanged (16
+  families). No family is green in isolation; no `select` change, no
+  per-file-ignores added.
+
+## Resolution (2026-09-30, batch 13)
+
+- Verdict: DEFERRED (record-only) — PERF 11, N 60, PT 112 as-read
+  above. Files changed: none for 031 (this issue file only). Gate
+  evidence: `select` untouched. DESIGN proposals: none.
+- Residuals: full adoption list (ANN, D, PLR2004-full, PT, S, PERF,
+  N) still dark; PERF unblocks when the supervisor sites +
+  worker/test sites clear under their owners.

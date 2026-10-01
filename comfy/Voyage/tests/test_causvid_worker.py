@@ -3,8 +3,7 @@
 CPU-only: every torch/causvid/omegaconf/imageio dependency is faked — no
 GPU, no model downloads. The fake pipeline returns fixed numpy-backed
 tensors (frame index encoded in pixel values, so commit slicing is
-verified for real), and media I/O is stubbed via ``sys.modules`` following
-the ``test_longlive_stages`` pattern.
+verified for real), and media I/O is stubbed via ``sys.modules``.
 """
 
 from __future__ import annotations

@@ -17,11 +17,11 @@ the supervisor package never imports torch/transformers/diffusers.
 ./scripts/gates.sh   # ruff + format-check + mypy strict + pytest, in-container
 ```
 
-## LongLive environment (`voyage-video:latest`, `worker/Dockerfile.video`)
+## Video worker environment (`voyage-video:latest`, `worker/Dockerfile.video`)
 
 CUDA 12.8 + Python 3.10 + torch 2.8/cu128 + torchao 0.13 + flash-attn +
-LongLive@`6b36d20` + ACE-Step-1.5@`ca1e85fe` + torchaudio + transformers
-4.57.6 (pinned: 5.x breaks LongLive). Runs the `video_longlive` and
+ACE-Step-1.5@`ca1e85fe` + torchaudio + transformers
+4.57.6. Runs the `video_ltxv`/`video_causvid` and
 `audio_acestep` workers with `--gpus all`. ~16 GB VRAM minimum
 (4060 Ti class); the 2060 cannot hold the ACE DiT (see TROUBLESHOOTING).
 
@@ -32,7 +32,7 @@ LongLive@`6b36d20` + ACE-Step-1.5@`ca1e85fe` + torchaudio + transformers
 ## ACE-Step environment
 
 No separate image: ACE-Step lives in `voyage-video:latest` (same CUDA
-stack as LongLive). Video and audio time-share the GPU sequentially —
+stack as the video workers). Video and audio time-share the GPU sequentially —
 the supervisor evicts the video session, renders audio, evicts audio,
 and rebuilds video from `recovery.pt` (see ARCHITECTURE).
 
@@ -81,8 +81,7 @@ never leave root-owned `__pycache__` in the bind mount.
 ## Model downloads
 
 ```bash
-./scripts/run.sh models download longlive2-bf16   # video (~48 GB)
-./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB)
+./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB, default)
 ./scripts/run.sh models download causvid        # CausVid DMD + Wan2.1-1.3B base (~28 GB)
 ./scripts/run.sh models download director-qwen8b  # director (~16 GB)
 ./scripts/run.sh models download director-qwen4b-awq  # GPU director decider (~2.6 GB)

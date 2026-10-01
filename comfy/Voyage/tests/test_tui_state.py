@@ -131,7 +131,7 @@ def test_gpu_warning_empty_for_fake_and_unknown() -> None:
     assert gpu_warning("nope") == ""
 
 
-@pytest.mark.parametrize("backend", ["ltxv", "longlive2", "causvid"])
+@pytest.mark.parametrize("backend", ["ltxv", "causvid"])
 def test_gpu_warning_names_image_and_gpu_flag(backend: str) -> None:
     warning = gpu_warning(backend)
     assert warning
@@ -177,7 +177,7 @@ def test_plan_counts_match_cli_truth_all_backends_and_blocks() -> None:
     from voyage.cli import _frames_per_segment, segments_for_duration
     from voyage.config import ProjectConfig, VideoConfig, _video_preset
 
-    for backend in ("ltxv", "longlive2", "causvid", "fake"):
+    for backend in ("ltxv", "causvid", "fake"):
         preset = _video_preset(backend)
         raw_fps = preset.get("fps", 24)
         assert isinstance(raw_fps, int)
@@ -207,7 +207,6 @@ def test_plan_summary_uses_single_source_struct() -> None:
     """plan_summary formats plan_counts (no independent frame math)."""
     for backend, expected_fragment in (
         ("ltxv", "96f/segment @ 24fps"),
-        ("longlive2", "29f/segment @ 24fps"),
         ("causvid", "72f/segment @ 16fps"),
         ("fake", "48f/segment @ 24fps"),
     ):
@@ -225,7 +224,7 @@ def test_gpu_warning_derives_from_shared_cuda_set() -> None:
     """gpu_warning agrees with cli._CUDA_BACKENDS (issue 024)."""
     from voyage.cli import _CUDA_BACKENDS
 
-    for backend in ("ltxv", "longlive2", "causvid", "fake", "nope"):
+    for backend in ("ltxv", "causvid", "fake", "nope"):
         assert bool(gpu_warning(backend)) == (backend in _CUDA_BACKENDS)
 
 

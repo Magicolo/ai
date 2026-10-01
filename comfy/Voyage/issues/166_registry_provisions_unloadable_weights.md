@@ -235,3 +235,78 @@ sed -n '93,105p' Voyage/voyage/models_ensure.py  # default-on ensure
   (`voyage/augment.py` / `supervisor.py` never import the worker —
   orchestration track); (3) live CUDA fp16 numeric + quality eyeball
   open (CPU-only box here).
+
+## Progress log (2026-10-01, batch 13 — resolution leg WIRED, inference handed off)
+
+- Premises re-verified live FIRST (in-container `voyage:latest`,
+  CPU-only, no host pip): SRVGG loader leg + full FILM port both hold
+  (`_build_upstream_rrdb_net` + `_build_film_net` strict-load the pinned
+  weights per the batch-10/11 logs); caller grep still empty — no
+  production module resolves registry paths into
+  `upscale_frames`/`interpolate_pair` (the remaining step named in the
+  FILM resolution). `voyage/supervisor.py` untouched throughout (foreign
+  hunks this pass); no longlive2 line touched.
+- TDD red first: new `tests/test_issue_166_resolve_weights.py` failed at
+  collection (`ImportError: cannot import name 'AugmentWeights' from
+  'voyage.augment'`), green after the implementation (6 passed,
+  1 skipped — the provisioned load-through skips in slim: no torch, no
+  `/models`; proven shape only, same skip contract as
+  `test_augment_contract_166.py`).
+- Wired: `voyage/augment.py` appended `AugmentWeights` (frozen dataclass:
+  `film: Path | None`, `realesrgan: Path | None`) + `resolve_augment_weights`
+  (`models_dir: Path | str -> AugmentWeights`, torch-free, lazy registry
+  imports so module scope stays stdlib-only). A leg resolves only when
+  its file exists at the registry-relative path with >= the registry
+  floor bytes (`FILM_MIN_BYTES` / `REALESRGAN_ANIME_MIN_BYTES`) —
+  missing/zero-byte/truncated read as not provisioned (mirrors
+  `augment_worker._require_weights` torn-download rule); wrong
+  `models_dir` type raises `TypeError`. Mid-pass fix: Real-ESRGAN pins
+  moved to canonical `voyage.registry_realesrgan` by a concurrent split
+  (same 082 pattern as `registry_film`) — verified live by grep, imports
+  re-pointed at the canonical home (the `registry_records` re-export
+  still works but is their in-flight surface). Own diff is purely
+  additive (`git diff`: 0 removed lines in `voyage/augment.py`).
+- Gates (in-container `voyage:latest`, CPU-only): `ruff check` +
+  `ruff format --check` + `mypy` strict clean on both touched files
+  (one `ruff --fix` + reflow cycle, own file only; the `pytest.skip`
+  narrowing the host LSP flags is mypy-clean in-container).
+  Neighbors green: 117 passed, 8 skipped across the 166/augment/pins/
+  152/media-unified set. 6 failures in `test_augment_models.py` +
+  `test_augment_config.py` collection are FOREIGN (all one root:
+  `ImportError: cannot import name 'warn_if_deprecated_backend' from
+  'voyage.config'` — another group's in-flight config/cli split,
+  `config.py` carries ~100 of their uncommitted lines, zero mine).
+
+## Resolution (2026-10-01, batch 13)
+
+- Verdict: RESOLUTION LEG WIRED — any production caller can now map
+  `config.video.models_dir` to loader-ready paths with graceful skip.
+  Files changed: `voyage/augment.py` (+61, append-only),
+  `tests/test_issue_166_resolve_weights.py` (new, 7 tests), this issue
+  file. Test evidence: TDD red→green above; per-file gates green;
+  neighbors green modulo the foreign config-split breakage (theirs, not
+  this leg — this leg imports nothing from `config`/`cli`).
+- DESIGN proposal (quoted text only, for the DESIGN owner — §§56-57, to
+  extend the "both weights strict-load" note): "Finalize resolves its
+  model pass through `resolve_augment_weights(config.video.models_dir)`:
+  each leg is a loader-ready path or None when the weights are absent,
+  and absent legs keep the ffmpeg fallback (default-off unless
+  provisioned) — the registry-to-loader seam is production code, the
+  chunk-scale inference call is the remaining slice below."
+- Residuals (exact inference handoff — NOT forced, per the GPU/hot-file
+  rule): the model-pass chunk worker does not exist yet — writing it
+  needs GPU semantics this box cannot prove (fp16-on-CUDA numerics +
+  quality eyeball, cuda:0/cuda:1 device pairing, chunk-scale OOM-halving
+  behavior past ~200 frames) and touches `finalize_run` in
+  `voyage/media.py` (hot file; the 152 residual explicitly warns
+  against media-side topology attempts alone). Exact next slice for the
+  augment/GPU owner: (1) add the chunk worker (calls
+  `resolve_augment_weights`, passes non-None legs to
+  `augment_worker.upscale_frames` / `interpolate_pair` with
+  `device=chunk.device`, keeps the ffmpeg encode for None legs);
+  (2) thread it through `run_augment_chunks` behind an opt-in knob
+  (ffmpeg stays the default — `finalize_run`'s current contract is
+  unchanged by this pass); (3) prove on idle-CUDA with the provisioned
+  `~/.cache/voyage-models/{frame_interpolation,realesrgan}` weights
+  (both present on the host 2026-10-01) incl. the fp16 numeric + eyeball
+  the FILM resolution left open.

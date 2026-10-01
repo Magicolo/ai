@@ -41,10 +41,10 @@ def test_ltxv_requires_own_spec_plus_audio_and_director() -> None:
 def test_video_backends_map_to_their_own_spec_only() -> None:
     from voyage.models_ensure import required_specs
 
-    config = with_video_backend(_config_with_style(), "longlive2")
+    config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
     assert specs == {
-        "longlive2-bf16",
+        "ltxv-2b",
         "audio-acestep",
         "director-qwen4b-awq",
         "film",
@@ -105,7 +105,7 @@ def test_sfx_and_inspector_are_opt_in_only() -> None:
 def test_cuda_backends_include_augmentation_by_default() -> None:
     from voyage.models_ensure import required_specs
 
-    for backend in ("longlive2", "ltxv", "causvid"):
+    for backend in ("ltxv", "causvid"):
         config = with_video_backend(_config_with_style(), backend)
         specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
         assert {"film", "realesrgan-anime"} <= specs

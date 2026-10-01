@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
-import sys
 import time
-import types
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +36,7 @@ from voyage.vision.metrics import (
     select_filter_expression,
     select_frame_indices,
 )
-from voyage.workers import video_common, video_longlive
+from voyage.workers import video_common
 from voyage.workers.video_causvid import CausvidSession, _stub_encoder_class, _stub_encoder_classes
 from voyage.workers.video_common import (
     EMBED_CACHE_CAPACITY,
@@ -46,197 +44,15 @@ from voyage.workers.video_common import (
     move_to_cpu,
     move_to_device,
 )
-from voyage.workers.video_longlive import LongLiveStreamSession, restore_tail_embed_cache
 from voyage.workers.video_ltxv import LTXVSession
 
 # ---------------------------------------------------------------------------
-# Issue 014: embed cache survives evict/rebuild via the recovery tape.
-#
-# The CPU T5-XXL encode costs minutes per segment, and the cache lived in
-# the session object that `evict()` destroys — every audio take forced a
-# cold re-encode of the identical prompt. The tape already persisted the
-# tail embeds; `restore_tail_embed_cache` re-seeds the LRU from it in
-# `resume_from_tape`.
-#
-# CPU-only: `LongLiveStreamSession` is built without `__init__` (GPU) and
-# `torch` is stubbed in `sys.modules` (the function imports it lazily).
+# Issue 014 (historical, issue 079): the embed cache used to survive
+# evict/rebuild via the recovery tape on a removed video backend (stream
+# session + tail-restore helper — both deleted with the backend). The
+# surviving CPU-side LRU (`EmbedCache`,
+# issue 030 below) keeps its own coverage.
 # ---------------------------------------------------------------------------
-
-
-class _014_FakeTensor:
-    """Recording stand-in for a torch tensor (device moves are visible)."""
-
-    def __init__(self, label: str, frames: int = 8) -> None:
-        self.label = label
-        self.shape = (1, frames, 4, 4, 4)
-        self.moved_to: list[str] = []
-        self.cpu_calls = 0
-
-    def to(self, device: Any) -> _014_FakeTensor:
-        self.moved_to.append(str(device))
-        return self
-
-    def cpu(self) -> _014_FakeTensor:
-        self.cpu_calls += 1
-        return self
-
-    def detach(self) -> _014_FakeTensor:
-        return self
-
-
-class _014_FakeGenerator:
-    def __init__(self) -> None:
-        self.state: Any = None
-
-    def set_state(self, state: Any) -> None:
-        self.state = state
-
-    def get_state(self) -> _014_FakeTensor:
-        return _014_FakeTensor("rng-state")
-
-
-class _014_FakeCuda:
-    def __init__(self) -> None:
-        self.empty_cache_calls = 0
-
-    def empty_cache(self) -> None:
-        self.empty_cache_calls += 1
-
-
-class _014_FakeTorchModule(types.ModuleType):
-    """Stub for the lazy `import torch` in `resume_from_tape`."""
-
-    def __init__(self) -> None:
-        super().__init__("torch")
-        self.cuda = _014_FakeCuda()
-        self.bfloat16 = "bfloat16"
-        self.int64 = "int64"
-
-    def zeros(self, shape: Any, device: Any = None, dtype: Any = None) -> _014_FakeTensor:
-        del device, dtype
-        return _014_FakeTensor("timestep", frames=int(shape[1]))
-
-    def inference_mode(self) -> Any:
-        return contextlib.nullcontext()
-
-    def Generator(self, device: Any = None) -> _014_FakeGenerator:
-        del device
-        return _014_FakeGenerator()
-
-    def as_tensor(self, value: Any) -> _014_FakeTensor:
-        fake = _014_FakeTensor("tape-state")
-        fake.label = repr(value)
-        return fake
-
-
-class _014_FakeVae:
-    def __init__(self) -> None:
-        self.moved_to: list[str] = []
-
-    def to(self, device: Any) -> _014_FakeVae:
-        self.moved_to.append(str(device))
-        return self
-
-
-class _014_FakePipe:
-    def __init__(self) -> None:
-        self.vae = _014_FakeVae()
-        self.kv_cache_pos: Any = None
-        self.kv_cache_neg: Any = None
-        self.crossattn_cache_pos: Any = None
-        self.crossattn_cache_neg: Any = None
-        self.generator_calls = 0
-
-    def _initialize_kv_cache(self, batch_size: int, dtype: Any, device: Any) -> None:
-        del batch_size, dtype, device
-        self.kv_cache_pos = []
-
-    def _initialize_crossattn_cache(self, batch_size: int, dtype: Any, device: Any) -> None:
-        del batch_size, dtype, device
-        self.crossattn_cache_pos = []
-
-    def generator(self, **kwargs: Any) -> None:
-        del kwargs
-        self.generator_calls += 1
-
-
-def _014_stream_session(pipe: _014_FakePipe) -> LongLiveStreamSession:
-    # Real constructor (assignment-only, CPU-safe): the __new__ + per-attribute
-    # scaffold is gone — same ten values, no private-member poking (issue 150).
-    return LongLiveStreamSession(pipeline=pipe, latent_shape=[1, 8, 4, 4, 4], device="cpu")
-
-
-def _014_tail_tape(prompt: str = "river lanterns") -> dict[str, Any]:
-    return {
-        "tail_latents": _014_FakeTensor("tail"),
-        "prompt_embeds": _014_FakeTensor("embeds"),
-        "tail_prompt": prompt,
-        "tail_conditionals": [{"conditional": _014_FakeTensor("conditional")}],
-        "noise_rng_state": "fake-rng-state",
-    }
-
-
-def test_restore_helper_seeds_cache_from_tape() -> None:
-    cache = EmbedCache()
-    tape = _014_tail_tape("river lanterns")
-    restored = restore_tail_embed_cache(cache, tape)
-    assert restored == "river lanterns"
-    cached = cache.get("river lanterns")
-    assert cached is not None
-    condition, conditionals = cached
-    assert condition == {"prompt_embeds": tape["prompt_embeds"]}
-    assert conditionals == tape["tail_conditionals"]
-
-
-def test_restore_helper_ignores_pre_fix_tape() -> None:
-    """Tapes without the new keys resume fine, just without the warm cache."""
-    cache = EmbedCache()
-    tape = {"tail_latents": _014_FakeTensor("tail"), "prompt_embeds": _014_FakeTensor("embeds")}
-    assert restore_tail_embed_cache(cache, tape) is None
-    assert len(cache) == 0
-
-
-def test_restore_helper_rejects_blank_or_missing_prompt() -> None:
-    cache = EmbedCache()
-    assert restore_tail_embed_cache(cache, {**_014_tail_tape(), "tail_prompt": ""}) is None
-    assert restore_tail_embed_cache(cache, {**_014_tail_tape(), "tail_prompt": 42}) is None
-    assert restore_tail_embed_cache(cache, {**_014_tail_tape(), "prompt_embeds": None}) is None
-    assert len(cache) == 0
-
-
-def test_resume_from_tape_warms_embed_cache(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    del tmp_path
-    monkeypatch.setitem(sys.modules, "torch", _014_FakeTorchModule())
-    pipe = _014_FakePipe()
-    session = _014_stream_session(pipe)
-    position = session.resume_from_tape(_014_tail_tape("river lanterns"))
-    assert position["next_start_frame"] == 8
-    assert position["blocks_appended"] == 1
-    assert pipe.generator_calls == 1
-    cached = session._embed_cache.get("river lanterns")
-    assert cached is not None
-    condition, _conditionals = cached
-    assert isinstance(condition, dict)
-
-
-def test_resume_from_tape_without_tail_prompt_leaves_cache_cold(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    del tmp_path
-    monkeypatch.setitem(sys.modules, "torch", _014_FakeTorchModule())
-    pipe = _014_FakePipe()
-    session = _014_stream_session(pipe)
-    tape = _014_tail_tape()
-    del tape["tail_prompt"]
-    session.resume_from_tape(tape)
-    assert len(session._embed_cache) == 0
-
-
-def test_longlive_module_still_imports_torch_free() -> None:
-    assert video_longlive.NUM_FRAME_PER_BLOCK == 8
-    assert video_common.EMBED_CACHE_CAPACITY == 8
 
 
 # ---------------------------------------------------------------------------
@@ -657,47 +473,6 @@ def test_ltxv_cache_evicts_stale_prompts() -> None:
         session._encode(f"valley {index}")
     assert len(session._embed_cache) == EMBED_CACHE_CAPACITY
     assert "valley 0" not in session._embed_cache
-
-
-def _030_longlive_session() -> LongLiveStreamSession:
-    session = LongLiveStreamSession(pipeline=None, latent_shape=[1, 8, 4, 4, 4], device="cpu")
-    session._pipeline = types.SimpleNamespace(text_encoder=object())
-    return session
-
-
-def test_longlive_encode_stores_cpu_side_and_hits_without_reencode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def _fake_blocks(text_encoder: Any, batched: list[list[str]], count: int) -> Any:
-        del text_encoder, count
-        calls.append(batched[0][0])
-        return {"prompt_embeds": _030_FakeTensor("embeds")}, [
-            {"conditional": _030_FakeTensor("cond")}
-        ]
-
-    conditioning_module = types.ModuleType("utils.prompt_conditioning")
-    # 150: ModuleType stub attribute — attr-defined fires only once this file
-    # enters the mypy gate (033); until then the ignore is dormant but kept
-    # so gate conversion needs no edit here.
-    conditioning_module.encode_prompt_blocks = _fake_blocks  # type: ignore[attr-defined]
-    package_module = types.ModuleType("utils")
-    package_module.prompt_conditioning = conditioning_module  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "utils", package_module)
-    monkeypatch.setitem(sys.modules, "utils.prompt_conditioning", conditioning_module)
-    session = _030_longlive_session()
-    first = session._encode("lantern valley")
-    second = session._encode("lantern valley")
-    assert calls == ["lantern valley"]
-    stored = session._embed_cache.get("lantern valley")
-    assert stored is not None
-    stored_condition, stored_list = stored
-    assert stored_condition["prompt_embeds"].cpu_calls == 1
-    assert stored_list[0]["conditional"].cpu_calls == 1
-    # Hits move the CPU entry back to the session device.
-    assert first[0]["prompt_embeds"].cpu_calls == 0
-    assert second[0]["prompt_embeds"].moved_to == ["cpu"]
 
 
 def test_video_common_surface_intact() -> None:

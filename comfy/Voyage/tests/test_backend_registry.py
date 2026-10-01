@@ -51,7 +51,7 @@ def _request(state_mode: str) -> VideoSegmentRequest:
 
 
 def test_backend_name_vocabularies() -> None:
-    assert get_args(VideoBackendName) == ("fake", "longlive2", "ltxv", "causvid")
+    assert get_args(VideoBackendName) == ("fake", "ltxv", "causvid")
     assert get_args(AudioBackendName) == ("fake", "acestep")
 
 
@@ -79,7 +79,6 @@ def test_state_modes_derive_from_registry() -> None:
         name: record.state_mode for name, record in BACKEND_REGISTRY.items()
     }
     assert BACKEND_STATE_MODES["fake"] == "independent_clip"
-    assert BACKEND_STATE_MODES["longlive2"] == "persistent_kv"
     assert BACKEND_STATE_MODES["ltxv"] == "reconstructable_prefix"
     assert BACKEND_STATE_MODES["causvid"] == "reconstructable_prefix"
 
@@ -89,7 +88,7 @@ def test_streaming_set_derives_from_registry() -> None:
         adapter = VideoBackendAdapter(_transport, name, VideoConfig(backend=name))
         assert adapter.streaming == BACKEND_REGISTRY[name].streaming
     streaming = {name for name in BACKEND_REGISTRY if BACKEND_REGISTRY[name].streaming}
-    assert streaming == {"longlive2", "ltxv", "causvid"}
+    assert streaming == {"ltxv", "causvid"}
 
 
 def test_capabilities_carry_typed_backend_per_row() -> None:

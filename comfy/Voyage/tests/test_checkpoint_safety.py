@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from voyage import model_registry
-from voyage.workers import video_causvid, video_longlive
+from voyage.workers import video_causvid
 
 
 class _RecordingTorch:
@@ -75,7 +75,7 @@ def _read_manifest(models_dir: Path) -> dict[str, Any]:
     return loaded
 
 
-def test_longlive_download_preserves_foreign_manifest_keys(
+def test_ltxv_download_preserves_foreign_manifest_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Issue 006a: video download merges instead of clobbering siblings."""
@@ -86,10 +86,10 @@ def test_longlive_download_preserves_foreign_manifest_keys(
     (tmp_path / "manifest.json").write_text(
         json.dumps({"director": {"repo": "Qwen/Qwen3-8B"}}), encoding="utf-8"
     )
-    record = model_registry.download_longlive2_bf16(tmp_path)
+    record = model_registry.download_ltxv_models(tmp_path)
     manifest = _read_manifest(tmp_path)
     assert manifest["director"] == {"repo": "Qwen/Qwen3-8B"}
-    assert manifest["video"]["repo"] == model_registry.LONGLIVE_HF_REPO
+    assert manifest["ltxv"]["repo"] == model_registry.LTXV_HF_REPO
     assert record == manifest
 
 
@@ -141,113 +141,6 @@ def test_verify_against_manifest_fails_closed_on_mismatch(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="sha256 mismatch"):
         model_registry.verify_checkpoint_against_manifest(tmp_path, "video", target)
-
-
-def test_recovery_tape_load_uses_weights_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Issue 005: tape loads never unpickle code (flags pinned via stub)."""
-    fake_torch = _install_torch_stub(monkeypatch, {"profile": "longlive2-bf16-fp8"})
-    tape_path = tmp_path / "recovery.pt"
-    tape_path.write_bytes(b"never-executed-bytes")
-    tape = video_longlive._load_recovery_tape(str(tape_path))
-    assert tape == {"profile": "longlive2-bf16-fp8"}
-    assert len(fake_torch.load_calls) == 1
-    assert fake_torch.load_calls[0]["weights_only"] is True
-    assert fake_torch.load_calls[0]["map_location"] == "cpu"
-
-
-def test_recovery_tape_load_rejects_non_tape_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fake_torch = _install_torch_stub(monkeypatch, {"profile": "x"})
-    impostor = tmp_path / "recovery.json"
-    impostor.write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="refusing to load"):
-        video_longlive._load_recovery_tape(str(impostor))
-    with pytest.raises(ValueError, match="refusing to load"):
-        video_longlive._load_recovery_tape(str(tmp_path / "missing.pt"))
-    assert fake_torch.load_calls == []
-
-
-def test_recovery_tape_load_rejects_non_dict_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_torch_stub(monkeypatch, ["not", "a", "dict"])
-    tape_path = tmp_path / "recovery.pt"
-    tape_path.write_bytes(b"never-executed-bytes")
-    with pytest.raises(ValueError, match="must be a dict"):
-        video_longlive._load_recovery_tape(str(tape_path))
-
-
-def test_generator_container_load_verifies_then_weights_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Issue 005: generator path hashes first, loads weights-only second."""
-    checkpoint = tmp_path / "model_bf16.pt"
-    checkpoint.write_bytes(b"generator-bytes")
-    expected = hashlib.sha256(b"generator-bytes").hexdigest()
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"video": {"checkpoint_sha256": expected}}), encoding="utf-8"
-    )
-    fake_torch = _install_torch_stub(monkeypatch, {"generator": {}})
-    container = video_longlive.load_generator_container(checkpoint, tmp_path)
-    assert container == {"generator": {}}
-    assert len(fake_torch.load_calls) == 1
-    assert fake_torch.load_calls[0]["weights_only"] is True
-
-
-def test_generator_container_load_fails_closed_on_tampered_weights(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    checkpoint = tmp_path / "model_bf16.pt"
-    checkpoint.write_bytes(b"tampered-bytes")
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"video": {"checkpoint_sha256": "2" * 64}}), encoding="utf-8"
-    )
-    fake_torch = _install_torch_stub(monkeypatch, {"generator": {}})
-    with pytest.raises(ValueError, match="sha256 mismatch"):
-        video_longlive.load_generator_container(checkpoint, tmp_path)
-    assert fake_torch.load_calls == []
-
-
-def _install_text_encoder_stubs(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub the wan_5b text-encoder tree behind CpuUmt5Encoder."""
-    seen_states: list[Any] = []
-
-    class _FakeModel:
-        def eval(self) -> _FakeModel:
-            return self
-
-        def load_state_dict(self, state: Any) -> None:
-            seen_states.append(state)
-
-    wan_package = types.ModuleType("wan_5b")
-    modules_package = types.ModuleType("wan_5b.modules")
-    t5_module = types.ModuleType("wan_5b.modules.t5")
-    t5_module.umt5_xxl = lambda **kwargs: _FakeModel()  # type: ignore[attr-defined]
-    tokenizers_module = types.ModuleType("wan_5b.modules.tokenizers")
-    tokenizers_module.HuggingfaceTokenizer = lambda **kwargs: object()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wan_5b", wan_package)
-    monkeypatch.setitem(sys.modules, "wan_5b.modules", modules_package)
-    monkeypatch.setitem(sys.modules, "wan_5b.modules.t5", t5_module)
-    monkeypatch.setitem(sys.modules, "wan_5b.modules.tokenizers", tokenizers_module)
-    return seen_states
-
-
-def test_text_encoder_state_dict_load_uses_weights_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Issue 005: T5 .pth is a plain state dict — weights-only suffices."""
-    fake_torch = _install_torch_stub(monkeypatch, {"encoder.block.0.weight": "tensor"})
-    seen_states = _install_text_encoder_stubs(monkeypatch)
-    wan_dir = tmp_path / "wan_models" / model_registry.WAN_SUBDIR
-    (wan_dir / "google" / "umt5-xxl").mkdir(parents=True)
-    (wan_dir / "models_t5_umt5-xxl-enc-bf16.pth").write_bytes(b"never-executed-bytes")
-    video_longlive.CpuUmt5Encoder(wan_dir, "cpu")
-    assert len(fake_torch.load_calls) == 1
-    assert fake_torch.load_calls[0]["weights_only"] is True
-    assert seen_states == [{"encoder.block.0.weight": "tensor"}]
 
 
 def _write_causvid_stack(models_dir: Path, checkpoint_bytes: bytes) -> Path:

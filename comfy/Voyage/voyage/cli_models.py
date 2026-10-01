@@ -173,7 +173,6 @@ def cmd_models(args: argparse.Namespace) -> int:
     # pre-split interception point) keeps working.
     from voyage.cli import (
         download_causvid_models,
-        download_longlive2_bf16,
         download_ltxv_models,
         verify_audio_models,
         verify_causvid_models,
@@ -181,7 +180,6 @@ def cmd_models(args: argparse.Namespace) -> int:
         verify_director_models,
         verify_film_models,
         verify_inspector_models,
-        verify_longlive2_bf16,
         verify_ltxv_models,
         verify_realesrgan_models,
         verify_sfx_models,
@@ -189,7 +187,7 @@ def cmd_models(args: argparse.Namespace) -> int:
 
     action = args.models_action
     if action == "list":
-        print("video: fake (built-in) | longlive2-bf16 (LongLive 2.0 BF16 + FP8 PTQ)")
+        print("video: fake (built-in) | ltxv-2b (LTXV 2B distilled, default)")
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
         print("audio: fake (built-in) | audio-acestep (ACE-Step 1.5 turbo + 0.6B planner)")
@@ -205,8 +203,6 @@ def cmd_models(args: argparse.Namespace) -> int:
         )
         return 0
     if action == "verify":
-        ok, message = verify_longlive2_bf16(_models_dir(args))
-        print(message)
         lok, lmessage = verify_ltxv_models(_models_dir(args))
         print(lmessage)
         cok, cmessage = verify_causvid_models(_models_dir(args))
@@ -226,10 +222,10 @@ def cmd_models(args: argparse.Namespace) -> int:
         iok, imessage = verify_inspector_models(_models_dir(args))
         print(imessage)
         print("fake backends need no model files: OK")
-        all_ok = ok and lok and cok and dok and dawq_ok and aok and sok and fok and rok and iok
+        all_ok = lok and cok and dok and dawq_ok and aok and sok and fok and rok and iok
         return 0 if all_ok else 1
     if action == "download":
-        target = getattr(args, "models_target", "longlive2-bf16")
+        target = getattr(args, "models_target", "ltxv-2b")
         if target == "ltxv-2b":
             models_dir = _models_dir(args)
             print(f"downloading ltxv-2b into {models_dir} ...")
@@ -270,40 +266,25 @@ def cmd_models(args: argparse.Namespace) -> int:
             return _download_realesrgan(_models_dir(args))
         if target == "inspector-qwen35":
             return _download_inspector(_models_dir(args))
-        if target != "longlive2-bf16":
-            print(f"unknown models target {target!r}", file=sys.stderr)
-            known_targets = ", ".join(
-                [
-                    "longlive2-bf16",
-                    "ltxv-2b",
-                    "causvid",
-                    "director-qwen8b",
-                    "director-qwen4b-awq",
-                    "audio-acestep",
-                    "sfx-mmaudio",
-                    "film",
-                    "realesrgan-anime",
-                    "inspector-qwen35",
-                ]
-            )
-            print(f"known: {known_targets}", file=sys.stderr)
-            return 2
-        models_dir = _models_dir(args)
-        print(f"downloading longlive2-bf16 into {models_dir} ...")
-        try:
-            record = download_longlive2_bf16(models_dir)
-        except Exception as exc:
-            print(f"download failed: {exc}", file=sys.stderr)
-            return 1
-        video = record["video"]
-        assert isinstance(video, dict)
-        print(f"generator: {video.get('checkpoint_bytes')} bytes")
-        print(f"sha256: {video.get('checkpoint_sha256')}")
-        print(f"manifest: {models_dir / 'manifest.json'}")
-        return 0
+        print(f"unknown models target {target!r}", file=sys.stderr)
+        known_targets = ", ".join(
+            [
+                "ltxv-2b",
+                "causvid",
+                "director-qwen8b",
+                "director-qwen4b-awq",
+                "audio-acestep",
+                "sfx-mmaudio",
+                "film",
+                "realesrgan-anime",
+                "inspector-qwen35",
+            ]
+        )
+        print(f"known: {known_targets}", file=sys.stderr)
+        return 2
     if action == "info":
         print("backends: `voyage models list` (video/audio/director/inspector)")
-        print("weights: longlive2-bf16 (~48 GB) | ltxv-2b (~7 GB) | causvid (~28 GB)")
+        print("weights: ltxv-2b (~7 GB) | causvid (~28 GB)")
         print("weights: director-qwen8b (~16 GB) | audio-acestep | inspector-qwen35 (~19 GB)")
         print("weights: sfx-mmaudio (~8 GB: 3 variants + VAE/sync/CLIP/vocoder)")
         print("weights: film (~66 MB interpolation) | realesrgan-anime (~18 MB upscaler)")
