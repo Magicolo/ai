@@ -74,7 +74,7 @@ def test_soak_cli_persists_report_json(tmp_path: Path) -> None:
 
 def _status_output(run_dir: Path, capsys: object) -> str:
     args = type("Args", (), {"run": str(run_dir)})()
-    assert cmd_status(args) == 0  # type: ignore[arg-type]
+    assert cmd_status(args) == 0
     return str(capsys.readouterr().out)  # type: ignore[attr-defined]
 
 

@@ -86,7 +86,7 @@ def test_crash_during_video_generate_recovers(tmp_path: Path) -> None:
                 supervisor.inject_worker_crash("video")
             return orig_call(op, payload)
 
-        supervisor._video.call = _crash_once  # type: ignore[method-assign]
+        supervisor._video.call = _crash_once  # type: ignore[assignment]
         segment_id = supervisor.commit_one_segment()
     finally:
         supervisor.stop_workers()

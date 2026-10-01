@@ -115,3 +115,40 @@ def test_rejects_negative_floors() -> None:
         FinalizeOptions(min_width=-1)
     with pytest.raises(ValueError, match="min_height"):
         FinalizeOptions(min_height=-1)
+
+
+def test_source_above_target_and_floors_is_preserved() -> None:
+    """Segments above target+floors are never downscaled (floors minimum).
+
+    A 2432x1408 source with a 1216x704 target and 1280x720 floors must ship
+    at its native spec — the floors are a minimum quality requirement, not
+    a ceiling, and downscaling would waste the rendered compute.
+    """
+    plan = plan_augmentation(2432, 1408, 32.0, 1216, 704, 32, 32, 1280, 720)
+    assert (plan.out_w, plan.out_h, plan.out_fps) == (2432, 1408, 32)
+    assert plan.needs_minterpolate is False
+    assert plan.needs_reencode is False
+
+
+def test_floors_disabled_preserves_above_target_source() -> None:
+    """`--min-* 0` must not downscale segments above the config target.
+
+    With floors disabled, a 1536x1024 source against a 768x512 target ships
+    at native spec. (The pre-hardening plan downscaled to the target here.)
+    """
+    plan = plan_augmentation(1536, 1024, 24.0, 768, 512, 24, 0, 0, 0)
+    assert (plan.out_w, plan.out_h, plan.out_fps) == (1536, 1024, 24)
+    assert plan.needs_minterpolate is False
+    assert plan.needs_reencode is False
+
+
+def test_partial_axis_each_dimension_resolves_independently() -> None:
+    """Per-axis max: a wide-but-short source keeps its width, lifts height.
+
+    1920x700 against a 1216x704 target with 1280x720 floors ships 1920x720:
+    width from the source, height from the floor.
+    """
+    plan = plan_augmentation(1920, 700, 24.0, 1216, 704, 24, 32, 1280, 720)
+    assert (plan.out_w, plan.out_h, plan.out_fps) == (1920, 720, 32)
+    assert plan.needs_minterpolate is True
+    assert plan.needs_reencode is True

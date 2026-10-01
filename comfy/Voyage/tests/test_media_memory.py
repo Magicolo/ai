@@ -213,7 +213,7 @@ def test_sample_frames_never_uses_capture_run(
         argv = args[0] if args else []
         if isinstance(argv, list) and "rawvideo" in argv:
             raise AssertionError("sample_frames captured video bytes via subprocess.run")
-        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+        return real_run(*args, **kwargs)  # type: ignore[call-overload]
 
     monkeypatch.setattr(subprocess_module, "run", _forbidden)
     try:
@@ -238,7 +238,7 @@ def test_sample_frames_single_frame_never_uses_capture_run(
         argv = args[0] if args else []
         if isinstance(argv, list) and "rawvideo" in argv:
             raise AssertionError("sample_frames captured video bytes via subprocess.run")
-        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+        return real_run(*args, **kwargs)  # type: ignore[call-overload]
 
     monkeypatch.setattr(subprocess_module, "run", _forbidden)
     (frame,) = sample_frames(clip, count=1, width=160)

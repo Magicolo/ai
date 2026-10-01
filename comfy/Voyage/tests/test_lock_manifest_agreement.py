@@ -31,7 +31,7 @@ import pytest
 try:
     import tomllib
 except ImportError:  # Python 3.10 floor (same fallback idiom as voyage/config.py)
-    import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+    import tomli as tomllib
 
 from packaging.requirements import Requirement
 

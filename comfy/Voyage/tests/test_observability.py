@@ -148,7 +148,7 @@ def test_status_shows_section_layout(tmp_path: Path, capsys: pytest.CaptureFixtu
         "000000"
     ]
     args = type("Args", (), {"run": str(run_dir)})()
-    assert cmd_status(args) == 0  # type: ignore[arg-type]
+    assert cmd_status(args) == 0
     out = capsys.readouterr().out
     for expected in (
         "Voyage: observability",

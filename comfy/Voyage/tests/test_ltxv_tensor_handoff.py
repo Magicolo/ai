@@ -8,6 +8,8 @@ GPU-free pure functions — covered here without a session.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -72,8 +74,8 @@ def test_tail_frames_rejects_non_uint8() -> None:
 class _FakeTailTensor:
     """Torch-style (B,C,T,H,W) clip: permute/float/cpu/numpy chain like _save_mp4."""
 
-    def __init__(self, array: np.ndarray) -> None:
-        self._array = np.asarray(array, dtype=np.float32)
+    def __init__(self, array: np.ndarray[Any, Any]) -> None:
+        self._array: np.ndarray[Any, Any] = np.asarray(array, dtype=np.float32)
         self.shape = self._array.shape
 
     def dim(self) -> int:
@@ -88,11 +90,11 @@ class _FakeTailTensor:
     def cpu(self) -> _FakeTailTensor:
         return self
 
-    def numpy(self) -> np.ndarray:
+    def numpy(self) -> np.ndarray[Any, Any]:
         return self._array
 
     def __getitem__(self, key: object) -> _FakeTailTensor:
-        return _FakeTailTensor(self._array[key])  # type: ignore[index]
+        return _FakeTailTensor(self._array[key])
 
 
 def test_handoff_helper_bottles_channel_first_tail() -> None:

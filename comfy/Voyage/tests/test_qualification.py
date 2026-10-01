@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
@@ -67,7 +67,7 @@ BOUNDARY_RATIO_LIMIT = 3.0
 """Provisional continuity gate: boundary jump must stay well below the ~6x
 fresh-scene failure signature measured in the continuity investigation."""
 
-Frame = NDArray[np.uint8]
+Frame: TypeAlias = NDArray[np.uint8]
 
 
 def time_to_first_output(elapsed_seconds: list[float]) -> float:

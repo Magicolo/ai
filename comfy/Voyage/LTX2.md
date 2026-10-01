@@ -3438,3 +3438,40 @@ joint-audio commit and evict all sound. Both Phase-2
 workers are now live-verified; remaining integration work
 is Phase 3 (supervisor bypass), Phase 4 surface/docs, and
 Phase 5 qual legs.
+
+## Phase 5 qual legs (2026-10-01): end-to-end via Voyage — BOTH PASS
+
+Same 8s shape each (`run.sh generate --backend <ltx25|ltx23>
+--duration 8s --style 'glass orchard at dusk, calm' --name
+qual-<backend> --seed 303 --director deterministic --no-sfx`;
+runs in gitignored `Voyage/output/qual-ltx25/` +
+`Voyage/output/qual-ltx23/`): 2 segments per run (fresh 121f
++ continued 96f = 217f @24fps) through the supervisor drive
++ joint-audio bypass + commit validation + validate verb +
+floors-lift finalize.
+
+Leg-1 ltx25: seg0 video 157.5s + audio 0.0s (joint, `no take
+(joint)`, 8 beats @95BPM), seg1 video 129.1s + audio 0.0s
+(4 beats @60BPM); validate VALID (2 segments, 217 frames);
+finalize → final.mp4 h264 1280x720@32fps 287f 8.97s +
+aac48k stereo. Eyeball: prompt-faithful dusk orchard, no
+artifacts; 3 separately-extracted frames have distinct
+md5s — real motion, not frozen (a first double-extraction
+gave byte-identical PNGs through my own ffmpeg `-ss`
+placement error; corrected methodology is separate
+invocations).
+
+Leg-2 ltx23: seg1 video 128.8s + audio 0.0s (joint),
+validate VALID (2 segments, 217 frames), finalize 8.978s
+→ final.mp4 same 1280x720@32 287f 8.97s + aac48k (3.9MiB).
+(`validate --run` takes the /app-relative path
+`output/qual-ltx23`, not `Voyage/output/qual-ltx23` —
+path-doubling lesson.)
+
+VERDICT: both backends proven end to end — supervisor
+drive, joint-audio bypass (audio stage ~0s), commit
+validation, and floors-lift finalize all sound. This closes
+the LTX-2/2.5 experiment arc E0–E9 + S21–S30 + Phase 0–5;
+remaining Voyage work is the floors-as-minimum hardening
+(`plan_augmentation` treats 1280x720@32 as a floor, never a
+ceiling) and routine operation.

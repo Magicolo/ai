@@ -118,13 +118,15 @@ def plan_augmentation(
     """Compute the presentation box/fps for one finalize (pure, Track B).
 
     `effective_fps = max(requested, min_fps or 0, PRESENTATION_MIN_FPS)`;
-    geometry is `max(target, min)` per axis — the output box always
-    covers both the requested target and the floors, preserving aspect
-    downstream via the scale-to-fit + pad vf (never stretched). Floors
-    only ever upscale: a target already above them is kept as-is
-    ("minimal upscale"), and a 0/None floor disables that axis (the
-    24fps `PRESENTATION_MIN_FPS` still applies — 0 disables the new
-    32fps floor, not the shipped-video guarantee).
+    geometry is `max(target, min, source)` per axis — the output box always
+    covers the requested target, the floors, AND the probed source, preserving
+    aspect downstream via the scale-to-fit + pad vf (never stretched). Floors
+    are a minimum quality requirement, never a ceiling: a target already above
+    them is kept as-is ("minimal upscale"), segments already above
+    target+floors ship at native spec (no downscaling — rendered compute is
+    never thrown away), and a 0/None floor disables that axis (the 24fps
+    `PRESENTATION_MIN_FPS` still applies — 0 disables the new 32fps floor,
+    not the shipped-video guarantee).
 
     `needs_minterpolate` is True only for an fps lift (source + 0.5 <
     out — motion interpolation); an fps drop uses the plain fps filter.
@@ -142,8 +144,8 @@ def plan_augmentation(
     if floor_fps < 0 or floor_w < 0 or floor_h < 0:
         raise ValueError(f"augment floors must be >= 0 (got {min_fps}/{min_width}/{min_height})")
     out_fps = max(int(requested_fps), floor_fps, PRESENTATION_MIN_FPS)
-    out_w = max(int(target_w), floor_w)
-    out_h = max(int(target_h), floor_h)
+    out_w = max(int(target_w), floor_w, int(source_w))
+    out_h = max(int(target_h), floor_h, int(source_h))
     source_fps_value = float(source_fps)
     needs_minterpolate = source_fps_value > 0 and out_fps > source_fps_value + FPS_MATCH_TOLERANCE
     fps_mismatch = source_fps_value <= 0 or abs(out_fps - source_fps_value) > FPS_MATCH_TOLERANCE

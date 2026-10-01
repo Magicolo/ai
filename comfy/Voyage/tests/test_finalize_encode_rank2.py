@@ -135,7 +135,14 @@ def test_audio_acestep_convert_uses_hygiene_flags(
 
 
 def test_reencode_is_single_pass_with_crf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-native finalize runs one libx264 encode carrying -crf/-preset."""
+    """Non-native finalize runs one libx264 encode carrying -crf/-preset.
+
+    The upscale target (1280x720 over a 768x432 fake segment, floors
+    disabled) still re-encodes exactly once; floors-as-minimum means a
+    below-spec target would preserve the source instead (see
+    test_augment_plan.py), so the single-encode path is pinned here via
+    an above-spec target.
+    """
     import voyage.media as media_module
 
     run_dir = tmp_path / "run"
@@ -155,8 +162,8 @@ def test_reencode_is_single_pass_with_crf(tmp_path: Path, monkeypatch: pytest.Mo
     assert media_module.finalize_run(
         run_dir,
         out,
-        width=640,
-        height=352,
+        width=1280,
+        height=720,
         fps=24,
         min_fps=0,
         min_width=0,

@@ -210,7 +210,7 @@ def _take_record(**overrides: object) -> dict[str, object]:
 def test_take_from_dict_rejects_degenerate_geometry(overrides: dict[str, object]) -> None:
     """Issue 104: corrupt ledger geometry must fail loud at load, never in the walk."""
     with pytest.raises(StateError):
-        AudioTake.from_dict(_take_record(**overrides))  # type: ignore[arg-type]
+        AudioTake.from_dict(_take_record(**overrides))
 
 
 def test_take_from_dict_accepts_tiny_positive_duration() -> None:
