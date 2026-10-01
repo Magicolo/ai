@@ -509,8 +509,17 @@ class VoyageConfig(BaseModel):
     # every Nth segment (1 = drift each segment). Non-drift segments hold
     # the current concept via the deterministic fallback (still recorded).
     drift_every_n_segments: int = 1
+    # Gauge sampling cadence (Stage C): resource snapshots cost one worker
+    # health round-trip per tail (~5 s when a probe times out), so long
+    # runs can thin them out. 1 keeps every-segment sampling.
+    resource_gauge_interval_segments: int = 1
 
-    @field_validator("blocks_per_prompt_stage", "novelty_max_attempts", "drift_every_n_segments")
+    @field_validator(
+        "blocks_per_prompt_stage",
+        "novelty_max_attempts",
+        "drift_every_n_segments",
+        "resource_gauge_interval_segments",
+    )
     @classmethod
     def positive(cls, value: int) -> int:
         if value <= 0:
@@ -770,6 +779,7 @@ novelty_max_rejections = 2
 max_worker_restarts = 3
 rpc_timeout_seconds = 600.0
 drift_every_n_segments = 1
+resource_gauge_interval_segments = 1
 
 [experimental]
 visual_inspector = false

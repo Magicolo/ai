@@ -187,9 +187,34 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     return {"status": "READY", "backend": "acestep", "device": _device, "loaded": False}
 
 
+def _cuda_mem_info_gib() -> tuple[float, float] | None:
+    """Device memory in GiB, or None without CUDA (Stage C gauge half).
+
+    Never raises: health is best-effort, and the slim image has no torch
+    at all — a missing stack or a CPU box simply yields no vram fields
+    instead of a failed probe. Units mirror the video workers' health.
+    """
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    return round(free_bytes / 1024**3, 1), round(total_bytes / 1024**3, 1)
+
+
 def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     del payload
-    return {"status": "READY", "backend": "acestep", "loaded": _stack is not None}
+    info: dict[str, Any] = {
+        "status": "READY",
+        "backend": "acestep",
+        "loaded": _stack is not None,
+    }
+    memory = _cuda_mem_info_gib()
+    if memory is not None:
+        info["vram_free_gib"], info["vram_total_gib"] = memory
+    return info
 
 
 def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int) -> None:

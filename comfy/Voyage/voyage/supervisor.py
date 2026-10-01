@@ -729,16 +729,39 @@ class Supervisor:
         )
         self._log_metric({"event": "video_resumed", "tape": str(tape), **result})
 
+    def _director_probe_blocked(self) -> bool:
+        """Whether a director health probe would stall behind LLM work.
+
+        The director worker serves one RPC at a time. An in-flight
+        prefetch decide is the known case (skip-busy, leniency batch) —
+        but the subtler one is a future that already timed out on our
+        side (60 s budget) while the worker still chews the decide
+        (120 s+ observed): its result is a non-dict, and a health probe
+        issued now queues behind the unfinished decide and burns the
+        full 5 s timeout (boba: 5 s every tail). Only a completed dict
+        result proves the worker is free again.
+        """
+        future = self._prefetch_future
+        if future is None:
+            return False
+        if self._prefetch_in_flight():
+            return True
+        try:
+            return not isinstance(future.result(), dict)
+        except Exception:
+            return True
+
     def _sample_gauges(self, segment_id: str) -> None:
         """Best-effort resource snapshot after a commit (Phase 6 slice E).
 
         Never fails the commit — and never stalls it either (issue 017):
         every probe carries a short timeout, so a sick worker shows up as
         missing fields while adding at most GAUGE_TIMEOUT_SECONDS per
-        worker. Sampled every RESOURCE_GAUGE_INTERVAL_SEGMENTS segments.
+        worker. Sampled every `resource_gauge_interval_segments` segments
+        (VoyageConfig, default 1).
         """
         try:
-            interval = max(1, RESOURCE_GAUGE_INTERVAL_SEGMENTS)
+            interval = max(1, self._config.voyage.resource_gauge_interval_segments)
             if int(segment_id) % interval != 0:
                 return
         except ValueError:
@@ -758,11 +781,11 @@ class Supervisor:
                 ("audio", self._audio),
                 ("director", self._director),
             ):
-                if name == "director" and self._prefetch_in_flight():
+                if name == "director" and self._director_probe_blocked():
                     # The director's RPC queue is serial: a health probe
-                    # issued while the background prefetch decide runs either
-                    # blocks behind it or burns the full 5 s timeout (boba:
-                    # 5 s every tail, 23.7 s once). Skip the probe — no fields
+                    # issued while LLM work occupies it either blocks
+                    # behind it or burns the full 5 s timeout (boba: 5 s
+                    # every tail, 23.7 s once). Skip the probe — no fields
                     # this segment — instead of stalling the commit.
                     continue
                 try:

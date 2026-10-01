@@ -136,6 +136,29 @@ def success(request_id: str, result: RpcResult) -> WorkerResponse:
     return WorkerResponse(id=request_id, ok=True, result=result)
 
 
+def _spawn_env(executable: str | None) -> dict[str, str] | None:
+    """Child env carrying the interpreter's bin dir on PATH (Stage C).
+
+    JIT compilers (torch cpp_extension for ExLlamaV2/Marlin, ninja-driven)
+    resolve their toolchain via `shutil.which` at compile time inside the
+    worker — but workers spawn by absolute interpreter path with the
+    supervisor's system PATH, so a venv's own `ninja` binary is invisible
+    and every JIT fails in 0.0 s (live-verified: ExLlamaV2 fell back to
+    the ~9 tok/s Triton linear; with ninja on PATH it compiles in ~12 s
+    and serves ~37 tok/s). Prepending `dirname(executable)` fixes any
+    venv interpreter without hardcoding paths. None means plain inherit
+    (the default interpreter needs nothing). Never double-prepends: the
+    env is rebuilt from `os.environ` on every start/restart.
+    """
+    if executable is None:
+        return None
+    bin_dir = os.path.dirname(os.path.abspath(executable))
+    system_path = os.environ.get("PATH", "")
+    if system_path.split(os.pathsep)[0] == bin_dir:
+        return dict(os.environ)
+    return {**os.environ, "PATH": bin_dir + os.pathsep + system_path}
+
+
 def failure(request_id: str, code: str, message: str, retryable: bool = True) -> WorkerResponse:
     return WorkerResponse(
         id=request_id,
@@ -172,6 +195,11 @@ class SubprocessWorker:
         # unified image's director venv via VOYAGE_DIRECTOR_PYTHON); None
         # keeps the supervisor's own interpreter.
         self._executable = executable or sys.executable
+        # Raw alternate path for spawn-env purposes (None-able): only a
+        # venv interpreter needs its bin dir on PATH (Stage C `_spawn_env`
+        # for JIT toolchains); default-interpreter workers inherit the
+        # supervisor env untouched so tool resolution never shifts.
+        self._alternate_executable = executable
         self._proc: subprocess.Popen[str] | None = None
         # Supervisor-side log handle, opened per start() (issue 058): kept
         # so stop() can close it instead of leaking one fd per restart.
@@ -206,6 +234,7 @@ class SubprocessWorker:
                 stderr=log_file,
                 text=True,
                 cwd=str(self._workdir),
+                env=_spawn_env(self._alternate_executable),
             )
             if self._init_op is not None:
                 self.call(self._init_op, dict(self._init_payload))

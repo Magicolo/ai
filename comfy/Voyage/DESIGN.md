@@ -8044,6 +8044,27 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   1730 passed + 1 foreign flake passing alone (augment model-pass
   selection, shared-box class), 11 skipped; tree format gate blocked by
   foreign `tests/test_run_sh.py` (untouched per §9).
+- Stage C done 2026-10-01 (AWQ kernels + gauge cadence): root cause of
+  the 0.0 s JIT failures was PATH, not toolchain — the director venv
+  ships a `ninja` binary (nvcc/gcc present) but workers spawn by
+  absolute interpreter path with the system PATH, so torch cpp_extension
+  never finds it and GPTQModel falls to `AwqGEMMTritonLinear` (~9
+  tok/s). `rpc._spawn_env` prepends `dirname(executable)` to the child
+  env (None = plain inherit, zero change for default workers); live
+  proof through the real `SubprocessWorker` spawn on cuda:1: ExLlamaV2
+  JIT compiled in 11 s, `selected -> AwqExllamaV2Linear`, 64 tokens in
+  1.7 s = 36.7 tok/s (~4x). JIT cache stays HOME-local (12 s per
+  container boot, once per run — no persistence wired, YAGNI). Gauges:
+  `_director_probe_blocked` also skips when the prefetch future is
+  done-but-None (60 s budget expired, worker still chewing — the boba
+  5 s/tail case; only a dict result proves the worker free);
+  `VoyageConfig.resource_gauge_interval_segments = 1` (positive
+  validator + TOML, TOML-only per YAGNI) thins sampling on long runs;
+  audio health gains `vram_free/total_gib` via never-raising
+  `_cuda_mem_info_gib` (it answered keyless before, hiding the timeout
+  attribution). Proof: `tests/test_stage_c.py` (11, TDD red-first);
+  ruff + format + mypy strict clean on all 5 touched files; full pytest
+  green except foreign in-flight media-split files (untouched per §9).
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 
