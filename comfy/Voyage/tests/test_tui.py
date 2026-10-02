@@ -45,7 +45,7 @@ def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def test_defaults_match_generate_effective_settings() -> None:
     state = GenerateFormState(style="x")
     assert state.backend == "ltxv"
-    assert state.director == "qwen"
+    assert state.director == "llama"
     assert state.quantization == "fp8"
     assert state.name == "voyage"
     assert state.duration == "5s"

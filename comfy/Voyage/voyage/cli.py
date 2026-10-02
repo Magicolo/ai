@@ -302,10 +302,10 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
     init.add_argument(
         "--director",
         choices=("qwen", "deterministic", "llama"),
-        default="qwen",
+        default="llama",
         help="director backend written into the run config "
-        "(default qwen; deterministic disables the LLM; "
-        "llama = loopback llama-server sidecar)",
+        "(default llama = loopback llama-server sidecar; "
+        "qwen = in-process AWQ; deterministic disables the LLM)",
     )
     init.add_argument(
         "--director-device",
@@ -569,9 +569,9 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     gen.add_argument(
         "--director",
-        default="qwen",
+        default="llama",
         choices=("qwen", "deterministic", "llama"),
-        help="director backend (default qwen)",
+        help="director backend (default llama)",
     )
     _add_generation_overrides(gen)
     _add_console_args(gen)

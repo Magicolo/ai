@@ -97,7 +97,8 @@ def test_required_specs_default_to_awq_decider() -> None:
     from voyage.models_ensure import required_specs
 
     specs = {item.spec for item in required_specs(_ltxv_config(), sfx_enabled=False)}
-    assert "director-qwen4b-awq" in specs
+    assert "director-qwen35-gguf" in specs
+    assert "director-qwen4b-awq" not in specs
     assert "director-qwen8b" not in specs
 
 
@@ -105,7 +106,7 @@ def test_required_specs_cpu_opt_out_keeps_8b() -> None:
     from voyage.config import resolve_config
     from voyage.models_ensure import required_specs
 
-    config = resolve_config(_ltxv_config(), director_device="cpu")
+    config = resolve_config(_ltxv_config(), director="qwen", director_device="cpu")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
     assert "director-qwen8b" in specs
     assert "director-qwen4b-awq" not in specs

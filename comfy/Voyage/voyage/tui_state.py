@@ -34,7 +34,7 @@ from voyage.cli_paths import _RESERVED_FOLDER_NAMES as _RESERVED_FOLDER_NAMES
 from voyage.cli_paths import is_flat_folder_name as _shared_flat_folder_name
 
 BACKENDS = ("ltxv", "causvid", "ltx25", "ltx23", "fake")
-DIRECTORS = ("qwen", "deterministic")
+DIRECTORS = ("qwen", "deterministic", "llama")
 QUANTIZATIONS = ("fp8", "bf16")
 
 
@@ -150,7 +150,7 @@ class GenerateFormState:
     force: bool = False
     skip_bad: bool = False
     draft: bool = False
-    director: str = "qwen"
+    director: str = "llama"
     blocks: str = ""
     take_seconds: str = ""
     quantization: str = "fp8"

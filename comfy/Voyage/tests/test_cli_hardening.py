@@ -229,10 +229,10 @@ def test_run_rejects_bogus_director(tmp_path: Path) -> None:
 
 
 def test_generate_parser_director_choices() -> None:
-    """Generate accepts qwen, rejects QWEN at parse time (073)."""
+    """Generate accepts llama/qwen, rejects QWEN at parse time (073)."""
     parser = build_parser()
     args = parser.parse_args(["generate", "--duration", "2s", "--style", _STYLE])
-    assert args.director == "qwen"
+    assert args.director == "llama"
     args = parser.parse_args(
         ["generate", "--duration", "2s", "--style", _STYLE, "--director", "qwen"]
     )

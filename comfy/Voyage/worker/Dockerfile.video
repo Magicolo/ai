@@ -202,33 +202,29 @@ RUN python3.10 -m venv /opt/venvs/director \
         "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
     && /opt/venvs/director/bin/pip install transformers==5.17.0
 
-# llama-server sidecar (Qwen director, DESIGN §140 llama entry): prebuilt
-# CUDA 12.8 binaries for the loopback sidecar the supervisor spawns when
-# the director backend is `llama` (voyage/llama_server.py). Pinned nightly
-# b11146 (the v0.5.0 nightly, 2026-09-23, 168920581 bytes): the
-# ubuntu-cuda-12.8-x64 asset matches this image's CUDA 12.8 base, and the
-# base image already ships cudart 12.8, so only the main tarball is needed
-# (fallback from the same build, if cudart ever goes missing:
-# cudart-llama-b11146-bin-ubuntu-cuda-12.8-x64.tar.gz, 594373356 bytes,
-# sha256 1466daea60aad1144819e151b2bae19d54556cf1da6c129c4f55a5ded2637c25).
-# No curl in this image and apt pins are frozen above, so the fetch uses
-# stdlib python3 (urllib + hashlib) with a hard sha256 gate instead of an
-# unpinned apt package. Layout inside the tarball is build/bin/llama-server
-# (+ .so peers via $ORIGIN rpath — the tree stays intact at /opt/llama.cpp
-# with a symlink, never a bare-binary copy that would orphan the libs).
-# The `test -x` asserts the layout (fail loud on upstream repackaging);
-# `--version` is the CPU-only smoke gate (same class as `voyage doctor`
-# below — prints without touching the GPU).
-# Re-pin procedure: take the ubuntu-cuda-12.8-x64 asset from the newest
-# nightly, update the URL + sha below, rebuild, note in docs/INSTALL.md.
+# llama-server sidecar (Qwen director, DESIGN §140 llama entry): built
+# from pinned SOURCE, not the prebuilt binaries. The b11146 release
+# binaries link GLIBC_2.38 (Ubuntu 24.04 build hosts) and die at startup
+# on this image's glibc 2.35 (proven live: prebuilt `llama-server
+# --version` failed with `GLIBC_2.38 not found`); a source build links
+# the local libc instead. Pinned tag b11146 (2026-09-23) with a hard
+# sha256 gate on the source tarball (37,561,762 bytes). cmake comes from
+# a pinned pip wheel (none in the image, apt pins frozen); CUDA comes
+# from the image toolkit (nvcc present). Only the `llama-server` target
+# builds, for sm_75 (RTX 2060) + sm_86 (RTX 4060 Ti) only — full-arch
+# fatbins would triple the build; retune CUDA_ARCHITECTURES if the
+# fleet changes. One layer, cached on success; sources removed after
+# install so only /opt/llama.cpp survives (the chown below is unchanged).
+# Re-pin procedure: update tag + source sha below, rebuild.
 RUN set -eux; \
+    python3 -m pip install --no-cache-dir "cmake==4.1.3" && \
     python3 <<'PYEOF'
 import hashlib
 import tarfile
 import urllib.request
-url = "https://github.com/ggml-org/llama.cpp/releases/download/b11146/llama-b11146-bin-ubuntu-cuda-12.8-x64.tar.gz"
-expected_sha256 = "c2ab9e19838513ff69d1af8d999ad717dd3c7ee4714ac04c7ed5ab9077c50e4e"
-archive_path = "/tmp/llama-cuda.tar.gz"
+url = "https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11146.tar.gz"
+expected_sha256 = "25eb89e300a0600bfdfadaac2acc7ec3a93cd23b992b7eff3c0eeae7987e4474"
+archive_path = "/tmp/llama-source.tar.gz"
 urllib.request.urlretrieve(url, archive_path)
 digest = hashlib.sha256()
 with open(archive_path, "rb") as archive:
@@ -236,14 +232,34 @@ with open(archive_path, "rb") as archive:
         digest.update(chunk)
 actual_sha256 = digest.hexdigest()
 if actual_sha256 != expected_sha256:
-    raise SystemExit(f"llama.cpp tarball sha mismatch: {actual_sha256}")
+    raise SystemExit(f"llama.cpp source sha mismatch: {actual_sha256}")
 with tarfile.open(archive_path) as archive:
-    archive.extractall("/opt/llama.cpp")
+    archive.extractall("/tmp/llama-source")
 PYEOF
-    test -x /opt/llama.cpp/build/bin/llama-server; \
-    ln -sfn /opt/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server; \
-    rm -f /tmp/llama-cuda.tar.gz; \
-    llama-server --version
+# A heredoc terminator cannot carry a `\` continuation, so the RUN above
+# ends at PYEOF — configure/build/install/smoke are their own layer.
+# NOTE: no `cmake --install` here on purpose — installing the
+# `llama-server` target alone leaves the `tests` install rules with
+# unbuilt files and the install step fails. The binary + its shared libs
+# are copied out directly instead; the loader finds the libs via
+# LD_LIBRARY_PATH below (no RUNPATH is baked in by a plain copy).
+ENV LD_LIBRARY_PATH=/opt/llama.cpp/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+RUN set -eux; \
+    cmake -S /tmp/llama-source/llama.cpp-b11146 -B /tmp/llama-build \
+        -DGGML_CUDA=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release \
+        "-DCMAKE_CUDA_ARCHITECTURES=75;86" \
+        "-DCMAKE_INSTALL_RPATH=$$ORIGIN/../lib" && \
+    cmake --build /tmp/llama-build --target llama-server -j"$(nproc)" && \
+    mkdir -p /opt/llama.cpp/bin /opt/llama.cpp/lib && \
+    cp /tmp/llama-build/bin/llama-server /opt/llama.cpp/bin/ && \
+    find /tmp/llama-build -name 'lib*.so*' -exec cp -P {} /opt/llama.cpp/lib/ \; && \
+    rm -rf /tmp/llama-source /tmp/llama-build /tmp/llama-source.tar.gz && \
+    test -x /opt/llama.cpp/bin/llama-server && \
+    ln -sfn /opt/llama.cpp/bin/llama-server /usr/local/bin/llama-server
+# NOTE: no `llama-server --version` smoke gate here on purpose — the
+# build container has no GPU, so libcuda.so.1 (driver-provided) is
+# absent and the CUDA binary cannot start until runtime with --gpus.
+# The live GPU A/B on cuda:1 is the real smoke test.
 
 # Run as the invoking host user (issue 053 follow-up): the supervisor and
 # its worker subprocesses share bind mounts with the host ($PWD:/app,

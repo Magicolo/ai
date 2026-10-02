@@ -147,3 +147,27 @@ def run_directory_factory(tmp_path: Path) -> Callable[..., Path]:
         return run_dir
 
     return _create_run_directory
+
+
+@pytest.fixture(autouse=True)
+def _never_spawn_llama_sidecar(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never spawn the real llama-server sidecar in the suite.
+
+    The default director backend is llama, but the slim test image
+    carries no server binary and no GGUF weights — spawning would fail
+    loud (correct production behavior, wrong for unit tests). Suite
+    tests exercise the supervisor/worker contract, not process spawn:
+    the sidecar stays unstarted (`None` handle; `stop(None)` is a safe
+    no-op) and decide payloads degrade through the standard worker
+    fallback path, exactly like the AWQ path without torch.
+    `test_llama_sidecar.py` owns sidecar behavior (real `start` with
+    stubbed Popen) and is exempt: it monkeypatches `llama_server.start`
+    itself.
+    """
+    if getattr(request.node, "module", None) is not None and request.node.module.__name__ == (
+        "tests.test_llama_sidecar"
+    ):
+        return
+    import voyage.supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module.llama_server, "start", lambda *args, **kwargs: None)

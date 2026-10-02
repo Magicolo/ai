@@ -418,11 +418,19 @@ def test_required_specs_selects_gguf_for_llama_backend() -> None:
 
 
 def test_required_specs_keeps_awq_for_qwen_backend() -> None:
-    """Control: the default qwen backend still ensures the AWQ decider."""
+    """Control: the explicit qwen backend still ensures the AWQ decider."""
     base = ProjectConfig(style="llama sidecar probe")
-    specs = _spec_names(base)
+    specs = _spec_names(resolve_config(base, director="qwen"))
     assert "director-qwen4b-awq" in specs
     assert "director-qwen35-gguf" not in specs
+
+
+def test_required_specs_defaults_to_gguf_for_llama_backend() -> None:
+    """Default backend (llama) ensures the sidecar GGUF, not AWQ."""
+    base = ProjectConfig(style="llama sidecar probe")
+    specs = _spec_names(base)
+    assert "director-qwen35-gguf" in specs
+    assert "director-qwen4b-awq" not in specs
 
 
 def test_required_specs_has_no_director_spec_for_deterministic() -> None:
@@ -441,7 +449,7 @@ def test_required_specs_has_no_director_spec_for_deterministic() -> None:
 
 def test_director_config_accepts_llama_with_default_endpoint() -> None:
     """llama joins the backend vocabulary; the endpoint defaults loopback."""
-    assert DirectorConfig().backend == "qwen"
+    assert DirectorConfig().backend == "llama"
     config = DirectorConfig(backend="llama")
     assert config.backend == "llama"
     assert config.llama_endpoint == DEFAULT_LLAMA_ENDPOINT
@@ -571,7 +579,7 @@ def test_start_workers_starts_sidecar_before_director(
 def test_start_workers_skips_sidecar_for_qwen_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Control: default backends never touch the sidecar binary."""
+    """Control: the explicit qwen backend never touches the sidecar binary."""
     run_dir = tmp_path / "run"
     supervisor = _supervisor_with_backend(run_dir, "qwen")
 

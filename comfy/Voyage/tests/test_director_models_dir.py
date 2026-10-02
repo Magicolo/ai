@@ -351,4 +351,5 @@ def test_supervisor_passes_models_dir_to_director_worker(tmp_path: Path) -> None
     assert supervisor._director._init_payload == {
         "models_dir": config.video.models_dir,
         "device": config.director.device,
+        "llama_endpoint": config.director.llama_endpoint,
     }

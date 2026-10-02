@@ -521,7 +521,12 @@ DEFAULT_LLAMA_ENDPOINT = "http://127.0.0.1:8080"
 
 
 class DirectorConfig(BaseModel):
-    backend: DirectorBackendName = "qwen"
+    # Default decider (A/B-proven 2026-10-01: 10.7s/directive at 67-70
+    # tok/s vs 23.4s AWQ): the loopback llama-server sidecar serving the
+    # Qwen3.5 GGUF. "qwen" keeps the in-process AWQ path (explicit opt-in
+    # for single-GPU/CI boxes without a second GPU); the worker routes on
+    # endpoint presence, so the wire backend stays `qwen` either way.
+    backend: DirectorBackendName = "llama"
     model_id: str = "Qwen/Qwen3-8B"
     # Decider placement: the unified worker image runs the Qwen decider on
     # cuda:1 (second GPU) via a 4-bit AWQ model; "cpu" keeps the legacy bf16
@@ -748,7 +753,7 @@ def default_config_toml(
     style: str,
     seed: int,
     video_backend: VideoBackendName = "ltxv",
-    director_backend: str = "qwen",
+    director_backend: str = "llama",
     director_device: str = "cuda:1",
 ) -> str:
     preset = _video_preset(video_backend)

@@ -236,10 +236,10 @@ def test_build_final_audio_falls_back_without_takes(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_generate_defaults_to_qwen_director_with_offline_fallback(tmp_path: Path) -> None:
-    """`generate` without --director resolves qwen; missing weights (this
-    CPU-only image) degrade to the deterministic fallback via the
-    offline-first load — the run still validates and finalizes."""
+def test_generate_defaults_to_llama_director_with_offline_fallback(tmp_path: Path) -> None:
+    """`generate` without --director resolves llama; the unstarted sidecar
+    (this CPU-only image) degrades to the deterministic fallback via the
+    worker §51 chain — the run still validates and finalizes."""
     from voyage.cli import main
 
     run_dir = tmp_path / "run"
@@ -265,7 +265,7 @@ def test_generate_defaults_to_qwen_director_with_offline_fallback(tmp_path: Path
     from voyage.config import load_config as _load
 
     config, _ = _load(run_dir / paths.CONFIG_FILENAME)
-    assert config.director.backend == "qwen"  # stored config matches the qwen default
+    assert config.director.backend == "llama"  # stored config matches the llama default
     state = read_state(run_dir)
     assert state.committed_segments == 1
 

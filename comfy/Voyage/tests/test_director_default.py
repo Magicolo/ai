@@ -1,10 +1,11 @@
-"""Qwen-by-default: every generation path uses the qwen director unless
-explicitly disabled (user request 2026-09-29; the poulah run froze for
-31 segments on the deterministic default with zero prompt evolution).
+"""Llama-by-default: every generation path uses the llama-server sidecar
+director unless explicitly disabled (A/B-proven 2026-10-01: 10.7s/directive
+at 67-70 tok/s vs 23.4s AWQ).
 
-Deterministic stays available as an explicit opt-out
-(`--director deterministic` / `backend = \"deterministic\"`), never as
-the silent default.
+The in-process AWQ path stays available as an explicit opt-in
+(`--director qwen` / `backend = "qwen"`), deterministic stays the
+LLM-off opt-out (`--director deterministic` / `backend =
+"deterministic"`), never as the silent default.
 """
 
 from __future__ import annotations
@@ -18,13 +19,23 @@ from voyage.config import DirectorConfig, default_config_toml, load_config
 from voyage.workers import director as director_worker
 
 
-def test_director_config_defaults_to_qwen() -> None:
-    assert DirectorConfig().backend == "qwen"
+def test_director_config_defaults_to_llama() -> None:
+    assert DirectorConfig().backend == "llama"
 
 
-def test_default_toml_writes_qwen_director(tmp_path: Path) -> None:
+def test_default_toml_writes_llama_director(tmp_path: Path) -> None:
     path = tmp_path / "voyage.toml"
-    path.write_text(default_config_toml("qwen-default", "pastel neon", 7), encoding="utf-8")
+    path.write_text(default_config_toml("llama-default", "pastel neon", 7), encoding="utf-8")
+    config, _ = load_config(path)
+    assert config.director.backend == "llama"
+
+
+def test_default_toml_allows_explicit_qwen_opt_in(tmp_path: Path) -> None:
+    path = tmp_path / "voyage.toml"
+    path.write_text(
+        default_config_toml("llama-default", "pastel neon", 7, director_backend="qwen"),
+        encoding="utf-8",
+    )
     config, _ = load_config(path)
     assert config.director.backend == "qwen"
 
@@ -50,17 +61,17 @@ def _parse(parser_adder: Callable[..., None], args: list[str]) -> argparse.Names
     return parser.parse_args(args)
 
 
-def test_init_parser_defaults_to_qwen() -> None:
+def test_init_parser_defaults_to_llama() -> None:
     args = _parse(_add_init_parser, ["init", "--output", "out", "--style", "calm"])
-    assert args.director == "qwen"
+    assert args.director == "llama"
 
 
-def test_generate_parser_defaults_to_qwen() -> None:
+def test_generate_parser_defaults_to_llama() -> None:
     args = _parse(
         _add_generate_parser,
         ["generate", "--duration", "2s", "--style", "calm"],
     )
-    assert args.director == "qwen"
+    assert args.director == "llama"
 
 
 def test_run_parser_leaves_stored_config_alone() -> None:

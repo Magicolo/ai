@@ -8098,6 +8098,23 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
   venv; full suite 1880 passed (1 pre-existing citation gate).
   Open: image rebuild + live GPU A/B (needs GPU signal), then commit
   (needs per-commit approval).
+- Llama-by-default done 2026-10-02 (A/B-proven: sidecar + Qwen3.5
+  Q4_K_M GGUF on cuda:1 gives 10.7s/11.0s per directive at 67-70
+  tok/s vs 23.4s AWQ ExLlamaV2 — ~2.2x wall-clock with ~40% more
+  tokens; clean first-try JSON both attempts, no thinking traces,
+  no --jinja trap): `DirectorConfig.backend`, `default_config_toml`,
+  `init`/`generate` parsers, `cli_run_ops` and TUI form all default
+  to `llama` (`qwen` AWQ stays an explicit opt-in, `deterministic`
+  the LLM-off opt-out; wire backend still `qwen`); TUI `DIRECTORS`
+  gains `llama` so stored configs validate; suite-wide
+  `conftest` no-spawn fixture (exempting `test_llama_sidecar.py`,
+  which owns spawn behavior) keeps offline fake-stack tests green
+  via the §51 fallback. Image saga: prebuilt b11146 links
+  GLIBC_2.38 vs image 2.35 (no 2026 binary can run) + build hosts
+  lack libcuda (no build-time `--version` gate possible) — the
+  Dockerfile block is now a pinned-source build (b11146 tarball,
+  cmake pip wheel, GGML_CUDA=ON, arches 75;86, `test -x` +
+  symlink only; live GPU run is the smoke test).
 
 ## Batch 7 (2026-09-30) — structure/toolchain/docs as-builts (ambiguous-header notes folded here per append-only rule)
 

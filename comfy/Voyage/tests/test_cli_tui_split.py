@@ -56,7 +56,7 @@ def test_generate_parser_defaults() -> None:
     assert args.func is cli.cmd_generate
     assert args.backend == "ltxv"
     assert args.duration == 5.0
-    assert args.director == "qwen"
+    assert args.director == "llama"
 
 
 def test_status_pause_resume_stop_validate_parsers() -> None:

@@ -82,7 +82,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
     (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
     backend: VideoBackendName = cast(VideoBackendName, backend_value)
-    director_backend: str = getattr(args, "director", None) or "qwen"
+    director_backend: str = getattr(args, "director", None) or "llama"
     director_device: str = getattr(args, "director_device", None) or "cuda:1"
     config_text = default_config_toml(
         run_id,
