@@ -23,13 +23,13 @@ from unittest.mock import patch
 import pytest
 
 from voyage import augment_sidecar as sidecar
-from voyage.augment_finalize import plan_dir_for_segment, run_durable_model_pass
+from voyage.augment_finalize import run_durable_model_pass
 from voyage.augment_seam import (
     render_seam_once,
     seam_endpoints,
     seam_plan_dir,
 )
-from voyage.augment_sidecar import ChunkKey
+from voyage.augment_sidecar import ChunkKey, plan_dir_for_segment
 
 
 def _make_segment(
@@ -382,3 +382,133 @@ def test_durable_pass_skips_seam_at_multiplier_one(tmp_path: Path) -> None:
         )
     (concat_order,) = calls["concat"]
     assert len(concat_order) == 2  # hard concat of two segments, no seam
+
+
+def test_rerendered_side_never_reuses_stale_seam(tmp_path: Path) -> None:
+    """Characterization: seam dirs are re-derived from current source keys.
+
+    When B is re-rendered (new video.mp4 checksum), the pollers produce a
+    new plan dir for B and the next finalize must render the seam under the
+    NEW joint dir H(A)|H(B'). The stale joint dir H(A)|H(B) still exists on
+    disk with ledgered records, but nothing may reference it: the drain
+    loop re-derives every seam dir from the current adjacent source keys,
+    so the stale dir is an orphan, never consumed.
+    """
+    first = _make_segment(tmp_path, "000000", frames=8, checksum="abc123")
+    second = _make_segment(tmp_path, "000001", frames=8, checksum="def456")
+    work = tmp_path / "work"
+    work.mkdir()
+    film = work / "film.safetensors"
+    film.write_bytes(b"film-weights")
+    esrgan = work / "esrgan.pth"
+    esrgan.write_bytes(b"esrgan-weights")
+    weights = SimpleNamespace(film=film, realesrgan=esrgan)
+    plan_a = plan_dir_for_segment(
+        tmp_path,
+        source_key="abc123",
+        weights_key="wkey",
+        out_width=1216,
+        out_height=704,
+        out_fps=24,
+        upscale_factor=2,
+        crf=15,
+        preset="veryfast",
+    )
+    plan_b = plan_dir_for_segment(
+        tmp_path,
+        source_key="def456",
+        weights_key="wkey",
+        out_width=1216,
+        out_height=704,
+        out_fps=24,
+        upscale_factor=2,
+        crf=15,
+        preset="veryfast",
+    )
+    _make_interp_plan(plan_a, tmp_path, {0: 7, 1: 7}, source_key="abc123")
+    _make_interp_plan(plan_b, tmp_path, {0: 7}, source_key="def456")
+    calls: dict[str, list[Any]] = {"drain": [], "concat": [], "seam": []}
+
+    def stub_poll(run_dir: Path, **kwargs):  # type: ignore[no-untyped-def]
+        if "multiplier" in kwargs:
+            return SimpleNamespace(chunks_done=0, chunks_waiting=0)
+        return SimpleNamespace(chunks_done=0)
+
+    def stub_drain(plan_dir: Path, **kwargs):  # type: ignore[no-untyped-def]
+        calls["drain"].append(plan_dir)
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        intermediate = plan_dir / "model_intermediate.mp4"
+        intermediate.write_bytes(b"fake-intermediate")
+        return SimpleNamespace(intermediate_mp4=intermediate, chunks_drained=1)
+
+    def stub_seam(  # type: ignore[no-untyped-def]
+        before_png: Path, after_png: Path, dest: Path, multiplier: int, **kwargs
+    ) -> list[Path]:
+        calls["seam"].append((before_png, after_png, multiplier))
+        dest.mkdir(parents=True, exist_ok=True)
+        frame = dest / "frame_000000.png"
+        frame.write_bytes(b"mid")
+        return [frame]
+
+    def stub_concat(chunks: list[Path], dest: Path) -> Path:
+        calls["concat"].append(list(chunks))
+        dest.write_bytes(b"".join(chunk.read_bytes() for chunk in chunks))
+        return dest
+
+    def run_pass() -> list[Path]:
+        with patch("voyage.augment_finalize.weights_key_for", return_value="wkey"):
+            run_durable_model_pass(
+                tmp_path,
+                [first, second],
+                out_width=1216,
+                out_height=704,
+                source_fps=24.0,
+                weights=weights,
+                multiplier=2,
+                chunk_frames=4,
+                device="cuda:1",
+                work_dir=work,
+                upscale_poll_fn=stub_poll,
+                interp_poll_fn=stub_poll,
+                drain_fn=stub_drain,
+                concat_fn=stub_concat,
+                seam_interp_fn=stub_seam,
+            )
+        (concat_order,) = calls["concat"]
+        typed_order: list[Path] = list(concat_order)
+        return typed_order
+
+    stale_seam_dir = seam_plan_dir(tmp_path, key_a="abc123", key_b="def456", **_seam_kwargs())
+    order_one = run_pass()
+    assert calls["seam"] != []  # first pass renders the seam once
+    assert stale_seam_dir / "model_intermediate.mp4" in order_one
+
+    # Re-render B: new checksum, new plan dir, pollers re-ran interp there.
+    _make_segment(tmp_path, "000001", frames=8, checksum="xyz789")
+    plan_b_new = plan_dir_for_segment(
+        tmp_path,
+        source_key="xyz789",
+        weights_key="wkey",
+        out_width=1216,
+        out_height=704,
+        out_fps=24,
+        upscale_factor=2,
+        crf=15,
+        preset="veryfast",
+    )
+    assert plan_b_new != plan_b
+    _make_interp_plan(plan_b_new, tmp_path, {0: 7}, source_key="xyz789")
+    fresh_seam_dir = seam_plan_dir(tmp_path, key_a="abc123", key_b="xyz789", **_seam_kwargs())
+    assert fresh_seam_dir != stale_seam_dir
+
+    calls["drain"].clear()
+    calls["concat"].clear()
+    calls["seam"].clear()
+    order_two = run_pass()
+    # The new joint dir renders exactly once; the stale dir is never touched.
+    assert len(calls["seam"]) == 1
+    assert stale_seam_dir not in calls["drain"]
+    assert fresh_seam_dir in calls["drain"]
+    assert fresh_seam_dir / "model_intermediate.mp4" in order_two
+    assert stale_seam_dir / "model_intermediate.mp4" not in order_two
+    assert len(order_two) == 3  # [A, fresh seam, B'] — no duplication

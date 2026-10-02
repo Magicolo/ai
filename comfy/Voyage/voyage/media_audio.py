@@ -65,6 +65,18 @@ MIN_SLICE_PIECE_SECONDS = 0.05
 #: while capping ffmpeg spawns when the ledger degrades.
 MAX_SLICES_PER_WINDOW = 128
 
+#: |stretch − 1| at or below which the final mix skips retiming, ratio.
+#: Stretch factors arrive as float math (source_fps * multiplier / out_fps),
+#: so an exact `== 1.0` check would atempo a 1.0000000001x mix for zero
+#: benefit. Mirrors `media.SLOWMO_STRETCH_TOLERANCE` (defined here because
+#: `media` imports this module — a back-import would cycle).
+STRETCH_IDENTITY_TOLERANCE = 1e-9
+
+#: Legal band of one ffmpeg `atempo` filter. Ratios outside split into
+#: halving/doubling stages with the remainder last (see `_atempo_stages`).
+_ATEMPO_MIN_TEMPO = 0.5
+_ATEMPO_MAX_TEMPO = 2.0
+
 #: Tolerance when estimating frame counts from duration, frames (issue 096).
 #: Container durations round to milliseconds, so a 29-frame @32fps file can
 #: probe as 28.99 estimated frames — one frame of slack keeps the
@@ -587,6 +599,57 @@ def _concat_fallback_audio(inputs: list[Path], dest: Path) -> Path:
     return dest
 
 
+def _atempo_stages(tempo: float) -> list[float]:
+    """Split a tempo ratio into ffmpeg-atempo stages within the legal band.
+
+    One `atempo` filter only accepts the band below, so slow-mo factors
+    outside it (stretch 4x → tempo 0.25 splits into halves; tempo 2.0 is
+    one stage) split into halving/doubling stages with the remainder
+    last. Raises on non-positive tempo (caller bug — validated beside
+    `stretch`).
+    """
+    if not tempo > 0:
+        raise MediaError(f"atempo tempo must be positive (got {tempo})")
+    stages: list[float] = []
+    while tempo < _ATEMPO_MIN_TEMPO:
+        stages.append(_ATEMPO_MIN_TEMPO)
+        tempo *= 2.0
+    while tempo > _ATEMPO_MAX_TEMPO:
+        stages.append(_ATEMPO_MAX_TEMPO)
+        tempo /= 2.0
+    stages.append(tempo)
+    return stages
+
+
+def _stretched_fallback_audio(inputs: list[Path], dest: Path, stretch: float) -> Path:
+    """Concat fallback retimed to the stretched (slow-mo) timeline.
+
+    Joint backends (ltx25/ltx23) commit worker audio directly — no takes
+    ledger — so the finalize mix is this concat, and under slow motion it
+    must cover `stretch` times the source duration. `atempo=1/stretch`
+    slows the mix onto the stretched video (pitch drops with the
+    slowdown — the standard slow-mo tradeoff, sync preserved). The SFX
+    bed needs no parallel change: its windows derive from the shipped
+    (already stretched) duration.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tempo = 1.0 / stretch
+    chain = "".join(f"atempo={stage:.6f}," for stage in _atempo_stages(tempo))
+    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    for source in inputs:
+        argv += ["-i", str(source)]
+    heads = "".join(f"[{i}:a]" for i in range(len(inputs)))
+    if len(inputs) == 1:
+        filter_graph = f"{heads}{chain[:-1]}[aout]"
+    else:
+        filter_graph = f"{heads}concat=n={len(inputs)}:v=0:a=1,{chain[:-1]}[aout]"
+    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
+    proc = run_capture(argv)
+    if proc.returncode != 0:
+        raise MediaError(f"final audio stretched concat failed: {proc.stderr[-2000:]}")
+    return dest
+
+
 def _audio_duration_seconds(path: Path) -> float:
     """Probed audio duration; fail loud on unreadable/empty files."""
     duration = float(probe(path).get("format", {}).get("duration", 0.0) or 0.0)
@@ -818,18 +881,25 @@ def build_final_audio(
     single-segment shortcut is bypassed and every fallback raises
     `MediaError` instead of shipping silence — takes must have rendered
     via `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
-    divides the timeline fps so the mix covers the stretched video.
+    divides the timeline fps so the mix covers the stretched video; the
+    joint-backend fallback paths (no takes ledger — ltx25/ltx23 commit
+    worker audio directly) retime via `atempo` instead of shipping the
+    1x mix under stretched video.
     """
     from voyage.audio.planner import AudioPlanner, load_takes
 
     if stretch <= 0:
         raise MediaError(f"final audio stretch must be positive (got {stretch})")
     dest = tmpdir / "final_audio.wav"
+    retime = abs(stretch - 1.0) > STRETCH_IDENTITY_TOLERANCE
 
     def _fallback_or_raise(reason: str) -> Path:
         if deferred:
             raise MediaError(f"deferred final audio has no rendered takes: {reason}")
-        return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+        inputs = [s / "audio.wav" for s in usable]
+        if retime:
+            return _stretched_fallback_audio(inputs, dest, stretch)
+        return _concat_fallback_audio(inputs, dest)
 
     def _convert_window_to_dest(window: Path, label: str) -> Path:
         proc = run_capture(
@@ -850,6 +920,8 @@ def build_final_audio(
         return dest
 
     if len(usable) == 1 and not deferred:
+        if retime:
+            return _stretched_fallback_audio([usable[0] / "audio.wav"], dest, stretch)
         return _convert_window_to_dest(usable[0] / "audio.wav", "copy")
     starts, ends, timeline = _segment_timeline(usable, fps / stretch)
     durations = [end - start for start, end in zip(starts, ends, strict=True)]
