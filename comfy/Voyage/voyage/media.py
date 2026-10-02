@@ -1093,9 +1093,47 @@ def finalize_run(
             if proc.returncode != 0:
                 raise MediaError(f"model-pass final encode failed: {proc.stderr[-2000:]}")
         elif native:
-            concat_list = write_concat_list(
-                [segment / "video.mp4" for segment in usable], tmpdir / "concat.txt"
+            from voyage.augment_morph import (
+                assemble_morphed_timeline,
+                morph_backend_for_run,
+                resolve_morph_device,
             )
+
+            # Always-on morph-cut leg (ltx25/ltx23): count-preserving 2+2
+            # FILM joints replace the hard cuts between committed segments.
+            # Frame total is unchanged, so the audio timeline below needs no
+            # work. Any missing precondition (foreign backend, single
+            # segment, no FILM leg) keeps the plain stream-copy concat.
+            morph_video: Path | None = None
+            if (
+                morph_backend_for_run(run_dir) is not None
+                and len(usable) > 1
+                and resolved_weights is not None
+                and resolved_weights.film is not None
+            ):
+                morph_start = time.monotonic()
+                morph_video = assemble_morphed_timeline(
+                    [segment / "video.mp4" for segment in usable],
+                    joint_root=run_dir / "augment" / "morph_native",
+                    fps=int(round(source_fps)),
+                    crf=effective_crf,
+                    preset=effective_preset,
+                    pix_fmt="yuv420p",
+                    interp_fn=None,
+                    weights=resolved_weights.film,
+                    device=resolve_morph_device(tensor_devices[0] if tensor_devices else None),
+                )
+                model_pass_timings.setdefault("morph_s", 0.0)
+                model_pass_timings.setdefault("morphs_done", 0.0)
+                model_pass_timings["morph_s"] += time.monotonic() - morph_start
+                model_pass_timings["morphs_done"] += float(len(usable) - 1)
+            if morph_video is not None:
+                video_inputs = ["-i", str(morph_video)]
+            else:
+                concat_list = write_concat_list(
+                    [segment / "video.mp4" for segment in usable], tmpdir / "concat.txt"
+                )
+                video_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
             final_start = time.monotonic()
             proc = run_capture(
                 [
@@ -1103,12 +1141,7 @@ def finalize_run(
                     "-hide_banner",
                     "-nostdin",
                     "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_list),
+                    *video_inputs,
                     "-i",
                     str(final_audio),
                     "-map",

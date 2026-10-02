@@ -195,6 +195,8 @@ def run_durable_model_pass(
     drain_fn: Callable[..., Any] | None = None,
     concat_fn: Callable[[list[Path], Path], Path] | None = None,
     seam_interp_fn: Callable[..., Any] | None = None,
+    morph_joints: bool = False,
+    morph_interp_fn: Callable[..., Any] | None = None,
     timings: dict[str, float] | None = None,
 ) -> tuple[Path, int]:
     """Poll, drain, and concat the durable sidecar path (issue: independent workers).
@@ -220,7 +222,16 @@ def run_durable_model_pass(
     A's last and B's first interpolated frames, interleaved as
     [A, seam, B] in the final concat — no hard cuts, no dropped or
     duplicated endpoints. `multiplier=1` has zero mids and skips seams.
+
+    Morph-cut joints (`morph_joints=True`, ltx25/ltx23): replaces the
+    mids-insert seams with count-preserving morph-cuts — per joint,
+    `A[-2:]+B[:2]` are replaced by 4 FILM bridge frames morphed between
+    anchors `A[-3]` and `B[+2]` (see `voyage.augment_morph`). Frame total
+    is unchanged so audio needs no work; `seam_interp_fn` is never called
+    in this mode. `morph_interp_fn` defaults to the resident FILM leg.
     """
+    if not isinstance(morph_joints, bool):
+        raise TypeError(f"morph_joints must be a bool (got {type(morph_joints).__name__})")
     run_dir = _require_run_dir(run_dir)
     segments = _require_usable(usable)
     out_width = _require_box("out_width", out_width)
@@ -244,6 +255,8 @@ def run_durable_model_pass(
             "chunks_drained",
             "seam_s",
             "seams_done",
+            "morph_s",
+            "morphs_done",
         ):
             timings.setdefault(key, 0.0)
     weights_key = weights_key_for(weights)
@@ -300,7 +313,7 @@ def run_durable_model_pass(
             crf=crf,
             preset=preset,
         )
-        if previous is not None and multiplier > 1:
+        if previous is not None and multiplier > 1 and not morph_joints:
             prev_key, prev_plan = previous
             seam_dir = seam_plan_dir(
                 run_dir,
@@ -358,6 +371,28 @@ def run_durable_model_pass(
         previous = (source.source_key, plan_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     final = work_dir / FINAL_INTERMEDIATE_FILENAME
+    if morph_joints:
+        from voyage.augment_morph import assemble_morphed_timeline
+
+        morph_start = time.monotonic()
+        final = assemble_morphed_timeline(
+            intermediates,
+            joint_root=run_dir / "augment" / "morph_joints",
+            fps=int(round(source_fps * multiplier)),
+            crf=crf,
+            preset=preset,
+            pix_fmt="yuv420p",
+            interp_fn=morph_interp_fn,
+            weights=weights.film,
+            device=device,
+            concat_fn=concat_fn,
+        )
+        if timings is not None:
+            timings["morph_s"] += time.monotonic() - morph_start
+            timings["morphs_done"] += float(len(intermediates) - 1)
+        if not final.exists() or final.stat().st_size == 0:
+            raise MediaError(f"durable morph pass produced empty output {final}")
+        return (final, round(source_fps * multiplier))
     concat_start = time.monotonic()
     concat_fn(intermediates, final)
     if timings is not None:
