@@ -328,9 +328,10 @@ class FinalizeOptions:
     quality (defaults crf 15 + veryfast match the validated Comfy
     `video_export.json` recipe and `augment.ffmpeg_encode_chunk`).
 
-    Model-pass field (`use_model_pass`, issue 166): opt-in Real-ESRGAN +
-    FILM pass when provisioned (default False — ffmpeg floors only; absent
-    legs fall back to the same vf path, so off == on-absent byte-for-byte).
+    Model-pass field (`use_model_pass`, issue 166): Real-ESRGAN +
+    FILM pass when provisioned (default True — DESIGN §140 GPU defaults;
+    absent legs fall back to the same vf path, so off == on-absent
+    byte-for-byte).
     """
 
     skip_bad: bool = False
@@ -344,7 +345,7 @@ class FinalizeOptions:
     min_height: int = 720
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
-    use_model_pass: bool = False
+    use_model_pass: bool = True
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -461,7 +462,7 @@ def resolve_finalize_settings(
             min_height=AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
             crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
             preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
-            use_model_pass=False if use_model_pass is None else use_model_pass,
+            use_model_pass=True if use_model_pass is None else use_model_pass,
         )
     else:
         settings = options
@@ -521,6 +522,51 @@ def _record_final_geometry(
     except (OSError, ValueError):
         return False
     return True
+
+
+def committed_usable_segments(run_dir: Path, skip_bad: bool) -> list[Path]:
+    """Committed segment dirs in order, triaged per §56 steps 4-6 (issues 138/188).
+
+    Shared by `finalize_run` and the parallel finalize path (DESIGN §140
+    GPU defaults): numbering gaps raise unless `skip_bad` (then the first
+    gap warns and stops the scan), and every segment passes
+    `_check_segment_committed` (failures raise, or print a loud skip line
+    under `skip_bad`). An empty usable set raises either way.
+    """
+    segments_root = run_dir / paths.SEGMENTS_DIRNAME
+    segment_dirs = (
+        sorted(p for p in segments_root.iterdir() if p.is_dir()) if segments_root.exists() else []
+    )
+    committed = [d for d in segment_dirs if (d / paths.DONE_MARKER).exists()]
+    if not committed:
+        raise MediaError(f"no committed segments in {run_dir}")
+    if skip_bad:
+        for position, segment in enumerate(committed):
+            if segment.name != f"{position:06d}":
+                print(
+                    "finalize: skipping segment numbering gap: "
+                    f"expected {position:06d}, found {segment.name}"
+                )
+                break
+    else:
+        for position, segment in enumerate(committed):
+            if segment.name != f"{position:06d}":
+                raise MediaError(
+                    f"segment numbering gap: expected {position:06d}, found {segment.name}"
+                )
+    usable: list[Path] = []
+    for segment in committed:
+        try:
+            _check_segment_committed(segment)
+        except MediaError as exc:
+            if not skip_bad:
+                raise
+            print(f"finalize: skipping {segment.name} ({exc})")
+            continue
+        usable.append(segment)
+    if not usable:
+        raise MediaError(f"no usable segments in {run_dir}")
+    return usable
 
 
 def finalize_run(
@@ -643,45 +689,12 @@ def finalize_run(
         model_selected = model_pass_active(effective_use_model_pass, resolved_weights)
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
-    segments_root = run_dir / paths.SEGMENTS_DIRNAME
-    segment_dirs = (
-        sorted(p for p in segments_root.iterdir() if p.is_dir()) if segments_root.exists() else []
-    )
-    committed = [d for d in segment_dirs if (d / paths.DONE_MARKER).exists()]
-    if not committed:
-        raise MediaError(f"no committed segments in {run_dir}")
-
     # §56 steps 4-6 per segment, before any encoding work. skip_bad is
     # input triage (issues 138/188): missing artifacts fold into the same
     # skippable loop as checksum/metrics/alignment failures, and numbering
     # gaps warn instead of vanishing silently — while the post-assembly
     # validate_video below stays strict under both settings.
-    if settings.skip_bad:
-        for position, segment in enumerate(committed):
-            if segment.name != f"{position:06d}":
-                print(
-                    "finalize: skipping segment numbering gap: "
-                    f"expected {position:06d}, found {segment.name}"
-                )
-                break
-    else:
-        for position, segment in enumerate(committed):
-            if segment.name != f"{position:06d}":
-                raise MediaError(
-                    f"segment numbering gap: expected {position:06d}, found {segment.name}"
-                )
-    usable: list[Path] = []
-    for segment in committed:
-        try:
-            _check_segment_committed(segment)
-        except MediaError as exc:
-            if not settings.skip_bad:
-                raise
-            print(f"finalize: skipping {segment.name} ({exc})")
-            continue
-        usable.append(segment)
-    if not usable:
-        raise MediaError(f"no usable segments in {run_dir}")
+    usable = committed_usable_segments(run_dir, settings.skip_bad)
 
     # Presentation box/fps via the pure augment plan (Track B): sources
     # below the floors (CausVid 16fps, sub-720p natives) are lifted with
@@ -732,9 +745,13 @@ def finalize_run(
         # already interpolated). Absent/off keeps the ffmpeg paths below.
         tensor_intermediate: Path | None = None
         if model_selected and resolved_weights is not None and source_fps > 0:
-            from voyage.augment import augment_devices, run_finalize_model_pass
+            from voyage.augment import augment_devices, model_pass_devices, run_finalize_model_pass
 
             if augment_devices():
+                # DESIGN §140 GPU defaults: the whole model pass is pinned
+                # to cuda:1 (the 2060) so the MMAudio SFX stack owns cuda:0
+                # (the 4060) — `model_pass_devices` collapses to cuda:0 on
+                # a 1-GPU box, so the sequential path is unchanged there.
                 model_work = tmpdir / "model_pass"
                 tensor_intermediate, _ = run_finalize_model_pass(
                     [segment / "video.mp4" for segment in usable],
@@ -743,6 +760,7 @@ def finalize_run(
                     crf=effective_crf,
                     preset=effective_preset,
                     work_dir=model_work,
+                    devices=model_pass_devices(),
                 )
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a

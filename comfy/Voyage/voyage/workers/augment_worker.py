@@ -102,6 +102,29 @@ FILM_STATE_KEYS = 82
 FILM_MIN_SIDE = 8
 """Smallest frame side the FILM pyramid supports (4 levels down to 1px)."""
 
+FILM_CLASSIC_ORDER_MIN_FREE_BYTES = 8 * 1024**3
+"""Chunk devices reporting less free VRAM than this interpolate at 1x first
+(measured 2026-10-01 on the 6 GB 2060: FILM pairs at 2432x1408 need
+~5.9 GiB and OOM where batch-halving bottoms out at one pair; the 8 GiB
+line leaves margin over that peak, so 16 GB+ devices keep the validated
+upscale-first recipe byte-for-byte)."""
+
+UPSCALE_TILE_SIZE = 512
+"""Spatial tile side for the tiled upscale path (a 512-side tile peaks ~1 GiB)."""
+
+UPSCALE_TILE_OVERLAP = 64
+"""Context margin around each upscale tile (cropped after upscale, so seams
+never show — measured 2026-10-01: 32 leaves diffs up to 0.066 (the RRDB
+receptive field reaches past it), 64 drops them to <= 0.0008 smooth and
+1e-5 on white noise)."""
+
+UPSCALE_TILE_BUDGET_PIXELS = 500_000
+"""Frames above this pixel count upscale tiled (measured 2026-10-01 on the
+6 GB 2060: 768x512 = 393,216 px peaks 3.29 GiB and fits, 1216x704 =
+856,064 px needs ~5.5 GiB and OOMs in `conv_first` — batch-halving
+bottoms out at one frame, so only spatial tiling saves it; every native
+backend size at or below the budget keeps the direct path byte-for-byte)."""
+
 _LOAD_ERRORS: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -1036,6 +1059,127 @@ def _run_stacked(forward: Callable[[Any], Any], stacked: Any) -> list[Any]:
     return [outputs[index] for index in range(int(outputs.shape[0]))]
 
 
+def _axis_blocks(length: int, tile: int) -> list[tuple[int, int]]:
+    """Split `[0, length)` into the fewest near-even blocks of size <= tile."""
+    if length <= tile:
+        return [(0, length)]
+    count = (length + tile - 1) // tile
+    base, extra = divmod(length, count)
+    blocks: list[tuple[int, int]] = []
+    start = 0
+    for index in range(count):
+        end = start + base + (1 if index < extra else 0)
+        blocks.append((start, end))
+        start = end
+    return blocks
+
+
+def tile_grid(
+    width: int,
+    height: int,
+    tile: int = UPSCALE_TILE_SIZE,
+) -> list[tuple[int, int, int, int]]:
+    """Output-space tile blocks partitioning a WxH frame (row-major).
+
+    Blocks are non-overlapping and cover the frame exactly; each side is
+    <= `tile`. The caller expands each block by `UPSCALE_TILE_OVERLAP`
+    (clipped) for model context and crops back to the block after upscale,
+    so assembly is gapless and seam-free. Stdlib-pure (tested in gates
+    without torch).
+    """
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, int)
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+    ):
+        raise TypeError(f"frame size must be ints (got {width!r}x{height!r})")
+    if width < 1 or height < 1:
+        raise ValueError(f"frame size must be positive (got {width!r}x{height!r})")
+    if isinstance(tile, bool) or not isinstance(tile, int) or tile < 1:
+        raise ValueError(f"tile must be a positive int (got {tile!r})")
+    return [
+        (x0, y0, x1, y1)
+        for (y0, y1) in _axis_blocks(height, tile)
+        for (x0, x1) in _axis_blocks(width, tile)
+    ]
+
+
+def needs_upscale_tiling(width: int, height: int) -> bool:
+    """True when a WxH frame must upscale tiled (over `UPSCALE_TILE_BUDGET_PIXELS`)."""
+    return width * height > UPSCALE_TILE_BUDGET_PIXELS
+
+
+def interp_first_for_small_device(device: str) -> bool:
+    """True when `device` is a CUDA GPU with under 8 GiB free (interp at 1x first).
+
+    Measured 2026-10-01: FILM pairs at 2432x1408 need ~5.9 GiB, so the
+    classic upscale-first order OOMs the 6 GB 2060 there; interpolating
+    the 1x frames first (then upscaling everything, tiled past the
+    budget) fits comfortably. Non-CUDA devices, unparsable names, and
+    probe failures all answer False — the validated order stands unless
+    small VRAM is proven.
+    """
+    if not isinstance(device, str) or not device.startswith("cuda"):
+        return False
+    try:
+        import torch
+
+        parts = device.split(":")
+        index = int(parts[1]) if len(parts) > 1 else 0
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(index)
+    except (ImportError, ValueError, RuntimeError):
+        return False
+    return bool(free_bytes < FILM_CLASSIC_ORDER_MIN_FREE_BYTES)
+
+
+def _upscale_frame_tiled(
+    model: Any,
+    frame: Any,
+    torch_device: Any,
+    dtype: Any,
+    tile: int,
+) -> Any:
+    """Upscale one CPU (3, H, W) frame through overlap-context tiles (x4 native).
+
+    Each output block runs with an `UPSCALE_TILE_OVERLAP` context margin
+    (clipped at borders) and only its own block is pasted back, so block
+    boundaries never show. Peak memory is one tile's activations (~1 GiB
+    at the default 512) instead of the full frame's (~5.5 GiB at
+    1216x704 — the 2060 OOM the budget answers).
+    """
+    import torch
+
+    moved = frame.to(torch_device, dtype=dtype)
+    _, height, width = moved.shape
+    try:
+        out = torch.empty(
+            (3, height * RRDB_NATIVE_SCALE, width * RRDB_NATIVE_SCALE),
+            device=torch_device,
+            dtype=dtype,
+        )
+        for x0, y0, x1, y1 in tile_grid(width, height, tile=tile):
+            in_x0 = max(0, x0 - UPSCALE_TILE_OVERLAP)
+            in_y0 = max(0, y0 - UPSCALE_TILE_OVERLAP)
+            in_x1 = min(width, x1 + UPSCALE_TILE_OVERLAP)
+            in_y1 = min(height, y1 + UPSCALE_TILE_OVERLAP)
+            patch = moved[:, in_y0:in_y1, in_x0:in_x1].unsqueeze(0)
+            up = model(patch)
+            paste_x = (x0 - in_x0) * RRDB_NATIVE_SCALE
+            paste_y = (y0 - in_y0) * RRDB_NATIVE_SCALE
+            paste_w = (x1 - x0) * RRDB_NATIVE_SCALE
+            paste_h = (y1 - y0) * RRDB_NATIVE_SCALE
+            out[
+                :,
+                y0 * RRDB_NATIVE_SCALE : y0 * RRDB_NATIVE_SCALE + paste_h,
+                x0 * RRDB_NATIVE_SCALE : x0 * RRDB_NATIVE_SCALE + paste_w,
+            ] = up[:, :, paste_y : paste_y + paste_h, paste_x : paste_x + paste_w]
+            del patch, up
+        return out
+    finally:
+        del moved
+
+
 def _run_frame_batches(
     forward: Callable[[Any], Any],
     frame_tensors: list[Any],
@@ -1080,6 +1224,23 @@ def _run_frame_batches(
         del stacked
 
 
+def _finish_upscaled(single: Any, functional: Any, target_scale: int) -> Any:
+    """Clamp a native-x4 device tensor, downscale to `target_scale`, move to CPU float32.
+
+    Single home for the upscale postprocess (both the batched and the
+    inline-tiled paths end here, so their bytes stay identical).
+    """
+    refined = single.clamp(0.0, 1.0)
+    if target_scale != RRDB_NATIVE_SCALE:
+        refined = functional.interpolate(
+            refined.unsqueeze(0),
+            scale_factor=target_scale / RRDB_NATIVE_SCALE,
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze(0)
+    return refined.float().cpu()
+
+
 def upscale_frames(
     frames: list[Any],
     weights: Path | str,
@@ -1087,6 +1248,7 @@ def upscale_frames(
     scale: int = 2,
     device: str = "cuda:0",
     timings: dict[str, float] | None = None,
+    tile: int | None = None,
 ) -> list[Any]:
     """Upscale (3, H, W) float frames in [0, 1] by `scale` (Real-ESRGAN x4 + downscale).
 
@@ -1095,11 +1257,20 @@ def upscale_frames(
     clamped to [0, 1] — the caller concatenates/encodes on CPU. The net
     is resident per (weights, device) across calls; `timings` records
     `load_ms` vs `infer_ms` separately when given (benchmark attribution).
+
+    `tile` selects the spatial path: `None` (default) tiles only frames
+    over `UPSCALE_TILE_BUDGET_PIXELS` (a single big frame OOMs small GPUs
+    where batch-halving cannot help — DESIGN §140 GPU defaults), an int
+    forces that tile size (tests, manual override; validated positive).
     """
     target = validate_upscale_factor(scale)
     weights_path = _require_weights(weights, "Real-ESRGAN")
     _require_torch()
     _require_frame_batch(frames)
+    if tile is not None and (isinstance(tile, bool) or not isinstance(tile, int)):
+        raise TypeError(f"tile must be an int or None (got {type(tile).__name__})")
+    if tile is not None and tile < 1:
+        raise ValueError(f"tile must be a positive int (got {tile})")
     import torch
     from torch.nn import functional as functional
 
@@ -1117,17 +1288,23 @@ def upscale_frames(
     infer_started = time.monotonic()
     try:
         with torch.no_grad():
-            batched = _run_frame_batches(model, cpu_frames, torch_device, dtype)
-        for single in batched:
-            refined = single.clamp(0.0, 1.0)
-            if target != RRDB_NATIVE_SCALE:
-                refined = functional.interpolate(
-                    refined.unsqueeze(0),
-                    scale_factor=target / RRDB_NATIVE_SCALE,
-                    mode="bicubic",
-                    align_corners=False,
-                ).squeeze(0)
-            results.append(refined.float().cpu())
+            natives: list[Any] = []
+            for cpu_frame in cpu_frames:
+                _, frame_h, frame_w = cpu_frame.shape
+                tile_size = tile
+                if tile_size is None and needs_upscale_tiling(frame_w, frame_h):
+                    tile_size = UPSCALE_TILE_SIZE
+                if tile_size is None:
+                    natives.extend(_run_frame_batches(model, [cpu_frame], torch_device, dtype))
+                else:
+                    # Postprocess inline (never accumulate device tiles: the
+                    # interp-first order hands this path 4x the frames, and
+                    # a full chunk of x4-native device tensors OOMs small
+                    # GPUs — measured 2026-10-01 on the 6 GB 2060).
+                    native = _upscale_frame_tiled(model, cpu_frame, torch_device, dtype, tile_size)
+                    results.append(_finish_upscaled(native, functional, target))
+        for single in natives:
+            results.append(_finish_upscaled(single, functional, target))
     finally:
         del cpu_frames
     if timings is not None:

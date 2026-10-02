@@ -158,7 +158,7 @@ class GenerateFormState:
     drift_every_n: str = ""
     min_fps: str = "32"
     min_resolution: str = "1280x720"
-    use_model_pass: bool = False
+    use_model_pass: bool = True
     verbose: bool = False
     no_color: bool = False
     no_download: bool = False

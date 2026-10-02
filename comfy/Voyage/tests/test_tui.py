@@ -552,16 +552,20 @@ def test_flag_toggles_propagate_to_read_form() -> None:
 
     async def _run() -> None:
         app = VoyageApp()
+        defaults = GenerateFormState()
         async with app.run_test(size=(120, 60)) as pilot:
             await pilot.pause()
             for widget_id, field in _FLAG_FIELDS:
-                assert getattr(app._read_form(), field) is False
+                # Initial state follows the form defaults (use_model_pass
+                # defaults on per DESIGN §140 GPU defaults, the rest off).
+                initial = getattr(defaults, field)
+                assert getattr(app._read_form(), field) is initial, widget_id
                 await _click_when_ready(pilot, app, f"#{widget_id}")
                 await pilot.pause()
-                assert getattr(app._read_form(), field) is True, widget_id
+                assert getattr(app._read_form(), field) is (not initial), widget_id
                 await _click_when_ready(pilot, app, f"#{widget_id}")
                 await pilot.pause()
-                assert getattr(app._read_form(), field) is False, widget_id
+                assert getattr(app._read_form(), field) is initial, widget_id
 
     asyncio.run(_run())
 

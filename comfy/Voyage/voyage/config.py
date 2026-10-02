@@ -217,10 +217,13 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # convention); the workers enforce the fixed native geometry
     # themselves. Quantization, text encoder, and VAE are implicit
     # per family (Q3_K_M DiT only — OOM is a clean failure, no
-    # fallback rung). Both render their own joint soundtrack, so
-    # audio/sfx pair fake/fake and the supervisor commits the
-    # worker's audio.wav directly (models_ensure.JOINT_AUDIO_BACKENDS
-    # skips ACE-Step/MMAudio even when paired).
+    # fallback rung). Both render their own joint soundtrack, so the music
+    # side pairs fake/cpu (no ACE-Step takes — the supervisor commits the
+    # worker's audio.wav directly) while the finalize SFX dub pairs
+    # mmaudio/cuda:0 (MMAudio dubs effects under the native soundtrack at
+    # finalize, after the video worker has stopped — DESIGN §140 GPU
+    # defaults; models_ensure.JOINT_AUDIO_BACKENDS still skips ACE-Step
+    # even when paired).
     "ltx25": BackendRecord(
         profile="ltx25-704p",
         width=1216,
@@ -231,8 +234,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cuda:0",
         audio_backend="fake",
         audio_device="cpu",
-        sfx_backend="fake",
-        sfx_device="cpu",
+        sfx_backend="mmaudio",
+        sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
         streaming=True,
     ),
@@ -246,8 +249,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         device="cuda:0",
         audio_backend="fake",
         audio_device="cpu",
-        sfx_backend="fake",
-        sfx_device="cpu",
+        sfx_backend="mmaudio",
+        sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
         streaming=True,
     ),
@@ -456,16 +459,16 @@ class AugmentConfig(BaseModel):
     these floors lands in a later slice; this track only plumbs them
     through TOML + CLI + TUI.
 
-    `use_model_pass` (issue 166) is the opt-in model pass: Real-ESRGAN
+    `use_model_pass` (issue 166) is the model pass: Real-ESRGAN
     upscale + FILM interpolate via `resolve_augment_weights` when
-    provisioned, ffmpeg floors only when off (default) or when the legs
-    are absent.
+    provisioned (default on — DESIGN §140 GPU defaults pins it to
+    cuda:1), ffmpeg floors only when off or when the legs are absent.
     """
 
     min_fps: int = 32
     min_width: int = 1280
     min_height: int = 720
-    use_model_pass: bool = False
+    use_model_pass: bool = True
 
     @field_validator("min_fps", "min_width", "min_height")
     @classmethod
@@ -828,9 +831,10 @@ model_size = "large_44k_v2"
 min_fps = 32
 min_width = 1280
 min_height = 720
-# Opt-in model pass (issue 166): Real-ESRGAN upscale + FILM interpolate
-# when provisioned; off (false) keeps the ffmpeg floors only.
-use_model_pass = false
+# Model pass (issue 166; DESIGN §140 GPU defaults): Real-ESRGAN upscale
+# + FILM interpolate when provisioned (pinned to cuda:1 when two GPUs
+# are visible); off (false) keeps the ffmpeg floors only.
+use_model_pass = true
 
 [director]
 backend = "{director_backend}"
@@ -1107,8 +1111,10 @@ def _sfx_preset(backend: str) -> dict[str, str]:
     """SFX pairing row as a plain dict (derived from BACKEND_REGISTRY).
 
     ltxv/causvid pair the MMAudio stack on cuda:0 (SFX/music on by
-    default on GPU); the joint-audio ltx25/ltx23 rows pair fake (their
-    soundtrack ships with the video); fake keeps the fake-noise backend
+    default on GPU); the joint-audio ltx25/ltx23 rows pair fake music
+    (their soundtrack ships with the video) but still pair MMAudio SFX
+    on cuda:0 (the finalize dub runs after the video worker stops —
+    DESIGN §140 GPU defaults); fake keeps the fake-noise backend
     on CPU so CPU-only test runs never touch weights.
     """
     try:

@@ -15,14 +15,15 @@ here; `voyage.media` re-exports both (`media.interpolated_frame_count`
 is this function, `FINALIZE_CRF_*` alias `CRF_*`) instead of duplicating
 them — the old TODO to move frame-count math into `media.py` is closed.
 
-Parallelism contract (SFX pairing): augment chunks run on cuda:0 while the
-MMAudio SFX stack (when present) renders on cuda:1 — the two stages share
-nothing but chunk boundaries, so a 2-GPU box runs them side by side and a
-1-GPU box runs chunks serially on cuda:0. `augment_plan` stamps each chunk
-with its device round-robin so the pairing is visible in the plan;
-`run_augment_chunks` owns the serial-vs-ThreadPoolExecutor(2) switch,
-warming the first chunk serially so resident model caches populate
-before threads spawn (issue 157).
+Parallelism contract (SFX pairing, DESIGN §140 GPU defaults): the
+model-pass chunks are pinned to cuda:1 via `model_pass_devices` while
+the MMAudio SFX stack (when present) renders on cuda:0 — the two stages
+share nothing but chunk boundaries, so a 2-GPU box runs them side by
+side and a 1-GPU box runs both serially on cuda:0. `augment_plan`
+stamps each chunk with its device round-robin so the pairing is visible
+in the plan; `run_augment_chunks` owns the serial-vs-ThreadPoolExecutor(2)
+switch, warming the first chunk serially so resident model caches
+populate before threads spawn (issue 157).
 """
 
 from __future__ import annotations
@@ -51,7 +52,8 @@ AUGMENT_DEVICE_PRIMARY = "cuda:0"
 """Video-augment device: always used, and the only device on a 1-GPU box."""
 
 AUGMENT_DEVICE_SECONDARY = "cuda:1"
-"""Second device for chunk parallelism; the SFX stack's device when paired."""
+"""Model-pass device on a 2-GPU box (DESIGN §140 GPU defaults): the 2060
+the Real-ESRGAN + FILM pass is pinned to, leaving cuda:0 to the SFX stack."""
 
 MAX_PARALLEL_DEVICES = 2
 """Chunk fan-out cap: one worker per device (the SFX pairing needs no more)."""
@@ -374,6 +376,26 @@ def augment_devices(
     return (AUGMENT_DEVICE_PRIMARY,)
 
 
+def model_pass_devices(
+    *,
+    devices: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Devices for the finalize model pass: cuda:1 alone when two GPUs show.
+
+    DESIGN §140 GPU defaults: the Real-ESRGAN + FILM pass is pinned to
+    the 2060 (cuda:1) so the MMAudio SFX stack owns the 4060 (cuda:0) —
+    the two finalize stages share nothing, so a 2-GPU box runs them side
+    by side. One visible GPU (or an admin-hidden GPU set) keeps the
+    `augment_devices` selection untouched (cuda:0, or empty). The
+    `devices` seam takes an explicit visibility tuple so tests pin the
+    branch without a GPU; `None` probes live visibility.
+    """
+    visible = augment_devices() if devices is None else devices
+    if len(visible) >= MAX_PARALLEL_DEVICES:
+        return (AUGMENT_DEVICE_SECONDARY,)
+    return visible
+
+
 def run_augment_chunks(
     chunks: list[AugmentChunk],
     worker: Callable[[AugmentChunk, str], T],
@@ -509,8 +531,11 @@ def enhance_frames(
     device — the cuda:0/cuda:1 SFX pairing): Real-ESRGAN upscales first (the
     2x video-export recipe), then FILM interpolates `(multiplier - 1)` mids
     per adjacent pair at evenly spaced moments (`multiplier=4` gives
-    0.25/0.5/0.75, matching `(n-1)*m+1`). Absent legs skip (same frames out),
-    so a half-provisioned stack still runs the available leg.
+    0.25/0.5/0.75, matching `(n-1)*m+1`). Chunks whose device reports under
+    8 GiB free reverse the legs (interp at 1x first — FILM at the upscaled
+    size would OOM small GPUs; DESIGN §140 GPU defaults). Absent legs skip
+    (same frames out), so a half-provisioned stack still runs the
+    available leg.
     """
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
@@ -527,28 +552,52 @@ def enhance_frames(
         return list(frames)
     from voyage.workers import augment_worker
 
-    working: list[Any] = list(frames)
-    if weights.realesrgan is not None:
-        working = augment_worker.upscale_frames(
-            working, weights.realesrgan, scale=target_scale, device=device
+    esrgan_weights = weights.realesrgan
+    film_weights = weights.film
+
+    def _run_upscale(source: list[Any]) -> list[Any]:
+        if esrgan_weights is None:
+            return source
+        return augment_worker.upscale_frames(
+            source, esrgan_weights, scale=target_scale, device=device
         )
-    if weights.film is not None and len(working) > 1 and interp_factor > 1:
+
+    def _run_interp(source: list[Any]) -> list[Any]:
+        if film_weights is None or len(source) <= 1 or interp_factor <= 1:
+            return source
         moments = [(position + 1) / interp_factor for position in range(interp_factor - 1)]
         blended: list[Any] = []
-        for position in range(len(working) - 1):
-            blended.append(working[position])
+        for position in range(len(source) - 1):
+            blended.append(source[position])
             for moment in moments:
                 blended.append(
                     augment_worker.interpolate_pair(
-                        working[position],
-                        working[position + 1],
-                        weights.film,
+                        source[position],
+                        source[position + 1],
+                        film_weights,
                         moment=moment,
                         device=device,
                     )
                 )
-        blended.append(working[-1])
-        working = blended
+        blended.append(source[-1])
+        return blended
+
+    working: list[Any] = list(frames)
+    both_legs = (
+        esrgan_weights is not None
+        and film_weights is not None
+        and len(working) > 1
+        and interp_factor > 1
+    )
+    if both_legs and augment_worker.interp_first_for_small_device(device):
+        # Small GPU (DESIGN §140 GPU defaults): FILM pairs at the upscaled
+        # size would OOM (measured ~5.9 GiB at 2432x1408 on the 6 GB 2060),
+        # so chunks interpolate at 1x first and upscale after (the
+        # established interp-then-upscale pipeline; the tiled upscale leg
+        # keeps every frame servable).
+        working = _run_upscale(_run_interp(working))
+    else:
+        working = _run_interp(_run_upscale(working))
     return working
 
 

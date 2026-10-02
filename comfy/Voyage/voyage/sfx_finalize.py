@@ -587,6 +587,68 @@ def mix_music_and_sfx(
     return dest
 
 
+def demux_music_audio(source_video: Path, dest_wav: Path) -> Path:
+    """Demux the first audio stream of `source_video` to pcm_s16le WAV.
+
+    Single home for the SFX dub's music read (the sequential pass and
+    the parallel finalize path demux identically, so their mixes stay
+    byte-identical).
+    """
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "pcm_s16le",
+            str(dest_wav),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"sfx pass music demux failed: {proc.stderr[-2000:]}")
+    return dest_wav
+
+
+def remux_video_with_audio(source_video: Path, mixed_audio: Path, dest_mp4: Path) -> Path:
+    """Mux `source_video` (stream copy) + `mixed_audio` (AAC 256k) to `dest_mp4`.
+
+    Single home for the SFX dub's publish encode (sequential and parallel
+    paths remux identically — video is never re-encoded here).
+    """
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source_video),
+            "-i",
+            str(mixed_audio),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-shortest",
+            str(dest_mp4),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"sfx pass remux failed: {proc.stderr[-2000:]}")
+    return dest_mp4
+
+
 def finalize_sfx_pass(
     run_dir: Path,
     final_path: Path,
@@ -637,52 +699,11 @@ def finalize_sfx_pass(
             num_workers,
         )
         music = tmpdir / "final_music.wav"
-        proc = run_capture(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-nostdin",
-                "-y",
-                "-i",
-                str(final_path),
-                "-map",
-                "0:a:0",
-                "-c:a",
-                "pcm_s16le",
-                str(music),
-            ]
-        )
-        if proc.returncode != 0:
-            raise MediaError(f"sfx pass music demux failed: {proc.stderr[-2000:]}")
+        demux_music_audio(final_path, music)
         mixed = tmpdir / "final_mixed.wav"
         mix_music_and_sfx(music, bed, mixed, sample_rate, channels)
         remuxed = tmpdir / "final_sfx.mp4"
-        proc = run_capture(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-nostdin",
-                "-y",
-                "-i",
-                str(final_path),
-                "-i",
-                str(mixed),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "256k",
-                "-shortest",
-                str(remuxed),
-            ]
-        )
-        if proc.returncode != 0:
-            raise MediaError(f"sfx pass remux failed: {proc.stderr[-2000:]}")
+        remux_video_with_audio(final_path, mixed, remuxed)
         from voyage.atomic import atomic_write_bytes
 
         atomic_write_bytes(final_path, remuxed.read_bytes())

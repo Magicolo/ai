@@ -104,8 +104,11 @@ def required_specs(
     interpolation + Real-ESRGAN anime upscaler): CUDA backends include
     them by default, `False` restores the pre-augmentation set (tests,
     weight-free probes).     Joint-audio backends (`JOINT_AUDIO_BACKENDS`)
-    never pull ACE-Step or MMAudio: their video model renders the full
-    soundtrack, so those stacks are skipped even when paired.
+    never pull ACE-Step: their video model renders the full soundtrack,
+    so that stack is skipped even when paired. Their SFX stack IS pulled
+    when enabled: MMAudio dubs effects under the native soundtrack at
+    finalize on cuda:0, after the video worker has stopped (DESIGN §140
+    GPU defaults).
     `VideoBackendName` is a closed Literal, so past the fake early-return
     the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
     """
@@ -160,7 +163,10 @@ def required_specs(
                 models_dir=_resolve_dir(models_root, config.video.models_dir),
             )
         )
-    if sfx_enabled and config.sfx.backend == "mmaudio" and not joint_audio:
+    if sfx_enabled and config.sfx.backend == "mmaudio":
+        # No joint-audio carve-out (DESIGN §140 GPU defaults): joint
+        # backends keep their native soundtrack (ACE-Step stays skipped
+        # above) but still dub MMAudio SFX over it at finalize.
         required.append(
             RequiredModel(
                 spec="sfx-mmaudio",

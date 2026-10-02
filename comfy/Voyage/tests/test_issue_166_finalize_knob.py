@@ -1,13 +1,13 @@
-"""Issue 166 finalize threading: opt-in model-augment knob, default-off ffmpeg.
+"""Issue 166 finalize threading: model-augment knob, default-on (DESIGN §140).
 
-`use_model_pass` (default False) threads `AugmentConfig` -> `resolve_config`
+`use_model_pass` (default True) threads `AugmentConfig` -> `resolve_config`
 -> CLI (`--use-model-pass`) + TUI form -> `FinalizeOptions` /
 `resolve_finalize_settings` -> `finalize_run` (which consults
 `resolve_augment_weights` and keeps the ffmpeg vf path when legs are
 absent). Identity proofs (CPU-only, real ffmpeg via the fake-backend
-commit path): knob-off output == pre-knob output (explicit False ==
-default), and knob-on with absent weights == knob-off (same bytes). The
-present-weights tensor encode is the GPU-box residual (see the issue).
+commit path): knob-off output == pre-knob output, and knob-on with
+absent weights == knob-off (same bytes). The present-weights tensor
+encode is the GPU-box residual (see the issue).
 """
 
 from __future__ import annotations
@@ -44,13 +44,17 @@ def _sha256(candidate: Path) -> str:
     return hashlib.sha256(candidate.read_bytes()).hexdigest()
 
 
-def test_knob_defaults_off_everywhere() -> None:
-    """Every layer defaults to the ffmpeg path (opt-in, never implicit)."""
+def test_knob_defaults_on_everywhere() -> None:
+    """Every layer defaults to the model pass when provisioned (DESIGN §140).
+
+    Absent legs still read as the ffmpeg path (never an error), so the
+    default is safe on weight-free boxes — `--no-augment` opts out.
+    """
     from voyage.media import FinalizeOptions, resolve_finalize_settings
 
-    assert AugmentConfig().use_model_pass is False
-    assert FinalizeOptions().use_model_pass is False
-    assert _base_config().augment.use_model_pass is False
+    assert AugmentConfig().use_model_pass is True
+    assert FinalizeOptions().use_model_pass is True
+    assert _base_config().augment.use_model_pass is True
     resolved = resolve_finalize_settings(
         options=None,
         skip_bad=None,
@@ -64,18 +68,18 @@ def test_knob_defaults_off_everywhere() -> None:
         crf=None,
         preset=None,
     )
-    assert resolved.use_model_pass is False
-    assert resolved.settings.use_model_pass is False
+    assert resolved.use_model_pass is True
+    assert resolved.settings.use_model_pass is True
 
 
-def test_default_toml_leaves_knob_off(tmp_path: Path) -> None:
-    """The generated `[augment]` section parses with the knob off."""
+def test_default_toml_leaves_knob_on(tmp_path: Path) -> None:
+    """The generated `[augment]` section parses with the knob on."""
     from voyage.config import default_config_toml
 
     config_path = tmp_path / "voyage.toml"
     config_path.write_text(default_config_toml("knob166", "line art", 7), encoding="utf-8")
     config, _ = load_config(config_path)
-    assert config.augment.use_model_pass is False
+    assert config.augment.use_model_pass is True
 
 
 def test_knob_rejects_non_bool() -> None:
@@ -119,8 +123,8 @@ def test_config_threads_knob() -> None:
 
     assert resolve_config(_base_config(), use_model_pass=True).augment.use_model_pass is True
     assert resolve_config(_base_config(), use_model_pass=False).augment.use_model_pass is False
-    assert resolve_config(_base_config(), use_model_pass=None).augment.use_model_pass is False
-    assert resolve_config(_base_config(), use_model_pass=Unset).augment.use_model_pass is False
+    assert resolve_config(_base_config(), use_model_pass=None).augment.use_model_pass is True
+    assert resolve_config(_base_config(), use_model_pass=Unset).augment.use_model_pass is True
     resolved = resolve_config(_base_config(), use_model_pass=True, min_fps=60)
     assert resolved.augment.use_model_pass is True
     assert resolved.augment.min_fps == 60
@@ -153,16 +157,16 @@ def test_cli_flag_parity_and_mapping() -> None:
 
 
 def test_tui_threads_knob() -> None:
-    """The TUI form carries the knob: unchecked = stored wins, checked = on."""
+    """The TUI form carries the knob: checked (default) = on, unchecked = stored wins."""
     from voyage.tui_state import GenerateFormState, to_generate_namespace
 
-    assert GenerateFormState().use_model_pass is False
+    assert GenerateFormState().use_model_pass is True
     namespace = to_generate_namespace(GenerateFormState(style="x", backend="fake"))
-    assert namespace.use_model_pass is Unset
-    checked = to_generate_namespace(
-        GenerateFormState(style="x", backend="fake", use_model_pass=True)
+    assert namespace.use_model_pass is True
+    unchecked = to_generate_namespace(
+        GenerateFormState(style="x", backend="fake", use_model_pass=False)
     )
-    assert checked.use_model_pass is True
+    assert unchecked.use_model_pass is Unset
 
 
 def test_tui_knob_settings_round_trip(tmp_path: Path) -> None:

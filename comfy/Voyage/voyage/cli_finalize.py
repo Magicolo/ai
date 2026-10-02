@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -37,56 +38,90 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     # Containment warning (issue 024): warn-only, same policy as init —
     # absolute outside-tree finals are legal, typos should be loud.
     warn_if_outside_output_dir(output, flag="--output")
-    try:
-        finalize_run(
-            run_dir,
-            output,
-            # Finalize keeps the generation resolution (no downscale): the
-            # run config snapshot carries what the segments rendered at,
-            # so old 768x512 runs refinalize natively too.
-            width=config.video.width,
-            height=config.video.height,
-            fps=config.video.fps,
-            # getattr: the stop --finalize handoff reuses the stop-parser
-            # namespace (issue 109) — a missing flag must read as off,
-            # never AttributeError after the status already flipped.
-            skip_bad=getattr(args, "skip_bad", False),
-            min_free_space_gib=config.min_free_space_gib,
-            sample_rate=config.audio.sample_rate,
-            channels=config.audio.channels,
-            overlap_fraction=config.audio.final_overlap_fraction,
-            overlap_cap_seconds=config.audio.final_overlap_cap_seconds,
-            min_fps=config.augment.min_fps,
-            min_width=config.augment.min_width,
-            min_height=config.augment.min_height,
+    sfx_backend = getattr(args, "sfx_backend", None) or config.sfx.backend
+    sfx_will_run = not getattr(args, "no_sfx", False) and sfx_backend != "fake"
+    # Shared video-stage kwargs (both finalize paths take the same box):
+    # finalize keeps the generation resolution (no downscale) — the run
+    # config snapshot carries what the segments rendered at, so old
+    # 768x512 runs refinalize natively too. getattr: the stop --finalize
+    # handoff reuses the stop-parser namespace (issue 109) — a missing
+    # flag must read as off, never AttributeError after the status flips.
+    video_kwargs: dict[str, Any] = {
+        "width": config.video.width,
+        "height": config.video.height,
+        "fps": config.video.fps,
+        "skip_bad": getattr(args, "skip_bad", False),
+        "min_free_space_gib": config.min_free_space_gib,
+        "sample_rate": config.audio.sample_rate,
+        "channels": config.audio.channels,
+        "overlap_fraction": config.audio.final_overlap_fraction,
+        "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
+        "min_fps": config.augment.min_fps,
+        "min_width": config.augment.min_width,
+        "min_height": config.augment.min_height,
+        "use_model_pass": config.augment.use_model_pass,
+        "models_dir": config.video.models_dir,
+    }
+    # DESIGN §140 GPU defaults: model pass (cuda:1) + SFX dub (cuda:0)
+    # run side by side when both stages are live on a 2-GPU box.
+    parallel = False
+    if sfx_will_run:
+        from voyage.finalize_parallel import SfxBedError, run_parallel_finalize, should_run_parallel
+
+        parallel = should_run_parallel(
+            sfx_backend=sfx_backend,
             use_model_pass=config.augment.use_model_pass,
             models_dir=config.video.models_dir,
+            num_workers=getattr(args, "sfx_workers", 1),
         )
-    except (MediaError, StateError, DiskSpaceError) as exc:
-        print(f"finalize failed: {exc}", file=sys.stderr)
-        return 1
-    sfx_backend = getattr(args, "sfx_backend", None) or config.sfx.backend
-    if not getattr(args, "no_sfx", False) and sfx_backend != "fake":
-        from voyage.sfx_finalize import finalize_sfx_pass
-
+        if parallel:
+            try:
+                run_parallel_finalize(
+                    run_dir,
+                    output,
+                    **video_kwargs,
+                    seed=config.seed,
+                    sfx_backend=sfx_backend,
+                    sfx_device=getattr(args, "sfx_device", None) or config.sfx.device,
+                    sfx_model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
+                    sfx_caption=getattr(args, "sfx_caption", None),
+                )
+            except SfxBedError as exc:
+                print(
+                    f"sfx pass failed (music-only kept at {output}): {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            except (MediaError, StateError) as exc:
+                print(f"finalize failed: {exc}", file=sys.stderr)
+                return 1
+    if not parallel:
         try:
-            finalize_sfx_pass(
-                run_dir,
-                output,
-                backend=sfx_backend,
-                models_dir=config.sfx.models_dir,
-                device=getattr(args, "sfx_device", None) or config.sfx.device,
-                model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
-                seed=config.seed,
-                sample_rate=config.audio.sample_rate,
-                channels=config.audio.channels,
-                num_workers=getattr(args, "sfx_workers", 1),
-                fps=config.video.fps,
-                caption_override=getattr(args, "sfx_caption", None),
-            )
-        except (MediaError, StateError) as exc:
-            print(f"sfx pass failed (music-only final kept at {output}): {exc}", file=sys.stderr)
+            finalize_run(run_dir, output, **video_kwargs)
+        except (MediaError, StateError, DiskSpaceError) as exc:
+            print(f"finalize failed: {exc}", file=sys.stderr)
             return 1
+        if sfx_will_run:
+            from voyage.sfx_finalize import finalize_sfx_pass
+
+            try:
+                finalize_sfx_pass(
+                    run_dir,
+                    output,
+                    backend=sfx_backend,
+                    models_dir=config.sfx.models_dir,
+                    device=getattr(args, "sfx_device", None) or config.sfx.device,
+                    model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
+                    seed=config.seed,
+                    sample_rate=config.audio.sample_rate,
+                    channels=config.audio.channels,
+                    num_workers=getattr(args, "sfx_workers", 1),
+                    fps=config.video.fps,
+                    caption_override=getattr(args, "sfx_caption", None),
+                )
+            except (MediaError, StateError) as exc:
+                print(f"sfx pass failed (music-only kept at {output}): {exc}", file=sys.stderr)
+                return 1
     console = get_console(args)
     try:
         info = media_probe(output)

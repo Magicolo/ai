@@ -485,7 +485,8 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=None,
         help="run the Real-ESRGAN + FILM model pass at finalize when provisioned "
-        "(default: [augment] use_model_pass off; ffmpeg floors only)",
+        "(default: [augment] use_model_pass on, pinned to cuda:1 when two GPUs show; "
+        "--no-augment turns it off with the floors)",
     )
 
 
