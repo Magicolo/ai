@@ -46,6 +46,8 @@ def test_augment_defaults() -> None:
         "min_width": 1216,
         "min_height": 704,
         "use_model_pass": True,
+        "interp_multiplier": 4,
+        "presentation_fps": None,
     }
     assert _base_config().augment == AugmentConfig()
 

@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from voyage.audio_finalize import is_deferred_backend
 from voyage.cli_core import _augment_overrides, _load_run, get_console
 from voyage.cli_paths import _run_dir_arg, warn_if_outside_output_dir
 from voyage.config import resolve_config
@@ -60,12 +61,26 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         "min_width": config.augment.min_width,
         "min_height": config.augment.min_height,
         "use_model_pass": config.augment.use_model_pass,
+        "interp_multiplier": config.augment.interp_multiplier,
+        "presentation_fps": config.augment.presentation_fps,
         "models_dir": config.video.models_dir,
+        "deferred_audio": is_deferred_backend(config.video.backend),
+        "audio_config": config.audio,
+        "seed": config.seed,
     }
     # DESIGN §140 GPU defaults: model pass (cuda:1) + SFX dub (cuda:0)
     # run side by side when both stages are live on a 2-GPU box.
+    # Deferred ACE also renders on cuda:0 (same card as the SFX bed), so a
+    # deferred run always takes the sequential path — Thread A/B forking
+    # while takes are pending would collide on the 4060. An explicit
+    # presentation fps also forces sequential: Thread B's reference concat
+    # walks the source timeline, which a retimed present no longer matches.
     parallel = False
-    if sfx_will_run:
+    if (
+        sfx_will_run
+        and not video_kwargs["deferred_audio"]
+        and video_kwargs["presentation_fps"] is None
+    ):
         from voyage.finalize_parallel import SfxBedError, run_parallel_finalize, should_run_parallel
 
         parallel = should_run_parallel(
@@ -80,7 +95,6 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                     run_dir,
                     output,
                     **video_kwargs,
-                    seed=config.seed,
                     sfx_backend=sfx_backend,
                     sfx_device=getattr(args, "sfx_device", None) or config.sfx.device,
                     sfx_model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,

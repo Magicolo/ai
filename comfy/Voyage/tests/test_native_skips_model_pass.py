@@ -93,6 +93,7 @@ def test_finalize_lift_still_selects_tensor_model_pass(
     import shutil
 
     import voyage.augment as augment_module
+    import voyage.augment_finalize as finalize_module
     from voyage.media import finalize_run
 
     run_dir = _commit_fake_run(tmp_path, "trigger")
@@ -100,26 +101,31 @@ def test_finalize_lift_still_selects_tensor_model_pass(
     seen: dict[str, Any] = {}
 
     def _recording_model_pass(
-        segment_videos: list[Path],
-        weights: AugmentWeights,
+        run_dir_arg: Path,
+        usable: list[Path],
         *,
+        out_width: int,
+        out_height: int,
         source_fps: float,
+        weights: AugmentWeights,
         upscale_factor: int = 2,
         multiplier: int = 4,
+        chunk_frames: int = 32,
         crf: int = 15,
         preset: str = "veryfast",
+        device: str = "cuda:1",
         work_dir: Path,
-        chunk_frames: int = 32,
-        devices: tuple[str, ...] | None = None,
+        timings: dict[str, float] | None = None,
     ) -> tuple[Path, int]:
         seen["model_pass_called"] = True
+        seen["segments"] = len(usable)
         work_dir.mkdir(parents=True, exist_ok=True)
         intermediate = work_dir / "model_intermediate.mp4"
-        shutil.copy(segment_videos[0], intermediate)
+        shutil.copy(usable[0] / "video.mp4", intermediate)
         return (intermediate, int(round(source_fps)))
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _stub_weights)
-    monkeypatch.setattr(augment_module, "run_finalize_model_pass", _recording_model_pass)
+    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _recording_model_pass)
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     out = tmp_path / "lifted-tensor.mp4"
@@ -140,3 +146,4 @@ def test_finalize_lift_still_selects_tensor_model_pass(
     )
     assert out.exists() and out.stat().st_size > 0
     assert seen.get("model_pass_called") is True
+    assert seen.get("segments") == 1

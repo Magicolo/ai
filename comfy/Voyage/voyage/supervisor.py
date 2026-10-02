@@ -31,6 +31,12 @@ from typing import Any, cast
 from voyage import llama_server, paths
 from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
+from voyage.audio_finalize import (
+    deferred_tail_frames,
+    derive_conditioning_tail,
+    is_deferred_backend,
+    write_deferred_stub_audio,
+)
 from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
@@ -2326,6 +2332,28 @@ class Supervisor:
                 take_reason=(
                     f"joint-audio backend {config.video.backend}: worker soundtrack "
                     "committed directly, no takes"
+                ),
+            )
+        if is_deferred_backend(config.video.backend):
+            with self._stage("audio", f"{config.video.backend} deferred"):
+                write_deferred_stub_audio(
+                    segment,
+                    duration,
+                    config.audio.sample_rate,
+                    config.audio.channels,
+                )
+                # Continuity preservation: the skipped audio swap's rebuild
+                # derived `video_tail.mp4` as a side effect — derive it here
+                # so the next segment chains (96f) instead of going fresh.
+                derive_conditioning_tail(segment, deferred_tail_frames(config.video.backend))
+            stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
+            return CoveredAudio(
+                audio_plan=AudioPlan(segment_id=segment_id),
+                audio_ahead=0.0,
+                take_action="deferred",
+                take_reason=(
+                    f"deferred-audio backend {config.video.backend}: timeline-exact "
+                    "silent stub committed, ACE takes render at finalize"
                 ),
             )
         with self._stage("audio", config.audio.backend):

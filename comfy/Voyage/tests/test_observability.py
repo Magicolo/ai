@@ -159,7 +159,7 @@ def test_status_shows_section_layout(tmp_path: Path, capsys: pytest.CaptureFixtu
         "432",
         "World",
         "Audio",
-        "Music: ambient electronic",
+        "Music: atonal experimental music in Messiaen modes",
         "Workers",
         "video: idle",
         "Stages (last commit 000000)",

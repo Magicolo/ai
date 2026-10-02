@@ -11,6 +11,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+#: Default music steering (§35): atonal experimental music in Messiaen modes
+#: with post-romantic harmony and dark progressive psychedelic fusion rock jazz.
+DEFAULT_MUSIC_STYLE = (
+    "atonal experimental music in Messiaen modes, "
+    "post-romantic harmony, dark progressive psychedelic fusion rock jazz"
+)
+
 LifecycleStatus = Literal[
     "CREATED",
     "STARTING",
@@ -281,7 +288,7 @@ class SegmentWorldState(BaseModel):
 
 class AudioPlan(BaseModel):
     segment_id: str
-    music_style: str = "ambient electronic"
+    music_style: str = DEFAULT_MUSIC_STYLE
     energy: float = 0.5
     seed: int = 0
     # Slow-loop takes (§35) serving this segment, oldest first. Empty for

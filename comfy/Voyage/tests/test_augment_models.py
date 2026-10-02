@@ -56,8 +56,8 @@ def test_realesrgan_spec_pins_mirror_upstream_and_license() -> None:
     assert filereq.repo_id == model_registry.REALESRGAN_HF_REPO != ""
     assert filereq.revision == model_registry.REALESRGAN_HF_REVISION != ""
     assert filereq.filename == model_registry.REALESRGAN_ANIME_FILE
-    assert filereq.filename == "RealESRGAN_x4plus_anime_6B.pth"
-    assert model_registry.REALESRGAN_ANIME_MIN_BYTES >= 15_000_000
+    assert filereq.filename == "realesr-animevideov3.pth"
+    assert model_registry.REALESRGAN_ANIME_MIN_BYTES >= 2_100_000
     assert "xinntao/Real-ESRGAN" in model_registry.REALESRGAN_UPSTREAM_URL
     assert "BSD" in model_registry.REALESRGAN_LICENSE
 
@@ -73,7 +73,7 @@ def test_realesrgan_verify_missing_message_names_weights(tmp_path: Path) -> None
     ok, message = model_registry.verify_model(tmp_path, "realesrgan-anime")
     assert ok is False
     assert message.startswith("missing")
-    assert "RealESRGAN_x4plus_anime_6B.pth" in message
+    assert "realesr-animevideov3.pth" in message
 
 
 def test_film_verify_passes_with_sized_file(tmp_path: Path) -> None:

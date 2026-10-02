@@ -12,7 +12,10 @@ import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from voyage.config import AudioConfig
 
 from voyage import paths
 from voyage.atomic import atomic_copy, atomic_write_json, read_json
@@ -114,6 +117,7 @@ def plan_augmentation(
     min_fps: int | None,
     min_width: int | None,
     min_height: int | None,
+    interp_multiplier: int = 1,
 ) -> AugmentPlan:
     """Compute the presentation box/fps for one finalize (pure, Track B).
 
@@ -130,6 +134,10 @@ def plan_augmentation(
 
     `needs_minterpolate` is True only for an fps lift (source + 0.5 <
     out — motion interpolation); an fps drop uses the plain fps filter.
+    When the model pass interpolates (`interp_multiplier > 1`), the lift
+    is measured against the interpolated rate (`source * multiplier`):
+    presenting 24fps x2 content at 32fps stretches the timeline (slow
+    motion) instead of synthesizing more frames.
     `needs_reencode` covers any pixel/timing change (dims differ, fps
     differs past 0.5 either way, lift, or unknown source fps) and gates
     the stream-copy fast path off.
@@ -138,6 +146,8 @@ def plan_augmentation(
         raise ValueError(f"target geometry must be positive (got {target_w}x{target_h})")
     if requested_fps <= 0:
         raise ValueError(f"requested fps must be positive (got {requested_fps})")
+    if interp_multiplier < 1:
+        raise ValueError(f"interp_multiplier must be >= 1 (got {interp_multiplier})")
     floor_fps = int(min_fps or 0)
     floor_w = int(min_width or 0)
     floor_h = int(min_height or 0)
@@ -147,7 +157,8 @@ def plan_augmentation(
     out_w = max(int(target_w), floor_w, int(source_w))
     out_h = max(int(target_h), floor_h, int(source_h))
     source_fps_value = float(source_fps)
-    needs_minterpolate = source_fps_value > 0 and out_fps > source_fps_value + FPS_MATCH_TOLERANCE
+    interpolated_rate = source_fps_value * interp_multiplier
+    needs_minterpolate = source_fps_value > 0 and out_fps > interpolated_rate + FPS_MATCH_TOLERANCE
     fps_mismatch = source_fps_value <= 0 or abs(out_fps - source_fps_value) > FPS_MATCH_TOLERANCE
     needs_reencode = bool(
         needs_minterpolate or fps_mismatch or int(source_w) != out_w or int(source_h) != out_h
@@ -158,6 +169,94 @@ def plan_augmentation(
         out_fps=out_fps,
         needs_reencode=needs_reencode,
         needs_minterpolate=needs_minterpolate,
+    )
+
+
+def slowmo_factor(source_fps: float, interp_multiplier: int, out_fps: int) -> float:
+    """Timeline stretch of a slow-motion present (pure).
+
+    Interpolating `source_fps` content by `interp_multiplier` and
+    presenting at `out_fps` stretches wall-clock by
+    `source_fps * multiplier / out_fps` (24fps x2 at 32fps = 1.5x).
+    1.0 means no stretch (today's behavior).
+    """
+    if source_fps <= 0 or interp_multiplier < 1 or out_fps <= 0:
+        raise ValueError(
+            f"slowmo inputs must be positive (got {source_fps}/{interp_multiplier}/{out_fps})"
+        )
+    return float(source_fps) * interp_multiplier / out_fps
+
+
+def presentation_stretch(source_fps: float, interp_multiplier: int, out_fps: int) -> float:
+    """Stretch for one finalize, tolerating an unprobable source (pure).
+
+    `_probe_video_fps` returns 0.0 when the first segment's fps is
+    absent/unparseable, and `plan_augmentation` handles that gracefully
+    (fps mismatch → re-encode). `slowmo_factor` rightly rejects
+    non-positive inputs, so this wrapper maps them to 1.0 (no stretch):
+    the tensor path can never arm on fps 0.0, and an unconditional call
+    would crash a finalize that previously proceeded.
+    """
+    if source_fps <= 0:
+        return 1.0
+    return slowmo_factor(source_fps, interp_multiplier, out_fps)
+
+
+#: Stretch values within this of 1.0 count as no-stretch (float noise
+#: from `slowmo_factor` must not arm the slow-mo path).
+SLOWMO_STRETCH_TOLERANCE = 1e-9
+
+
+def slowmo_video_active(tensor: bool, presentation_fps: int | None, stretch: float) -> bool:
+    """True when the tensor present must retime instead of decimate (pure).
+
+    All three must hold: the model pass actually interpolated (tensor
+    path), the user explicitly requested a presentation fps (opt-in —
+    default runs keep the legacy fps-filter timeline byte-identical), and
+    the stretch differs from 1.0. A bare `fps=` filter drops frames to
+    hold the duration; slow-mo keeps every FILM frame via setpts.
+    """
+    return tensor and presentation_fps is not None and abs(stretch - 1.0) > SLOWMO_STRETCH_TOLERANCE
+
+
+def tensor_presentation_vf(
+    out_w: int, out_h: int, out_fps: int, stretch: float, *, slowmo: bool
+) -> str:
+    """Presentation vf for the tensor intermediate (pure).
+
+    Slow-mo prefixes `setpts=<stretch>*PTS` (uniform retime — every
+    interpolated frame survives, the timeline stretches); otherwise the
+    legacy scale/pad/setsar/fps chain (fps filter holds the duration).
+    """
+    head = f"setpts={stretch}*PTS," if slowmo else ""
+    return (
+        f"{head}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+        f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
+    )
+
+
+def tensor_path_armed(
+    *,
+    model_selected: bool,
+    weights_present: bool,
+    source_fps: float,
+    needs_reencode: bool,
+    devices_available: bool,
+) -> bool:
+    """Tensor-path gate shared by `finalize_run` and the parallel pre-fork.
+
+    Pure: the model pass interpolates iff the knob selected legs, weights
+    resolved, the source has a real fps, the plan flags work, and a model
+    device is visible. One predicate in one place — the pre-fork ACE
+    render must predict exactly what Thread A will decide, or the takes
+    ledger lands on the wrong timeline.
+    """
+    return bool(
+        model_selected
+        and weights_present
+        and source_fps > 0
+        and needs_reencode
+        and devices_available
     )
 
 
@@ -332,6 +431,21 @@ class FinalizeOptions:
     FILM pass when provisioned (default True — DESIGN §140 GPU defaults;
     absent legs fall back to the same vf path, so off == on-absent
     byte-for-byte).
+
+    Interpolation multiplier (`interp_multiplier`, DESIGN §56): FILM
+    frames per pair for the model pass (default 4); 1 keeps the frame
+    count — upscale without interpolating.
+
+    Presentation fps (`presentation_fps`, slow-mo finalize): pins the
+    shipped frame rate instead of the floors rule — 24fps x2 content
+    presented at 32fps stretches the timeline 1.5x (slow motion).
+    `None` (default) keeps the floors behavior; 0 also means unset.
+
+    Deferred audio (`deferred_audio`, DESIGN §140 slow-mo finalize):
+    ltxv/causvid commit no ACE takes, so finalize renders them via
+    `ensure_deferred_for_finalize` before the mix (full move, never at
+    commit). `False` (default) keeps the takes-ledger behavior; joint
+    backends never set this.
     """
 
     skip_bad: bool = False
@@ -346,6 +460,9 @@ class FinalizeOptions:
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
     use_model_pass: bool = True
+    interp_multiplier: int = 4
+    presentation_fps: int | None = None
+    deferred_audio: bool = False
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -364,6 +481,12 @@ class FinalizeOptions:
             raise ValueError(f"min_height must be >= 0 (got {self.min_height})")
         if not isinstance(self.use_model_pass, bool):
             raise TypeError(f"use_model_pass must be a bool (got {self.use_model_pass!r})")
+        if self.interp_multiplier < 1:
+            raise ValueError(f"interp_multiplier must be >= 1 (got {self.interp_multiplier!r})")
+        if self.presentation_fps is not None and self.presentation_fps < 1:
+            raise ValueError(f"presentation_fps must be >= 1 (got {self.presentation_fps!r})")
+        if not isinstance(self.deferred_audio, bool):
+            raise TypeError(f"deferred_audio must be a bool (got {self.deferred_audio!r})")
         validate_crf(self.crf)
         validate_preset(self.preset)
 
@@ -419,6 +542,9 @@ class ResolvedFinalizeSettings:
     crf: int
     preset: str
     use_model_pass: bool
+    interp_multiplier: int
+    presentation_fps: int | None
+    deferred_audio: bool
 
 
 def resolve_finalize_settings(
@@ -435,6 +561,9 @@ def resolve_finalize_settings(
     crf: int | None,
     preset: str | None,
     use_model_pass: bool | None = None,
+    interp_multiplier: int | None = None,
+    presentation_fps: int | None = None,
+    deferred_audio: bool | None = None,
 ) -> ResolvedFinalizeSettings:
     """Resolve the scalar/`options=` split into one settings struct (pure).
 
@@ -463,6 +592,9 @@ def resolve_finalize_settings(
             crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
             preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
             use_model_pass=True if use_model_pass is None else use_model_pass,
+            interp_multiplier=4 if interp_multiplier is None else interp_multiplier,
+            presentation_fps=presentation_fps,
+            deferred_audio=False if deferred_audio is None else deferred_audio,
         )
     else:
         settings = options
@@ -478,6 +610,12 @@ def resolve_finalize_settings(
             settings = replace(settings, overlap_cap_seconds=overlap_cap_seconds)
         if use_model_pass is not None:
             settings = replace(settings, use_model_pass=use_model_pass)
+        if interp_multiplier is not None:
+            settings = replace(settings, interp_multiplier=interp_multiplier)
+        if presentation_fps is not None:
+            settings = replace(settings, presentation_fps=presentation_fps)
+        if deferred_audio is not None:
+            settings = replace(settings, deferred_audio=deferred_audio)
     return ResolvedFinalizeSettings(
         settings=settings,
         min_fps=min_fps if min_fps is not None else settings.min_fps,
@@ -486,6 +624,13 @@ def resolve_finalize_settings(
         crf=validate_crf(crf if crf is not None else settings.crf),
         preset=validate_preset(preset if preset is not None else settings.preset),
         use_model_pass=settings.use_model_pass,
+        interp_multiplier=(
+            interp_multiplier if interp_multiplier is not None else settings.interp_multiplier
+        ),
+        presentation_fps=(
+            presentation_fps if presentation_fps is not None else settings.presentation_fps
+        ),
+        deferred_audio=(deferred_audio if deferred_audio is not None else settings.deferred_audio),
     )
 
 
@@ -587,8 +732,13 @@ def finalize_run(
     crf: int | None = None,
     preset: str | None = None,
     use_model_pass: bool | None = None,
+    interp_multiplier: int | None = None,
+    presentation_fps: int | None = None,
     models_dir: Path | str | None = None,
     options: FinalizeOptions | None = None,
+    deferred_audio: bool | None = None,
+    seed: int = 0,
+    audio_config: AudioConfig | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -673,6 +823,9 @@ def finalize_run(
         crf=crf,
         preset=preset,
         use_model_pass=use_model_pass,
+        interp_multiplier=interp_multiplier,
+        presentation_fps=presentation_fps,
+        deferred_audio=deferred_audio,
     )
     settings = resolved.settings
     effective_min_fps = resolved.min_fps
@@ -681,6 +834,9 @@ def finalize_run(
     effective_crf = resolved.crf
     effective_preset = resolved.preset
     effective_use_model_pass = resolved.use_model_pass
+    effective_interp_multiplier = resolved.interp_multiplier
+    effective_presentation_fps = resolved.presentation_fps
+    effective_deferred_audio = resolved.deferred_audio
     resolved_weights = None
     model_selected = False
     if effective_use_model_pass and models_dir is not None:
@@ -706,37 +862,30 @@ def finalize_run(
     source_info = probe(usable[0] / "video.mp4")
     source_fps = _probe_video_fps(source_info)
     source_w, source_h = _probe_video_geometry(source_info)
+    # The plan only credits the FILM multiplier when the model pass will
+    # actually interpolate (legs present + knob on); otherwise a missing
+    # leg must fall back to the minterpolate lift, never to slow motion.
+    plan_multiplier = effective_interp_multiplier if model_selected else 1
     plan = plan_augmentation(
         source_w,
         source_h,
         source_fps,
         width,
         height,
-        fps,
+        (effective_presentation_fps if effective_presentation_fps is not None else fps),
         effective_min_fps,
         effective_min_width,
         effective_min_height,
+        interp_multiplier=plan_multiplier,
     )
     out_w, out_h, out_fps = plan.out_w, plan.out_h, plan.out_fps
+    stretch = presentation_stretch(source_fps, effective_interp_multiplier, out_fps)
     lift = ""
     if plan.needs_minterpolate:
         lift = f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
 
     with tempfile.TemporaryDirectory(prefix="voyage-final-", dir=run_dir) as tmp:
         tmpdir = Path(tmp)
-        # Blended final mix (overlap re-sliced from takes; previews untouched).
-        audio_start = time.monotonic()
-        final_audio = build_final_audio(
-            run_dir,
-            usable,
-            tmpdir,
-            fps,
-            settings.sample_rate,
-            settings.channels,
-            settings.effective_overlap_fraction(),
-            settings.overlap_cap_seconds,
-        )
-        audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # Single-pass shape (issues 050): no intermediate per-segment
         # libx264 parts — the concat demuxer feeds one vf encode over the
         # originals. `parts_encode_ms` stays 0.0 so soak trending keeps a
@@ -752,29 +901,145 @@ def finalize_run(
         # are present, so ltx25 native 1216x704@24 takes the stream-copy
         # fast path instead of a no-op enhance.
         tensor_intermediate: Path | None = None
-        if (
-            model_selected
-            and resolved_weights is not None
-            and source_fps > 0
-            and plan.needs_reencode
-        ):
-            from voyage.augment import augment_devices, model_pass_devices, run_finalize_model_pass
+        # Phase timings for the elapsed-time report (DESIGN §56): the
+        # durable entry fills this in; the legacy flow and the no-model
+        # paths leave it empty (only wall time is known there).
+        model_pass_timings: dict[str, float] = {}
+        # One shared gate (`tensor_path_armed`): the parallel pre-fork
+        # predicts exactly this, or the ACE takes ledger lands on the
+        # wrong timeline.
+        tensor_devices: tuple[str, ...] = ()
+        if model_selected and resolved_weights is not None:
+            from voyage.augment import augment_devices, model_pass_devices
 
             if augment_devices():
-                # DESIGN §140 GPU defaults: the whole model pass is pinned
-                # to cuda:1 (the 2060) so the MMAudio SFX stack owns cuda:0
-                # (the 4060) — `model_pass_devices` collapses to cuda:0 on
-                # a 1-GPU box, so the sequential path is unchanged there.
-                model_work = tmpdir / "model_pass"
+                tensor_devices = model_pass_devices()
+        if (
+            resolved_weights is not None
+            and tensor_devices
+            and tensor_path_armed(
+                model_selected=model_selected,
+                weights_present=True,
+                source_fps=source_fps,
+                needs_reencode=plan.needs_reencode,
+                devices_available=True,
+            )
+        ):
+            # DESIGN §140 GPU defaults: the whole model pass is pinned
+            # to cuda:1 (the 2060) so the MMAudio SFX stack owns cuda:0
+            # (the 4060) — `model_pass_devices` collapses to cuda:0 on
+            # a 1-GPU box, so the sequential path is unchanged there.
+            model_work = tmpdir / "model_pass"
+            if resolved_weights.film is not None and resolved_weights.realesrgan is not None:
+                # Durable sidecar path (independent workers): poll the
+                # upscale + interp workers to completion under
+                # run_dir/augment/<plan-hash>/, drain one intermediate
+                # per usable segment, concat in segment order. A crashed
+                # finalize retries only the missing chunks.
+                from voyage.augment_finalize import run_durable_model_pass
+
+                tensor_intermediate, _ = run_durable_model_pass(
+                    run_dir,
+                    usable,
+                    out_width=out_w,
+                    out_height=out_h,
+                    source_fps=source_fps,
+                    weights=resolved_weights,
+                    multiplier=effective_interp_multiplier,
+                    crf=effective_crf,
+                    preset=effective_preset,
+                    device=tensor_devices[0],
+                    work_dir=model_work,
+                    timings=model_pass_timings,
+                )
+            else:
+                # Partial legs keep the legacy all-or-nothing tmpdir
+                # flow (unchanged behavior for film-only/ESRGAN-only).
+                from voyage.augment import run_finalize_model_pass
+
                 tensor_intermediate, _ = run_finalize_model_pass(
                     [segment / "video.mp4" for segment in usable],
                     resolved_weights,
                     source_fps=source_fps,
+                    multiplier=effective_interp_multiplier,
                     crf=effective_crf,
                     preset=effective_preset,
                     work_dir=model_work,
-                    devices=model_pass_devices(),
+                    devices=tensor_devices,
                 )
+        # Deferred ACE music (DESIGN §140 slow-mo finalize): ltxv/causvid
+        # commit no takes, so the takes render here — AFTER the model pass
+        # (upscale → interp → music → SFX order) and BEFORE the mix below.
+        # The stretch covers the slow-mo timeline only when the present
+        # actually retimes (tensor path + explicit presentation fps +
+        # stretch != 1 — `slowmo_video_active`); otherwise the mix stays on
+        # the source timeline. A complete ledger (re-finalize) no-ops
+        # inside the helper with no worker spawned.
+        audio_start = time.monotonic()
+        slowmo = slowmo_video_active(
+            tensor_intermediate is not None, effective_presentation_fps, stretch
+        )
+        if effective_deferred_audio:
+            from voyage.audio_finalize import ensure_deferred_for_finalize
+
+            ace_models_dir = (
+                getattr(audio_config, "models_dir", None) if audio_config is not None else None
+            )
+            if ace_models_dir is None:
+                ace_models_dir = models_dir
+            audio_stretch = stretch if slowmo else 1.0
+            ensure_deferred_for_finalize(
+                run_dir=run_dir,
+                usable=usable,
+                source_fps=source_fps,
+                stretch=audio_stretch,
+                run_seed=seed,
+                models_dir=ace_models_dir,
+                device="cuda:0",
+                music_style=(
+                    getattr(audio_config, "music_style", "") if audio_config is not None else ""
+                ),
+                explicit_caption=(
+                    getattr(audio_config, "music_caption", None)
+                    if audio_config is not None
+                    else None
+                ),
+                take_seconds=(
+                    getattr(audio_config, "take_seconds", 45.0)
+                    if audio_config is not None
+                    else 45.0
+                ),
+                ahead_seconds=(
+                    getattr(audio_config, "ahead_seconds", 20.0)
+                    if audio_config is not None
+                    else 20.0
+                ),
+                beats_per_segment=(
+                    getattr(audio_config, "beats_per_segment", 4) if audio_config is not None else 4
+                ),
+                sample_rate=(
+                    getattr(audio_config, "sample_rate", 48000)
+                    if audio_config is not None
+                    else 48000
+                ),
+                channels=(getattr(audio_config, "channels", 2) if audio_config is not None else 2),
+            )
+        else:
+            audio_stretch = 1.0
+        # Blended final mix (overlap re-sliced from takes; previews untouched).
+        final_audio = build_final_audio(
+            run_dir,
+            usable,
+            tmpdir,
+            fps,
+            settings.sample_rate,
+            settings.channels,
+            settings.effective_overlap_fraction(),
+            settings.overlap_cap_seconds,
+            deferred=effective_deferred_audio,
+            stretch=audio_stretch,
+        )
+        audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
         # stream copy and mux the final audio — zero video re-encodes. The
@@ -790,10 +1055,7 @@ def finalize_run(
             )
         )
         if tensor_intermediate is not None:
-            tensor_vf = (
-                f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
-                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
-            )
+            tensor_vf = tensor_presentation_vf(out_w, out_h, out_fps, stretch, slowmo=slowmo)
             final_start = time.monotonic()
             proc = run_capture(
                 [
@@ -949,6 +1211,20 @@ def finalize_run(
                     "audio_blend_ms": round(audio_blend_ms, 1),
                     "final_encode_ms": round(final_encode_ms, 1),
                     "fast_path": native and tensor_intermediate is None,
+                    "interp_multiplier": effective_interp_multiplier,
+                    "presentation_fps": effective_presentation_fps,
+                    "slowmo_factor": round(stretch, 4),
+                    "deferred_audio": effective_deferred_audio,
+                    "model_pass_timings_s": {
+                        key: round(value, 3)
+                        for key, value in model_pass_timings.items()
+                        if key.endswith("_s")
+                    },
+                    "model_pass_chunks": {
+                        key: value
+                        for key, value in model_pass_timings.items()
+                        if not key.endswith("_s")
+                    },
                 }
             ),
         )

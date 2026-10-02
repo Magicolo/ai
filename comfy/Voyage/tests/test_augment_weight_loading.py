@@ -63,7 +63,7 @@ def test_safetensors_suffix_uses_safe_loader(
 
 def test_pth_suffix_uses_weights_only_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`.pth` paths load via `torch.load(weights_only=True)` (no safetensors)."""
-    weights_path = tmp_path / "RealESRGAN_x4plus_anime_6B.pth"
+    weights_path = tmp_path / "realesr-animevideov3.pth"
     weights_path.write_bytes(b"fake-pth-payload")
     seen: dict[str, Any] = {}
 
@@ -97,7 +97,7 @@ def test_corrupt_pickle_maps_to_compatibility(
     """A corrupt `.pth` blob surfaces as ModelCompatibilityError (actionable)."""
     from voyage import model_registry
 
-    weights_path = tmp_path / "RealESRGAN_x4plus_anime_6B.pth"
+    weights_path = tmp_path / "realesr-animevideov3.pth"
     weights_path.parent.mkdir(parents=True, exist_ok=True)
     with weights_path.open("wb") as handle:
         handle.truncate(model_registry.REALESRGAN_ANIME_MIN_BYTES)
@@ -113,8 +113,9 @@ def test_corrupt_pickle_maps_to_compatibility(
         load_state_dict=lambda state, strict: None,
     )
     monkeypatch.setattr(augment_worker, "_build_rrdb_net", lambda: fake_model)
+    monkeypatch.setattr(augment_worker, "_build_srvgg_net", lambda _depth: fake_model)
     with pytest.raises(ModelCompatibilityError, match="Real-ESRGAN"):
-        augment_worker._load_rrdb_net(weights_path)
+        augment_worker._load_esrgan_net(weights_path)
 
 
 def test_size_floor_rejects_tiny_file(tmp_path: Path) -> None:

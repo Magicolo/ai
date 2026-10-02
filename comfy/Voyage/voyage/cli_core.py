@@ -51,4 +51,10 @@ def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
     use_model_pass = getattr(args, "use_model_pass", None)
     if is_provided(use_model_pass):
         overrides["use_model_pass"] = use_model_pass
+    interp_multiplier = getattr(args, "interp_multiplier", None)
+    if is_provided(interp_multiplier):
+        overrides["interp_multiplier"] = interp_multiplier
+    presentation_fps = getattr(args, "presentation_fps", None)
+    if is_provided(presentation_fps):
+        overrides["presentation_fps"] = presentation_fps
     return overrides

@@ -493,6 +493,21 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
         "(default: [augment] use_model_pass on, pinned to cuda:1 when two GPUs show; "
         "--no-augment turns it off with the floors)",
     )
+    parser.add_argument(
+        "--interp-multiplier",
+        type=int,
+        default=None,
+        help="FILM interpolation multiplier for the model pass "
+        "(default: [augment] interp_multiplier 4; 1 = upscale only, no interpolation)",
+    )
+    parser.add_argument(
+        "--presentation-fps",
+        type=int,
+        default=None,
+        help="pin the shipped frame rate instead of the floors rule "
+        "(default: unset; e.g. 24fps x2 content at 32fps stretches the "
+        "timeline 1.5x slow motion)",
+    )
 
 
 def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:

@@ -244,6 +244,8 @@ def ffmpeg_decode_chunk(
             f"select='between(n\\,0\\,{end})',setpts=N/FRAME_RATE/TB",
             "-vsync",
             "0",
+            "-start_number",
+            "0",
             str(dest_dir / "frame_%06d.png"),
         ]
     else:
@@ -258,6 +260,8 @@ def ffmpeg_decode_chunk(
             "-vf",
             f"select='between(n\\,{start}\\,{end})',setpts=N/FRAME_RATE/TB",
             "-vsync",
+            "0",
+            "-start_number",
             "0",
             str(dest_dir / "frame_%06d.png"),
         ]

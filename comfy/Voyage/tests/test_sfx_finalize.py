@@ -354,3 +354,59 @@ def test_fake_bed_end_to_end_over_junctions(tmp_path: Path) -> None:
     assert len(records) == 2
     assert "glass chimes" in records[0]["caption"]
     assert "deep rumble" in records[0]["caption"]
+
+
+def test_finalize_sfx_pass_emits_timing_metric(tmp_path: Path) -> None:
+    import json
+    import subprocess
+
+    from voyage.sfx_finalize import finalize_sfx_pass
+
+    run_dir = tmp_path / "run"
+    _make_finalize_segment(run_dir, "000000", 4.0, "glass chimes")
+    final_video = tmp_path / "final.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(run_dir / "segments" / "000000" / "video.mp4"),
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:duration=4",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            str(final_video),
+        ],
+        check=True,
+    )
+    out = finalize_sfx_pass(
+        run_dir, final_video, "fake", "/models", "cpu", "large_44k_v2", 11, 48000, 2, 1, 24
+    )
+    assert out == final_video
+    events = [
+        json.loads(line)
+        for line in (run_dir / "logs" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    timed = [entry for entry in events if entry.get("event") == "sfx_pass_completed"]
+    assert len(timed) == 1
+    assert timed[0]["sfx_pass_s"] >= 0.0
+    assert timed[0]["windows"] == 1
+    assert timed[0]["backend"] == "fake"

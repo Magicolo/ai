@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,10 @@ stub tail into its predecessor instead, since counts must stay exact)."""
 
 SFX_VOLUME = 0.5
 """Bed level under the music (-6 dB, Zoomy parity)."""
+
+BOUNDS_RESCALE_IDENTITY_TOLERANCE = 1e-6
+"""Timelines within this (seconds) count as identical — float noise from
+probing must not rescale the SFX bounds (byte-identical legacy path)."""
 
 SFX_LEDGER_NAME = "sfx.jsonl"
 SFX_STEMS_DIRNAME = "sfx"
@@ -207,6 +212,31 @@ def segment_sfx_bounds(
         bounds.append((cursor, cursor + duration, caption or ""))
         cursor += duration
     return bounds
+
+
+def _scale_bounds_to_timeline(
+    bounds: list[tuple[float, float, str]], timeline_seconds: float
+) -> list[tuple[float, float, str]]:
+    """Rescale source-timeline bounds onto a retimed shipped timeline (pure).
+
+    The SFX bounds walk source segments (unchanged by any video retime),
+    while the finalize SFX pass probes the shipped video duration as its
+    timeline. Identical timelines (within float noise) return the bounds
+    untouched — byte-identical to today's path; a stretched slow-mo
+    timeline scales every bound uniformly so captions stay aligned with
+    the retimed video.
+    """
+    if not bounds:
+        raise MediaError("cannot scale empty sfx bounds onto a timeline")
+    source_end = bounds[-1][1]
+    if source_end <= 0.0 or timeline_seconds <= 0.0:
+        raise MediaError(
+            f"sfx bounds scaling needs positive durations (got {source_end}/{timeline_seconds})"
+        )
+    if abs(timeline_seconds - source_end) <= BOUNDS_RESCALE_IDENTITY_TOLERANCE:
+        return list(bounds)
+    factor = timeline_seconds / source_end
+    return [(start * factor, end * factor, caption) for start, end, caption in bounds]
 
 
 def append_sfx_window(ledger: Path, window: SfxWindow, path: str, model_size: str) -> None:
@@ -368,7 +398,10 @@ def render_sfx_bed(
     `blend_timings` collects the single join wall-milliseconds for soak
     trending.
     """
+    from voyage.logrotate import append_line
     from voyage.rpc import SubprocessWorker
+
+    started = time.perf_counter()
 
     if num_workers not in (1, SFX_MAX_WORKERS):
         raise MediaError(f"sfx workers must be 1 or 2 (got {num_workers})")
@@ -510,6 +543,9 @@ def render_sfx_bed(
         )
         if proc.returncode != 0:
             raise MediaError(f"sfx bed copy failed: {proc.stderr[-2000:]}")
+        _emit_sfx_pass_completed(
+            run_dir, windows, backend, device, model_size, started, append_line
+        )
         return bed
     stem_seconds = [_audio_duration_seconds(stem) for stem in stems]
     joined = tmpdir / "sfx_joined.wav"
@@ -539,7 +575,39 @@ def render_sfx_bed(
     bed_seconds = _audio_duration_seconds(bed)
     if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
         raise MediaError(f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s")
+    _emit_sfx_pass_completed(run_dir, windows, backend, device, model_size, started, append_line)
     return bed
+
+
+def _emit_sfx_pass_completed(
+    run_dir: Path,
+    windows: list[SfxWindow],
+    backend: str,
+    device: str,
+    model_size: str,
+    started: float,
+    append_line: Any,
+) -> None:
+    """Emit `sfx_pass_completed` (bed windows + wall seconds, DESIGN §140).
+
+    Single home so both the sequential `finalize_sfx_pass` and the
+    parallel-finalize Thread B (both funnel through `render_sfx_bed`)
+    report the SFX leg like `finalize_completed` reports the model pass.
+    """
+    append_line(
+        run_dir / paths.LOGS_DIRNAME / "metrics.jsonl",
+        json.dumps(
+            {
+                "ts": time.time(),
+                "event": "sfx_pass_completed",
+                "windows": len(windows),
+                "backend": backend,
+                "device": device,
+                "model_size": model_size,
+                "sfx_pass_s": round(time.perf_counter() - started, 3),
+            }
+        ),
+    )
 
 
 def mix_music_and_sfx(
@@ -669,6 +737,9 @@ def finalize_sfx_pass(
     bed conditioned on the final video, mixes, and muxes video-copy +
     mixed audio back over the same path (atomic replace — a failed pass
     never strands a half-written final). Returns the final path.
+
+    The `sfx_pass_completed` timing event fires inside `render_sfx_bed`
+    (shared with the parallel-finalize path).
     """
     import tempfile
 
@@ -681,6 +752,11 @@ def finalize_sfx_pass(
         d for d in segments_root.iterdir() if d.is_dir() and (d / paths.DONE_MARKER).exists()
     )
     bounds = segment_sfx_bounds(run_dir, usable, fps, caption_override)
+    # Slow-mo retime (DESIGN §140): the bounds walk the source timeline
+    # but the shipped video may be stretched — rescale onto the probed
+    # shipped duration so captions stay aligned. Identical timelines are
+    # returned untouched (byte-identical legacy path).
+    bounds = _scale_bounds_to_timeline(bounds, timeline)
     with tempfile.TemporaryDirectory(prefix="voyage-sfx-final-") as tmp:
         tmpdir = Path(tmp)
         bed = render_sfx_bed(

@@ -29,7 +29,7 @@ from voyage.registry_realesrgan import (
 )
 
 _REALESRGAN_RELATIVE = f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}"
-"""Registry-relative path of the pinned anime-6B `.pth` under a models dir."""
+"""Registry-relative path of the pinned anime-video-XS `.pth` under a models dir."""
 
 
 def _write_sparse(path: Path, size_bytes: int) -> Path:

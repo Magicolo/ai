@@ -362,7 +362,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         print("weights: ltx25 (~38 GB Q3 + TE + VAEs + upscaler) | ltx23 (~20 GB Q3 + TE + VAEs)")
         print("weights: director-qwen8b (~16 GB) | audio-acestep | inspector-qwen35 (~19 GB)")
         print("weights: sfx-mmaudio (~8 GB: 3 variants + VAE/sync/CLIP/vocoder)")
-        print("weights: film (~66 MB interpolation) | realesrgan-anime (~18 MB upscaler)")
+        print("weights: film (~66 MB interpolation) | realesrgan-anime (~2 MB upscaler)")
         print("note: MMAudio weights are CC-BY-NC-4.0 (non-commercial)")
         print("pins: voyage/model_registry.py (single source); human mirror docs/MODELS.md")
         print("note: CausVid DMD checkpoint is CC BY-NC-SA 4.0 (non-commercial)")

@@ -66,7 +66,7 @@ def test_tiled_upscale_matches_direct_within_tolerance() -> None:
     torch = pytest.importorskip("torch")
     from voyage.workers.augment_worker import upscale_frames
 
-    weights = "/models/realesrgan/RealESRGAN_x4plus_anime_6B.pth"
+    weights = "/models/realesrgan/realesr-animevideov3.pth"
     if not os.path.exists(weights):
         pytest.skip("augment weights absent (needs /models)")
     frame = torch.rand(3, 256, 256)

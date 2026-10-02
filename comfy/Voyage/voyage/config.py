@@ -22,6 +22,7 @@ except ImportError:  # Python 3.10 worker image (upstream env)
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from voyage.errors import ConfigurationError
+from voyage.models import DEFAULT_MUSIC_STYLE
 
 VideoBackendName = Literal["fake", "ltxv", "causvid", "ltx25", "ltx23"]
 """Video backend vocabulary (issue 022): every backend field, the registry,
@@ -324,7 +325,7 @@ class AudioConfig(BaseModel):
     backend: AudioBackendName = "fake"
     sample_rate: int = 48000
     channels: int = 2
-    music_style: str = "ambient electronic"
+    music_style: str = DEFAULT_MUSIC_STYLE
     energy: float = 0.5
     # Slow-loop music takes (§35): each take covers `take_seconds` of video
     # time; a new take renders when coverage drops within `ahead_seconds`
@@ -463,18 +464,46 @@ class AugmentConfig(BaseModel):
     upscale + FILM interpolate via `resolve_augment_weights` when
     provisioned (default on — DESIGN §140 GPU defaults pins it to
     cuda:1), ffmpeg floors only when off or when the legs are absent.
+
+    `interp_multiplier` (DESIGN §56) is the FILM frame multiplier for
+    the model pass (default 4, matching the validated Comfy
+    `video_export.json` recipe); 1 keeps the frame count
+    (`(n-1)*1+1 = n`, the interp worker passes frames through), so the
+    pass upscales without interpolating.
+
+    `presentation_fps` (slow-mo finalize) pins the shipped frame rate
+    instead of the floors rule: with `interp_multiplier=2` on 24fps
+    content presented at 32fps, the timeline stretches 1.5x (slow
+    motion) instead of lifting fps with minterpolate. `None` (default)
+    keeps the floors behavior; TOML `0` also means unset.
     """
 
     min_fps: int = 24
     min_width: int = 1216
     min_height: int = 704
     use_model_pass: bool = True
+    interp_multiplier: int = 4
+    presentation_fps: int | None = Field(default=None, ge=1)
+
+    @field_validator("presentation_fps", mode="before")
+    @classmethod
+    def unset_presentation_zero(cls, value: object) -> object:
+        if value == 0:
+            return None
+        return value
 
     @field_validator("min_fps", "min_width", "min_height")
     @classmethod
     def non_negative(cls, value: int) -> int:
         if value < 0:
             raise ValueError("must be non-negative (0 disables the floor)")
+        return value
+
+    @field_validator("interp_multiplier")
+    @classmethod
+    def multiplier_at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("interp_multiplier must be >= 1 (1 = upscale only, no interpolation)")
         return value
 
     @model_validator(mode="after")
@@ -786,6 +815,7 @@ def default_config_toml(
     sfx_device = sfx_preset["device"]
     escaped_run_id = _toml_basic_string(run_id)
     escaped_style = _toml_basic_string(style)
+    escaped_music_style = _toml_basic_string(DEFAULT_MUSIC_STYLE)
     return f"""\
 schema_version = 1
 run_id = {escaped_run_id}
@@ -812,7 +842,7 @@ quantization = "fp8"
 backend = "{audio_backend}"
 sample_rate = 48000
 channels = 2
-music_style = "ambient electronic"
+music_style = {escaped_music_style}
 energy = 0.5
 take_seconds = 45.0
 ahead_seconds = 20.0
@@ -842,6 +872,9 @@ min_height = 704
 # + FILM interpolate when provisioned (pinned to cuda:1 when two GPUs
 # are visible); off (false) keeps the ffmpeg floors only.
 use_model_pass = true
+# Interpolation multiplier (DESIGN §56): FILM frames per pair (default
+# 4); 1 keeps the frame count — upscale without interpolating.
+interp_multiplier = 4
 
 [director]
 backend = "{director_backend}"
@@ -922,6 +955,8 @@ def resolve_config(
     min_fps: int | None | UnsetType = Unset,
     min_resolution: str | None | UnsetType = Unset,
     use_model_pass: bool | None | UnsetType = Unset,
+    interp_multiplier: int | None | UnsetType = Unset,
+    presentation_fps: int | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issues 022 + 025): backend preset,
     then the stored [draft] overlay, then targeted overrides — in that
@@ -985,22 +1020,36 @@ def resolve_config(
     if is_provided(video_caption):
         video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
     augment = config.augment
-    if is_provided(min_fps) or is_provided(min_resolution) or is_provided(use_model_pass):
+    if (
+        is_provided(min_fps)
+        or is_provided(min_resolution)
+        or is_provided(use_model_pass)
+        or is_provided(interp_multiplier)
+        or is_provided(presentation_fps)
+    ):
         resolved_fps = augment.min_fps
         resolved_width = augment.min_width
         resolved_height = augment.min_height
         resolved_model_pass = augment.use_model_pass
+        resolved_multiplier = augment.interp_multiplier
+        resolved_presentation = augment.presentation_fps
         if is_provided(min_fps):
             resolved_fps = min_fps
         if is_provided(min_resolution):
             resolved_width, resolved_height = parse_min_resolution(min_resolution)
         if is_provided(use_model_pass):
             resolved_model_pass = use_model_pass
+        if is_provided(interp_multiplier):
+            resolved_multiplier = interp_multiplier
+        if is_provided(presentation_fps):
+            resolved_presentation = presentation_fps
         augment = AugmentConfig(
             min_fps=resolved_fps,
             min_width=resolved_width,
             min_height=resolved_height,
             use_model_pass=resolved_model_pass,
+            interp_multiplier=resolved_multiplier,
+            presentation_fps=resolved_presentation,
         )
     return config.model_copy(
         update={
@@ -1030,6 +1079,8 @@ def apply_draft_overrides(
     min_fps: int | None | UnsetType = Unset,
     min_resolution: str | None | UnsetType = Unset,
     use_model_pass: bool | None | UnsetType = Unset,
+    interp_multiplier: int | None | UnsetType = Unset,
+    presentation_fps: int | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Apply the draft profile + targeted run overrides (fast loop).
 
@@ -1052,6 +1103,8 @@ def apply_draft_overrides(
         min_fps=min_fps,
         min_resolution=min_resolution,
         use_model_pass=use_model_pass,
+        interp_multiplier=interp_multiplier,
+        presentation_fps=presentation_fps,
     )
 
 

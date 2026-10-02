@@ -27,12 +27,35 @@ from __future__ import annotations
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from voyage.atomic import atomic_copy
-from voyage.augment import augment_devices, model_pass_active, resolve_augment_weights
+from voyage.augment import (
+    augment_devices,
+    model_pass_active,
+    model_pass_devices,
+    resolve_augment_weights,
+)
 from voyage.errors import MediaError
-from voyage.media import committed_usable_segments, finalize_run, write_concat_list
-from voyage.media_audio import probe, run_capture
+from voyage.media import (
+    AUGMENT_DEFAULT_MIN_FPS,
+    AUGMENT_DEFAULT_MIN_HEIGHT,
+    AUGMENT_DEFAULT_MIN_WIDTH,
+    committed_usable_segments,
+    finalize_run,
+    plan_augmentation,
+    presentation_stretch,
+    slowmo_video_active,
+    tensor_path_armed,
+    write_concat_list,
+)
+from voyage.media import (
+    _probe_video_geometry as _probe_geometry,
+)
+from voyage.media_audio import _probe_video_fps, probe, run_capture
+
+if TYPE_CHECKING:
+    from voyage.config import AudioConfig
 from voyage.sfx_finalize import (
     demux_music_audio,
     mix_music_and_sfx,
@@ -132,8 +155,12 @@ def run_parallel_finalize(
     crf: int | None = None,
     preset: str | None = None,
     use_model_pass: bool | None = None,
+    interp_multiplier: int | None = None,
+    presentation_fps: int | None = None,
+    deferred_audio: bool | None = None,
     models_dir: Path | str | None = None,
     seed: int = 0,
+    audio_config: AudioConfig | None = None,
     sfx_backend: str = "mmaudio",
     sfx_device: str = "cuda:0",
     sfx_model_size: str = "large_44k_v2",
@@ -152,6 +179,83 @@ def run_parallel_finalize(
     sample_rate_value = 48000 if sample_rate is None else sample_rate
     channels_value = 2 if channels is None else channels
     usable = committed_usable_segments(run_dir, skip)
+    # Deferred ACE pre-fork (DESIGN §140): ACE renders on cuda:0, same card
+    # as the SFX bed — forking both threads while takes are pending would
+    # collide on the 4060. Render here before Thread A/B fork; Thread A
+    # forwards the flags and its ledger check then no-ops. The stretch
+    # must predict Thread A exactly (`tensor_path_armed` + the
+    # slow-mo rule): a superset stretch renders takes for a timeline
+    # Thread A never builds, and its ledger no-op would then blend the
+    # wrong takes silently. `use_model_pass=None` resolves to the stored
+    # default (True) inside Thread A, mirrored here; the requested fps
+    # mirrors Thread A's presentation-first rule.
+    if deferred_audio:
+        from voyage.audio_finalize import ensure_deferred_for_finalize
+
+        pre_info = probe(usable[0] / "video.mp4")
+        pre_fps = _probe_video_fps(pre_info)
+        pre_w, pre_h = _probe_geometry(pre_info)
+        pre_mult = 4 if interp_multiplier is None else interp_multiplier
+        pre_requested = presentation_fps if presentation_fps is not None else fps
+        pre_plan = plan_augmentation(
+            pre_w,
+            pre_h,
+            pre_fps,
+            width,
+            height,
+            pre_requested,
+            AUGMENT_DEFAULT_MIN_FPS if min_fps is None else min_fps,
+            AUGMENT_DEFAULT_MIN_WIDTH if min_width is None else min_width,
+            AUGMENT_DEFAULT_MIN_HEIGHT if min_height is None else min_height,
+            interp_multiplier=pre_mult,
+        )
+        pre_weights = resolve_augment_weights(models_dir)
+        pre_use = True if use_model_pass is None else use_model_pass
+        pre_devices = model_pass_devices() if augment_devices() else ()
+        pre_tensor_likely = tensor_path_armed(
+            model_selected=model_pass_active(pre_use, pre_weights),
+            weights_present=pre_weights is not None,
+            source_fps=pre_fps,
+            needs_reencode=pre_plan.needs_reencode,
+            devices_available=bool(pre_devices),
+        )
+        pre_stretch_full = presentation_stretch(pre_fps, pre_mult, pre_plan.out_fps)
+        pre_stretch = (
+            pre_stretch_full
+            if slowmo_video_active(pre_tensor_likely, presentation_fps, pre_stretch_full)
+            else 1.0
+        )
+        pre_models = getattr(audio_config, "models_dir", None) if audio_config is not None else None
+        if pre_models is None:
+            pre_models = models_dir
+        ensure_deferred_for_finalize(
+            run_dir=run_dir,
+            usable=usable,
+            source_fps=pre_fps,
+            stretch=pre_stretch,
+            run_seed=seed,
+            models_dir=pre_models,
+            device="cuda:0",
+            music_style=(
+                getattr(audio_config, "music_style", "") if audio_config is not None else ""
+            ),
+            explicit_caption=(
+                getattr(audio_config, "music_caption", None) if audio_config is not None else None
+            ),
+            take_seconds=(
+                getattr(audio_config, "take_seconds", 45.0) if audio_config is not None else 45.0
+            ),
+            ahead_seconds=(
+                getattr(audio_config, "ahead_seconds", 20.0) if audio_config is not None else 20.0
+            ),
+            beats_per_segment=(
+                getattr(audio_config, "beats_per_segment", 4) if audio_config is not None else 4
+            ),
+            sample_rate=(
+                getattr(audio_config, "sample_rate", 48000) if audio_config is not None else 48000
+            ),
+            channels=(getattr(audio_config, "channels", 2) if audio_config is not None else 2),
+        )
     with tempfile.TemporaryDirectory(prefix="voyage-parallel-", dir=run_dir) as tmp:
         tmpdir = Path(tmp)
         reference, timeline = _reference_concat(usable, tmpdir)
@@ -179,7 +283,12 @@ def run_parallel_finalize(
                 crf=crf,
                 preset=preset,
                 use_model_pass=use_model_pass,
+                interp_multiplier=interp_multiplier,
+                presentation_fps=presentation_fps,
                 models_dir=models_dir,
+                deferred_audio=deferred_audio,
+                seed=seed,
+                audio_config=audio_config,
             )
 
         def _run_bed() -> Path:

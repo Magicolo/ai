@@ -3,7 +3,7 @@
 Contract: every `FileSpec` filename under the `film` /
 `realesrgan-anime` registry rows must resolve to a worker loader in
 `voyage.workers.augment_worker`, and the provisioned weights must load
-strict plus run synthetic tensors end to end — the ESRGAN anime-6B
+strict plus run synthetic tensors end to end — the ESRGAN anime-video-XS
 `.pth` upscales, the FILM `.safetensors` strict-loads its 82-key
 extract/fuse/predict_flow state and interpolates a synthetic pair.
 
@@ -36,7 +36,7 @@ _AUGMENT_SPECS = ("film", "realesrgan-anime")
 def _loader_for_filename(filename: str) -> Callable[[Path], Any]:
     """Worker loader owning `filename` (suffix decides, mirroring the registry)."""
     if filename.endswith(".pth"):
-        return augment_worker._load_rrdb_net
+        return augment_worker._load_esrgan_net
     if filename.endswith(".safetensors"):
         return augment_worker._load_film_net
     raise AssertionError(f"no augment loader owns filename {filename!r}")
@@ -78,7 +78,7 @@ def test_every_filespec_filename_resolves_to_a_loader() -> None:
         for spec in _AUGMENT_SPECS
     }
     assert resolved["film"] == [augment_worker._load_film_net]
-    assert resolved["realesrgan-anime"] == [augment_worker._load_rrdb_net]
+    assert resolved["realesrgan-anime"] == [augment_worker._load_esrgan_net]
 
 
 def test_loader_mapping_rejects_unknown_suffix() -> None:
@@ -105,12 +105,46 @@ def test_esrgan_loader_rejects_wrong_keys(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(augment_worker, "_load_state_dict", _wrong_keys)
     monkeypatch.setattr(augment_worker, "_build_rrdb_net", lambda: _RejectsAll())
+    monkeypatch.setattr(augment_worker, "_build_srvgg_net", lambda _depth: _RejectsAll())
     with pytest.raises(ModelCompatibilityError, match="Real-ESRGAN"):
-        augment_worker._load_rrdb_net(weights_path)
+        augment_worker._load_esrgan_net(weights_path)
+
+
+def test_srvgg_compact_state_sniff_and_strict_load() -> None:
+    """Provisioned anime-video-XS `.pth` sniffs SRVGG-compact and strict-loads.
+
+    The pinned `realesr-animevideov3.pth` carries the SRVGGNetCompact
+    PReLU layout (body.0..body.34, odd indices weight-only, last conv
+    (48, 64, 3, 3) for num_feat 64 / upscale 4); the worker sniffs it
+    (not the RRDB layouts) and `load_state_dict(strict=True)` covers
+    every key. Skips (not fails) without torch+weights.
+    """
+    if not _torch_available():
+        pytest.skip("needs torch (run in voyage-video, not the slim gates image)")
+    check = model_registry.MODEL_SPECS["realesrgan-anime"].checks[0]
+    assert isinstance(check, RequiredFile)
+    found = _find_provisioned_weight(check.relative_path)
+    if found is None:
+        pytest.skip(f"needs provisioned weights ({check.relative_path})")
+    weights_path = found
+
+    decoded = augment_worker._load_state_dict(weights_path)
+    # The file wraps params one level deep (`params`, ESRGAN-family
+    # convention) — unwrap exactly like `_load_esrgan_net` before sniffing.
+    state = augment_worker._unwrap_esrgan_state(decoded)
+    assert len(state) == 53
+    assert augment_worker._is_srvgg_compact_state(state) is True
+    assert augment_worker._upstream_block_count(state) is None
+    last_weight = state["body.34.weight"]
+    assert tuple(last_weight.shape) == (48, 64, 3, 3)
+    model = augment_worker._build_srvgg_net(16)
+    model.eval()
+    model.load_state_dict(state, strict=True)
+    assert set(model.state_dict()) == set(state)
 
 
 def test_esrgan_loads_provisioned_weights_and_upscales() -> None:
-    """Provisioned anime-6B `.pth` loads strict and upscales a synthetic frame.
+    """Provisioned anime-video-XS `.pth` loads strict and upscales a synthetic frame.
 
     Red pre-fix (issue 166): ModelCompatibilityError ("needs its own
     loader"). Green post-fix: strict load plus a (3, 16, 16) finite

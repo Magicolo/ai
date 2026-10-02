@@ -8,8 +8,8 @@ importers keep working; new code imports from here directly.
 
 - `REALESRGAN_*`: Hub pin + layout + floors + license (Track C).
 - `EXPECTED_REALESRGAN_SHA256`: ingest-time hash pin (issue 071;
-  provenance in `registry_records.py` — measured live 2026-09-30 from
-  the provisioned volume at the pinned revision).
+   provenance: measured live 2026-10-02 from the downloaded file at the
+   pinned revision — matches the Hub LFS oid exactly).
 - `_record_realesrgan` / `_describe_realesrgan`: manifest value + exact
   OK string.
 """
@@ -21,32 +21,34 @@ from pathlib import Path
 from voyage.atomic import JsonValue
 from voyage.hashing import sha256_file
 
-# Real-ESRGAN anime 6B: xinntao/Real-ESRGAN v0.2.2.4 release asset (RRDBNet
-# 6-block, 4x, 17,938,799 bytes, BSD-3-Clause (c) 2021 Xintao Wang),
-# re-hosted 1:1 on the Hub — xinntao ships no HF repo, so the registry pins
-# the amd mirror (its card records the upstream release URL + sha256
-# f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da).
-# Floor holds ~15% headroom below measured.
-REALESRGAN_HF_REPO = "amd/realesrgan-x4plus-anime-6b"
+# Real-ESRGAN anime-video-XS: xinntao/Real-ESRGAN v0.2.5.0 release asset
+# (SRVGGNetCompact PReLU, 16 conv / 64 feat, native 4x, 2,504,012 bytes,
+# BSD-3-Clause), re-hosted 1:1 on the Hub — xinntao ships no HF repo, so
+# the registry pins the nateraw mirror (its LFS oid matches the measured
+# sha256 b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d71363008000a18b75d
+# exactly at the pinned revision). Adopted 2026-10-02: ~11.5x faster
+# than the RRDB anime-6B at 768x512 on the 2060 (0.055 vs 0.63 s/frame),
+# same 2x recipe (native x4 + Lanczos 0.5). Floor holds ~15% headroom
+# below measured.
+REALESRGAN_HF_REPO = "nateraw/real-esrgan"
 
-REALESRGAN_HF_REVISION = "b14ff5f8ecb5a4b56ce4049a58d0bca1f8814690"
+REALESRGAN_HF_REVISION = "44ad8adf6069185b86df22349b12f255821c86ab"
 
 REALESRGAN_SUBDIR = "realesrgan"
 
-REALESRGAN_ANIME_FILE = "RealESRGAN_x4plus_anime_6B.pth"
+REALESRGAN_ANIME_FILE = "realesr-animevideov3.pth"
 
-REALESRGAN_ANIME_MIN_BYTES = 15_000_000
+REALESRGAN_ANIME_MIN_BYTES = 2_100_000
 
 REALESRGAN_UPSTREAM_URL = (
-    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/"
-    "RealESRGAN_x4plus_anime_6B.pth"
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
 )
 
-REALESRGAN_LICENSE = "BSD 3-Clause (c) 2021 Xintao Wang"
+REALESRGAN_LICENSE = "BSD 3-Clause"
 
-REALESRGAN_LICENSE_URL = "https://huggingface.co/amd/realesrgan-x4plus-anime-6b/blob/main/LICENSE"
+REALESRGAN_LICENSE_URL = "https://huggingface.co/nateraw/real-esrgan/blob/main/LICENSE"
 
-EXPECTED_REALESRGAN_SHA256 = "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
+EXPECTED_REALESRGAN_SHA256 = "b8a8376811077954d82ca3fcf476f1ac3da3e8a68a4f4d71363008000a18b75d"
 
 
 def _record_realesrgan(models_dir: Path) -> dict[str, JsonValue]:
@@ -72,4 +74,4 @@ def _describe_realesrgan(models_dir: Path) -> str:
     """Exact OK string for the Real-ESRGAN anime weights (byte-stable)."""
     weights_path = models_dir / REALESRGAN_SUBDIR / REALESRGAN_ANIME_FILE
     size_mib = weights_path.stat().st_size / 1024**2
-    return f"realesrgan-anime OK (anime 6B {size_mib:.0f} MiB)"
+    return f"realesrgan-anime OK (anime-video-XS {size_mib:.0f} MiB)"

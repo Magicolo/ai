@@ -9,6 +9,7 @@ stubbed `run_capture` (arg-lists asserted, never executed).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -263,6 +264,47 @@ def test_ffmpeg_decode_chunk_zero_byte_frame_raises(
         ffmpeg_decode_chunk(tmp_path / "source.mp4", tmp_path / "chunk_00", 0, 4)
 
 
+def test_ffmpeg_decode_chunk_names_start_at_zero(tmp_path: Path) -> None:
+    """Real ffmpeg must emit 0-based names (image2 defaults to 1-based).
+
+    The upscale poller decodes and upscales in one dir while
+    `write_tensors_as_png_frames` writes 0-based names: 1-based decode
+    output leaves a native-size `frame_<count>` orphan that breaks the
+    interp count check. Needs real ffmpeg (skips when absent).
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg unavailable")
+    assert ffmpeg is not None
+    source = tmp_path / "source.mp4"
+    staged = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=24:duration=0.34",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert staged.returncode == 0, staged.stderr[-500:]
+    dest = tmp_path / "chunk_00"
+    frames = ffmpeg_decode_chunk(source, dest, 0, 4)
+    expected = [f"frame_{index:06d}.png" for index in range(4)]
+    assert [path.name for path in frames] == expected
+    assert sorted(path.name for path in dest.glob("frame_*.png")) == expected
+
+
 def test_ffmpeg_encode_chunk_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -313,7 +355,7 @@ def test_ffmpeg_encode_chunk_rejects_bad_crf(tmp_path: Path) -> None:
 def test_upscale_frames_missing_weights_raises_torch_free(tmp_path: Path) -> None:
     """Weights are checked before any torch import: registry owns download."""
     with pytest.raises(NotImplementedError, match="registry"):
-        augment_worker.upscale_frames([], tmp_path / "RealESRGAN_x4plus_anime_6B.pth")
+        augment_worker.upscale_frames([], tmp_path / "realesr-animevideov3.pth")
 
 
 def test_interpolate_pair_missing_weights_raises_torch_free(tmp_path: Path) -> None:

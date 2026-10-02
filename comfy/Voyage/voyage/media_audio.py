@@ -502,7 +502,7 @@ def _check_segment_committed(segment: Path) -> None:
     _verify_segment(segment)
 
 
-def _segment_timeline(usable: list[Path], fps: int) -> tuple[list[float], list[float], float]:
+def _segment_timeline(usable: list[Path], fps: float) -> tuple[list[float], list[float], float]:
     """Per-segment [start, end) video-times from committed metrics + total.
 
     The timeline follows frame counts (the supervisor's truthful
@@ -796,6 +796,8 @@ def build_final_audio(
     overlap_cap_seconds: float = 0.5,
     *,
     blend_timings: list[float] | None = None,
+    deferred: bool = False,
+    stretch: float = 1.0,
 ) -> Path:
     """Blend committed segments into one timeline-exact final mix (§56).
 
@@ -810,11 +812,26 @@ def build_final_audio(
     when the takes ledger is unavailable (pre-take runs) — the old
     hard-splice behavior, clicks included. Per-segment previews are
     never rewritten: the blend exists only in the returned final mix.
+
+    Deferred runs (DESIGN §140 slow-mo finalize): `deferred=True` means
+    the per-segment audio.wav files are commit-time silent stubs, so the
+    single-segment shortcut is bypassed and every fallback raises
+    `MediaError` instead of shipping silence — takes must have rendered
+    via `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
+    divides the timeline fps so the mix covers the stretched video.
     """
     from voyage.audio.planner import AudioPlanner, load_takes
 
+    if stretch <= 0:
+        raise MediaError(f"final audio stretch must be positive (got {stretch})")
     dest = tmpdir / "final_audio.wav"
-    if len(usable) == 1:
+
+    def _fallback_or_raise(reason: str) -> Path:
+        if deferred:
+            raise MediaError(f"deferred final audio has no rendered takes: {reason}")
+        return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+
+    def _convert_window_to_dest(window: Path, label: str) -> Path:
         proc = run_capture(
             [
                 "ffmpeg",
@@ -822,23 +839,26 @@ def build_final_audio(
                 "-nostdin",
                 "-y",
                 "-i",
-                str(usable[0] / "audio.wav"),
+                str(window),
                 "-c:a",
                 "pcm_s16le",
                 str(dest),
             ]
         )
         if proc.returncode != 0:
-            raise MediaError(f"final audio copy failed: {proc.stderr[-2000:]}")
+            raise MediaError(f"final audio {label} failed: {proc.stderr[-2000:]}")
         return dest
-    starts, ends, timeline = _segment_timeline(usable, fps)
+
+    if len(usable) == 1 and not deferred:
+        return _convert_window_to_dest(usable[0] / "audio.wav", "copy")
+    starts, ends, timeline = _segment_timeline(usable, fps / stretch)
     durations = [end - start for start, end in zip(starts, ends, strict=True)]
     overlap = min(overlap_fraction * min(durations), overlap_cap_seconds)
     ledger = run_dir / "audio" / "takes.jsonl"
     takes: list[Any] = load_takes(ledger) if ledger.exists() else []
     planner = AudioPlanner(takes=takes)
     if not takes or overlap < MIN_OVERLAP_BLEND_SECONDS:
-        return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+        return _fallback_or_raise("no takes ledger" if not takes else "tiny overlap")
     half = overlap / 2.0
     windows: list[Path] = []
     # Issue 031: memo take slices across windows (take joints inside two
@@ -860,20 +880,20 @@ def build_final_audio(
         piece = 0
         while cursor < window_end - 1e-6:
             if piece >= MAX_SLICES_PER_WINDOW:
-                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+                return _fallback_or_raise("too many slices")
             serving = planner.take_for_time(cursor)
             if serving is None or not serving.path:
-                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+                return _fallback_or_raise("take gap in window")
             # Issue 016 consumer side: ledger entries may be run-relative
             # or legacy absolute — resolve the same way at every use site.
             serving_path = paths.resolve_stored_path(run_dir, serving.path)
             if not serving_path.exists():
-                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+                return _fallback_or_raise(f"missing take file {serving.path}")
             piece_end = min(serving.covers_until(), window_end)
             if piece_end <= cursor:
-                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+                return _fallback_or_raise("degenerate take window")
             if piece_end - cursor < MIN_SLICE_PIECE_SECONDS:
-                return _concat_fallback_audio([s / "audio.wav" for s in usable], dest)
+                return _fallback_or_raise("sliver take piece")
             slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
             _cached_slice_take(
                 slice_cache,
@@ -932,6 +952,11 @@ def build_final_audio(
                     slices[-1] = tail_slice
             assemble_segment_audio(slices, window_path, overlap, joint_fade=fade)
         windows.append(window_path)
+    # Single window needs no join (deferred single-segment runs land here:
+    # the shortcut above is bypassed so stubs never ship — the window is
+    # real music re-sliced from rendered takes, so convert and return it).
+    if len(windows) == 1:
+        return _convert_window_to_dest(windows[0], "single-window copy")
     # Single-graph staged join (issue 152): chained pairwise stages with
     # s32 barriers replay the fold byte-for-byte in one spawn (N=31 proven,
     # no acrossfade anywhere). Each window is probed once here and threaded

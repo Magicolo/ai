@@ -6,8 +6,9 @@ device pairing) is the shipped path and never imports this module; treat any
 vendored arch here as a placeholder until its upstream port lands (or this
 module moves to `experimental/` with a spike contract). Debug augment quality
 via the orchestration + registry weights first, not these vendored nets. The
-ESRGAN leg is DONE (issue 166): the pinned `RealESRGAN_x4plus_anime_6B` pth
-loads strict into the upstream-named builder below. The FILM leg is DONE
+ESRGAN leg is DONE (issue 166): the pinned `realesr-animevideov3.pth`
+loads strict into the SRVGGNetCompact builder below (RRDB layouts stay
+as fallback). The FILM leg is DONE
 (issue 166): the pinned `film_net_fp16.safetensors` strict-loads into the
 upstream FILM port below (extract/fuse/predict_flow, 82 keys).
 
@@ -19,9 +20,11 @@ fetches weights at runtime.
 
 Architectures are vendored minimal inline — do NOT import Comfy nodes
 (the worker images carry no ComfyUI tree):
-- RRDBNet: two layouts (issue 166) — upstream-named weights
-  (`body.N.rdb1/2/3` + `conv_up1/up2/hr`, EMA-wrapped; the pinned
-  `RealESRGAN_x4plus_anime_6B` pth carries 6 body blocks) build
+- ESRGAN family: three layouts (issue 166) — SRVGGNetCompact PReLU
+  weights (`body.<int>` + odd weight-only + 48-channel last conv; the
+  pinned `realesr-animevideov3.pth` carries 16 body convs) build
+  `_build_srvgg_net` at the measured depth, upstream-named RRDB weights
+  (`body.N.rdb1/2/3` + `conv_up1/up2/hr`, EMA-wrapped) build
   `_build_upstream_rrdb_net` at the measured depth, while anything else
   falls back to the classic x4 residual-in-residual dense net below
   (state-dict shapes match the x4plus/UltraSharp ESRGAN family).
@@ -64,7 +67,16 @@ RRDB_NATIVE_SCALE = 4
 """Native upscale of the vendored RRDBNet (two x2 nearest stages)."""
 
 RRDB_ANIME_NUM_BLOCKS = 6
-"""Body depth of the pinned `RealESRGAN_x4plus_anime_6B` pth (`body.0`–`body.5`)."""
+"""Body depth of the legacy `RealESRGAN_x4plus_anime_6B` pth (`body.0`–`body.5`)."""
+
+SRVGG_NUM_FEATURES = 64
+"""SRVGGNetCompact width of the pinned anime-video-XS pth (shapes must match)."""
+
+SRVGG_NATIVE_SCALE = 4
+"""Native upscale of the SRVGGNetCompact leg (PixelShuffle x4 + residual base)."""
+
+SRVGG_LAST_OUT_CHANNELS = 48
+"""Last-conv output channels: num_out_ch 3 × upscale 4² (state-dict shape pin)."""
 
 _UPSTREAM_UPCONV_KEYS = ("conv_up1", "conv_up2", "conv_hr")
 """Upconv names distinguishing upstream RRDB weights from the vendored classic net."""
@@ -142,8 +154,8 @@ five); safetensors decode failures are normalized to `ValueError` in
 `_load_state_dict` so they land here too.
 """
 
-_RRDB_CACHE: dict[tuple[str, str], Any] = {}
-"""Resident Real-ESRGAN nets keyed by (weights path, device) — issue 047.
+_ESRGAN_CACHE: dict[tuple[str, str], Any] = {}
+"""Resident ESRGAN-family nets keyed by (weights path, device) — issue 047.
 
 A 32-chunk augment must not pay 32x construction + disk load + H2D;
 the first call warms the entry, later chunks reuse it. `evict_augment_models`
@@ -161,8 +173,8 @@ def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
 
 def evict_augment_models() -> int:
     """Drop all resident augment nets; return the evicted entry count."""
-    count = len(_RRDB_CACHE) + len(_FILM_CACHE)
-    _RRDB_CACHE.clear()
+    count = len(_ESRGAN_CACHE) + len(_FILM_CACHE)
+    _ESRGAN_CACHE.clear()
     _FILM_CACHE.clear()
     return count
 
@@ -364,7 +376,7 @@ def _build_upstream_rrdb_net(num_blocks: int) -> Any:
     two x2 nearest stages), but submodule names follow the released
     weights: `body.N.rdb1/2/3` (chained, 0.2-scaled residual) plus
     `conv_up1/up2/hr/last`. Depth is measured from the state dict (the
-    pinned anime-6B pth carries `RRDB_ANIME_NUM_BLOCKS`), so this one
+    legacy anime-6B pth carries `RRDB_ANIME_NUM_BLOCKS`), so this one
     builder serves every upstream-depth release.
     """
     import torch
@@ -447,9 +459,9 @@ def _build_upstream_rrdb_net(num_blocks: int) -> Any:
 def _unwrap_esrgan_state(state: dict[str, Any]) -> dict[str, Any]:
     """Return the inference state dict, stripping a training wrapper when present.
 
-    Released inference weights (including the pinned anime-6B pth) nest the
-    net one level down under `params_ema`; raw training checkpoints may use
-    `params`. A flat upstream/vendored state passes through untouched — only
+    Released inference weights (EMA-wrapped RRDB training checkpoints nest
+    the net one level down under `params_ema`; raw training checkpoints may
+    use `params`). A flat upstream/vendored state passes through untouched — only
     a single-key wrapper dict is ever unwrapped, so a flat net that happens
     to carry such a key alongside real weights is never truncated.
     """
@@ -485,6 +497,93 @@ def _upstream_block_count(state: dict[str, Any]) -> int | None:
     if not {"conv_first", "conv_body", "conv_last", *_UPSTREAM_UPCONV_KEYS} <= present:
         return None
     return depth
+
+
+def _is_srvgg_compact_state(state: dict[str, Any]) -> bool:
+    """Whether `state` uses the SRVGGNetCompact PReLU layout (not RRDB).
+
+    SRVGG means every key is `body.<int>.<weight|bias>` with contiguous
+    indices `0..top` (top even, >= 4), odd indices weight-only (PReLU
+    activations carry no bias), even indices weight+bias (convs), and
+    the last conv emitting `SRVGG_LAST_OUT_CHANNELS` channels. RRDB
+    states (`body.N.rdb1/2/3`, 4-part keys) and foreign nets return
+    False so the caller falls back — `strict=True` at the load then
+    fails loud on a partial match. Torch-free: shapes read via duck
+    typing so stubbed states simply miss.
+    """
+    if not state:
+        return False
+    per_index: dict[int, set[str]] = {}
+    for key in state:
+        parts = key.split(".")
+        if len(parts) != 3 or parts[0] != "body" or not parts[1].isdigit():
+            return False
+        per_index.setdefault(int(parts[1]), set()).add(parts[2])
+    top = max(per_index)
+    if top < 4 or top % 2 != 0:
+        return False
+    if sorted(per_index) != list(range(top + 1)):
+        return False
+    for index, names in per_index.items():
+        if index % 2 == 1:
+            if names != {"weight"}:
+                return False
+        elif names != {"weight", "bias"}:
+            return False
+    last_weight = state.get(f"body.{top}.weight")
+    shape = getattr(last_weight, "shape", None)
+    if shape is None:
+        return False
+    try:
+        shape_tuple = tuple(int(dim) for dim in shape)
+    except TypeError:
+        return False
+    return shape_tuple == (SRVGG_LAST_OUT_CHANNELS, SRVGG_NUM_FEATURES, 3, 3)
+
+
+def _build_srvgg_net(num_conv: int) -> Any:
+    """SRVGGNetCompact PReLU net (xinntao Real-ESRGAN family — issue 166).
+
+    Plain-torch port of upstream `srvgg_arch.py`: a ModuleList body of
+    first conv + PReLU, `num_conv` conv+PReLU pairs, and a last conv
+    emitting 3×upscale² channels, then PixelShuffle x4 plus the nearest-
+    upsampled input as residual base. ModuleList indices register
+    `body.0..body.N` exactly, so the pinned anime-video-XS pth
+    strict-loads (53 keys at num_conv 16). No dense blocks: 16 plain
+    convs are why it runs ~11x faster than the RRDB anime-6B.
+    """
+    from torch import nn
+    from torch.nn import functional as functional
+
+    # NOTE (mypy strict): same `# type: ignore[misc]` idiom as the RRDB
+    # builders above — torch resolves to Any in the slim gates image.
+    class _SRVGGNetCompact(nn.Module):  # type: ignore[misc]
+        """Compact VGG-style x4 net: body convs, PixelShuffle, residual base."""
+
+        def __init__(self, depth: int) -> None:
+            super().__init__()
+            body: list[Any] = [nn.Conv2d(3, SRVGG_NUM_FEATURES, 3, 1, 1)]
+            body.append(nn.PReLU(num_parameters=SRVGG_NUM_FEATURES))
+            for _ in range(depth):
+                body.append(nn.Conv2d(SRVGG_NUM_FEATURES, SRVGG_NUM_FEATURES, 3, 1, 1))
+                body.append(nn.PReLU(num_parameters=SRVGG_NUM_FEATURES))
+            body.append(
+                nn.Conv2d(SRVGG_NUM_FEATURES, 3 * SRVGG_NATIVE_SCALE * SRVGG_NATIVE_SCALE, 3, 1, 1)
+            )
+            self.body = nn.ModuleList(body)
+            self.upsampler = nn.PixelShuffle(SRVGG_NATIVE_SCALE)
+
+        def forward(self, value: Any) -> Any:
+            out = value
+            for layer in self.body:
+                out = layer(out)
+            out = self.upsampler(out)
+            base = functional.interpolate(value, scale_factor=SRVGG_NATIVE_SCALE, mode="nearest")
+            return out + base
+
+    if num_conv <= 0:
+        raise ValueError(f"SRVGG body depth must be positive (got {num_conv})")
+    return _SRVGGNetCompact(num_conv)
 
 
 def _build_film_net() -> Any:
@@ -983,14 +1082,16 @@ def _verify_weights_manifest(weights_path: Path) -> None:
     return
 
 
-def _load_rrdb_net(weights_path: Path) -> Any:
-    """Build the matching RRDBNet and load `weights_path`; failures become compatibility errors.
+def _load_esrgan_net(weights_path: Path) -> Any:
+    """Build the matching ESRGAN-family net and load `weights_path`.
 
-    Two layouts (issue 166): upstream-named weights (`body.N.rdb1/2/3` +
-    `conv_up1/up2/hr`, EMA-wrapped — the pinned anime-6B pth) build an
-    upstream net at the measured depth; anything else falls back to the
-    vendored x4 net. `strict=True` in both cases, so a partial match still
-    fails loud instead of inferring on random init.
+    Three layouts (issue 166): SRVGGNetCompact PReLU states
+    (`body.<int>` + odd weight-only + 48-channel last conv — the pinned
+    anime-video-XS pth) build an SRVGG net at the measured body depth;
+    upstream-named RRDB weights (`body.N.rdb1/2/3` + `conv_up1/up2/hr`)
+    build an upstream net at the measured depth; anything else falls
+    back to the vendored x4 net. `strict=True` in all cases, so a
+    partial match still fails loud instead of inferring on random init.
     """
     from voyage.model_registry import REALESRGAN_ANIME_MIN_BYTES
 
@@ -999,16 +1100,21 @@ def _load_rrdb_net(weights_path: Path) -> Any:
 
     try:
         state = _unwrap_esrgan_state(_load_state_dict(weights_path))
-        block_count = _upstream_block_count(state)
-        if block_count is not None:
-            model = _build_upstream_rrdb_net(block_count)
+        if _is_srvgg_compact_state(state):
+            top_index = max(int(key.split(".")[1]) for key in state)
+            model = _build_srvgg_net((top_index - 2) // 2)
         else:
-            model = _build_rrdb_net()
+            block_count = _upstream_block_count(state)
+            if block_count is not None:
+                model = _build_upstream_rrdb_net(block_count)
+            else:
+                model = _build_rrdb_net()
         model.load_state_dict(state, strict=True)
     except _LOAD_ERRORS as exc:
         raise ModelCompatibilityError(
-            f"Real-ESRGAN weights at {weights_path} match neither the upstream RRDB "
-            f"layout (body.N.rdb1/2/3 + conv_up1/up2/hr, e.g. the pinned anime-6B) "
+            f"Real-ESRGAN weights at {weights_path} match neither the SRVGG-compact "
+            f"layout (body.<int> PReLU, e.g. the pinned anime-video-XS) nor the "
+            f"upstream RRDB layout (body.N.rdb1/2/3 + conv_up1/up2/hr) "
             f"nor the vendored x4 net: {exc}"
         ) from exc
     return model
@@ -1276,10 +1382,10 @@ def upscale_frames(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _RRDB_CACHE.get(key)
+    model = _ESRGAN_CACHE.get(key)
     if model is None:
-        model = _load_rrdb_net(weights_path)
-        _RRDB_CACHE[key] = model
+        model = _load_esrgan_net(weights_path)
+        _ESRGAN_CACHE[key] = model
     load_ms = (time.monotonic() - load_started) * 1000.0
     torch_device, dtype = _prepare_model(model, device)
     model.eval()

@@ -167,7 +167,7 @@ def test_047_upscale_reports_load_vs_infer_ms(
         del path
         return worker._build_rrdb_net()
 
-    monkeypatch.setattr(worker, "_load_rrdb_net", _stub)
+    monkeypatch.setattr(worker, "_load_esrgan_net", _stub)
     rows = torch.linspace(0.0, 1.0, 8).unsqueeze(1).expand(8, 8)
     frame = torch.stack([rows, rows, rows])
     timings: dict[str, float] = {}

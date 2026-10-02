@@ -212,6 +212,7 @@ def test_parallel_finalize_matches_sequential_bytes(
     is fully real ffmpeg.
     """
     import voyage.augment as augment_module
+    import voyage.augment_finalize as finalize_module
     import voyage.finalize_parallel as parallel_module
     import voyage.sfx_finalize as sfx_module
     from voyage.augment import AugmentWeights
@@ -234,11 +235,12 @@ def test_parallel_finalize_matches_sequential_bytes(
     monkeypatch.setattr(augment_module, "augment_devices", lambda **_: two_gpus)
 
     def _stub_model_pass(
-        segment_videos: list[Path], weights: AugmentWeights, **kwargs: object
+        run_dir_arg: Path, usable: list[Path], **kwargs: object
     ) -> tuple[Path, int]:
         work_dir = kwargs["work_dir"]
         assert isinstance(work_dir, Path)
         work_dir.mkdir(parents=True, exist_ok=True)
+        segment_videos = [segment / "video.mp4" for segment in usable]
         intermediate = work_dir / "stub_intermediate.mp4"
         file_list = work_dir / "stub_list.txt"
         file_list.write_text(
@@ -267,7 +269,7 @@ def test_parallel_finalize_matches_sequential_bytes(
         assert proc.returncode == 0, proc.stderr[-1000:]
         return (intermediate, int(cast(float, kwargs["source_fps"])))
 
-    monkeypatch.setattr(augment_module, "run_finalize_model_pass", _stub_model_pass)
+    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _stub_model_pass)
 
     def _stub_bed(
         run_dir_arg: Path,

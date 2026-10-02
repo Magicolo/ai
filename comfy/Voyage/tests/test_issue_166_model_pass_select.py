@@ -71,11 +71,13 @@ def test_finalize_present_legs_selects_tensor_path(
     The pass is trigger-gated: the request lifts above the 768x432@24
     fake source so the plan flags reencode work (a matching request
     would take the stream-copy fast path — see
-    tests/test_native_skips_model_pass.py).
+    tests/test_native_skips_model_pass.py). Both legs provisioned select
+    the durable sidecar path (`run_durable_model_pass`).
     """
     import shutil
 
     import voyage.augment as augment_module
+    import voyage.augment_finalize as finalize_module
     from tests.conftest import initialize_run_directory
     from voyage import paths
     from voyage.config import load_config
@@ -100,27 +102,31 @@ def test_finalize_present_legs_selects_tensor_path(
         )
 
     def _fake_model_pass(
-        segment_videos: list[Path],
-        weights: AugmentWeights,
+        run_dir_arg: Path,
+        usable: list[Path],
         *,
+        out_width: int,
+        out_height: int,
         source_fps: float,
+        weights: AugmentWeights,
         upscale_factor: int = 2,
         multiplier: int = 4,
+        chunk_frames: int = 32,
         crf: int = 15,
         preset: str = "veryfast",
+        device: str = "cuda:1",
         work_dir: Path,
-        chunk_frames: int = 32,
-        devices: tuple[str, ...] | None = None,
+        timings: dict[str, float] | None = None,
     ) -> tuple[Path, int]:
         seen["model_pass_called"] = True
-        seen["segments"] = len(segment_videos)
+        seen["segments"] = len(usable)
         work_dir.mkdir(parents=True, exist_ok=True)
         intermediate = work_dir / "model_intermediate.mp4"
-        shutil.copy(segment_videos[0], intermediate)
+        shutil.copy(usable[0] / "video.mp4", intermediate)
         return (intermediate, int(round(source_fps)))
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _fake_resolve)
-    monkeypatch.setattr(augment_module, "run_finalize_model_pass", _fake_model_pass)
+    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _fake_model_pass)
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     out = tmp_path / "tensor-selected.mp4"

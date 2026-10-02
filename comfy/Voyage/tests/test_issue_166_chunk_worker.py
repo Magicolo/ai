@@ -116,7 +116,7 @@ def test_chunk_worker_forwards_chunk_device(
     monkeypatch.setattr(augment_worker, "interpolate_pair", _fake_interpolate)
     weights = AugmentWeights(
         film=Path("/models/frame_interpolation/film_net_fp16.safetensors"),
-        realesrgan=Path("/models/realesrgan/RealESRGAN_x4plus_anime_6B.pth"),
+        realesrgan=Path("/models/realesrgan/realesr-animevideov3.pth"),
     )
     worker = augment_module.make_enhance_chunk_worker(
         {0: ["frame-a", "frame-b"]},
