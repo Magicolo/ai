@@ -140,7 +140,7 @@ def test_fresh_graph_matches_spike_a_recipe() -> None:
     assert graph["13"]["inputs"] == {"sampler_name": "euler_ancestral"}
     assert graph["14"]["inputs"]["sigmas"].startswith("1.0, 0.99375")
     assert graph["22"]["inputs"] == {"sampler_name": "euler"}
-    assert graph["23"]["inputs"]["sigmas"] == "0.85, 0.7250, 0.4219, 0.0"
+    assert graph["23"]["inputs"]["sigmas"] == "0.45, 0.3, 0.15, 0.0"
     assert graph["26"]["inputs"]["tile_size"] == 512
     assert graph["28"]["inputs"]["filename_prefix"] == "seg000001-b0/frames"
     assert graph["29"]["inputs"]["filename_prefix"] == "seg000001-b0/audio"
@@ -152,7 +152,7 @@ def test_chained_graph_adds_frozen_prefix() -> None:
     graph = build_mode_a_graph(
         prompt="orchard", seed=303, save_prefix="seg000001-b1", prefix_filenames=prefix
     )
-    assert len(graph) == 29 + 25 + 2
+    assert len(graph) == 29 + 25 + 2 + 1
     assert graph["30"]["inputs"] == {"image": "prefix_00.png"}
     assert graph["54"]["inputs"] == {"image": "prefix_24.png"}
     batch_inputs = graph["55"]["inputs"]

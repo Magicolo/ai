@@ -97,7 +97,7 @@ NATIVE_FPS = 24
 # Validated schedules (Spike A graph s0_121_B.json): stage-1 distilled
 # 8-sigma euler_ancestral CFG 1.0, stage-2 3-step euler refine.
 STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
-STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+STAGE2_SIGMAS = "0.45, 0.3, 0.15, 0.0"
 NEGATIVE_PROMPT = ""
 QUANT_RUNG = "Q3_K_M"
 
@@ -114,6 +114,28 @@ SEGMENT_AUDIO_FILENAME = "audio.wav"
 
 COMFYUI_PATH_ENV = "LTX_COMFYUI_PATH"
 COMFYUI_PATH_DEFAULT = "/opt/comfyui"
+
+CONTINUATION_STRENGTH_ENV = "VOYAGE_LTX_STRENGTH"
+
+
+def _continuation_strength_from_env() -> float:
+    """Read the frozen-prefix strength override for bake-offs (default 1.0).
+
+    Track B1 sweep sets VOYAGE_LTX_STRENGTH=0.8/0.6 to let drifted prompts
+    reinterpret more. Production stays 1.0 (env unset). Fail loud on
+    non-finite/out-of-range values — a silent clamp would invalidate the
+    bake-off comparison.
+    """
+    raw = os.getenv(CONTINUATION_STRENGTH_ENV, "1.0")
+    try:
+        strength = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{CONTINUATION_STRENGTH_ENV} must be a float in (0, 1] (got {raw!r})"
+        ) from exc
+    if not 0.0 < strength <= 1.0 or strength != strength:
+        raise ValueError(f"{CONTINUATION_STRENGTH_ENV} must be in (0, 1] (got {raw!r})")
+    return strength
 
 
 def is_oom(failure: BaseException) -> bool:
@@ -298,6 +320,7 @@ def build_mode_a_graph(
     seed: int,
     save_prefix: str,
     prefix_filenames: list[str] | None = None,
+    strength: float = 1.0,
 ) -> dict[str, Any]:
     """Build the validated Mode A prompt-format graph (pure — CPU-testable).
 
@@ -308,7 +331,7 @@ def build_mode_a_graph(
 
     With `prefix_filenames` (25 input-root PNGs, Spike B convention) the
     graph gains LoadImage x25 (ids 30-54) + BatchImagesNode (55) +
-    LTXVImgToVideoInplace (56, strength 1.0 frozen) and node 10 consumes
+    LTXVImgToVideoInplace (56, strength frozen by default) and node 10 consumes
     the pinned latent instead of the empty one.
     """
     graph: dict[str, Any] = {
@@ -464,13 +487,28 @@ def build_mode_a_graph(
                 "vae": ["6", 0],
                 "image": ["55", 0],
                 "latent": ["8", 0],
-                "strength": 1.0,
+                "strength": strength,
                 "bypass": False,
             },
         }
         video_latent = graph["10"]["inputs"]
         assert isinstance(video_latent, dict)
         video_latent["video_latent"] = ["56", 0]
+        # The upsampler (18) drops the Inplace noise mask, so the stage-2
+        # refine would repaint the frozen prefix. Re-attach the freeze
+        # through the shared pack node (prefix branch only); K derives
+        # from the carry via the LTX causal 8x grid.
+        frozen_latent_frames = (len(prefix_filenames) - 1) // 8 + 1
+        graph["57"] = {
+            "class_type": "LTXPrefixFreeze",
+            "inputs": {
+                "samples": ["18", 0],
+                "prefix_latent_frames": frozen_latent_frames,
+            },
+        }
+        stage2_latent = graph["19"]["inputs"]
+        assert isinstance(stage2_latent, dict)
+        stage2_latent["video_latent"] = ["57", 0]
     return graph
 
 
@@ -735,6 +773,7 @@ class LTX23Session:
 
         novel_frames_all: list[Any] = []
         novel_audio_wavs: list[Path] = []
+        continuation_strength = _continuation_strength_from_env()
         generated_total = 0
         conditioning_total = 0
         fresh_blocks = 0
@@ -758,6 +797,7 @@ class LTX23Session:
                 seed=seed,
                 save_prefix=save_prefix,
                 prefix_filenames=prefix_filenames,
+                strength=continuation_strength,
             )
             prompt_id = f"ltx23-{segment_id}-{block_index}"
             denoise_total_ms += self._execute_graph(graph, prompt_id) * MILLISECONDS_PER_SECOND

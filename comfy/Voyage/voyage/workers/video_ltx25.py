@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -88,11 +89,112 @@ NATIVE_FPS = 24
 # Validated schedules (Spike A graph s0_121_B.json): stage-1 distilled
 # 8-sigma euler_ancestral CFG 1.0, stage-2 3-step euler refine.
 STAGE1_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
-STAGE2_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+STAGE2_SIGMAS = "0.45, 0.3, 0.15, 0.0"
 NEGATIVE_PROMPT = ""
 QUANT_RUNG = "Q3_K_M"
 
 STATE_MODE = "reconstructable_prefix"
+
+FAST_PROFILE_ENV = "VOYAGE_LTX_FAST"
+"""Set to `1` for the Phase-1 fast-iteration profile (never production)."""
+
+CARRY_OVERRIDE_ENV = "VOYAGE_LTX_CARRY"
+"""Carry-frame override for the Phase-1 carry sweep (validated, fail loud)."""
+
+CONTINUATION_STRENGTH_ENV = "VOYAGE_LTX_STRENGTH"
+"""Frozen-prefix strength override for bake-offs (default 1.0; ltx23 parity)."""
+
+# Fast-iteration profile (Phase-1 mechanism work only): stage 1 384x224,
+# commit 768x448, 49f windows, 9f carry. Every contract holds — commit
+# clears /64 (12x7 tiles), stage 1 clears /32, (49-1)%8==0, (9-1)%8==0 —
+# so mechanism reads transfer; winners get full-res confirmation before
+# any production claim.
+FAST_STAGE1_WIDTH = 384
+FAST_STAGE1_HEIGHT = 224
+FAST_COMMIT_WIDTH = 768
+FAST_COMMIT_HEIGHT = 448
+FAST_TARGET_FRAMES = 49
+FAST_TAIL_FRAMES = 9
+
+
+@dataclass(frozen=True)
+class ExperimentProfile:
+    """Resolved render geometry + segment accounting for one process run.
+
+    Production defaults mirror the baked constants; the fast profile and
+    the carry override are experiment-only (Phase 1) and resolve from the
+    environment per call so one process can run sequential conditions.
+    The tape profile hash covers the resolved values, so a fast tape
+    never resumes on a production worker.
+    """
+
+    stage1_width: int
+    stage1_height: int
+    commit_width: int
+    commit_height: int
+    target_frames: int
+    tail_frames: int
+
+
+def resolve_experiment_profile() -> ExperimentProfile:
+    """Resolve the render profile from the environment (fail loud)."""
+    if os.environ.get(FAST_PROFILE_ENV, "0") == "1":
+        profile = ExperimentProfile(
+            stage1_width=FAST_STAGE1_WIDTH,
+            stage1_height=FAST_STAGE1_HEIGHT,
+            commit_width=FAST_COMMIT_WIDTH,
+            commit_height=FAST_COMMIT_HEIGHT,
+            target_frames=FAST_TARGET_FRAMES,
+            tail_frames=FAST_TAIL_FRAMES,
+        )
+    else:
+        profile = ExperimentProfile(
+            stage1_width=STAGE1_WIDTH,
+            stage1_height=STAGE1_HEIGHT,
+            commit_width=COMMIT_WIDTH,
+            commit_height=COMMIT_HEIGHT,
+            target_frames=SEGMENT_TARGET_FRAMES,
+            tail_frames=CONDITIONING_TAIL_FRAMES,
+        )
+    raw_carry = os.environ.get(CARRY_OVERRIDE_ENV)
+    if raw_carry is None:
+        return profile
+    try:
+        carry = int(raw_carry)
+    except ValueError as exc:
+        raise ValueError(f"{CARRY_OVERRIDE_ENV} must be an integer (got {raw_carry!r})") from exc
+    if carry <= 0 or carry >= profile.target_frames or (carry - 1) % 8 != 0:
+        raise ValueError(
+            f"{CARRY_OVERRIDE_ENV} must satisfy 0 < carry < {profile.target_frames} "
+            f"with (carry-1)%8==0 (got {raw_carry!r})"
+        )
+    return ExperimentProfile(
+        stage1_width=profile.stage1_width,
+        stage1_height=profile.stage1_height,
+        commit_width=profile.commit_width,
+        commit_height=profile.commit_height,
+        target_frames=profile.target_frames,
+        tail_frames=carry,
+    )
+
+
+def continuation_strength_from_env() -> float:
+    """Read the frozen-prefix strength override for bake-offs (default 1.0).
+
+    Production stays 1.0 (env unset). Fail loud on non-finite/out-of-range
+    values — a silent clamp would invalidate the bake-off comparison.
+    """
+    raw = os.getenv(CONTINUATION_STRENGTH_ENV, "1.0")
+    try:
+        strength = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{CONTINUATION_STRENGTH_ENV} must be a float in (0, 1] (got {raw!r})"
+        ) from exc
+    if not 0.0 < strength <= 1.0 or strength != strength:
+        raise ValueError(f"{CONTINUATION_STRENGTH_ENV} must be in (0, 1] (got {raw!r})")
+    return strength
+
 
 MILLISECONDS_PER_SECOND = 1000.0
 """`perf_counter` seconds → wall milliseconds for `stage_ms` telemetry."""
@@ -131,6 +233,25 @@ def split_prefix_novel(generated_frames: int, conditioning_frames: int) -> tuple
     if conditioning_frames < 0 or conditioning_frames > generated_frames:
         raise ValueError(f"conditioning {conditioning_frames} out of range [0, {generated_frames}]")
     return (conditioning_frames, generated_frames - conditioning_frames)
+
+
+def extend_conditioning_tail(old_tail: list[Any] | None, novel: list[Any], carry: int) -> list[Any]:
+    """Return the next clip's conditioning tail: the full window's last `carry` frames.
+
+    The full window is (staged prefix + novel); the staged prefix IS the old
+    tail, so the window tail is `(old_tail + novel)[-carry:]`. Production
+    (novel 96 >= carry 25) reduces to `novel[-carry:]`; wide carries on
+    short fast windows (novel 24 < carry 25) keep one stale frame instead of
+    silently shortening the tail (which broke the next `_block_prefix` with
+    `tail holds 24 frames, need 25`). Pure — pinned by host tests.
+    """
+    if carry <= 0:
+        raise ValueError(f"LTX25 carry must be positive (got {carry})")
+    if not novel:
+        raise ValueError("LTX25 novel clip is empty")
+    if old_tail is None:
+        return list(novel[-carry:])
+    return list((old_tail[-carry:] + novel)[-carry:])
 
 
 def generation_profile_hash(
@@ -285,6 +406,7 @@ def build_mode_a_graph(
     seed: int,
     save_prefix: str,
     prefix_filenames: list[str] | None = None,
+    strength: float = 1.0,
 ) -> dict[str, Any]:
     """Build the validated Mode A prompt-format graph (pure — CPU-testable).
 
@@ -293,11 +415,14 @@ def build_mode_a_graph(
     euler_ancestral CFG 1.0, 2x latent upscale, stage-2 1216x704x121
     3-step euler refine, tiled VAE decode, SaveImage + SaveAudio tails.
 
-    With `prefix_filenames` (25 input-root PNGs, Spike B convention) the
-    graph gains LoadImage x25 (ids 30-54) + BatchImagesNode (55) +
-    LTXVImgToVideoInplace (56, strength 1.0 frozen) and node 10 consumes
-    the pinned latent instead of the empty one.
+    With `prefix_filenames` (input-root PNGs, Spike B convention) the graph
+    gains LoadImage xN (ids 30+) + BatchImagesNode + LTXVImgToVideoInplace
+    (strength frozen by default) and node 10 consumes the pinned latent
+    instead of the empty one. Geometry/accounting resolve from the
+    experiment profile (production 121f/25-carry unless VOYAGE_LTX_FAST
+    or VOYAGE_LTX_CARRY select the Phase-1 fast profile).
     """
+    profile = resolve_experiment_profile()
     graph: dict[str, Any] = {
         "1": {
             "class_type": "UnetLoaderGGUF",
@@ -328,16 +453,16 @@ def build_mode_a_graph(
         "8": {
             "class_type": "EmptyLTXVLatentVideo",
             "inputs": {
-                "width": STAGE1_WIDTH,
-                "height": STAGE1_HEIGHT,
-                "length": SEGMENT_TARGET_FRAMES,
+                "width": profile.stage1_width,
+                "height": profile.stage1_height,
+                "length": profile.target_frames,
                 "batch_size": 1,
             },
         },
         "9": {
             "class_type": "LTXVEmptyLatentAudio",
             "inputs": {
-                "frames_number": SEGMENT_TARGET_FRAMES,
+                "frames_number": profile.target_frames,
                 "frame_rate": float(NATIVE_FPS),
                 "batch_size": 1,
                 "audio_vae": ["7", 0],
@@ -427,10 +552,9 @@ def build_mode_a_graph(
         },
     }
     if prefix_filenames is not None:
-        if len(prefix_filenames) != CONDITIONING_TAIL_FRAMES:
+        if len(prefix_filenames) != profile.tail_frames:
             raise ValueError(
-                f"LTX25 prefix needs {CONDITIONING_TAIL_FRAMES} frames "
-                f"(got {len(prefix_filenames)})"
+                f"LTX25 prefix needs {profile.tail_frames} frames (got {len(prefix_filenames)})"
             )
         batch_inputs: dict[str, Any] = {}
         for index, filename in enumerate(prefix_filenames):
@@ -444,13 +568,28 @@ def build_mode_a_graph(
                 "vae": ["6", 0],
                 "image": ["55", 0],
                 "latent": ["8", 0],
-                "strength": 1.0,
+                "strength": strength,
                 "bypass": False,
             },
         }
         video_latent = graph["10"]["inputs"]
         assert isinstance(video_latent, dict)
         video_latent["video_latent"] = ["56", 0]
+        # The upsampler (18) drops the Inplace noise mask, so the stage-2
+        # refine would repaint the frozen prefix. Re-attach the freeze
+        # through the shared pack node (prefix branch only); K derives
+        # from the carry via the LTX causal 8x grid.
+        frozen_latent_frames = (len(prefix_filenames) - 1) // 8 + 1
+        graph["57"] = {
+            "class_type": "LTXPrefixFreeze",
+            "inputs": {
+                "samples": ["18", 0],
+                "prefix_latent_frames": frozen_latent_frames,
+            },
+        }
+        stage2_latent = graph["19"]["inputs"]
+        assert isinstance(stage2_latent, dict)
+        stage2_latent["video_latent"] = ["57", 0]
     return graph
 
 
@@ -470,6 +609,7 @@ def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
     """Decode a tail mp4 to RGB uint8 arrays (oldest-first)."""
     import numpy as np
 
+    profile = resolve_experiment_profile()
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("LTX25 needs an ffmpeg binary on PATH")
@@ -490,16 +630,17 @@ def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
     )
     if completed.returncode != 0:
         raise RuntimeError(f"LTX25 tail decode failed: {completed.stderr.decode()[-500:]}")
-    pixel_bytes = bytes(COMMIT_WIDTH * COMMIT_HEIGHT * 3)
+    pixel_bytes = bytes(profile.commit_width * profile.commit_height * 3)
     raw = completed.stdout
     if len(raw) != frame_count * len(pixel_bytes):
         raise ValueError(
             f"LTX25 tail {tail_path} decoded to {len(raw)} bytes, "
-            f"expected {frame_count} frames of {COMMIT_WIDTH}x{COMMIT_HEIGHT}"
+            f"expected {frame_count} frames of "
+            f"{profile.commit_width}x{profile.commit_height}"
         )
     return [
         np.frombuffer(raw[offset : offset + len(pixel_bytes)], dtype=np.uint8).reshape(
-            (COMMIT_HEIGHT, COMMIT_WIDTH, 3)
+            (profile.commit_height, profile.commit_width, 3)
         )
         for offset in range(0, len(raw), len(pixel_bytes))
     ]
@@ -630,9 +771,8 @@ class LTX25Session:
         if self._tail_frames is None:
             if self._conditioning_tail_path is None:
                 raise RuntimeError("LTX25 continued block has no conditioning tail")
-            self._tail_frames = _decode_tail_frames(
-                Path(self._conditioning_tail_path), CONDITIONING_TAIL_FRAMES
-            )
+            tail_length = resolve_experiment_profile().tail_frames
+            self._tail_frames = _decode_tail_frames(Path(self._conditioning_tail_path), tail_length)
         tail = self._tail_frames
         if len(tail) != conditioning_frames:
             raise ValueError(f"LTX25 tail holds {len(tail)} frames, need {conditioning_frames}")
@@ -650,10 +790,10 @@ class LTX25Session:
 
         block_dir = self._output_dir / save_prefix
         paths = sorted(block_dir.glob("frames_*.png"))
-        if len(paths) != SEGMENT_TARGET_FRAMES:
+        target_frames = resolve_experiment_profile().target_frames
+        if len(paths) != target_frames:
             raise ValueError(
-                f"LTX25 block {save_prefix} produced {len(paths)} frames, "
-                f"expected {SEGMENT_TARGET_FRAMES}"
+                f"LTX25 block {save_prefix} produced {len(paths)} frames, expected {target_frames}"
             )
         frames: list[Any] = []
         for path in paths:
@@ -685,18 +825,22 @@ class LTX25Session:
         prompt_plan_digest: str | None = None,
         requested_frames: int | None = None,
     ) -> dict[str, Any]:
-        """Render one segment (one 121f Mode A clip per block) with joint audio.
+        """Render one segment (one Mode A clip per block) with joint audio.
 
         Block 0 uses the resident tail unless fresh/`scene_cuts[0]`/missing;
         later blocks chain the in-memory tail (no mp4 roundtrip). Fresh
-        clips commit all 121 frames; conditioned clips drop the 25-frame
-        prefix and commit 96 novel frames + the novel audio slice. Counts
-        are measured from disk, never assumed.
+        clips commit the whole window; conditioned clips drop the carry
+        prefix and commit the novel remainder + the novel audio slice.
+        Counts are measured from disk, never assumed. Geometry/accounting
+        follow the experiment profile (production 121f/25-carry unless
+        VOYAGE_LTX_FAST or VOYAGE_LTX_CARRY select Phase-1 fast values).
         """
+        profile = resolve_experiment_profile()
         validate_spatial_size(width, height)
-        if (width, height) != (COMMIT_WIDTH, COMMIT_HEIGHT):
+        if (width, height) != (profile.commit_width, profile.commit_height):
             raise ValueError(
-                f"LTX25 commits fixed {COMMIT_WIDTH}x{COMMIT_HEIGHT} Mode A (got {width}x{height})"
+                f"LTX25 commits fixed {profile.commit_width}x{profile.commit_height} "
+                f"Mode A (got {width}x{height})"
             )
         if fps != NATIVE_FPS:
             raise ValueError(f"LTX25 runs fixed at {NATIVE_FPS} fps (got {fps})")
@@ -705,9 +849,10 @@ class LTX25Session:
         if len(seeds) != len(prompts) or len(scene_cuts) != len(prompts):
             raise ValueError("LTX25 prompts/seeds/scene_cuts must align")
 
-        segment_target_frames = SEGMENT_TARGET_FRAMES
+        segment_target_frames = profile.target_frames
         validate_frame_count(segment_target_frames)
         validate_conditioning_start(0, segment_target_frames)
+        continuation_strength = continuation_strength_from_env()
 
         novel_frames_all: list[Any] = []
         novel_audio_wavs: list[Path] = []
@@ -722,7 +867,7 @@ class LTX25Session:
         ):
             has_tail = self._tail_frames is not None or self._conditioning_tail_path is not None
             continued = has_tail and not scene_cut
-            conditioning_frames = CONDITIONING_TAIL_FRAMES if continued else 0
+            conditioning_frames = profile.tail_frames if continued else 0
             save_prefix = f"seg{segment_id}-b{block_index}"
             prefix_filenames = (
                 self._block_prefix(conditioning_frames, segment_id, block_index)
@@ -734,6 +879,7 @@ class LTX25Session:
                 seed=seed,
                 save_prefix=save_prefix,
                 prefix_filenames=prefix_filenames,
+                strength=continuation_strength,
             )
             prompt_id = f"ltx25-{segment_id}-{block_index}"
             denoise_total_ms += self._execute_graph(graph, prompt_id) * MILLISECONDS_PER_SECOND
@@ -788,7 +934,9 @@ class LTX25Session:
             if novel_wav.stat().st_size == 0:
                 raise ValueError(f"LTX25 block {block_index} novel audio is empty")
             novel_audio_wavs.append(novel_wav)
-            self._tail_frames = list(novel[-CONDITIONING_TAIL_FRAMES:])
+            self._tail_frames = extend_conditioning_tail(
+                self._tail_frames if continued else None, novel, profile.tail_frames
+            )
             self._last_prompt = prompt
             if continued and prefix_filenames is not None:
                 for filename in prefix_filenames:
@@ -817,7 +965,7 @@ class LTX25Session:
         for wav in novel_audio_wavs:
             wav.unlink(missing_ok=True)
         tail_path = output_path.parent / TAIL_FILENAME
-        tail_frames = novel_frames_all[-CONDITIONING_TAIL_FRAMES:]
+        tail_frames = novel_frames_all[-profile.tail_frames :]
         _save_mp4(tail_frames, tail_path, fps)
         save_total_ms = (time.perf_counter() - save_started) * MILLISECONDS_PER_SECOND
 
@@ -831,7 +979,7 @@ class LTX25Session:
             height=height,
             fps=fps,
             segment_target_frames=segment_target_frames,
-            conditioning_tail_frames=CONDITIONING_TAIL_FRAMES,
+            conditioning_tail_frames=profile.tail_frames,
             prompt_plan_digest=prompt_plan_digest,
         )
         tape_path = output_path.parent / TAPE_FILENAME
@@ -855,7 +1003,7 @@ class LTX25Session:
             "committed_frames": committed_frames,
             "prefix_discarded_frames": prefix_discarded,
             "segment_target_frames": segment_target_frames,
-            "conditioning_tail_frames": CONDITIONING_TAIL_FRAMES,
+            "conditioning_tail_frames": profile.tail_frames,
             "conditioning_start_frame": 0,
             "native_fps": fps,
             "prompt_changed": prompt_changed,
@@ -986,9 +1134,12 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
     if _SESSION is None:
         raise RuntimeError("video_ltx25 not initialized — send `init` first")
     # One validated struct (issue 045): payload forms + shape checks live
-    # in GenerateBlocksRequest.from_payload — no inline asserts.
+    # in GenerateBlocksRequest.from_payload — no inline asserts. Geometry
+    # defaults follow the active experiment profile (production commit
+    # size unless VOYAGE_LTX_FAST selects the Phase-1 fast profile).
+    profile = resolve_experiment_profile()
     request = video_common.GenerateBlocksRequest.from_payload(
-        payload, width_default=COMMIT_WIDTH, height_default=COMMIT_HEIGHT
+        payload, width_default=profile.commit_width, height_default=profile.commit_height
     )
     output = request.output_path
     if request.width is None or request.height is None:
@@ -1019,8 +1170,8 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
 
     Probes are fresh text-to-video renders (scene cut, no resident tail), so
     this does NOT advance any stream — safe to run on a live
-    session between segments (still prefer scratch). Requires `init` first.
-    Each probe commits a full 121-frame fresh segment (no prefix to drop).
+    session between segments (still prefer scratch). Each probe commits a
+    full fresh window (no prefix to drop) at the active profile geometry.
     """
     warmup = int(payload.get("warmup", 1))
     measured = int(payload.get("measured", 3))
@@ -1029,6 +1180,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("video_ltx25 not initialized — send `init` first")
     import torch
 
+    profile = resolve_experiment_profile()
     session = _SESSION
     saved_tail = session._conditioning_tail_path
     saved_frames = session._tail_frames
@@ -1038,8 +1190,8 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     session._last_prompt = None
     benchmark_prompt = str(payload.get("prompt", "benchmark probe"))
     benchmark_seed = int(payload.get("seed", 0))
-    benchmark_width = int(payload.get("width", COMMIT_WIDTH))
-    benchmark_height = int(payload.get("height", COMMIT_HEIGHT))
+    benchmark_width = int(payload.get("width", profile.commit_width))
+    benchmark_height = int(payload.get("height", profile.commit_height))
     benchmark_fps = int(payload.get("fps", NATIVE_FPS))
     committed = 0
     generated = 0
