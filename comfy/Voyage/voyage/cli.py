@@ -472,13 +472,13 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
         "--min-fps",
         type=int,
         default=None,
-        help="floor output fps at finalize (default: [augment] min_fps 32; 0 disables)",
+        help="floor output fps at finalize (default: [augment] min_fps 24; 0 disables)",
     )
     parser.add_argument(
         "--min-resolution",
         default=None,
-        help='floor output resolution at finalize, WxH e.g. "1280x720" '
-        '(default: [augment] 1280x720; "0" disables)',
+        help='floor output resolution at finalize, WxH e.g. "1216x704" '
+        '(default: [augment] 1216x704; "0" disables)',
     )
     parser.add_argument(
         "--no-augment",

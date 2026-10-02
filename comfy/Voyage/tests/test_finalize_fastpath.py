@@ -144,7 +144,7 @@ def test_finalize_native_geometry_validates_without_reencode(tmp_path: Path) -> 
     _commit_two(run_dir)
     out = tmp_path / "final-copy.mp4"
     # Legacy native path: floors disabled so 768x432@24 fake segments
-    # stream-copy (default floors would lift to 1280x720@32).
+    # stream-copy (default floors would lift to 1216x704@24).
     assert finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)

@@ -26,9 +26,9 @@ def test_manifest_records_presentation_floors(tmp_path: Path) -> None:
     manifest = _read_manifest(run_dir)
     presentation = manifest["presentation"]
     assert isinstance(presentation, dict)
-    assert presentation["min_fps"] == 32
-    assert presentation["min_width"] == 1280
-    assert presentation["min_height"] == 720
+    assert presentation["min_fps"] == 24
+    assert presentation["min_width"] == 1216
+    assert presentation["min_height"] == 704
     assert manifest["final_geometry"] is None
 
 

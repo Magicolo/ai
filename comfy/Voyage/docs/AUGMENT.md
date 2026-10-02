@@ -1,6 +1,6 @@
 # AUGMENT — finalize-time presentation floors
 
-Every shipped video is ≥32 fps and ≥1280×720 by default. The floors
+Every shipped video is ≥24 fps and ≥1216×704 by default. The floors
 lift low-native backends (CausVid 832×480 @ 16, fake testsrc) to
 presentation size at finalize; sources already above the floors pass
 through untouched ("minimal upscale"). `0` disables a floor — the 24 fps
@@ -8,32 +8,34 @@ through untouched ("minimal upscale"). `0` disables a floor — the 24 fps
 
 ## Floors, flags, TOML, TUI
 
-Defaults (`voyage/config.py:375`, `AugmentConfig`):
+Defaults (`voyage/config.py`, `AugmentConfig` — they track the ltx25
+high-quality native 1216×704 @ 24, so true-native ltx25 sources pass
+through unaugmented by default):
 
-- `min_fps = 32` (0 disables the fps floor);
-- `min_width = 1280`, `min_height = 720` (`0x0` disables the resolution
-  floor; a half-disabled pair like `0x720` is rejected — both-zero or
+- `min_fps = 24` (0 disables the fps floor);
+- `min_width = 1216`, `min_height = 704` (`0x0` disables the resolution
+  floor; a half-disabled pair like `0x704` is rejected — both-zero or
   both-positive).
 
 ```toml
 [augment]
-min_fps = 32
-min_width = 1280
-min_height = 720
+min_fps = 24
+min_width = 1216
+min_height = 704
 ```
 
-Flags (shared helper `_add_augment_args`, `voyage/cli.py:2117` — every
+Flags (shared helper `_add_augment_args` — every
 finalizing verb carries the same three, so they cannot drift apart):
 
-- `--min-fps N` (default: `[augment] min_fps 32`; 0 disables);
-- `--min-resolution WxH` e.g. `"1280x720"` (default: `[augment]`
-  1280×720; `"0"` disables);
+- `--min-fps N` (default: `[augment] min_fps 24`; 0 disables);
+- `--min-resolution WxH` e.g. `"1216x704"` (default: `[augment]`
+  1216×704; `"0"` disables);
 - `--no-augment` (wins over explicit floors — both to 0).
 
 Carried by `finalize` (owns the floors — defaults ride the run's
 `[augment]` TOML), forwarded by `generate`/`run` overrides into
 `resolve_config`, and `stop --finalize` forwards into it. TUI fields
-`min_fps` (`"32"`) / `min_resolution` (`"1280x720"`)
+`min_fps` (`"24"`) / `min_resolution` (`"1216x704"`)
 (`voyage/tui_state.py:125-126`, help at `:84-85`) validate the same way
 (non-negative integer / `WxH`-or-`0`) and stay `Unset` when untouched so
 the stored config wins.
@@ -59,10 +61,10 @@ out box     = max(target, min) per axis (never stretched — downstream
 
 Examples (live `plan_augmentation`):
 
-- ltxv native 768×512 @ 24 → out 1280×720 @ 32
-  (`needs_reencode=True, needs_minterpolate=True`);
-- CausVid native 832×480 @ 16 → out 1280×720 @ 32 (same flags —
-  ~2.7× pixels plus 2× fps, the cost note below).
+- ltxv native 768×512 @ 24 → out 1216×704 @ 24
+  (`needs_reencode=True, needs_minterpolate=False`);
+- CausVid native 832×480 @ 16 → out 1216×704 @ 24 (motion-interpolation
+  lift — ~2.2× pixels plus the 16→24 fps lift, the cost note below).
 
 ## Chunked runner and 2-GPU pairing
 
@@ -122,10 +124,11 @@ re-encode) without weights.
 ## Cost note and benchmark effect
 
 Lifting costs pixels × fps. CausVid (832×480 @ 16) and fake testsrc
-(768×432 fake-432p) both ship as 1280×720 @ 32 — ~2.7× pixels plus a 2×
-fps lift through minterpolate + upscale + re-encode. Expect finalize
+(768×432 fake-432p) both ship as 1216×704 @ 24 — ~2.2× pixels plus the
+16→24 fps lift through minterpolate + upscale + re-encode. Expect finalize
 to dominate e2e wall time on those backends; ltxv (768×512 @ 24) pays
-a smaller lift. `BENCHMARKING.md` e2e numbers predate the floors —
+a smaller lift, and ltx25 (1216×704 @ 24 native) passes through
+untouched by default. `BENCHMARKING.md` e2e numbers predate the floors —
 compare GPU runs to GPU runs at the same floor settings, and pass
 `--no-augment` (or `min_*=0`) when you need native-geometry timings.
 Soak trends stay comparable run-to-run only when the floors match.

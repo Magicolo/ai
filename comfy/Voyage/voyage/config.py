@@ -454,7 +454,7 @@ class AugmentConfig(BaseModel):
 
     `min_fps = 0` disables the fps floor; `min_width = min_height = 0`
     disables the resolution floor. Geometry must be both-zero or
-    both-positive — a half-disabled floor (0 wide x 720 high) is
+    both-positive — a half-disabled floor (0 wide x 704 high) is
     meaningless, so the model rejects it. The media consumer that reads
     these floors lands in a later slice; this track only plumbs them
     through TOML + CLI + TUI.
@@ -465,9 +465,9 @@ class AugmentConfig(BaseModel):
     cuda:1), ffmpeg floors only when off or when the legs are absent.
     """
 
-    min_fps: int = 32
-    min_width: int = 1280
-    min_height: int = 720
+    min_fps: int = 24
+    min_width: int = 1216
+    min_height: int = 704
     use_model_pass: bool = True
 
     @field_validator("min_fps", "min_width", "min_height")
@@ -485,11 +485,11 @@ class AugmentConfig(BaseModel):
 
 
 def parse_min_resolution(raw: str) -> tuple[int, int]:
-    """Parse a resolution floor: WxH like "1280x720", or "0" to disable.
+    """Parse a resolution floor: WxH like "1216x704", or "0" to disable.
 
     Returns (width, height); "0" (and the equivalent "0x0") returns
     (0, 0). Anything else — wrong shape, non-digits, or a half-disabled
-    pair like "0x720" — raises ValueError so CLI/TUI/resolve paths share
+    pair like "0x704" — raises ValueError so CLI/TUI/resolve paths share
     one error source. The full both-or-neither invariant also lives on
     AugmentConfig for direct construction and TOML loads.
     """
@@ -499,7 +499,7 @@ def parse_min_resolution(raw: str) -> tuple[int, int]:
     match = re.fullmatch(r"(\d+)\s*x\s*(\d+)", text)
     if match is None:
         raise ValueError(
-            f'invalid resolution {raw!r} (expected WxH like "1280x720" or "0" to disable)'
+            f'invalid resolution {raw!r} (expected WxH like "1216x704" or "0" to disable)'
         )
     width, height = int(match.group(1)), int(match.group(2))
     if (width == 0) != (height == 0):
@@ -833,9 +833,11 @@ model_size = "large_44k_v2"
 
 [augment]
 # Finalize-time floors: 0 disables a floor (min_fps = 0, or 0x0 geometry).
-min_fps = 32
-min_width = 1280
-min_height = 720
+# Defaults track the ltx25 high-quality native (1216x704@24, DESIGN §140):
+# true-native ltx25 sources pass through unaugmented by default.
+min_fps = 24
+min_width = 1216
+min_height = 704
 # Model pass (issue 166; DESIGN §140 GPU defaults): Real-ESRGAN upscale
 # + FILM interpolate when provisioned (pinned to cuda:1 when two GPUs
 # are visible); off (false) keeps the ffmpeg floors only.

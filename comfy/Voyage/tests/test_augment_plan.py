@@ -24,11 +24,33 @@ from voyage.media import (
 
 
 def test_augment_defaults_match_coming_config() -> None:
-    assert AUGMENT_DEFAULT_MIN_FPS == 32
-    assert AUGMENT_DEFAULT_MIN_WIDTH == 1280
-    assert AUGMENT_DEFAULT_MIN_HEIGHT == 720
+    assert AUGMENT_DEFAULT_MIN_FPS == 24
+    assert AUGMENT_DEFAULT_MIN_WIDTH == 1216
+    assert AUGMENT_DEFAULT_MIN_HEIGHT == 704
     options = FinalizeOptions()
-    assert (options.min_fps, options.min_width, options.min_height) == (32, 1280, 720)
+    assert (options.min_fps, options.min_width, options.min_height) == (24, 1216, 704)
+
+
+def test_ltx25_native_passes_through_default_floors() -> None:
+    """ltx25 high-quality native 1216x704@24 ships untouched by default.
+
+    The floors track the ltx25 HQ native (DESIGN §140), so a true-native
+    source takes the stream-copy fast path — no re-encode, no lift.
+    """
+    plan = plan_augmentation(
+        1216,
+        704,
+        24.0,
+        1216,
+        704,
+        24,
+        AUGMENT_DEFAULT_MIN_FPS,
+        AUGMENT_DEFAULT_MIN_WIDTH,
+        AUGMENT_DEFAULT_MIN_HEIGHT,
+    )
+    assert (plan.out_w, plan.out_h, plan.out_fps) == (1216, 704, 24)
+    assert plan.needs_minterpolate is False
+    assert plan.needs_reencode is False
 
 
 def test_causvid_native_lifts_to_presentation() -> None:

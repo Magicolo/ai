@@ -101,9 +101,9 @@ FIELD_HELP = {
     "beats_per_segment": "Beats per segment for the rhythm grid (empty = 4, "
     "doubles to hold >=60 BPM).",
     "drift_every_n": "Director drifts every Nth segment (empty = 1); other segments hold.",
-    "min_fps": "Floor output fps at finalize (untouched/32 = stored config; 0 disables).",
-    "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1280x720" '
-    '(untouched/1280x720 = stored config; "0" disables).',
+    "min_fps": "Floor output fps at finalize (untouched/24 = stored config; 0 disables).",
+    "min_resolution": 'Floor output resolution at finalize, WxH e.g. "1216x704" '
+    '(untouched/1216x704 = stored config; "0" disables).',
     "use_model_pass": "Model augment pass at finalize (Real-ESRGAN upscale + "
     "FILM interpolate when provisioned; off = ffmpeg floors only).",
     "no_download": "Fail instead of downloading missing models (verify only). "
@@ -129,8 +129,8 @@ FIELD_HELP = {
 # indistinguishable from untouched, so that downgrade needs the CLI flag.
 # Non-default values always emit concrete overrides and still win.
 _DEFAULT_QUANTIZATION = "fp8"
-_DEFAULT_MIN_FPS = "32"
-_DEFAULT_MIN_RESOLUTION = "1280x720"
+_DEFAULT_MIN_FPS = "24"
+_DEFAULT_MIN_RESOLUTION = "1216x704"
 
 
 @dataclass
@@ -156,8 +156,8 @@ class GenerateFormState:
     quantization: str = "fp8"
     beats_per_segment: str = ""
     drift_every_n: str = ""
-    min_fps: str = "32"
-    min_resolution: str = "1280x720"
+    min_fps: str = "24"
+    min_resolution: str = "1216x704"
     use_model_pass: bool = True
     verbose: bool = False
     no_color: bool = False

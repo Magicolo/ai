@@ -78,12 +78,12 @@ from voyage.media_audio import validate_video as validate_video
 PRESENTATION_MIN_FPS = 24
 
 #: Presentation floors for the Track B augment path (coming config): the
-#: shipped video is always >= 32fps and covers 1280x720. `finalize_run`
+#: shipped video is always >= 24fps and covers 1216x704. `finalize_run`
 #: and `FinalizeOptions` default to these so headless/legacy callers get
 #: the same presentation without a config round-trip.
-AUGMENT_DEFAULT_MIN_FPS = 32
-AUGMENT_DEFAULT_MIN_WIDTH = 1280
-AUGMENT_DEFAULT_MIN_HEIGHT = 720
+AUGMENT_DEFAULT_MIN_FPS = 24
+AUGMENT_DEFAULT_MIN_WIDTH = 1216
+AUGMENT_DEFAULT_MIN_HEIGHT = 704
 
 
 @dataclass
@@ -125,7 +125,7 @@ def plan_augmentation(
     them is kept as-is ("minimal upscale"), segments already above
     target+floors ship at native spec (no downscaling — rendered compute is
     never thrown away), and a 0/None floor disables that axis (the 24fps
-    `PRESENTATION_MIN_FPS` still applies — 0 disables the new 32fps floor,
+    `PRESENTATION_MIN_FPS` still applies — 0 disables the 24fps floor,
     not the shipped-video guarantee).
 
     `needs_minterpolate` is True only for an fps lift (source + 0.5 <
@@ -321,7 +321,7 @@ class FinalizeOptions:
 
     Track B augment fields (`min_fps`/`min_width`/`min_height`): the
     presentation floors `finalize_run` enforces via `plan_augmentation`
-    (defaults 32/1280/720 to match the coming config; 0 disables that
+    (defaults 24/1216/704 to match the coming config; 0 disables that
     axis — the 24fps `PRESENTATION_MIN_FPS` still applies).
 
     Encode fields (`crf`/`preset`, issues 050): the single vf encode
@@ -340,9 +340,9 @@ class FinalizeOptions:
     overlap_fraction: float = 0.10
     overlap_cap_seconds: float = 0.5
     joint_style: JointStyle = "blend"
-    min_fps: int = 32
-    min_width: int = 1280
-    min_height: int = 720
+    min_fps: int = 24
+    min_width: int = 1216
+    min_height: int = 704
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
     use_model_pass: bool = True
@@ -595,10 +595,10 @@ def finalize_run(
     The presentation box/fps come from `plan_augmentation` (Track B):
     `max(requested, floors, 24fps)` for fps and `max(target, floors)`
     per axis for geometry, so backend-native segments (CausVid
-    832x480@16, LTXV 768x512@24) ship at >= 1280x720@32 by default.
+    832x480@16, LTXV 768x512@24) ship at >= 1216x704@24 by default.
     One uniform knob rule (issue 190): an explicit scalar wins over
     `options`, `None` means "use the `options` value" (which defaults to
-    32/1280/720 floors, crf 15 + veryfast, blend joints at 0.10 overlap);
+    24/1216/704 floors, crf 15 + veryfast, blend joints at 0.10 overlap);
     pass 0 to disable a floor axis (the 24fps `PRESENTATION_MIN_FPS`
     still applies). An explicit `overlap_fraction=0` behaves as a hard
     splice (the blend falls back to concat below the audibility floor).
@@ -647,7 +647,7 @@ def finalize_run(
     defaults (768/432/24) are the legacy fake-native fallback — kept (not
     raised to the presentation floors) because zero-floor callers rely on
     them for the stream-copy fast path (see `test_finalize_fastpath`);
-    default-floor callers are lifted to 1280x720@32 by `plan_augmentation`
+    default-floor callers are lifted to 1216x704@24 by `plan_augmentation`
     either way, so either default ships the same presentation.
 
     Model pass (issue 166): `use_model_pass=True` consults
@@ -655,7 +655,10 @@ def finalize_run(
     legs (or no `models_dir`) read as ffmpeg fallback, never an error, so
     knob-off == knob-on-absent byte-for-byte. Present legs select the
     tensor chunk encode (`run_finalize_model_pass`: SRVGG upscale + FILM
-    mids chunked, then the presentation vf without minterpolate).
+    mids chunked, then the presentation vf without minterpolate) only when
+    the augment plan flags work (`needs_reencode`); sources already at the
+    presentation box/fps skip it for the stream-copy fast path, so ltx25
+    native 1216x704@24 is not augmented by default.
     """
     resolved = resolve_finalize_settings(
         options=options,
@@ -697,7 +700,7 @@ def finalize_run(
     usable = committed_usable_segments(run_dir, settings.skip_bad)
 
     # Presentation box/fps via the pure augment plan (Track B): sources
-    # below the floors (CausVid 16fps, sub-720p natives) are lifted with
+    # below the floors (CausVid 16fps, sub-704p natives) are lifted with
     # motion interpolation + upscale; the audio timeline stays on the
     # requested (== source) fps — frame counts / source fps = seconds.
     source_info = probe(usable[0] / "video.mp4")
@@ -743,8 +746,18 @@ def finalize_run(
         # Present-legs tensor path (issue 166): chunked SRVGG + FILM to one
         # intermediate, then the presentation vf without minterpolate (FILM
         # already interpolated). Absent/off keeps the ffmpeg paths below.
+        # Trigger rule: the tensor pass only runs when the augment plan
+        # flags work (`needs_reencode` — a geometry/fps lift). Sources
+        # already meeting the presentation box/fps skip it even when legs
+        # are present, so ltx25 native 1216x704@24 takes the stream-copy
+        # fast path instead of a no-op enhance.
         tensor_intermediate: Path | None = None
-        if model_selected and resolved_weights is not None and source_fps > 0:
+        if (
+            model_selected
+            and resolved_weights is not None
+            and source_fps > 0
+            and plan.needs_reencode
+        ):
             from voyage.augment import augment_devices, model_pass_devices, run_finalize_model_pass
 
             if augment_devices():

@@ -66,7 +66,13 @@ def test_model_pass_selector_rejects_bad_inputs() -> None:
 def test_finalize_present_legs_selects_tensor_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Knob-on + legs calls the tensor model pass (not the vf-only fallback)."""
+    """Knob-on + legs calls the tensor model pass (not the vf-only fallback).
+
+    The pass is trigger-gated: the request lifts above the 768x432@24
+    fake source so the plan flags reencode work (a matching request
+    would take the stream-copy fast path — see
+    tests/test_native_skips_model_pass.py).
+    """
     import shutil
 
     import voyage.augment as augment_module
@@ -121,6 +127,9 @@ def test_finalize_present_legs_selects_tensor_path(
     finalize_run(
         run_dir,
         out,
+        width=1216,
+        height=704,
+        fps=24,
         min_fps=0,
         min_width=0,
         min_height=0,

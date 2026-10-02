@@ -177,7 +177,7 @@ def test_finalize_reencode_path_publishes_without_read_bytes(
     _guard_mp4_read_bytes(monkeypatch)
     out = tmp_path / "final-lift.mp4"
     assert finalize_run(run_dir, out).exists()
-    validate_video(out, 1280, 720, 32)
+    validate_video(out, 1216, 704, 24)
 
 
 # ---------------------------------------------------------------------------

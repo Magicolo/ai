@@ -97,8 +97,8 @@ appended (e.g. the CUDA-stack reason), never a stuck view.
   at ~+4.5 GB VRAM.
 - Blocks, Take seconds, Beats, Drift, Min fps, Min resolution, Seed
   (empty = preset defaults: 1 block; 45 s takes above the 20 s audio-ahead window;
-  4 beats doubling to hold >=60 BPM; drift every segment; finalize floors
-  32 fps / 1280×720; seed 0)
+   4 beats doubling to hold >=60 BPM; drift every segment; finalize floors
+   24 fps / 1216×704; seed 0)
   plus draft / force / skip-bad / verbose / no-color checkboxes.
 
 Invalid fields get flagged (`field-invalid`: red-tinted background on
@@ -219,7 +219,7 @@ Full scenario table: `docs/STATE_AND_RECOVERY.md`.
 `finalize` collects DONE segments only, verifies checksums/ranges/
 alignment, and publishes atomically (sources never mutated). Use
 `--skip-bad` to finalize around corrupt segments with warnings.
-Presentation floors apply at finalize: output is ≥32 fps and ≥1280×720
+Presentation floors apply at finalize: output is ≥24 fps and ≥1216×704
 by default (`--min-fps`/`--min-resolution`/`--no-augment`, `[augment]`
 TOML — see `docs/AUGMENT.md`). The SFX pass dubs director-captioned
 effects under the music afterwards unless `--no-sfx` (pins

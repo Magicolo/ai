@@ -42,9 +42,9 @@ def _base_config() -> ProjectConfig:
 
 def test_augment_defaults() -> None:
     assert AugmentConfig().model_dump() == {
-        "min_fps": 32,
-        "min_width": 1280,
-        "min_height": 720,
+        "min_fps": 24,
+        "min_width": 1216,
+        "min_height": 704,
         "use_model_pass": True,
     }
     assert _base_config().augment == AugmentConfig()
@@ -102,9 +102,9 @@ def test_toml_round_trip_custom_floors(tmp_path: Path) -> None:
     config_path = tmp_path / "voyage.toml"
     config_path.write_text(default_config_toml("augment-run", "line art", 7), encoding="utf-8")
     text = config_path.read_text(encoding="utf-8")
-    text = text.replace("min_fps = 32", "min_fps = 60")
-    text = text.replace("min_width = 1280", "min_width = 1920")
-    text = text.replace("min_height = 720", "min_height = 1080")
+    text = text.replace("min_fps = 24", "min_fps = 60")
+    text = text.replace("min_width = 1216", "min_width = 1920")
+    text = text.replace("min_height = 704", "min_height = 1080")
     config_path.write_text(text, encoding="utf-8")
     config, _digest = load_config(config_path)
     assert (config.augment.min_fps, config.augment.min_width, config.augment.min_height) == (
@@ -120,7 +120,7 @@ def test_toml_rejects_half_geometry(tmp_path: Path) -> None:
     config_path = tmp_path / "voyage.toml"
     config_path.write_text(default_config_toml("augment-run", "line art", 7), encoding="utf-8")
     text = config_path.read_text(encoding="utf-8")
-    text = text.replace("min_width = 1280", "min_width = 0")
+    text = text.replace("min_width = 1216", "min_width = 0")
     config_path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigurationError):
         load_config(config_path)
@@ -137,13 +137,13 @@ def test_resolve_without_augment_options_is_pure_noop() -> None:
 def test_resolve_min_fps_override() -> None:
     resolved = resolve_config(_base_config(), min_fps=60)
     assert resolved.augment.min_fps == 60
-    assert (resolved.augment.min_width, resolved.augment.min_height) == (1280, 720)
+    assert (resolved.augment.min_width, resolved.augment.min_height) == (1216, 704)
 
 
 def test_resolve_min_resolution_override() -> None:
     resolved = resolve_config(_base_config(), min_resolution="1920x1080")
     assert (resolved.augment.min_width, resolved.augment.min_height) == (1920, 1080)
-    assert resolved.augment.min_fps == 32
+    assert resolved.augment.min_fps == 24
 
 
 def test_resolve_zero_disables() -> None:
@@ -270,8 +270,8 @@ def test_cmd_finalize_rejects_invalid_augment(tmp_path: Path) -> None:
 
 def test_tui_augment_defaults() -> None:
     state = GenerateFormState()
-    assert state.min_fps == "32"
-    assert state.min_resolution == "1280x720"
+    assert state.min_fps == "24"
+    assert state.min_resolution == "1216x704"
 
 
 def test_tui_namespace_carries_augment_attrs() -> None:

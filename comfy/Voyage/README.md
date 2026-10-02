@@ -62,7 +62,7 @@ VOYAGE_GPUS=1 ./scripts/run.sh generate --duration 5s \
   --style "pastel neon line-art, peaceful"
 # -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
 # ltx25 (the default) renders joint video+audio native 1216x704 @ 24 fps;
-# finalize lifts video to >=1280x720 @ >=32 fps via the augmentation floors
+# finalize lifts video to >=1216x704 @ >=24 fps via the augmentation floors
 # (see docs/AUGMENT.md; --no-augment keeps native geometry) and dubs the
 # MMAudio SFX bed under the native soundtrack. --backend fake needs no GPU.
 # Omit --duration to generate until you press 's' (finishing the current
@@ -133,7 +133,7 @@ pick `fake` on GPU-less boxes for CPU smoke runs.
 - `docs/PROMPTING.md` — style charter, novelty, staged prompts.
 - `docs/AUDIO.md` — ACE-Step slow loop, continuation, final mix.
 - `docs/SFX.md` — finalize-time video-synced effects (captions, windows, `voyage sfx`).
-- `docs/AUGMENT.md` — finalize presentation floors (≥32 fps, ≥1280×720), chunked runner.
+- `docs/AUGMENT.md` — finalize presentation floors (≥24 fps, ≥1216×704), chunked runner.
 - `docs/OPERATIONS.md` — runbook: run/pause/resume/stop/recover/finalize.
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — benchmark/soak protocol and reports.

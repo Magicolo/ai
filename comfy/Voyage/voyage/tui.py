@@ -692,7 +692,7 @@ class VoyageApp(App[None]):
             "min_resolution",
             Input(
                 value=self.initial_state.min_resolution,
-                placeholder="1280x720",
+                placeholder="1216x704",
                 id="field-min-resolution",
                 tooltip=FIELD_HELP["min_resolution"],
             ),
