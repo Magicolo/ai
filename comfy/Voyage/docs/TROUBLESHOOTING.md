@@ -55,8 +55,9 @@
   port: `FilmNetMini` blends with FILM's semantic contract but official
   `film_net` weights will NOT load (shape mismatch →
   `ModelCompatibilityError`); the full FILM port is follow-up
-  (`docs/AUGMENT.md`). The compact `RealESRGAN_x4plus_anime_6B` SRVGG
-  variant likewise needs its own loader.
+  (`docs/AUGMENT.md`). The anime upscaler leg (`realesr-animevideov3.pth`,
+  SRVGGNetCompact XS) has its own key-sniffed loader; RRDB-shaped
+  files take the classic builder.
 - Missing `film`/`realesrgan-anime` weights raise torch-free before any
   torch import — `models download film realesrgan-anime` + `models verify`.
 

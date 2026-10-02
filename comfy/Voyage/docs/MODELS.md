@@ -66,15 +66,17 @@ hzwer/Practical-RIFE (MIT), hence the `mit-and-apache-2.0` tag. Weights
 land in `<models>/frame_interpolation/` (ComfyUI layout); leaf deps in
 `worker/Dockerfile.video`.
 
-## Finalize augmentation — Real-ESRGAN anime 6B (`models download realesrgan-anime`, ~18 MB)
+## Finalize augmentation — realesr-animevideov3 (`models download realesrgan-anime`, ~2.5 MB)
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
-| Anime upscaler (`RealESRGAN_x4plus_anime_6B.pth`, 4x RRDBNet 6-block) | [amd/realesrgan-x4plus-anime-6b](https://huggingface.co/amd/realesrgan-x4plus-anime-6b) (1:1 mirror of the [xinntao/Real-ESRGAN v0.2.2.4 release asset](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth)) | `b14ff5f8ecb5a4b56ce4049a58d0bca1f8814690` |
+| Anime upscaler (`realesr-animevideov3.pth`, native 4x SRVGGNetCompact XS: 16 conv, 64 feat) | [nateraw/real-esrgan](https://huggingface.co/nateraw/real-esrgan) (mirror of the [xinntao/Real-ESRGAN v0.2.5.0 release asset](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth)) | `44ad8adf6069185b86df22349b12f255821c86ab` |
 
 BSD-3-Clause (c) 2021 Xintao Wang. Torch-native `torch.load`
-(weights-only) of the RRDBNet generator; weights land in
-`<models>/realesrgan/`.
+(weights-only) of the SRVGGNetCompact generator (key-sniffed, not the
+RRDB layouts — the file wraps params one level deep under `params`;
+the old 18 MB `RealESRGAN_x4plus_anime_6B` RRDB weights are superseded,
+~11-13x slower on the 2060); weights land in `<models>/realesrgan/`.
 
 ## Director — Qwen3-8B + MiniLM (`models download director-qwen8b`, ~16 GB)
 

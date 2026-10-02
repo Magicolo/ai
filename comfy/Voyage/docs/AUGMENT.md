@@ -95,10 +95,10 @@ them side by side and a 1-GPU box runs chunks serially on cuda:0.
 
 `voyage/workers/augment_worker.py:15-19` (spike, not the full port):
 
-- `RRDBNet` is the vendored Real-ESRGAN ×4 residual-in-residual net
-  (state-dict shapes match the ×4plus family; the compact
-  `RealESRGAN_x4plus_anime_6B` SRVGG variant needs its own loader —
-  follow-up, not this spike).
+- The anime upscaler leg loads `realesr-animevideov3.pth` (native 4x
+  SRVGGNetCompact XS) strict via its own key-sniffed builder
+  (`_is_srvgg_compact_state` / `_build_srvgg_net`); RRDB-shaped
+  state goes to the classic 23-block builder instead.
 - `FilmNetMini` is a spike stand-in flow blender with FILM's semantic
   contract (two frames + time give the mid frame), batched as
   `(B, 2, C, H, W)` so OOM-halving applies. Official `film_net`
@@ -114,7 +114,7 @@ Precision is fp16 on CUDA, fp32 elsewhere; batch inference starts full
 and halves on OOM down to single items (Comfy `FrameInterpolate`
 recipe).
 
-Weights (`models download film` ~66 MB, `realesrgan-anime` ~18 MB;
+Weights (`models download film` ~66 MB, `realesrgan-anime` ~2.5 MB;
 `docs/MODELS.md:45-65`): FILM fp16 lands in
 `<models>/frame_interpolation/`, the anime upscaler in
 `<models>/realesrgan/`. `generate` ensures both when augmentation is
