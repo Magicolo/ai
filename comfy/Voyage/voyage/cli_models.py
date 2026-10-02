@@ -209,10 +209,9 @@ def cmd_models(args: argparse.Namespace) -> int:
 
     action = args.models_action
     if action == "list":
-        print("video: fake (built-in) | ltxv-2b (LTXV 2B distilled, default)")
+        print("video: fake (built-in) | ltx25 (LTX-2.5 Q3 + TE + VAEs, joint A/V, default)")
         print("video: ltxv-2b (LTXV 2B distilled, Phase 7 alternative)")
         print("video: causvid (CausVid DMD causal generator + Wan2.1-1.3B base)")
-        print("video: ltx25 (LTX-2.5 Q3 + Gemma4 TE + VAEs, joint A/V)")
         print("video: ltx23 (LTX-2.3 Q3 + Gemma3 TE + VAEs, joint A/V)")
         print("audio: fake (built-in) | audio-acestep (ACE-Step 1.5 turbo + 0.6B planner)")
         print("sfx: fake (built-in) | sfx-mmaudio (MMAudio 44k effects, CC-BY-NC-4.0)")

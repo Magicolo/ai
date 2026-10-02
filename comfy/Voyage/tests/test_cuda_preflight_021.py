@@ -26,7 +26,7 @@ from voyage.tui_state import gpu_warning
 
 
 def _all_fake_config() -> ProjectConfig:
-    """CPU-only config (product default video is ltxv/CUDA, so pin fake)."""
+    """CPU-only config (product default video is ltx25/CUDA, so pin fake)."""
     base = ProjectConfig(style="probe")
     return base.model_copy(
         update={

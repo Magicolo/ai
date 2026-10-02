@@ -767,9 +767,9 @@ def test_select_values_render_in_form_text(tmp_path: Path) -> None:
             for _ in range(25):
                 await pilot.pause(0.2)
                 text = "\n".join(_form_svg_rows(app, tmp_path))
-                if "ltxv" in text and "llama" in text and "fp8" in text:
+                if "ltx25" in text and "llama" in text and "fp8" in text:
                     break
-            assert "ltxv" in text
+            assert "ltx25" in text
             assert "llama" in text
             assert "fp8" in text
 

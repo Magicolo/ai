@@ -30,8 +30,8 @@ def _parse(verb_args: list[str]) -> argparse.Namespace:
 def test_init_parser_defaults() -> None:
     args = _parse(["init", "--output", "out", "--style", "calm"])
     assert args.func is cli.cmd_init
-    assert args.backend == "ltxv"
-    assert args.seed == 0
+    assert args.backend == "ltx25"
+    assert args.seed is None
 
 
 def test_doctor_parser() -> None:
@@ -41,7 +41,7 @@ def test_doctor_parser() -> None:
 def test_models_parser_defaults() -> None:
     args = _parse(["models", "list"])
     assert args.func is cli.cmd_models
-    assert args.models_target == "ltxv-2b"
+    assert args.models_target == "ltx25"
 
 
 def test_run_parser_defaults() -> None:
@@ -52,11 +52,17 @@ def test_run_parser_defaults() -> None:
 
 
 def test_generate_parser_defaults() -> None:
-    args = _parse(["generate", "--duration", "5s", "--style", "calm"])
+    args = _parse(["generate", "--style", "calm"])
     assert args.func is cli.cmd_generate
-    assert args.backend == "ltxv"
-    assert args.duration == 5.0
+    assert args.backend == "ltx25"
+    assert args.duration is None
+    assert args.seed is None
     assert args.director == "llama"
+
+
+def test_generate_parser_accepts_explicit_duration() -> None:
+    args = _parse(["generate", "--duration", "5s", "--style", "calm"])
+    assert args.duration == 5.0
 
 
 def test_status_pause_resume_stop_validate_parsers() -> None:

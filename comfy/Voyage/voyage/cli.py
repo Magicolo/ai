@@ -291,12 +291,17 @@ def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="run name (primary spelling; wins over --run-id, same flat folder rule)",
     )
     init.add_argument("--style", required=True, help="permanent style charter for the run")
-    init.add_argument("--seed", type=int, default=0, help="master seed for the run")
+    init.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="master seed for the run (omit for a fresh random seed, printed at init)",
+    )
     init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     init.add_argument(
         "--backend",
         choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
-        default="ltxv",
+        default="ltx25",
         help="video backend preset written into the run config",
     )
     init.add_argument(
@@ -333,7 +338,7 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
     models.add_argument(
         "models_target",
         nargs="?",
-        default="ltxv-2b",
+        default="ltx25",
         choices=[
             "ltxv-2b",
             "causvid",
@@ -347,7 +352,7 @@ def _add_models_parser(sub: argparse._SubParsersAction[Any]) -> None:
             "realesrgan-anime",
             "inspector-qwen35",
         ],
-        help="weight bundle for download (default ltxv-2b)",
+        help="weight bundle for download (default ltx25)",
     )
     models.add_argument("--models-dir", default=None, help="model root (default /models)")
     models.set_defaults(func=cmd_models)
@@ -518,22 +523,24 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
 
 
 def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
-    """`generate` verb: one-shot fixed-duration video."""
+    """`generate` verb: one-shot video (fixed duration, or until 's' is pressed)."""
     gen = sub.add_parser(
         "generate",
-        help="One-shot fixed-duration video (init + run + validate + finalize)",
+        help="One-shot video (init + run + validate + finalize; omit --duration to stop with 's')",
     )
     gen.add_argument(
         "--backend",
         choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
-        default="ltxv",
+        default="ltx25",
         help="video backend preset written into the run config",
     )
     gen.add_argument(
         "--duration",
         type=parse_duration,
-        required=True,
-        help=f"target length, e.g. {_DURATION_EXAMPLES} (rounds up to whole segments)",
+        required=False,
+        default=None,
+        help=f"target length, e.g. {_DURATION_EXAMPLES} (rounds up to whole segments; "
+        "omit to generate until 's' is pressed, finishing the current segment first)",
     )
     gen.add_argument("--style", required=True, help="permanent style charter for the run")
     gen.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
@@ -543,7 +550,12 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="run name (primary spelling; wins over --run-id, same flat folder rule)",
     )
     gen.add_argument("--output", default=None, help="run directory (default output/<name>)")
-    gen.add_argument("--seed", type=int, default=0, help="master seed for the run")
+    gen.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="master seed for the run (omit for a fresh random seed, printed at init)",
+    )
     gen.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
     gen.add_argument(
         "--final-video",

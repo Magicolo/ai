@@ -65,7 +65,7 @@ def test_stored_longlive2_toml_fails_with_migration_hint(tmp_path) -> None:  # t
     toml_path = Path(str(tmp_path)) / "voyage.toml"
     toml_path.write_text(
         config.default_config_toml("voyage", "test style", 0).replace(
-            'backend = "ltxv"', 'backend = "longlive2"', 1
+            'backend = "ltx25"', 'backend = "longlive2"', 1
         ),
         encoding="utf-8",
     )

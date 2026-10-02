@@ -37,9 +37,9 @@ Fake backends need nothing. Real backends need one download each
 (all ungated Hugging Face repos, pinned revisions in `docs/MODELS.md`):
 
 ```bash
-./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights (default)
+./scripts/run.sh models download ltx25          # ~38 GB LTX-2.5 Q3 + TE + VAEs (joint A/V; TE/VAEs gated; default)
+./scripts/run.sh models download ltxv-2b         # ~7 GB LTXV video weights
 ./scripts/run.sh models download causvid        # ~28 GB CausVid DMD + Wan2.1-1.3B base
-./scripts/run.sh models download ltx25          # ~38 GB LTX-2.5 Q3 + TE + VAEs (joint A/V; TE/VAEs gated)
 ./scripts/run.sh models download ltx23          # ~20 GB LTX-2.3 Q3 + TE + VAEs (joint A/V)
 ./scripts/run.sh models download director-qwen8b  # ~16 GB director LLM
 ./scripts/run.sh models download director-qwen4b-awq  # ~2.6 GB GPU director decider
@@ -54,17 +54,19 @@ Fake backends need nothing. Real backends need one download each
 
 ## Basic run
 
-One-shot fixed-duration video (init → run → validate → finalize in one call;
+One-shot video (init → run → validate → finalize in one call;
 aborts if validation fails unless `--skip-bad`):
 
 ```bash
-VOYAGE_GPUS=1 ./scripts/run.sh generate --backend ltxv --duration 5s \
+VOYAGE_GPUS=1 ./scripts/run.sh generate --duration 5s \
   --style "pastel neon line-art, peaceful"
 # -> ./output/voyage/final.mp4 (run dir defaults to ./output/<run-id>)
-# ltxv (the default) renders native 768x512 @ 24 fps; finalize lifts to
-# >=1280x720 @ >=32 fps via the augmentation floors (see docs/AUGMENT.md;
-# --no-augment keeps native geometry). --backend fake needs no GPU.
-# --backend causvid needs its models downloaded first (see above).
+# ltx25 (the default) renders joint video+audio native 1216x704 @ 24 fps;
+# finalize lifts video to >=1280x720 @ >=32 fps via the augmentation floors
+# (see docs/AUGMENT.md; --no-augment keeps native geometry) and dubs the
+# MMAudio SFX bed under the native soundtrack. --backend fake needs no GPU.
+# Omit --duration to generate until you press 's' (finishing the current
+# segment first); the seed is random unless --seed pins it.
 ```
 
 Step-by-step (for pause/resume and unbounded runs):
@@ -87,9 +89,10 @@ Omit `--segments` to run until `voyage pause` / `voyage stop` / SIGINT.
 GPU run: `VOYAGE_IMAGE=voyage-video:latest VOYAGE_GPUS=1 ./scripts/run.sh …`
 Fast iteration: add `--draft` (640×352, 1 block/segment, 45 s takes).
 
-`generate` flags: `--backend ltxv|causvid|fake` (default ltxv),
+`generate` flags: `--backend ltxv|causvid|ltx25|ltx23|fake` (default ltx25),
 `--duration 5s` (e.g. `5s`, `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`; rounds
-up to whole segments), `--draft`, `--director qwen|deterministic`,
+up to whole segments; omit to run until 's' is pressed), `--seed`
+(omit for a fresh random seed), `--draft`, `--director qwen|deterministic|llama`,
 `--blocks`, `--take-seconds`, `--quantization fp8|bf16`,
 `--beats-per-segment`, `--drift-every-n`, `--final-video`, `--skip-bad`,
 `--min-fps`/`--min-resolution`/`--no-augment` (finalize floors, see

@@ -44,7 +44,7 @@ def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def test_defaults_match_generate_effective_settings() -> None:
     state = GenerateFormState(style="x")
-    assert state.backend == "ltxv"
+    assert state.backend == "ltx25"
     assert state.director == "llama"
     assert state.quantization == "fp8"
     assert state.name == "voyage"
@@ -84,7 +84,18 @@ def test_namespace_maps_empty_optionals_to_unset() -> None:
     assert namespace.take_seconds is Unset
     assert namespace.beats_per_segment is Unset
     assert namespace.drift_every_n is Unset
-    assert namespace.seed == 0
+    assert isinstance(namespace.seed, int) and not isinstance(namespace.seed, bool)
+
+
+def test_blank_seed_randomizes_but_explicit_seed_pins() -> None:
+    """Blank TUI seed means a fresh random master seed; explicit pins it."""
+    first = to_generate_namespace(_valid_state())
+    second = to_generate_namespace(_valid_state())
+    assert isinstance(first.seed, int)
+    assert isinstance(second.seed, int)
+    explicit = _valid_state()
+    explicit.seed = "1234"
+    assert to_generate_namespace(explicit).seed == 1234
 
 
 def test_namespace_derives_output_from_name() -> None:
@@ -147,7 +158,7 @@ def test_plan_summary_default_is_five_seconds() -> None:
     assert "2 segment(s)" in summary
     assert "192 frames" in summary
     assert "96f/segment" in summary
-    assert "ltxv" in summary
+    assert "ltx25" in summary
 
 
 def test_plan_summary_reports_block_math() -> None:

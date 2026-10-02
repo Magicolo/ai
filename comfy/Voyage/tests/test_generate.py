@@ -101,8 +101,8 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
     assert ltxv.video.profile == "ltxv-512p"
     assert (ltxv.video.width, ltxv.video.height) == (768, 512)
     assert ltxv.video.device == "cuda:0"
-    # Source config untouched (pure function).
-    assert config.video.backend == "ltxv"
+    # Source config untouched (pure function) — the default preset is ltx25.
+    assert config.video.backend == "ltx25"
 
 
 def test_removed_longlive2_preset_rejected_with_migration_hint(tmp_path: Path) -> None:
@@ -166,8 +166,8 @@ def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
     assert causvid.video.latent_shape == [1, 21, 16, 60, 104]
     # CUDA video backends pair with ACE-Step music.
     assert causvid.audio.backend == "acestep"
-    # Source config untouched (pure function).
-    assert config.video.backend == "ltxv"
+    # Source config untouched (pure function) — the default preset is ltx25.
+    assert config.video.backend == "ltx25"
 
 
 def test_frames_per_segment_causvid_uses_novel_minimum(tmp_path: Path) -> None:
@@ -210,8 +210,9 @@ def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:
         assert applied.audio.backend == "acestep"
         assert applied.audio.device == "cuda:0"
         assert applied.audio.models_dir == "/models"
-    # Source config untouched (pure function).
-    assert config.audio.backend == "acestep"
+    # Source config untouched (pure function) — the default preset is
+    # ltx25 with joint audio, so its own audio row stays fake.
+    assert config.audio.backend == "fake"
 
 
 def test_fake_preset_keeps_fake_audio(tmp_path: Path) -> None:
@@ -435,3 +436,67 @@ def test_generate_aborts_before_init_without_cuda_stack(
     assert code == 1
     assert not (tmp_path / "output" / "voyage").exists()
     assert "voyage-video" in capsys.readouterr().err
+
+
+def test_omitted_seed_randomizes_init(tmp_path: Path) -> None:
+    """Omitting --seed writes a fresh random master seed (non-reproducible)."""
+    from voyage.cli import build_parser, cmd_init
+    from voyage.config import load_config
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    assert (
+        cmd_init(
+            build_parser().parse_args(
+                ["init", "--output", str(first), "--style", "pastel neon line-art, peaceful"]
+            )
+        )
+        == 0
+    )
+    assert (
+        cmd_init(
+            build_parser().parse_args(
+                ["init", "--output", str(second), "--style", "pastel neon line-art, peaceful"]
+            )
+        )
+        == 0
+    )
+    seed_first, _ = load_config(first / "voyage.toml")
+    seed_second, _ = load_config(second / "voyage.toml")
+    assert isinstance(seed_first.seed, int)
+    assert isinstance(seed_second.seed, int)
+    # 1-in-2^31 collision odds — a repeat means the RNG broke, not luck.
+    assert seed_first.seed != seed_second.seed
+
+
+def test_stop_key_listener_requests_stop_at_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typing 's' flips the run to STOP_REQUESTED so the segment finishes first."""
+    import io
+
+    from voyage.cli_generate import _start_stop_key_listener
+    from voyage.config import default_config_toml, load_config
+    from voyage.console import VoyageConsole
+    from voyage.persistence import (
+        build_manifest,
+        initial_state,
+        read_state,
+        write_manifest,
+        write_state,
+    )
+
+    (tmp_path / "segments").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "voyage.toml").write_text(
+        default_config_toml("stopkey", "pastel neon line-art, peaceful", 7), encoding="utf-8"
+    )
+    config, digest = load_config(tmp_path / "voyage.toml")
+    write_manifest(tmp_path, build_manifest(config, digest, {}, {}))
+    write_state(tmp_path, initial_state(config))
+    monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
+    console = VoyageConsole(stream=io.StringIO())
+    thread = _start_stop_key_listener(tmp_path, console)
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert read_state(tmp_path).status == "STOP_REQUESTED"

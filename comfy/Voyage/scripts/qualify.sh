@@ -6,7 +6,7 @@
 #        ./scripts/qualify.sh --backend causvid --segments 2 /tmp/qual-causvid
 #   <run-dir> MUST be absolute: workers spawn with CWD=run_dir, so a
 #   relative dir doubles up inside payload paths (issue 064 leg b).
-#   Default backend is ltxv (the config default since 2026-09-29).
+#   Default backend is ltx25 (the config default since 2026-10-02).
 #   The helper is
 #   backend-agnostic — it benchmarks, runs, validates, and tees the JSON
 #   summary for whatever backend the run dir was inited with.
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "${0%/*}" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 cd "$SCRIPT_DIR/.."
 
-backend="ltxv"
+backend="ltx25"
 segments="3"
 run_dir=""
 while [ $# -gt 0 ]; do

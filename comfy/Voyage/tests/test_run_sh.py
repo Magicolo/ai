@@ -119,9 +119,9 @@ def test_explicit_gpus_zero_disables_gpu_flag(tmp_path: Path) -> None:
 
 @needs_bash
 def test_generate_selects_cuda_without_host_gpu(tmp_path: Path) -> None:
-    """CLI generate defaults to ltxv: CUDA stack regardless of host probe."""
+    """CLI generate defaults to ltx25: LTX image regardless of host probe."""
     selection = _dry_run(tmp_path, ["generate"], "absent")
-    assert selection["image"] == "voyage-video:latest"
+    assert selection["image"] == "voyage-ltx:latest"
     assert selection["gpus"] == "--gpus all"
 
 

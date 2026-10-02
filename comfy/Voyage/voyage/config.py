@@ -260,14 +260,14 @@ state mode + streaming shape. This table IS the BACKEND_GEOMETRY table
 (geometry columns live in each row) and the preset/state registries —
 every dict below is a derived view, never a second source."""
 
-_DEFAULT_ROW: BackendRecord = BACKEND_REGISTRY["ltxv"]
-"""VideoConfig defaults spell this row (issues 025 + 2026-09-29 ltxv decision)."""
+_DEFAULT_ROW: BackendRecord = BACKEND_REGISTRY["ltx25"]
+"""VideoConfig defaults spell this row (issues 025 + 2026-10-02 ltx25 decision)."""
 
 
 class VideoConfig(BaseModel):
-    # Defaults ARE the ltxv registry row (issue 025) — change the row,
+    # Defaults ARE the ltx25 registry row (issue 025) — change the row,
     # not these references. Pinned by tests/test_backend_registry.py.
-    backend: VideoBackendName = "ltxv"
+    backend: VideoBackendName = "ltx25"
     profile: str = _DEFAULT_ROW.profile
     width: int = _DEFAULT_ROW.width
     height: int = _DEFAULT_ROW.height
@@ -752,7 +752,7 @@ def default_config_toml(
     run_id: str,
     style: str,
     seed: int,
-    video_backend: VideoBackendName = "ltxv",
+    video_backend: VideoBackendName = "ltx25",
     director_backend: str = "llama",
     director_device: str = "cuda:1",
 ) -> str:

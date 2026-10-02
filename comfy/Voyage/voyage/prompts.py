@@ -13,6 +13,7 @@ prompt chain.
 from __future__ import annotations
 
 import math
+import re
 
 from voyage.models import PromptPlan, PromptStage
 from voyage.models import StyleSpec as StyleSpec
@@ -21,8 +22,77 @@ from voyage.models import StyleSpec as StyleSpec
 # step 4): at/below calm the camera barely drifts, at/below slow it
 # glides, above slow it may travel at a moderate pace. Thresholds are
 # charter-relative, not perceptual absolutes — tune against StyleSpec.
+# The general prompt can demand faster motion (2026-10-02): explicit
+# motion cues in the middle-layer text override the charter band, so a
+# fast prompt renders fast instead of being calmed down.
 _MOTION_CALM_MAX = 0.35
 _MOTION_SLOW_MAX = 0.6
+
+_FAST_MOTION_CUES = (
+    "fast",
+    "faster",
+    "fastest",
+    "rapid",
+    "rapidly",
+    "dynamic",
+    "energetic",
+    "sweeping",
+    "darting",
+    "rushing",
+    "frenetic",
+    "frantic",
+    "high energy",
+    "high speed",
+    "fast paced",
+    "quick",
+    "quickly",
+    "swift",
+    "swiftly",
+    "racing",
+    "surging",
+    "bursting",
+)
+
+_MODERATE_MOTION_CUES = (
+    "glide",
+    "glides",
+    "gliding",
+    "drift",
+    "drifts",
+    "drifting",
+    "flow",
+    "flows",
+    "flowing",
+    "travel",
+    "travels",
+    "traveling",
+    "travelling",
+    "pan",
+    "pans",
+    "panning",
+    "orbit",
+    "orbits",
+    "orbiting",
+    "sail",
+    "sails",
+    "sailing",
+    "cruise",
+    "cruises",
+    "cruising",
+)
+
+
+def _mentions_motion_cues(lowered_middle: str, cues: tuple[str, ...]) -> bool:
+    """Word-boundary cue match over the middle-layer text (hyphens count as spaces).
+
+    Substring matching is wrong here: "pan" lives inside "company"/"span",
+    "flow" inside "flower", "sail" inside "assail". Anchoring each cue at
+    word boundaries keeps those quiet while inflected forms ("drifting",
+    "gliding") still match via the explicit entries above.
+    """
+    normalized = lowered_middle.replace("-", " ")
+    return any(re.search(rf"\b{re.escape(cue)}\b", normalized) for cue in cues)
+
 
 # Fragments that attempt to override the human-owned style charter (§18.1
 # step 5). Matched case-insensitively as substrings. The ladder is:
@@ -46,9 +116,19 @@ STYLE_OVERRIDE_MARKERS = (
 )
 
 
-def motion_constraints(style: StyleSpec) -> str:
-    """Camera/motion tail derived from the charter (§18.1 step 4)."""
-    if style.motion_energy_max <= _MOTION_CALM_MAX:
+def motion_constraints(style: StyleSpec, middle: str = "") -> str:
+    """Camera/motion tail derived from the general prompt first (§18.1 step 4).
+
+    Explicit motion cues in the middle-layer text win: a prompt demanding
+    fast motion renders fast. Otherwise the charter band decides (calm →
+    barely drifts, slow → glides, above slow → moderate pace).
+    """
+    lowered = middle.lower()
+    if _mentions_motion_cues(lowered, _FAST_MOTION_CUES):
+        pace = "fast dynamic"
+    elif _mentions_motion_cues(lowered, _MODERATE_MOTION_CUES):
+        pace = "moderate"
+    elif style.motion_energy_max <= _MOTION_CALM_MAX:
         pace = "very slow"
     elif style.motion_energy_max <= _MOTION_SLOW_MAX:
         pace = "slow"
@@ -68,7 +148,7 @@ def enforce_style(prompt: str, style: StyleSpec) -> str:
     carry style on its own.
     """
     middle = " ".join(prompt.split())
-    parts = [style.prompt.strip(), middle, motion_constraints(style)]
+    parts = [style.prompt.strip(), middle, motion_constraints(style, middle)]
     return ", ".join(part for part in parts if part)
 
 

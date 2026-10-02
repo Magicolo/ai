@@ -181,8 +181,9 @@ def test_cmd_init_missing_attributes_exit_without_litter(tmp_path: Path) -> None
     run_dir = tmp_path / "run"
     assert cmd_init(argparse.Namespace(**{**base, "seed": 11})) == 2  # missing style
     assert not run_dir.exists()
-    assert cmd_init(argparse.Namespace(**{**base, "style": _STYLE})) == 2  # missing seed
-    assert not run_dir.exists()
+    # Missing seed now randomizes (omitted --seed means a fresh random seed).
+    assert cmd_init(argparse.Namespace(**{**base, "style": _STYLE})) == 0
+    assert run_dir.exists()
 
 
 def test_tui_rejects_take_seconds_at_or_below_ahead_window() -> None:

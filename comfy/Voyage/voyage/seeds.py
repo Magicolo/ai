@@ -7,6 +7,7 @@ logging can never silently alter video randomness.
 from __future__ import annotations
 
 import hashlib
+import secrets
 
 #: Top of the derived-seed range: seeds stay in [0, 2**31 - 1] because
 #: downstream consumers (sampler RNGs, worker payloads, the seed column in
@@ -40,3 +41,14 @@ def audio_seed(run_seed: int, segment: int, chunk: int) -> int:
 
 def director_seed(run_seed: int, decision_index: int) -> int:
     return derive_seed(run_seed, "director", decision_index)
+
+
+def random_master_seed() -> int:
+    """Fresh random master seed for a new run (omitted `--seed`).
+
+    Non-reproducible by design (user decision 2026-10-02): callers print
+    the value so the run can be repeated with an explicit `--seed`.
+    `secrets.randbits(31)` keeps it in signed-31-bit range, exactly like
+    every `derive_seed` output downstream consumes.
+    """
+    return secrets.randbits(31)

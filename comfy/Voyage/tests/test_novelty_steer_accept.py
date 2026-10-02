@@ -143,7 +143,7 @@ def test_steering_section_present_with_forbidden_list() -> None:
         controller_metrics="ok",
     )
     assert "NOVELTY STEERING" in message
-    assert "different setting" in message
+    assert "slightly different" in message
 
 
 def test_no_steering_section_when_revisits_allowed() -> None:
@@ -162,7 +162,7 @@ def test_no_steering_section_when_revisits_allowed() -> None:
 
 def test_system_prompt_steers_to_novelty() -> None:
     """The charter-level prompt tells the director to differ, not just avoid."""
-    assert "different setting" in DIRECTOR_SYSTEM_PROMPT
+    assert "slightly different" in DIRECTOR_SYSTEM_PROMPT
 
 
 def test_legacy_rejections_cap_still_loads() -> None:

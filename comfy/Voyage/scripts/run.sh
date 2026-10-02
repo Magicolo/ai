@@ -9,7 +9,7 @@
 #                 ltx23 -- is requested, unless set;
 #                 bare `run.sh` (the launcher TUI, backend picked
 #                 interactively) also defaults to voyage-video when the host
-#                 has a GPU, so ltxv works with no explicit variables)
+#                 has a GPU, so ltx25 works with no explicit variables)
 #   VOYAGE_GPUS   set to 1 to pass --gpus all (auto-enabled for CUDA backends
 #                 and GPU-box bare launches unless set; needed for
 #                 ltxv/acestep/mmaudio)
@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 
 # Backend-aware defaults: the CUDA worker stacks (torch + LTXV/ACE)
 # only exist in voyage-video. Detect the requested backend from
-# --backend <name> / --backend=<name> (defaulting to ltxv for `generate`);
+# --backend <name> / --backend=<name> (defaulting to ltx25 for `generate`);
 # for run-like commands with --run DIR, read it from DIR/voyage.toml.
 # Explicit VOYAGE_IMAGE / VOYAGE_GPUS always win.
 #
@@ -52,7 +52,7 @@ for arg in "$@"; do
   fi
 done
 if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
-  requested_backend="ltxv"
+  requested_backend="ltx25"
 fi
 # Section-aware TOML sniff via the stdlib parser: reads the video/audio/sfx
 # backends only, so [director] backends (or indentation/layout changes) can
@@ -78,7 +78,7 @@ case "${requested_backend:-}" in
 esac
 # Bare launcher TUI: the backend is picked interactively inside the TUI, so
 # no CLI signal exists. On a GPU box assume the CUDA stack so bare `run.sh`
-# can generate with ltxv and no explicit variables; explicit
+# can generate with ltx25 and no explicit variables; explicit
 # VOYAGE_IMAGE / VOYAGE_GPUS always win. On GPU-less boxes stay slim (the
 # TUI still runs fake-backend smoke runs; picking a CUDA backend there
 # fast-fails to the form with the relaunch hint). The probe is a cheap

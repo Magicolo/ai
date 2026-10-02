@@ -107,7 +107,8 @@ def test_sfx_pairs_by_backend_cuda_on_fake_off(tmp_path: Path) -> None:
     from voyage.config import default_config_toml, load_config, with_video_backend
 
     config_path = tmp_path / "voyage.toml"
-    # Default template is ltxv (CUDA): SFX/music pair on GPU by default.
+    # Default template is ltx25 (CUDA joint A/V): the SFX dub pairs on
+    # GPU by default while music ships with the worker (audio fake).
     config_path.write_text(
         default_config_toml("demo", "pastel neon line-art, peaceful", 1),
         encoding="utf-8",
@@ -116,7 +117,7 @@ def test_sfx_pairs_by_backend_cuda_on_fake_off(tmp_path: Path) -> None:
     assert config.sfx.backend == "mmaudio"
     assert config.sfx.device == "cuda:0"
     assert config.sfx.model_size == "large_44k_v2"
-    assert config.audio.backend == "acestep"
+    assert config.audio.backend == "fake"
     assert "[sfx]" in config_path.read_text(encoding="utf-8")
     # Fake stays CPU-only (gates never touch weights); old runs without
     # an [sfx] section keep byte-identical behavior via SfxConfig defaults.

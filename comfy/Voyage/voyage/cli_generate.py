@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from voyage.console import VoyageConsole
 
 from pydantic import ValidationError
 
@@ -30,6 +35,7 @@ from voyage.cli_planning import (
 from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml
 from voyage.errors import DiskSpaceError
 from voyage.persistence import read_state
+from voyage.seeds import random_master_seed
 
 
 def _pre_init_override_gate(args: argparse.Namespace, run_id: str, style: str, seed: int) -> int:
@@ -77,8 +83,67 @@ def _pre_init_override_gate(args: argparse.Namespace, run_id: str, style: str, s
     return 0
 
 
+def _start_stop_key_listener(
+    run_dir: Path, console: VoyageConsole, sentinel: str = "s"
+) -> threading.Thread:
+    """Watch stdin for the stop sentinel; request stop at the next boundary.
+
+    Daemon thread: a line whose first non-space character matches the
+    sentinel (case-insensitive) flips the run to STOP_REQUESTED via the
+    state.json control plane, so the current segment finishes before
+    finalize. Obvious console feedback on arm, on trigger, and on EOF.
+    Returns the thread (daemon, never joined — the process exits past it).
+    """
+    from voyage.persistence import read_state, write_state
+
+    def _watch() -> None:
+        import sys
+
+        try:
+            for line in sys.stdin:
+                if line.strip()[:1].lower() == sentinel:
+                    try:
+                        state = read_state(run_dir)
+                        state.status = "STOP_REQUESTED"
+                        write_state(run_dir, state)
+                    except Exception as exc:
+                        print(
+                            f"warning: stop key ignored ({exc})",
+                            file=sys.stderr,
+                        )
+                        continue
+                    try:
+                        console.ok(
+                            "stop key received — finishing the current segment, then finalizing ..."
+                        )
+                        print(
+                            "stop key received — finishing the current segment, then finalizing ..."
+                        )
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            pass
+        try:
+            console.warn(
+                "stop-key listener ended (stdin closed) — use Ctrl-C or "
+                "`voyage stop` to finish instead"
+            )
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_watch, name="voyage-stop-key", daemon=True)
+    thread.start()
+    return thread
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
-    """One-shot fixed-duration video: init -> run -> validate -> finalize."""
+    """One-shot video: init -> run -> validate -> finalize.
+
+    With --duration the run covers at least that long (rounded up to whole
+    segments). Without it the run continues until the operator presses
+    's' (finishing the current segment first), Ctrl-C, or `voyage stop`.
+    """
     # Seam dispatch (issue 080): orchestration targets + test-patched
     # leaves resolve through the voyage.cli namespace at call time, exactly
     # as when they shared one module — monkeypatching voyage.cli keeps
@@ -114,6 +179,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # the gate — cmd_init reports those itself, litter-free since 143/185.
     style_value = getattr(args, "style", None)
     seed_value = getattr(args, "seed", None)
+    if seed_value is None:
+        seed_value = random_master_seed()
+        args.seed = seed_value
+        print(f"random seed for this run: {seed_value} (re-run with --seed {seed_value})")
     if (
         isinstance(style_value, str)
         and style_value.strip()
@@ -165,8 +234,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print(f"error: invalid numeric override: {exc}", file=sys.stderr)
         return 2
     frames_per_segment = _frames_per_segment(effective)
-    segments = segments_for_duration(args.duration, effective.video.fps, frames_per_segment)
-    planned_frames = segments * frames_per_segment
+    raw_duration = getattr(args, "duration", None)
+    if raw_duration is None:
+        segments = None
+        planned_frames = None
+    else:
+        segments = segments_for_duration(raw_duration, effective.video.fps, frames_per_segment)
+        planned_frames = segments * frames_per_segment
     console = get_console(args)
     sink = getattr(args, "progress_sink", None)
     ffmpeg_ok, ffmpeg_message = check_ffmpeg()
@@ -214,17 +288,36 @@ def cmd_generate(args: argparse.Namespace) -> int:
             f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps · "
             f"director {effective.director.backend}"
         )
-        console.info(
-            f"plan: ~{planned_frames / effective.video.fps:.1f}s "
-            f"({segments} segments, {planned_frames} frames) "
-            f"· {effective.audio.beats_per_segment} beats/segment · "
-            f"drift every {effective.voyage.drift_every_n_segments}"
-        )
-        print(
-            f"generating ~{planned_frames / effective.video.fps:.1f}s "
-            f"({segments} segments, {planned_frames} frames) "
-            f"with {effective.video.backend} ..."
-        )
+        if planned_frames is None:
+            console.info(
+                f"plan: open-ended run (no --duration) · {frames_per_segment}f/segment · "
+                f"{effective.audio.beats_per_segment} beats/segment · "
+                f"drift every {effective.voyage.drift_every_n_segments}"
+            )
+            print(
+                "generating until you press 's' "
+                f"({frames_per_segment}f per segment) "
+                f"with {effective.video.backend} ..."
+            )
+            print("PRESS 's' + Enter at any time to finish the current segment,")
+            print("then the run validates and finalizes automatically.")
+            print("TIP: keep this terminal focused — the 's' key is read from stdin.")
+        else:
+            console.info(
+                f"plan: ~{planned_frames / effective.video.fps:.1f}s "
+                f"({segments} segments, {planned_frames} frames) "
+                f"· {effective.audio.beats_per_segment} beats/segment · "
+                f"drift every {effective.voyage.drift_every_n_segments}"
+            )
+            print(
+                f"generating ~{planned_frames / effective.video.fps:.1f}s "
+                f"({segments} segments, {planned_frames} frames) "
+                f"with {effective.video.backend} ..."
+            )
+    if planned_frames is None:
+        console.info("stop-key armed: type 's' + Enter to stop after the current segment")
+        print("stop-key armed: type 's' + Enter to stop after the current segment")
+        _start_stop_key_listener(run_dir, console)
     cmd_run(
         argparse.Namespace(
             run=str(run_dir),

@@ -64,10 +64,15 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("error: --style must be a non-empty human-owned style string", file=sys.stderr)
         return 2
     seed_value = getattr(args, "seed", None)
+    if seed_value is None:
+        from voyage.seeds import random_master_seed
+
+        seed_value = random_master_seed()
+        print(f"random seed for this run: {seed_value} (re-run with --seed {seed_value})")
     if isinstance(seed_value, bool) or not isinstance(seed_value, int):
         print(f"error: --seed must be an integer, got {seed_value!r}", file=sys.stderr)
         return 2
-    backend_value = getattr(args, "backend", None) or "ltxv"
+    backend_value = getattr(args, "backend", None) or "ltx25"
     if backend_value not in BACKEND_REGISTRY:
         from voyage.config import removed_backend_suffix
 

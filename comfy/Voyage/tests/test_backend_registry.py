@@ -60,9 +60,9 @@ def test_registry_covers_exactly_the_video_vocabulary() -> None:
 
 
 def test_video_config_defaults_equal_ltxv_row() -> None:
-    row = BACKEND_REGISTRY["ltxv"]
+    row = BACKEND_REGISTRY["ltx25"]
     defaults = VideoConfig()
-    assert defaults.backend == "ltxv"
+    assert defaults.backend == "ltx25"
     assert defaults.profile == row.profile
     assert (defaults.width, defaults.height) == (row.width, row.height)
     assert defaults.fps == row.fps

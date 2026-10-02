@@ -142,11 +142,11 @@ class GenerateFormState:
     typed. :func:`validate` + :func:`to_generate_namespace` parse them.
     """
 
-    backend: str = "ltxv"
+    backend: str = "ltx25"
     duration: str = "5s"
     style: str = ""
     name: str = "voyage"
-    seed: str = "0"
+    seed: str = ""
     force: bool = False
     skip_bad: bool = False
     draft: bool = False
@@ -220,10 +220,11 @@ def field_errors(state: GenerateFormState) -> dict[str, str]:
         errors["style"] = "style must be a non-empty human-owned style string"
     if not _flat_folder_name(state.name):
         errors["name"] = f"name must be a flat folder name (no slashes), got {state.name!r}"
-    try:
-        int(state.seed)
-    except ValueError:
-        errors["seed"] = f"seed must be an integer, got {state.seed!r}"
+    if state.seed.strip():
+        try:
+            int(state.seed)
+        except ValueError:
+            errors["seed"] = f"seed must be an integer, got {state.seed!r}"
     if state.director not in DIRECTORS:
         errors["director"] = (
             f"director must be one of {', '.join(DIRECTORS)}, got {state.director!r}"
@@ -326,6 +327,13 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
     quantization_raw = state.quantization
     name = state.name.strip()
     output = str(Path("output") / name)
+    seed_raw = state.seed.strip()
+    if seed_raw:
+        seed_value: int = int(seed_raw)
+    else:
+        from voyage.seeds import random_master_seed
+
+        seed_value = random_master_seed()
     return argparse.Namespace(
         backend=state.backend,
         duration=parse_duration(state.duration),
@@ -333,7 +341,7 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         run_id=name,
         name=name,
         output=output,
-        seed=int(state.seed),
+        seed=seed_value,
         force=state.force,
         final_video=str(Path(output) / "final.mp4"),
         skip_bad=state.skip_bad,
