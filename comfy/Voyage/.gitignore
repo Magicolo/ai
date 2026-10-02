@@ -15,3 +15,6 @@ Voyage/
 *.log
 .coverage
 coverage.xml
+# LTX image-bake staging (scripts/build-ltx.sh copies the Comfy pack here
+# so the Dockerfile COPY can reach it; removed after the build).
+worker/ltx_mask_utils/

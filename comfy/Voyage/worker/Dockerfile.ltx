@@ -103,6 +103,15 @@ RUN python3.11 -m venv /opt/venvs/director \
         "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
     && /opt/venvs/director/bin/pip install transformers==5.17.0
 
+# LTX prefix-freeze pack (staged by scripts/build-ltx.sh from the Comfy
+# checkout, which sits outside this Voyage build context and cannot be
+# COPYd directly). Re-attaches the frozen-prefix noise_mask that
+# LTXVLatentUpsampler drops, for both LTX workers' stage-2 refine.
+# Placed after the slow layers so only the fast user-setup layers rerun;
+# the recursive chown below covers the pack.
+COPY worker/ltx_mask_utils/ /opt/comfyui/custom_nodes/ltx_mask_utils/
+RUN grep -q 'LTXPrefixFreeze' /opt/comfyui/custom_nodes/ltx_mask_utils/prefix_freeze.py
+
 # Run as the invoking host user (same contract as the video image): the
 # supervisor and its worker subprocesses share bind mounts with the host,
 # so a root container leaves root-owned renders behind. A real user

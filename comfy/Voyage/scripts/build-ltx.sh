@@ -15,6 +15,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 cd "$SCRIPT_DIR/.."
+# Stage the LTX prefix-freeze pack for the image bake: it lives in the
+# Comfy checkout (outside this Voyage build context), so copy it under
+# worker/ where the Dockerfile COPY can reach it. Removed when the build
+# finishes, pass or fail; gitignored build debris, never committed.
+PACK_SRC="$SCRIPT_DIR/../../Comfy/custom_nodes/ltx_mask_utils"
+[ -d "$PACK_SRC" ] || { echo "missing LTX mask pack: $PACK_SRC" >&2; exit 1; }
+rm -rf worker/ltx_mask_utils
+cp -r "$PACK_SRC" worker/ltx_mask_utils
+trap 'rm -rf worker/ltx_mask_utils' EXIT
 voyage_build_image voyage-ltx:latest worker/Dockerfile.ltx
 docker run --rm --gpus all "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" \
   --entrypoint python3 voyage-ltx:latest -c "
@@ -48,5 +57,13 @@ for name in ('UnetLoaderGGUF', 'CLIPLoaderGGUF', 'DualCLIPLoaderGGUF'):
 # Gemma4 patch marker (build asserts it too; re-asserted at runtime).
 src = open(gguf_dir + '/loader.py').read()
 assert '\"gemma4\"' in src and 'LTXV_BF16_PARAMETERS' in src
+# LTX prefix-freeze pack (baked by the Dockerfile COPY above; torch-only).
+mask_dir = '/opt/comfyui/custom_nodes/ltx_mask_utils'
+spec = importlib.util.spec_from_file_location('ltx_mask_utils.prefix_freeze', mask_dir + '/prefix_freeze.py')
+maskmod = importlib.util.module_from_spec(spec)
+sys.modules['ltx_mask_utils.prefix_freeze'] = maskmod
+spec.loader.exec_module(maskmod)
+assert 'LTXPrefixFreeze' in maskmod.NODE_CLASS_MAPPINGS, 'LTXPrefixFreeze'
+
 print('ltx smoke ok: torch', torch.__version__, '+ comfy exec + GGUF loaders + gemma4 patch')
 "
