@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -320,6 +321,19 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
             f"sfx coverage {covered_until:.2f}s short of timeline {timeline_seconds:.2f}s"
         )
     return errors
+
+
+#: Matches exactly the pure-shortfall line above (two `%.2f` seconds).
+#: Generate's pre-finalize gate filters this line — and only this line —
+#: because the finalize SFX pass heals it (`render_sfx_bed` cache-hits old
+#: windows and renders the new ones; render failures raise). Gaps, missing
+#: stems, unreadable ledgers, and escapes stay fatal: nothing heals those.
+_SFX_SHORTFALL_RE = re.compile(r"^sfx coverage \d+\.\d{2}s short of timeline \d+\.\d{2}s$")
+
+
+def is_healable_sfx_shortfall(error: str) -> bool:
+    """Whether an sfx error line is the pure tail shortfall finalize heals."""
+    return bool(_SFX_SHORTFALL_RE.match(error))
 
 
 def _sfx_worker_module(backend: str) -> str:
