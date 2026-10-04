@@ -935,6 +935,40 @@ class Supervisor:
                 return []
             state.status = "RUNNING"
             write_state(self._run_dir, state)
+            if (count is None or count > 0) and (
+                self._config.video.backend in STREAMING_VIDEO_BACKENDS
+            ):
+                # Swansy continuity: a fresh process starts with an empty
+                # video session tail, so without this the first segment of
+                # every extension renders fresh (121f) and hard-cuts. Resume
+                # from the latest committed tape before the first commit so
+                # cross-invocation extensions continue like same-batch ones
+                # (mid-batch refresh covers the rest). No tape (first
+                # segment) is a no-op inside `_resume_video_worker`.
+                try:
+                    pending_start = read_state(self._run_dir)
+                    self._resume_video_worker(
+                        paths.format_segment_id(pending_start.next_segment_number)
+                    )
+                except VoyageError as exc:
+                    failed = read_state(self._run_dir)
+                    failed.status = "FAILED"
+                    write_state(self._run_dir, failed)
+                    self._log_metric({"event": "video_startup_resume_failed", "error": str(exc)})
+                    raise
+                except Exception as exc:
+                    failed = read_state(self._run_dir)
+                    failed.status = "FAILED"
+                    write_state(self._run_dir, failed)
+                    self._log_metric(
+                        {
+                            "event": "video_startup_resume_failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    raise FatalWorkerError(
+                        f"video startup resume failed with {type(exc).__name__}: {exc}"
+                    ) from exc
             committed: list[str] = []
             stopped = False
             while count is None or len(committed) < count:
