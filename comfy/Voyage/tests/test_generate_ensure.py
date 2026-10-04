@@ -350,9 +350,10 @@ def test_generate_fails_without_ffmpeg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import voyage.cli as cli
+    import voyage.doctor as doctor_module
 
     _configure_fake(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli, "check_ffmpeg", lambda: (False, "ffmpeg not found on PATH"))
+    monkeypatch.setattr(doctor_module, "check_ffmpeg", lambda: (False, "ffmpeg not found on PATH"))
     assert cli.main(["generate", "ensure"]) == 1
     assert "ffmpeg" in capsys.readouterr().err
 
@@ -361,13 +362,14 @@ def test_generate_fails_on_low_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import voyage.cli as cli
+    import voyage.media as media_module
     from voyage.errors import DiskSpaceError
 
     def _no_space(_path: Path, _reserve: float) -> float:
         raise DiskSpaceError("free space 0.0 GiB below reserve 5.0 GiB")
 
     _configure_fake(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli, "check_free_space", _no_space)
+    monkeypatch.setattr(media_module, "check_free_space", _no_space)
     assert cli.main(["generate", "ensure"]) == 1
     assert "free space" in capsys.readouterr().err
 

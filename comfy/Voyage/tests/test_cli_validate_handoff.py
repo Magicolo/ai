@@ -1,4 +1,4 @@
-"""Handoff-contract tests for issues 003 / 020 / 022 (cli/config/tui_state scope).
+"""Handoff-contract tests for issues 003 / 020 / 022 (cli/config scope).
 
 Why this module exists: three Rank-1 findings all concern the
 validate/generate handoff owned by this track — `validate_run` must
@@ -24,7 +24,7 @@ from hypothesis import strategies as strategies
 from hypothesis.strategies import DataObject
 
 from tests.conftest import initialize_run_directory
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.config import preset_config
 from voyage.persistence import read_effective_config
 

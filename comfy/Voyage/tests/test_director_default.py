@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from voyage.cli import _add_generate_parser, _add_run_parser
+from voyage.cli import _add_generate_parser
 from voyage.config import DirectorConfig, preset_config
 from voyage.workers import director as director_worker
 
@@ -63,8 +63,3 @@ def test_generate_parser_takes_name_only() -> None:
             ["generate", "calm", "--director", "llama"],
         )
     assert exc_info.value.code == 2
-
-
-def test_run_parser_leaves_stored_config_alone() -> None:
-    args = _parse(_add_run_parser, ["run", "--run", "out"])
-    assert args.director is None

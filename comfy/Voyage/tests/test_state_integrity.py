@@ -15,7 +15,7 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.audio.planner import AudioTake, append_take, load_takes
-from voyage.cli import main, validate_run
+from voyage.cli_validate import validate_run
 from voyage.concepts import ConceptStore
 from voyage.errors import MediaError
 from voyage.media import (
@@ -70,7 +70,7 @@ def test_clean_run_validates(tmp_path: Path) -> None:
     _init_run(run_dir, "clean")
     assert _commit(run_dir, 1) == ["000000"]
     assert validate_run(run_dir) == []
-    assert main(["validate", "--run", str(run_dir)]) == 0
+    assert validate_run(run_dir) == []
 
 
 def test_validate_detects_checksum_mismatch(tmp_path: Path) -> None:
@@ -82,7 +82,7 @@ def test_validate_detects_checksum_mismatch(tmp_path: Path) -> None:
         handle.write(b"\x00")
     errors = validate_run(run_dir)
     assert any("checksum" in error and "video.mp4" in error for error in errors)
-    assert main(["validate", "--run", str(run_dir)]) == 1
+    assert validate_run(run_dir) != []
 
 
 def test_validate_detects_audio_checksum_mismatch(tmp_path: Path) -> None:

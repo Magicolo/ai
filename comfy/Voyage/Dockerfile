@@ -46,10 +46,9 @@ RUN set -eux; \
 ENV HOME=/home/voyager
 USER voyager
 
-# Build-time doctor gate (issue 048): runs as the runtime user, proving the
-# ffmpeg/disk/models facts resolve without root (HOME is user-writable for
-# caches). Exit code is ffmpeg-only, so missing models warn without failing.
-RUN voyage doctor
+# Build-time CLI gate (issue 048, two-verb CLI): runs as the runtime
+# user, proving both verbs register and the install imports cleanly.
+RUN voyage configure --help && voyage generate --help
 
 # Tests/gates run via scripts/gates.sh (not at build, to keep iteration fast).
-CMD ["voyage", "doctor"]
+CMD ["voyage", "--help"]

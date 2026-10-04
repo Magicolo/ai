@@ -12,9 +12,7 @@ no hub, no torch, no ffmpeg.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -125,80 +123,3 @@ def test_augment_specs_share_video_models_dir() -> None:
     config = with_video_backend(_base_config(), "ltxv")
     entries = {item.spec: item.models_dir for item in required_specs(config, sfx_enabled=False)}
     assert entries["film"] == entries["realesrgan-anime"] == Path(config.video.models_dir)
-
-
-@pytest.mark.parametrize("target", ["film", "realesrgan-anime"])
-def test_models_download_parser_accepts_augment_targets(target: str) -> None:
-    """`models download film|realesrgan-anime` parses (choices list them)."""
-    from voyage.cli import build_parser
-
-    args = build_parser().parse_args(["models", "download", target])
-    assert args.models_target == target
-
-
-@pytest.mark.parametrize(
-    ("target", "record_key"),
-    [
-        ("film", "film"),
-        ("realesrgan-anime", "realesrgan"),
-    ],
-)
-def test_models_download_dispatches_augment_targets(
-    target: str,
-    record_key: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Dispatch calls the registry downloader (no hub — monkeypatched)."""
-    import voyage.cli as cli_module
-
-    calls: dict[str, Any] = {}
-
-    def _fake_download(models_dir: Path) -> dict[str, Any]:
-        calls["models_dir"] = models_dir
-        return {record_key: {"checkpoint_bytes": 123}}
-
-    monkeypatch.setattr(cli_module, f"download_{record_key}_models", _fake_download)
-    args = argparse.Namespace(models_action="download", models_target=target, models_dir=None)
-    assert cli_module.cmd_models(args) == 0
-    assert calls["models_dir"] == Path("/models")
-    out = capsys.readouterr().out
-    assert "123" in out
-    assert "manifest.json" in out
-
-
-def test_models_verify_reports_augment_stacks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """`models verify` includes the FILM + Real-ESRGAN rows (real checks).
-
-    The augment weights are real sized files on tmp_path; the other
-    stacks are mocked present so the exit code reflects the wiring.
-    """
-    import voyage.cli as cli_module
-
-    film = tmp_path / model_registry.FILM_SUBDIR / model_registry.FILM_FILE
-    _write_sized_file(film, model_registry.FILM_MIN_BYTES)
-    esrgan = tmp_path / model_registry.REALESRGAN_SUBDIR / model_registry.REALESRGAN_ANIME_FILE
-    _write_sized_file(esrgan, model_registry.REALESRGAN_ANIME_MIN_BYTES)
-    for name in (
-        "verify_ltxv_models",
-        "verify_causvid_models",
-        "verify_ltx25_models",
-        "verify_ltx23_models",
-        "verify_director_models",
-        "verify_director_awq_models",
-        "verify_director_gguf_models",
-        "verify_audio_models",
-        "verify_sfx_models",
-        "verify_inspector_models",
-    ):
-        monkeypatch.setattr(cli_module, name, lambda _d: (True, "mocked OK"))
-    args = argparse.Namespace(models_action="verify", models_dir=str(tmp_path))
-    assert cli_module.cmd_models(args) == 0
-    out = capsys.readouterr().out
-    assert "film OK" in out
-    assert "realesrgan-anime OK" in out

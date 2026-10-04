@@ -440,3 +440,57 @@ def rotate_worker_logs(
         if sibling is not None:
             rotated.append(sibling)
     return rotated
+
+
+def read_all_metric_events(run_dir: Path) -> list[dict[str, object]]:
+    """All metric events across live + rotated siblings, oldest-first (049).
+
+    Rotation splits history across dated siblings; readers needing full
+    history must use this instead of opening the live file directly. Torn
+    lines are skipped; a missing/unreadable logs dir yields whatever
+    subset exists. (Moved from the deleted `cli_status` module: the
+    `status` verb is gone but rotation-tolerant reading stays.)
+    """
+    events: list[dict[str, object]] = []
+    for events_path in iter_metric_files(run_dir):
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:
+    """Newest segment_committed event (id + stages) across rotated logs.
+
+    Scans live + dated siblings newest-first via `iter_metric_files`:
+    after a daily rotation the live file alone would silently drop recent
+    history. Returns None when no commit is found. (Moved from the
+    deleted `cli_status` module with `read_all_metric_events`.)
+    """
+    for events_path in reversed(iter_metric_files(run_dir)):
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "segment_committed":
+                stages = event.get("stages")
+                segment_id = event.get("segment_id")
+                if isinstance(stages, dict) and isinstance(segment_id, str):
+                    return segment_id, stages
+    return None

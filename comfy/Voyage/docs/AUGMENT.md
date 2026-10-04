@@ -6,7 +6,7 @@ presentation size at finalize; sources already above the floors pass
 through untouched ("minimal upscale"). `0` disables a floor — the 24 fps
 `PRESENTATION_MIN_FPS` shipped-video guarantee still applies.
 
-## Floors, flags, TOML, TUI
+## Floors, flags, stored config
 
 Defaults (`voyage/config.py`, `AugmentConfig` — they track the ltx25
 high-quality native 1216×704 @ 24, so true-native ltx25 sources pass
@@ -17,6 +17,8 @@ through unaugmented by default):
   floor; a half-disabled pair like `0x704` is rejected — both-zero or
   both-positive).
 
+Stored in the manifest's `[augment]` section at `configure` time:
+
 ```toml
 [augment]
 min_fps = 24
@@ -24,21 +26,16 @@ min_width = 1216
 min_height = 704
 ```
 
-Flags (shared helper `_add_augment_args` — every
-finalizing verb carries the same three, so they cannot drift apart):
+Flags (shared helper `_add_augment_args` on `configure`):
 
 - `--min-fps N` (default: `[augment] min_fps 24`; 0 disables);
 - `--min-resolution WxH` e.g. `"1216x704"` (default: `[augment]`
   1216×704; `"0"` disables);
 - `--no-augment` (wins over explicit floors — both to 0).
 
-Carried by `finalize` (owns the floors — defaults ride the run's
-`[augment]` TOML), forwarded by `generate`/`run` overrides into
-`resolve_config`, and `stop --finalize` forwards into it. TUI fields
-`min_fps` (`"24"`) / `min_resolution` (`"1216x704"`)
-(`voyage/tui_state.py:125-126`, help at `:84-85`) validate the same way
-(non-negative integer / `WxH`-or-`0`) and stay `Unset` when untouched so
-the stored config wins.
+Carried by `configure` into the stored `[augment]` section (defaults
+ride the manifest); `generate`'s finalize step consumes them. Unset
+flags leave the stored config winning.
 
 ## `plan_augmentation` contract (fast-path vs re-encode)
 

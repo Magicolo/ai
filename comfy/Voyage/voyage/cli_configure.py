@@ -138,7 +138,8 @@ def trim_overflow_segments(run_dir: Path, keep: int, fps: int) -> int:
 
 def cmd_configure(args: argparse.Namespace) -> int:
     """Init (`manifest.json` absent) or update (present) a run manifest."""
-    from voyage.cli import check_ffmpeg, check_free_space
+    from voyage.doctor import check_ffmpeg
+    from voyage.media import check_free_space
     from voyage.seeds import random_master_seed
 
     name = getattr(args, "name", "")

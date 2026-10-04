@@ -57,16 +57,6 @@ def test_resolve_config_explicit_value_still_wins() -> None:
     assert resolve_config(base, blocks=2).video.blocks_per_segment == 2
 
 
-def test_tui_optional_int_emits_unset() -> None:
-    from voyage.tui_state import GenerateFormState, to_generate_namespace
-
-    namespace = to_generate_namespace(
-        GenerateFormState(style="x", name="v", duration="5s", blocks="", take_seconds="")
-    )
-    assert namespace.blocks is Unset
-    assert namespace.take_seconds is Unset
-
-
 # ---------------------------------------------------------------------------
 # Cluster 2: GenerateBlocksRequest + BoundaryKind contract (issue 045)
 # Original docstring: "GenerateBlocksRequest + BoundaryKind contract (issue

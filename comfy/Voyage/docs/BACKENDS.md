@@ -46,9 +46,8 @@ finalizer concat path, and checksums run exactly as in production.
 | sfx | `mmaudio` | `voyage-video:latest` | finalize-time video-synced effects, 8 s windows / 1 s fades, amix −6 dB (see `docs/SFX.md`) |
 | director | `qwen` | `voyage-video:latest` (`/opt/venvs/director` via `VOYAGE_DIRECTOR_PYTHON`) | Qwen3-4B-AWQ on cuda:1 (default) or Qwen3-8B bf16 on CPU (`--director-device cpu`), non-thinking, temp 0.7 |
 
-Select in TOML (`config.video.backend`, `config.audio.backend`,
-`config.sfx.backend`, `config.director.backend`) or per-invocation for runs
-(`voyage run --director … --quantization …`).
+Select at `configure` time (`--backend`, `--director`,
+`--quantization`, …) into the run manifest.
 
 ## LTXV chaining model (`ltxv`, Phase 7 alternative)
 

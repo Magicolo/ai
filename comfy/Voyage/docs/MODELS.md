@@ -4,7 +4,8 @@ All pins live in code in `voyage/model_registry.py` (the single source of
 truth); this file mirrors them for humans. Most repos are **ungated** —
 no token required — except the LTX-2.5 text encoder, VAEs and upscaler
 (see below), which need a token with access. Verify local files with
-`voyage models verify`.
+`configure --no-download` (verify-only; the default verifies and
+downloads the stacks the effective config needs).
 
 ## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB, default)
 

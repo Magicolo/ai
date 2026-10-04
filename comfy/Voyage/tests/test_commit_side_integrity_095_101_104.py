@@ -17,7 +17,7 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage.audio.planner import AudioTake, append_take
-from voyage.cli import _check_segment_checksums, validate_run
+from voyage.cli_validate import _check_segment_checksums, validate_run
 from voyage.errors import MediaError, StateError
 from voyage.persistence import read_effective_config
 

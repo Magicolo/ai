@@ -9,14 +9,14 @@ Docs-mirror tests read the tree (INSTALL/README/MODELS) plus the
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
 
 import voyage
+import voyage.cli_planning as cli_planning
 from tests.conftest import initialize_run_directory
-from voyage import cli, paths
+from voyage import paths
 from voyage.models import StyleSpec
 from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
@@ -32,7 +32,7 @@ def _read_doc(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Issues 065 + 146 — every registry key mirrored in docs + `models list`.
+# Issues 065 + 146 — every registry key mirrored in docs.
 # ---------------------------------------------------------------------------
 
 
@@ -55,35 +55,6 @@ def test_every_model_spec_key_appears_in_install_and_readme() -> None:
     missing_readme = [key for key in model_registry.MODEL_SPECS if key not in readme]
     assert missing_install == []
     assert missing_readme == []
-
-
-def test_models_list_names_every_download_target() -> None:
-    """`models list` discovers every `models download` target (146)."""
-    from voyage import model_registry
-
-    namespace = argparse.Namespace(models_action="list")
-    output = _capture_models_list(namespace)
-    missing = [key for key in model_registry.MODEL_SPECS if key not in output]
-    assert missing == []
-
-
-def _capture_models_list(namespace: argparse.Namespace) -> str:
-    """Run the list verb and return stdout (capfd-safe helper)."""
-    import io
-    from contextlib import redirect_stdout
-
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
-        result = cli.cmd_models(namespace)
-    assert result == 0
-    return buffer.getvalue()
-
-
-def test_models_list_names_film_and_realesrgan() -> None:
-    """146's two missing rows read explicitly (folded into 065 on fix)."""
-    output = _capture_models_list(argparse.Namespace(models_action="list"))
-    assert "film" in output
-    assert "realesrgan-anime" in output
 
 
 # ---------------------------------------------------------------------------
@@ -179,37 +150,6 @@ def test_latest_recovery_tape_all_zero_byte_reads_as_none(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Issue 178 (brief labels it 024) — invalid backend blocks the TUI plan.
-# ---------------------------------------------------------------------------
-
-
-def test_tui_plan_details_none_for_unknown_backend() -> None:
-    """Unknown backend → no plan struct (178, never a fallback plan)."""
-    from voyage.tui_state import GenerateFormState, _plan_details
-
-    state = GenerateFormState(style="x", name="t", backend="bogus")
-    assert _plan_details(state) is None
-
-
-def test_tui_plan_summary_and_counts_blocked_for_unknown_backend() -> None:
-    """Plan line agrees with the errors line: cannot plan (178)."""
-    from voyage.tui_state import GenerateFormState, plan_counts, plan_summary
-
-    state = GenerateFormState(style="x", name="t", backend="bogus")
-    assert plan_counts(state) is None
-    assert plan_summary(state).startswith("cannot plan")
-
-
-def test_tui_plan_unchanged_for_valid_backend() -> None:
-    """Control: a known backend still renders a confident plan (178 no-op)."""
-    from voyage.tui_state import GenerateFormState, plan_counts, plan_summary
-
-    state = GenerateFormState(style="x", name="t", backend="ltxv")
-    assert plan_counts(state) is not None
-    assert not plan_summary(state).startswith("cannot plan")
-
-
-# ---------------------------------------------------------------------------
 # Issue 025 — registries agree with BACKEND_REGISTRY (unity test, no source).
 # ---------------------------------------------------------------------------
 
@@ -234,7 +174,6 @@ def test_worker_module_keys_match_registry_keys() -> None:
 
 def test_cuda_backend_sets_match_registry_devices() -> None:
     """Derived CUDA sets equal the registry device projection (025/021)."""
-    from voyage import cli
     from voyage.config import BACKEND_REGISTRY
 
     expected_video = frozenset(
@@ -250,9 +189,9 @@ def test_cuda_backend_sets_match_registry_devices() -> None:
         for record in BACKEND_REGISTRY.values()
         if record.sfx_device.startswith("cuda")
     )
-    assert expected_video == cli._CUDA_VIDEO_BACKENDS
-    assert expected_audio == cli._CUDA_AUDIO_BACKENDS
-    assert expected_sfx == cli._CUDA_SFX_BACKENDS
+    assert expected_video == cli_planning._CUDA_VIDEO_BACKENDS
+    assert expected_audio == cli_planning._CUDA_AUDIO_BACKENDS
+    assert expected_sfx == cli_planning._CUDA_SFX_BACKENDS
 
 
 # ---------------------------------------------------------------------------

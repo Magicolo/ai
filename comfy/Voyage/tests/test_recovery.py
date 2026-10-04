@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import main
+from voyage.cli_validate import validate_run
 from voyage.persistence import (
     read_effective_config,
     read_state,
@@ -34,7 +34,7 @@ def test_supervisor_restart_continues(tmp_path: Path) -> None:
     state = read_state(run_dir)
     assert state.committed_segments == 2
     assert state.next_segment_number == 2
-    assert main(["validate", "--run", str(run_dir)]) == 0
+    assert validate_run(run_dir) == []
 
 
 def test_killed_video_worker_recovers(tmp_path: Path) -> None:

@@ -12,9 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from voyage.cli import (
+from voyage.cli_planning import (
     _frames_per_segment,
-    _run_dir_arg,
     parse_duration,
     segments_for_duration,
 )
@@ -22,7 +21,7 @@ from voyage.config import VideoConfig, with_video_backend
 
 
 def test_no_cuda_warning_for_cpu_device(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from voyage.cli import _warn_if_no_cuda
+    from voyage.cli_planning import _warn_if_no_cuda
     from voyage.config import preset_config
 
     config = preset_config("preset", "pastel neon line-art, peaceful", 11, video_backend="fake")
@@ -34,7 +33,7 @@ def test_cuda_warning_when_no_gpu_visible(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import voyage.doctor
-    from voyage.cli import _warn_if_no_cuda
+    from voyage.cli_planning import _warn_if_no_cuda
     from voyage.config import preset_config
 
     monkeypatch.setattr(voyage.doctor, "probe", lambda: {"nvidia_smi": None, "gpus": []})
@@ -101,12 +100,6 @@ def test_unknown_video_preset_rejected(tmp_path: Path) -> None:
     config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     with pytest.raises(ValueError, match="unknown video backend"):
         with_video_backend(config, "nope")  # type: ignore[arg-type]
-
-
-def test_run_dir_arg_resolves_absolute(tmp_path: Path) -> None:
-    """Worker CWD is run_dir: relative dirs double up downstream (qual-leg)."""
-    assert _run_dir_arg(str(tmp_path / "some-run")) == (tmp_path / "some-run").resolve()
-    assert _run_dir_arg("output/some-run") == (Path.cwd() / "output/some-run").resolve()
 
 
 def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:

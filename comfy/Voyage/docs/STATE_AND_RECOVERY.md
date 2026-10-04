@@ -1,6 +1,6 @@
 # STATE_AND_RECOVERY — persistence invariants and crash scenarios
 
-## Invariants (all enforced by `voyage validate`, testable via `validate_run`)
+## Invariants (all enforced at generate time by `validate_run`)
 
 1. **DONE gates commitment.** Only `segments/NNNNNN/` dirs containing a
    `DONE` marker count as committed. Everything else is scratch and is

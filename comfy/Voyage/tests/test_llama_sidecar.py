@@ -11,7 +11,6 @@ the readiness HTTP probe are stubbed — no GPU, no network, no downloads.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -639,29 +638,6 @@ def test_stop_workers_stops_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     supervisor.stop_workers()
     assert events.index("_director") < events.index("sidecar")
     assert supervisor._llama_sidecar is None
-
-
-def test_models_download_target_for_gguf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`models download director-qwen35-gguf` parses and dispatches (no hub)."""
-    import voyage.cli as cli_module
-    from voyage.cli import build_parser
-
-    args = build_parser().parse_args(["models", "download", "director-qwen35-gguf"])
-    assert args.models_target == "director-qwen35-gguf"
-    calls: dict[str, Any] = {}
-
-    def _fake_download(models_dir: Path) -> dict[str, Any]:
-        calls["models_dir"] = models_dir
-        return {"director-gguf": {"checkpoint_bytes": 123}}
-
-    monkeypatch.setattr(cli_module, "download_director_gguf_models", _fake_download)
-    download_args = argparse.Namespace(
-        models_action="download",
-        models_target="director-qwen35-gguf",
-        models_dir=str(tmp_path),
-    )
-    assert cli_module.cmd_models(download_args) == 0
-    assert calls["models_dir"] == tmp_path
 
 
 def test_init_parser_accepts_llama_director() -> None:

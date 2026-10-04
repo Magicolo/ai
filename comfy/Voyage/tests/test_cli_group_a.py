@@ -1,15 +1,11 @@
-"""Group A CLI/TUI surface fixes (Voyage issues 109-112, 115-116, 143-149, 179, 182, 185).
+"""Group A CLI surface fixes (Voyage issues 110, 112, 143, 147, 149, 185).
 
-Why this module exists: sixteen CLI/TUI-boundary findings share one
-theme — two surfaces (CLI parsers vs TUI namespaces vs cross-verb
-handoff namespaces) disagreeing about normalization, validation order,
-or flag coverage. Each test below pins the single-source contract for
-one issue: the stop/finalize handoff (109/179/147), validate-before-
-mutate ordering (110/143/185), the TUI live-validation floor (111),
-the duration grammar (112), CUDA preflight coverage (115), and the
-run-name migration (116/148/149) plus TUI namespace parity for the
-download/SFX opt-outs (145/182). CPU/fake only; torch availability is
-stubbed, workers are monkeypatched — no GPU, no model weights.
+Why this module exists: CLI-boundary findings about validation order
+and flag coverage. Each test below pins the single-source contract
+for one issue: the generate-driven finalize handoff (147),
+validate-before-mutate ordering (110/143/185), the duration grammar
+(112), and the run-name routing (149). CPU/fake only; workers are
+monkeypatched — no GPU, no model weights.
 """
 
 from __future__ import annotations
@@ -20,56 +16,15 @@ from pathlib import Path
 import pytest
 
 from voyage.cli import build_parser, main, parse_duration
-from voyage.tui_state import GenerateFormState, field_errors, to_generate_namespace
 
 _STYLE = "pastel neon line-art, peaceful"
-
-
-def test_stop_finalize_end_to_end_without_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`stop --finalize` finalizes instead of AttributeError (109)."""
-    import voyage.cli_finalize as finalize_module
-    from tests.conftest import initialize_run_directory
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11)
-
-    def _fake_finalize_run(run: Path, output: Path, **kwargs: object) -> None:
-        del run, kwargs
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"fake-final")
-
-    monkeypatch.setattr(finalize_module, "finalize_run", _fake_finalize_run)
-    assert main(["stop", "--run", str(run_dir), "--finalize"]) == 0
-
-
-def test_stop_parser_offers_full_finalize_surface() -> None:
-    """Stop carries skip/augment/console flags like every finalizing verb (109/179)."""
-    namespace = build_parser().parse_args(
-        [
-            "stop",
-            "--run",
-            str(Path("any")),
-            "--finalize",
-            "--verbose",
-            "--no-color",
-            "--skip-bad",
-            "--min-fps",
-            "32",
-        ]
-    )
-    assert namespace.skip_bad is True
-    assert namespace.verbose is True
-    assert namespace.no_color is True
-    assert namespace.min_fps == 32
 
 
 def test_generate_finalize_inherits_console_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The generate-driven finalize honors --verbose/--no-color (147)."""
-    import voyage.cli as cli_module
+    import voyage.cli_finalize as finalize_module
     import voyage.cli_generate as gen_ops
 
     captured: dict[str, argparse.Namespace] = {}
@@ -103,7 +58,7 @@ def test_generate_finalize_inherits_console_flags(
         )
         == 0
     )
-    monkeypatch.setattr(cli_module, "cmd_finalize", _capture_finalize)
+    monkeypatch.setattr(finalize_module, "cmd_finalize", _capture_finalize)
     monkeypatch.setattr(gen_ops, "Supervisor", _FakeSupervisor)
     monkeypatch.setattr(gen_ops, "validate_run", lambda run_dir: [])
     assert main(["generate", "console-probe", "--verbose", "--no-color"]) == 0
@@ -195,20 +150,6 @@ def test_cmd_generate_missing_attributes_exit_without_litter(
     assert (tmp_path / "output" / "group-a" / "manifest.json").exists()
 
 
-def test_tui_rejects_take_seconds_at_or_below_ahead_window() -> None:
-    """Live validation enforces take_seconds > ahead_seconds (111)."""
-    assert "take_seconds" in field_errors(
-        GenerateFormState(style="x", name="probe", take_seconds="5")
-    )
-    assert "take_seconds" in field_errors(
-        GenerateFormState(style="x", name="probe", take_seconds="20")
-    )
-    assert "take_seconds" not in field_errors(
-        GenerateFormState(style="x", name="probe", take_seconds="20.1")
-    )
-    assert "take_seconds" not in field_errors(GenerateFormState(style="x", name="probe"))
-
-
 def test_parse_duration_rejects_mixed_signs() -> None:
     """Per-component signs are subtractive typos, not arithmetic (112)."""
     with pytest.raises(ValueError, match="invalid duration"):
@@ -236,64 +177,15 @@ def test_parse_duration_interior_space_names_the_rule() -> None:
         parse_duration("1m 30s")
 
 
-def test_benchmark_video_fast_fails_without_cuda_stack(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Benchmark video preflights torch like run/generate do (115)."""
-    import voyage.cli as cli_module
-    import voyage.cli_observe as observe_module
-    from tests.conftest import initialize_run_directory
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11, video_backend="ltxv")
-    monkeypatch.setattr(cli_module, "_torch_available", lambda: False)
-
-    def _no_workers(*args: object, **kwargs: object) -> object:
-        raise AssertionError("workers must never start past a failed preflight")
-
-    monkeypatch.setattr(observe_module, "Supervisor", _no_workers)
-    assert main(["benchmark", "video", "--run", str(run_dir)]) == 1
-    assert "CUDA" in capsys.readouterr().err
-
-
-def test_soak_fast_fails_without_cuda_stack(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Soak preflights torch before printing its rule line (115)."""
-    import voyage.cli as cli_module
-    import voyage.cli_observe as observe_module
-    from tests.conftest import initialize_run_directory
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11, video_backend="ltxv")
-    monkeypatch.setattr(cli_module, "_torch_available", lambda: False)
-
-    def _no_workers(*args: object, **kwargs: object) -> object:
-        raise AssertionError("workers must never start past a failed preflight")
-
-    monkeypatch.setattr(observe_module, "Supervisor", _no_workers)
-    assert main(["soak", "--run", str(run_dir), "--segments", "1"]) == 1
-    assert "CUDA" in capsys.readouterr().err
-
-
-def test_effective_run_id_strips_padding_on_both_surfaces() -> None:
-    """Padded names resolve identically on CLI and TUI (116)."""
-    from voyage.cli import _effective_run_id
-
-    assert _effective_run_id(argparse.Namespace(name=" boba ", run_id="voyage")) == "boba"
-    namespace = to_generate_namespace(GenerateFormState(style="x", name=" boba "))
-    assert namespace.name == "boba"
-    assert namespace.output == str(Path("output") / "boba")
-
-
-def test_tui_run_dir_for_honors_name_over_run_id() -> None:
-    """The TUI watcher follows _effective_run_id, not run_id (148)."""
-    from voyage.tui import VoyageApp
-
-    namespace = argparse.Namespace(output=None, run_id="legacy", name="boba")
-    assert VoyageApp._run_dir_for(VoyageApp(), namespace) == Path("output/boba").resolve()
-    explicit = argparse.Namespace(output="custom", run_id="legacy", name="boba")
-    assert VoyageApp._run_dir_for(VoyageApp(), explicit) == Path("custom").resolve()
+def test_generate_parser_accepts_plan_extension_shorthand() -> None:
+    """Approved (b): --segments/--duration extend the stored plan additively."""
+    args = build_parser().parse_args(["generate", "probe", "--segments", "3"])
+    assert args.name == "probe"
+    assert args.segments == 3
+    assert args.duration is None
+    args = build_parser().parse_args(["generate", "probe", "--duration", "5s"])
+    assert args.duration == 5.0
+    assert args.segments is None
 
 
 def test_generate_output_help_names_name_default(
@@ -304,23 +196,3 @@ def test_generate_output_help_names_name_default(
         main(["generate", "--help"])
     assert exc_info.value.code == 0
     assert "output/<name>" in capsys.readouterr().out
-
-
-def test_tui_namespace_carries_no_download_opt_out() -> None:
-    """TUI Generate can request verify-only runs (145)."""
-    assert to_generate_namespace(GenerateFormState(style="x", name="probe")).no_download is False
-    assert (
-        to_generate_namespace(
-            GenerateFormState(style="x", name="probe", no_download=True)
-        ).no_download
-        is True
-    )
-
-
-def test_tui_namespace_carries_sfx_opt_out() -> None:
-    """TUI Generate can skip the finalize-time SFX pass (182)."""
-    assert to_generate_namespace(GenerateFormState(style="x", name="probe")).no_sfx is False
-    assert (
-        to_generate_namespace(GenerateFormState(style="x", name="probe", no_sfx=True)).no_sfx
-        is True
-    )

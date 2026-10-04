@@ -1,8 +1,8 @@
-"""Ops-visibility Rank-2 tests (issues 060/061/064/066).
+"""Ops-visibility Rank-2 tests (issues 060/064/066).
 
-CPU-only, fake backends: benchmark env richness + report persistence (060),
-status config/health sections (061), qualify.sh gate hygiene (064), and
-doctor per-mount disks + model split + alert thresholds (066).
+CPU-only, fake backends: report document shape (060), qualify.sh
+gate hygiene (064), and doctor per-mount disks + model split + alert
+thresholds (066).
 """
 
 from __future__ import annotations
@@ -11,33 +11,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.bench import report_document
-from voyage.cli import _benchmark_env, cmd_status, main
 from voyage.doctor import health_alerts, meets_reserve, probe
-from voyage.persistence import read_effective_config
-
-
-def test_benchmark_env_carries_driver_revision_keys() -> None:
-    """060: env reports driver/compute/CUDA-runtime/torch/version/revisions."""
-    env = _benchmark_env()
-    for key in (
-        "gpu",
-        "driver",
-        "compute_cap",
-        "cuda_runtime",
-        "torch",
-        "cuda_available",
-        "voyage_version",
-        "revisions",
-    ):
-        assert key in env, key
-    assert isinstance(env["revisions"], dict)
-    assert env["revisions"], "at least one model revision must be recorded"
-    # Off-GPU honesty: absent facts degrade to "unknown"/None, never raise.
-    assert env["gpu"] in ("unknown", env["gpu"])
-    assert env["driver"] is None or isinstance(env["driver"], str)
 
 
 def test_report_document_builds_json_artifact() -> None:
@@ -47,82 +22,6 @@ def test_report_document_builds_json_artifact() -> None:
     assert document["setup"] == {"backend": "fake"}
     assert document["measured"] == {"count": 2}
     json.dumps(document)
-
-
-def test_benchmark_cli_persists_report_json(tmp_path: Path) -> None:
-    """060: `benchmark video` tees a JSON sidecar into the run logs."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    assert main(["benchmark", "video", "--run", str(run_dir)]) == 0
-    artifacts = sorted((run_dir / paths.LOGS_DIRNAME).glob("benchmark-video-*.json"))
-    assert artifacts, "benchmark video must persist a logs/ JSON artifact"
-    document = json.loads(artifacts[-1].read_text(encoding="utf-8"))
-    assert document["setup"]["backend"] == "fake"
-    assert "measured" in document
-
-
-def test_soak_cli_persists_report_json(tmp_path: Path) -> None:
-    """060: `soak` tees a JSON sidecar into the run logs."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    assert main(["soak", "--run", str(run_dir), "--segments", "1"]) == 0
-    artifacts = sorted((run_dir / paths.LOGS_DIRNAME).glob("soak-*.json"))
-    assert artifacts, "soak must persist a logs/ JSON artifact"
-    document = json.loads(artifacts[-1].read_text(encoding="utf-8"))
-    assert "measured" in document
-
-
-def _status_output(run_dir: Path, capsys: object) -> str:
-    args = type("Args", (), {"run": str(run_dir)})()
-    assert cmd_status(args) == 0
-    return str(capsys.readouterr().out)  # type: ignore[attr-defined]
-
-
-def test_status_shows_config_section(tmp_path: Path, capsys: object) -> None:
-    """061: status echoes quantization/SFX/floors/beats/drift/takes."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    out = _status_output(run_dir, capsys).lower()
-    for needle in (
-        "quantization",
-        "sfx",
-        "augment",
-        "beats",
-        "drift",
-        "take_seconds",
-        "ahead_seconds",
-    ):
-        assert needle in out, needle
-
-
-def test_status_warns_below_reserve(tmp_path: Path, capsys: object) -> None:
-    """061: free space below min_free_space_gib warns instead of printing bare."""
-
-    from voyage.persistence import read_manifest, write_manifest
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    manifest = read_manifest(run_dir)
-    assert "min_free_space_gib" in manifest
-    # A reserve no disk can meet forces the WARN path deterministically.
-    manifest["min_free_space_gib"] = 999999.0
-    write_manifest(run_dir, manifest)
-    out = _status_output(run_dir, capsys)
-    assert "WARN" in out
-    assert "reserve" in out.lower()
-
-
-def test_status_shows_gauges_and_restart_counts(tmp_path: Path, capsys: object) -> None:
-    """061: committed runs show the gauges trend + restart/circuit counts."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    config = read_effective_config(run_dir)
-    from voyage.supervisor import Supervisor
-
-    assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
-    out = _status_output(run_dir, capsys).lower()
-    assert "gauges" in out
-    assert "restart" in out
 
 
 def test_doctor_reports_disks_per_mount() -> None:
@@ -181,13 +80,6 @@ def test_health_alerts_fire_on_thresholds() -> None:
     assert "86" in joined
     assert "reserve" in joined.lower()
     assert health_alerts({"disk_by_mount": {}, "gpu_details": []}) == []
-
-
-def test_cmd_doctor_prints_alerts_without_crashing(capsys: object) -> None:
-    """066: `voyage doctor` stays exit-0 on missing ffmpeg siblings + prints."""
-    assert main(["doctor"]) in (0, 1)
-    out = str(capsys.readouterr().out)  # type: ignore[attr-defined]
-    assert "python:" in out
 
 
 def _qualify_path() -> Path:

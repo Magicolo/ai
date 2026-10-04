@@ -54,9 +54,10 @@ The Qwen3.5-9B VLM inspector still serves from CPU system RAM (~19 GB).
 
 - NVIDIA driver supporting CUDA 12.8, nvidia-container-toolkit installed.
 - Pass `--gpus all`: `VOYAGE_GPUS=1 ./scripts/run.sh …`.
-- `voyage doctor` reports driver/GPU/ffmpeg facts plus torch-CUDA,
-  disk-free, and a models presence summary before you start. Full
-  weight-file checks stay behind `models verify`; remaining doctor gaps
+- The `doctor` probe library (`voyage/doctor.py`) reports driver/GPU/ffmpeg
+  facts plus torch-CUDA, disk-free, and a models presence summary
+  before you start. Full weight-file checks stay behind `configure
+  --no-download` (verify-only); remaining doctor gaps
   (compute capability, CUDA runtime, FlashAttention/Triton, checkpoint
   compat, permissions, worker interpreters, ACE-Step runtime
   availability) are listed in

@@ -16,7 +16,6 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.bench import format_report, summarize_gauges, timing_stats
-from voyage.cli import main
 from voyage.persistence import read_effective_config, read_state
 from voyage.supervisor import Supervisor
 
@@ -104,20 +103,6 @@ def test_timing_stats_and_report_format() -> None:
     assert "warmup" in report
 
 
-def test_benchmark_cli_video_prints_report(tmp_path: Path, capsys: object) -> None:
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert main(["benchmark", "video", "--run", str(run_dir)]) == 0
-    out = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert "blocks_per_second" in out
-
-
-def test_benchmark_cli_end_to_end_uses_temp_dir(tmp_path: Path, capsys: object) -> None:
-    assert main(["benchmark", "end-to-end", "--segments", "1"]) == 0
-    out = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert "segments" in out
-
-
 def test_per_segment_gauges_logged(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
@@ -135,42 +120,6 @@ def test_per_segment_gauges_logged(tmp_path: Path) -> None:
     # Symmetric flatness budget (issue 089): peak RSS can legitimately
     # *fall* between segments after GC, so a one-sided `>= 0` flakes.
     assert abs(summary["rss_delta_mb"]) < 500
-
-
-def test_soak_cli_reports_trend(tmp_path: Path, capsys: object) -> None:
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert main(["soak", "--run", str(run_dir), "--segments", "2"]) == 0
-    out = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert "rss_delta_mb" in out
-    assert read_state(run_dir).committed_segments == 2
-
-
-# Always-on stability gate (issue 089 decision): `gates.sh`/`test.sh` pass
-# no `-m` filter, so this `endurance` test runs on every gate by design —
-# small (3 fake segments, seconds) and bounded the same 500 MB budget as
-# the gauge test above. Exclude deliberately with `-m "not endurance"`.
-@pytest.mark.endurance
-def test_endurance_segments_stay_flat(tmp_path: Path) -> None:
-    """Small always-on soak: gauges every segment, bounded RSS, valid run."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    config = read_effective_config(run_dir)
-    assert Supervisor(run_dir, config).run_segments(3) == ["000000", "000001", "000002"]
-    events = _gauge_events(run_dir)
-    assert len(events) == 3
-    summary = summarize_gauges(events)
-    assert summary["rss_delta_mb"] < 500
-    assert main(["validate", "--run", str(run_dir)]) == 0
-
-
-# --- 088 fold: test_stage_timings.py (slice 2) ---
-# """Per-stage wall-time breakdown in segment_committed metrics (slice 2).
-#
-# Each committed segment records how long its stages took (inspect,
-# director, video, audio, validate, commit) so experiment runs reveal the
-# real bottleneck instead of one opaque elapsed number.
-# """
 
 
 def _committed_events(run_dir: Path) -> list[dict[str, object]]:

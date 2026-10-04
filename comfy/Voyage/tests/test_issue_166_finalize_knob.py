@@ -1,7 +1,7 @@
 """Issue 166 finalize threading: model-augment knob, default-on (DESIGN §140).
 
 `use_model_pass` (default True) threads `AugmentConfig` -> `resolve_config`
--> CLI (`--use-model-pass`) + TUI form -> `FinalizeOptions` /
+-> CLI (`--use-model-pass`) -> `FinalizeOptions` /
 `resolve_finalize_settings` -> `finalize_run` (which consults
 `resolve_augment_weights` and keeps the ffmpeg vf path when legs are
 absent). Identity proofs (CPU-only, real ffmpeg via the fake-backend
@@ -134,15 +134,10 @@ def test_cli_flag_parity_and_mapping() -> None:
     from voyage.cli_core import _augment_overrides
 
     parser = build_parser()
-    for verb in (
-        ["finalize", "--run", "r", "--output", "o.mp4"],
-        ["configure", "calm", "--segments", "1"],
-        ["run", "--run", "r"],
-        ["stop", "--run", "r"],
-    ):
-        assert parser.parse_args(verb).use_model_pass is None
-        flagged = [*verb, "--use-model-pass"]
-        assert parser.parse_args(flagged).use_model_pass is True
+    args = parser.parse_args(["configure", "calm", "--segments", "1"])
+    assert args.use_model_pass is None
+    flagged = parser.parse_args(["configure", "calm", "--segments", "1", "--use-model-pass"])
+    assert flagged.use_model_pass is True
     assert _augment_overrides(argparse.Namespace()) == {}
     assert _augment_overrides(argparse.Namespace(use_model_pass=None)) == {}
     assert _augment_overrides(argparse.Namespace(use_model_pass=Unset)) == {}
@@ -152,29 +147,6 @@ def test_cli_flag_parity_and_mapping() -> None:
         "min_resolution": "0",
         "use_model_pass": False,
     }
-
-
-def test_tui_threads_knob() -> None:
-    """The TUI form carries the knob: checked (default) = on, unchecked = stored wins."""
-    from voyage.tui_state import GenerateFormState, to_generate_namespace
-
-    assert GenerateFormState().use_model_pass is True
-    namespace = to_generate_namespace(GenerateFormState(style="x", backend="fake"))
-    assert namespace.use_model_pass is True
-    unchecked = to_generate_namespace(
-        GenerateFormState(style="x", backend="fake", use_model_pass=False)
-    )
-    assert unchecked.use_model_pass is Unset
-
-
-def test_tui_knob_settings_round_trip(tmp_path: Path) -> None:
-    """Last-settings persistence keeps the checked box."""
-    from voyage.tui_state import GenerateFormState, load_last_settings, save_last_settings
-
-    settings_file = tmp_path / "tui-last.toml"
-    state = GenerateFormState(style="x", use_model_pass=True)
-    save_last_settings(state, settings_file)
-    assert load_last_settings(settings_file) == state
 
 
 def test_finalize_knob_off_byte_identical_to_default(tmp_path: Path) -> None:

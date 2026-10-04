@@ -28,7 +28,7 @@ from voyage.backends import (
     segment_seconds_for_frames,
     transport_from_restarting_call,
 )
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.config import (
     BACKEND_REGISTRY,
     ProjectConfig,

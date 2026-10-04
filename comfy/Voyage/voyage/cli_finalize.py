@@ -1,8 +1,8 @@
-"""`finalize` and `sfx` verbs (DESIGN §§54-57).
+"""Final-video assembly (DESIGN §§54-57).
 
-Verb module of the issue-080 split: final-video assembly plus the
-standalone SFX pass. CLI augment floors ride the stored `[augment]`
-section via `cli_core._augment_overrides`.
+Library module for `generate`'s finalize step: final-video assembly
+plus the SFX dub, with CLI augment floors riding the stored
+`[augment]` section via `cli_core._augment_overrides`.
 """
 
 from __future__ import annotations
@@ -164,65 +164,4 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         size_text = "unknown size"
     console.ok(f"finalized -> {output} ({duration}s, {size_text})")
     print(f"finalized -> {output}")
-    return 0
-
-
-def cmd_sfx(args: argparse.Namespace) -> int:
-    """Dub SFX onto an existing video (standalone post-pass, no re-finalize).
-
-    Conditions on `--video` (default: the run's `final.mp4`), mixes the
-    bed under its audio, and publishes `--output` (default:
-    `final-sfx.mp4` beside the input — the input is never modified).
-    Caption source is per-segment director captions unless
-    `--sfx-caption` overrides (required for runs committed before SFX
-    captions existed, e.g. poulah).
-    """
-    import shutil
-
-    from voyage.sfx_finalize import finalize_sfx_pass
-
-    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
-    if run_dir is None:
-        return 2
-    config = _load_run(run_dir)
-    video = Path(args.video).resolve() if args.video else run_dir / "final.mp4"
-    if not video.exists():
-        print(f"sfx failed: no such video {video}", file=sys.stderr)
-        return 1
-    output = Path(args.output).resolve() if args.output else video.parent / "final-sfx.mp4"
-    if args.output:
-        # Containment warning (issue 024) for the explicit write target
-        # only: --video is a read-only input (never warned), and the
-        # derived default beside it inherits the input's location.
-        warn_if_outside_output_dir(output, flag="--output")
-    backend = args.sfx_backend or config.sfx.backend
-    try:
-        if output != video:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(video, output)
-        finalize_sfx_pass(
-            run_dir,
-            output,
-            backend=backend,
-            models_dir=config.sfx.models_dir,
-            device=args.sfx_device or config.sfx.device,
-            model_size=args.sfx_model_size or config.sfx.model_size,
-            seed=config.seed,
-            sample_rate=config.audio.sample_rate,
-            channels=config.audio.channels,
-            num_workers=args.sfx_workers,
-            fps=config.video.fps,
-            caption_override=args.sfx_caption,
-        )
-    except (MediaError, StateError, OSError) as exc:
-        print(f"sfx dub failed: {exc}", file=sys.stderr)
-        return 1
-    console = get_console(args)
-    try:
-        info = media_probe(output)
-        duration = info.get("format", {}).get("duration", "?") if isinstance(info, dict) else "?"
-    except MediaError:
-        duration = "?"
-    console.ok(f"sfx dubbed -> {output} ({duration}s, backend {backend})")
-    print(f"sfx dubbed -> {output}")
     return 0

@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from voyage.cli import _augment_overrides, build_parser, cmd_finalize
+from voyage.cli import build_parser
+from voyage.cli_core import _augment_overrides
+from voyage.cli_finalize import cmd_finalize
 from voyage.config import (
     AugmentConfig,
     ProjectConfig,
@@ -24,14 +26,6 @@ from voyage.config import (
     parse_min_resolution,
     preset_config,
     resolve_config,
-)
-from voyage.tui_state import (
-    GenerateFormState,
-    field_errors,
-    load_last_settings,
-    plan_summary,
-    save_last_settings,
-    to_generate_namespace,
 )
 
 
@@ -164,26 +158,20 @@ def _augment_defaults(args: argparse.Namespace) -> dict[str, object]:
 
 
 def test_augment_parser_defaults() -> None:
-    for verb in (
-        ["finalize", "--run", "r", "--output", "o.mp4"],
-        ["configure", "calm", "--segments", "1"],
-        ["run", "--run", "r"],
-    ):
-        assert _augment_defaults(_parse(verb)) == {
-            "min_fps": None,
-            "min_resolution": None,
-            "no_augment": False,
-        }
+    assert _augment_defaults(_parse(["configure", "calm", "--segments", "1"])) == {
+        "min_fps": None,
+        "min_resolution": None,
+        "no_augment": False,
+    }
 
 
 def test_augment_flags_parse() -> None:
     args = _parse(
         [
-            "finalize",
-            "--run",
-            "r",
-            "--output",
-            "o.mp4",
+            "configure",
+            "calm",
+            "--segments",
+            "1",
             "--min-fps",
             "60",
             "--min-resolution",
@@ -195,26 +183,27 @@ def test_augment_flags_parse() -> None:
         "min_resolution": "1920x1080",
         "no_augment": False,
     }
-    assert _parse(["run", "--run", "r", "--no-augment"]).no_augment is True
+    assert _parse(["configure", "calm", "--segments", "1", "--no-augment"]).no_augment is True
 
 
-def test_run_and_generate_share_augment_flags() -> None:
-    """The shared helper keeps run/configure/finalize in lockstep (mirrors 020)."""
+def test_configure_carries_augment_flags() -> None:
+    """The shared helper exposes every augment flag on `configure` (020)."""
     flags = ["--min-fps", "60", "--min-resolution", "1920x1080", "--no-augment"]
-    run_args = _parse(["run", "--run", "r", *flags])
-    gen_args = _parse(["configure", "calm", "--segments", "1", *flags])
-    fin_args = _parse(["finalize", "--run", "r", "--output", "o.mp4", *flags])
-    assert _augment_defaults(run_args) == _augment_defaults(gen_args) == _augment_defaults(fin_args)
+    args = _parse(["configure", "calm", "--segments", "1", *flags])
+    assert _augment_defaults(args) == {
+        "min_fps": 60,
+        "min_resolution": "1920x1080",
+        "no_augment": True,
+    }
 
 
 def test_augment_overrides_mapping() -> None:
-    assert _augment_overrides(_parse(["run", "--run", "r"])) == {}
-    assert _augment_overrides(_parse(["run", "--run", "r", "--min-fps", "60"])) == {"min_fps": 60}
-    assert _augment_overrides(_parse(["run", "--run", "r", "--min-resolution", "0"])) == {
-        "min_resolution": "0"
-    }
+    base = ["configure", "calm", "--segments", "1"]
+    assert _augment_overrides(_parse(base)) == {}
+    assert _augment_overrides(_parse([*base, "--min-fps", "60"])) == {"min_fps": 60}
+    assert _augment_overrides(_parse([*base, "--min-resolution", "0"])) == {"min_resolution": "0"}
     # --no-augment wins over explicit floors (both to 0) and forces the pass off.
-    assert _augment_overrides(_parse(["run", "--run", "r", "--min-fps", "60", "--no-augment"])) == {
+    assert _augment_overrides(_parse([*base, "--min-fps", "60", "--no-augment"])) == {
         "min_fps": 0,
         "min_resolution": "0",
         "use_model_pass": False,
@@ -252,71 +241,6 @@ def test_cmd_finalize_rejects_invalid_augment(tmp_path: Path) -> None:
     assert code == 2
 
 
-def test_tui_augment_defaults() -> None:
-    state = GenerateFormState()
-    assert state.min_fps == "24"
-    assert state.min_resolution == "1216x704"
-
-
-def test_tui_namespace_carries_augment_attrs() -> None:
-    """Issue 097 class: the TUI namespace must satisfy cmd_generate's finalize block.
-
-    Issue 023: untouched-at-default augment floors emit Unset (stored TOML wins),
-    never the concrete form defaults.
-    """
-    namespace = to_generate_namespace(GenerateFormState(style="x", backend="fake", name="augns"))
-    assert namespace.min_fps is Unset
-    assert namespace.min_resolution is Unset
-    assert namespace.no_augment is False
-
-
-def test_tui_blank_augment_fields_emit_unset() -> None:
-    """Blank TUI augment fields emit Unset (issue 045), never None."""
-    namespace = to_generate_namespace(GenerateFormState(style="x", min_fps="", min_resolution=""))
-    assert namespace.min_fps is Unset
-    assert namespace.min_resolution is Unset
-
-
-def test_tui_zero_disables_a_floor() -> None:
-    namespace = to_generate_namespace(GenerateFormState(style="x", min_fps="0", min_resolution="0"))
-    assert namespace.min_fps == 0
-    assert namespace.min_resolution == "0"
-
-
-@pytest.mark.parametrize("raw", ["-1", "soon", "3.5"])
-def test_tui_min_fps_rejects_bad_values(raw: str) -> None:
-    assert "min_fps" in field_errors(GenerateFormState(style="x", min_fps=raw))
-
-
-@pytest.mark.parametrize("raw", ["32", "0", "60"])
-def test_tui_min_fps_accepts_non_negative(raw: str) -> None:
-    assert "min_fps" not in field_errors(GenerateFormState(style="x", min_fps=raw))
-
-
-@pytest.mark.parametrize("raw", ["soon", "1280", "0x720", "1280x0", "-1x720"])
-def test_tui_min_resolution_rejects_bad_values(raw: str) -> None:
-    assert "min_resolution" in field_errors(GenerateFormState(style="x", min_resolution=raw))
-
-
-@pytest.mark.parametrize("raw", ["1280x720", "0", "1920x1080"])
-def test_tui_min_resolution_accepts_good_values(raw: str) -> None:
-    assert "min_resolution" not in field_errors(GenerateFormState(style="x", min_resolution=raw))
-
-
-def test_tui_augment_fields_leave_planning_pure() -> None:
-    """Augment knobs never touch plan math (planning stays CLI truth)."""
-    plain = plan_summary(GenerateFormState(style="x"))
-    floored = plan_summary(GenerateFormState(style="x", min_fps="60", min_resolution="0"))
-    assert floored == plain
-
-
-def test_tui_augment_settings_round_trip(tmp_path: Path) -> None:
-    settings_file = tmp_path / "tui-last.toml"
-    state = GenerateFormState(style="x", min_fps="60", min_resolution="0")
-    save_last_settings(state, settings_file)
-    assert load_last_settings(settings_file) == state
-
-
 # --- 088 fold: tests/test_sfx_parser_parity.py (2 tests, verbatim) ---
 # Original module docstring (banner, issue ID stays greppable):
 # """SFX flag parity across finalizing verbs (issue 092).
@@ -340,12 +264,16 @@ def _sfx_defaults(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def test_all_finalizing_verbs_carry_sfx_flags() -> None:
-    parser = build_parser()
-    generate = parser.parse_args(["configure", "calm", "--segments", "1"])
-    finalize = parser.parse_args(["finalize", "--run", "r", "--output", "o.mp4"])
-    stop = parser.parse_args(["stop", "--run", "r"])
-    assert _sfx_defaults(generate) == _sfx_defaults(finalize) == _sfx_defaults(stop)
+def test_configure_carries_sfx_flags() -> None:
+    args = build_parser().parse_args(["configure", "calm", "--segments", "1"])
+    assert _sfx_defaults(args) == {
+        "no_sfx": False,
+        "sfx_backend": None,
+        "sfx_caption": None,
+        "sfx_device": None,
+        "sfx_model_size": None,
+        "sfx_workers": 1,
+    }
 
 
 def test_generate_sfx_overrides_parse() -> None:

@@ -30,7 +30,7 @@ from numpy.typing import NDArray
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 from voyage.vision.metrics import sample_frames

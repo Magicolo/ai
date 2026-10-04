@@ -83,18 +83,13 @@ models_dir = "/models"
 model_size = "large_44k_v2"  # small_44k | medium_44k | large_44k_v2
 ```
 
-## `voyage sfx` verb and caption pins
+## Finalize-time SFX pass and caption pins
 
-```bash
-./scripts/run.sh sfx --run <dir> [--video <file.mp4>] [--output <file.mp4>]
-```
-
-Dubs SFX onto an existing video without re-finalizing
-(`cmd_sfx`, `voyage/cli.py:1200`): defaults to the run's `final.mp4`,
-publishes `final-sfx.mp4` beside the input (the input is never
-modified). Caption source is per-segment director captions unless
-`--sfx-caption` overrides — required for runs committed before SFX
-captions existed.
+The SFX pass runs inside `generate`'s finalize step (no standalone
+verb): it dubs director-captioned effects under the music and
+publishes the `-audio` twin beside `final.mp4`. Caption source is
+per-segment director captions unless `--sfx-caption` overrides —
+required for runs committed before SFX captions existed.
 
 Pins (all in-memory — the run manifest carries the effective config, no TOML):
 

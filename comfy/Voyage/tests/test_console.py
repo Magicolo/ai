@@ -221,11 +221,33 @@ def test_supervisor_silent_by_default(tmp_path: Path, capsys: pytest.CaptureFixt
     assert capsys.readouterr().out == ""
 
 
-def test_run_cli_shows_segment_prompts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """`voyage run` prints the segment header with prompts by default."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert main(["run", "--run", str(run_dir), "--segments", "1"]) == 0
+def _configure_fake_console_run(name: str = "console", segments: str = "1") -> None:
+    assert (
+        main(
+            [
+                "configure",
+                name,
+                "--backend",
+                "fake",
+                "--segments",
+                segments,
+                "--style",
+                "pastel neon line-art, peaceful",
+                "--seed",
+                "11",
+            ]
+        )
+        == 0
+    )
+
+
+def test_run_cli_shows_segment_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`voyage generate` prints the segment header with prompts by default."""
+    monkeypatch.chdir(tmp_path)
+    _configure_fake_console_run()
+    assert main(["generate", "console"]) == 0
     out = capsys.readouterr().out
     assert "SEGMENT 000000" in out
     assert "prompt" in out
@@ -233,29 +255,13 @@ def test_run_cli_shows_segment_prompts(tmp_path: Path, capsys: pytest.CaptureFix
 
 
 def test_run_cli_accepts_verbose_and_no_color(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verbosity flags work on run (050: status no longer accepts them)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert main(["run", "--run", str(run_dir), "--segments", "1", "--verbose"]) == 0
+    """Verbosity flags work on generate (050)."""
+    monkeypatch.chdir(tmp_path)
+    _configure_fake_console_run()
+    assert main(["generate", "console", "--verbose"]) == 0
     assert "seeds:" in capsys.readouterr().out
-    assert main(["run", "--run", str(run_dir), "--segments", "1", "--no-color"]) == 0
+    _configure_fake_console_run(segments="2")
+    assert main(["generate", "console", "--no-color"]) == 0
     assert "SEGMENT 000001" in capsys.readouterr().out
-
-
-def test_status_cli_rejects_console_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """`status`/`validate`/`inspect` don't accept --verbose/--no-color (050)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    with pytest.raises(SystemExit) as exc_info:
-        main(["status", "--run", str(run_dir), "--no-color"])
-    assert exc_info.value.code == 2
-    with pytest.raises(SystemExit) as exc_info:
-        main(["validate", "--run", str(run_dir), "--verbose"])
-    assert exc_info.value.code == 2
-    with pytest.raises(SystemExit) as exc_info:
-        main(["inspect", "--run", str(run_dir), "segments", "--verbose"])
-    assert exc_info.value.code == 2

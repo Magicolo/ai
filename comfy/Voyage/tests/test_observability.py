@@ -12,12 +12,14 @@ import os
 import time
 from pathlib import Path
 
-import pytest
-
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import _last_commit_stages, _read_all_metric_events, cmd_status
-from voyage.logrotate import append_line, iter_metric_files
+from voyage.logrotate import (
+    append_line,
+    iter_metric_files,
+    last_commit_stages,
+    read_all_metric_events,
+)
 from voyage.persistence import read_effective_config
 from voyage.rpc import SubprocessWorker
 from voyage.supervisor import Supervisor
@@ -138,34 +140,6 @@ def test_metric_events_carry_run_id(tmp_path: Path) -> None:
         assert json.loads(line)["run_id"] == "run-id-probe"
 
 
-def test_status_shows_section_layout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """`voyage status` renders the §59 sections plus last-commit stages."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert Supervisor(run_dir, read_effective_config(run_dir)).run_segments(1) == ["000000"]
-    args = type("Args", (), {"run": str(run_dir)})()
-    assert cmd_status(args) == 0
-    out = capsys.readouterr().out
-    for expected in (
-        "Voyage: observability",
-        "Uptime:",
-        "Video",
-        "Backend: fake",
-        "768",
-        "432",
-        "World",
-        "Audio",
-        "Music: atonal experimental music in Messiaen modes",
-        "Workers",
-        "video: idle",
-        "Stages (last commit 000000)",
-        "video:",
-        "Storage",
-        "Free:",
-    ):
-        assert expected in out, expected
-
-
 def test_last_commit_stages_spans_rotation(tmp_path: Path) -> None:
     """Day-after rotation: the commit in the dated sibling is still found (049)."""
     run_dir = tmp_path / "run"
@@ -178,12 +152,12 @@ def test_last_commit_stages_spans_rotation(tmp_path: Path) -> None:
     )
     live = logs_dir / "metrics.jsonl"
     live.write_text('{"event": "resource_gauges"}\n', encoding="utf-8")
-    assert _last_commit_stages(run_dir) == ("000000", {"video": 1.0})
+    assert last_commit_stages(run_dir) == ("000000", {"video": 1.0})
     live.write_text(
         '{"event": "segment_committed", "segment_id": "000001", "stages": {"video": 2.0}}\n',
         encoding="utf-8",
     )
-    assert _last_commit_stages(run_dir) == ("000001", {"video": 2.0})
+    assert last_commit_stages(run_dir) == ("000001", {"video": 2.0})
 
 
 def test_read_all_metric_events_concatenates_oldest_first(tmp_path: Path) -> None:
@@ -198,6 +172,6 @@ def test_read_all_metric_events_concatenates_oldest_first(tmp_path: Path) -> Non
     )
     live = logs_dir / "metrics.jsonl"
     live.write_text('{"event": "resource_gauges"}\n', encoding="utf-8")
-    events = _read_all_metric_events(run_dir)
+    events = read_all_metric_events(run_dir)
     assert [event["event"] for event in events] == ["segment_committed", "resource_gauges"]
-    assert _read_all_metric_events(tmp_path / "absent-run") == []
+    assert read_all_metric_events(tmp_path / "absent-run") == []

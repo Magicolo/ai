@@ -115,84 +115,6 @@ def test_sfx_window_constants_match_ladder() -> None:
     assert SFX_WINDOW_OVERLAP == 1.0
 
 
-def test_sfx_verb_parses_with_caption_override() -> None:
-    from voyage.cli import build_parser
-
-    args = build_parser().parse_args(
-        [
-            "sfx",
-            "--run",
-            "/tmp/poulah",
-            "--sfx-backend",
-            "mmaudio",
-            "--sfx-caption",
-            "frenetic glitch foley",
-            "--sfx-workers",
-            "2",
-        ]
-    )
-    assert args.func.__name__ == "cmd_sfx"
-    assert args.sfx_backend == "mmaudio"
-    assert args.sfx_caption == "frenetic glitch foley"
-    assert args.sfx_workers == 2
-    assert not hasattr(args, "no_sfx")
-    assert args.video is None and args.output is None
-
-
-def test_finalize_verb_accepts_new_sfx_flags() -> None:
-    from voyage.cli import build_parser
-
-    args = build_parser().parse_args(
-        [
-            "finalize",
-            "--run",
-            "/tmp/x",
-            "--output",
-            "/tmp/x.mp4",
-            "--sfx-backend",
-            "mmaudio",
-            "--sfx-caption",
-            "wind",
-        ]
-    )
-    assert args.sfx_backend == "mmaudio"
-    assert args.sfx_caption == "wind"
-
-
-def test_caption_override_replaces_segment_captions(tmp_path: Path) -> None:
-    from voyage.sfx_finalize import segment_sfx_bounds
-
-    run_dir = tmp_path / "run"
-    _make_finalize_segment(run_dir, "000000", 4.0, "glass chimes")
-    usable = [run_dir / "segments" / "000000"]
-    bounds = segment_sfx_bounds(run_dir, usable, 24, caption_override="forced dub")
-    assert bounds[0][2] == "forced dub"
-    plain = segment_sfx_bounds(run_dir, usable, 24)
-    assert plain[0][2] == "glass chimes"
-
-
-def test_cmd_sfx_rejects_missing_video(tmp_path: Path) -> None:
-    import argparse
-
-    from tests.conftest import initialize_run_directory
-    from voyage.cli import cmd_sfx
-
-    initialize_run_directory(tmp_path, run_id="x", style="y", seed=0)
-    code = cmd_sfx(
-        argparse.Namespace(
-            run=str(tmp_path),
-            video=str(tmp_path / "nope.mp4"),
-            output=None,
-            sfx_backend="fake",
-            sfx_caption=None,
-            sfx_device=None,
-            sfx_model_size=None,
-            sfx_workers=1,
-        )
-    )
-    assert code == 1
-
-
 def _make_finalize_segment(run_dir: Path, seg_id: str, duration: float, sfx_caption: str) -> None:
     import subprocess
 
@@ -249,19 +171,35 @@ def _make_finalize_segment(run_dir: Path, seg_id: str, duration: float, sfx_capt
     (segment / "DONE").write_text("", encoding="utf-8")
 
 
-def test_run_and_generate_accept_caption_pins() -> None:
+def test_caption_override_replaces_segment_captions(tmp_path: Path) -> None:
+    from voyage.sfx_finalize import segment_sfx_bounds
+
+    run_dir = tmp_path / "run"
+    _make_finalize_segment(run_dir, "000000", 4.0, "glass chimes")
+    usable = [run_dir / "segments" / "000000"]
+    bounds = segment_sfx_bounds(run_dir, usable, 24, caption_override="forced dub")
+    assert bounds[0][2] == "forced dub"
+    plain = segment_sfx_bounds(run_dir, usable, 24)
+    assert plain[0][2] == "glass chimes"
+
+
+def test_configure_accepts_caption_pins() -> None:
     from voyage.cli import build_parser
 
-    run_args = build_parser().parse_args(
-        ["run", "--run", "r", "--music-caption", "brass", "--video-caption", "dune"]
+    args = build_parser().parse_args(
+        [
+            "configure",
+            "x",
+            "--segments",
+            "1",
+            "--music-caption",
+            "brass",
+            "--video-caption",
+            "dune",
+        ]
     )
-    assert run_args.music_caption == "brass"
-    assert run_args.video_caption == "dune"
-    gen_args = build_parser().parse_args(
-        ["configure", "x", "--segments", "1", "--music-caption", "brass"]
-    )
-    assert gen_args.music_caption == "brass"
-    assert gen_args.video_caption is None
+    assert args.music_caption == "brass"
+    assert args.video_caption == "dune"
 
 
 def test_fake_bed_end_to_end_over_junctions(tmp_path: Path) -> None:

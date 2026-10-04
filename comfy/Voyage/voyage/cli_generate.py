@@ -275,7 +275,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return _finalize_run_dir(run_dir, manifest, args, console)
     if not _require_cuda_stack(effective):
         return 1
-    from voyage.cli import check_ffmpeg, check_free_space
+    from voyage.doctor import check_ffmpeg
+    from voyage.media import check_free_space
 
     ffmpeg_ok, ffmpeg_message = check_ffmpeg()
     if not ffmpeg_ok:

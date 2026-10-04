@@ -1,35 +1,13 @@
 """Run-directory and run-name helpers for the `voyage` CLI (DESIGN §58).
 
-Leaf module of the issue-080 verb-group split: path resolution and
-flat-folder validation with zero voyage imports (stdlib only), so the
-TUI state layer can share it without an import cycle. `voyage.cli`
-re-exports every name below for backward compatibility.
+Leaf module: path resolution and flat-folder validation with zero
+voyage imports (stdlib only).
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
-
-
-def _run_dir_arg(value: str) -> Path:
-    # Absolute: workers spawn with CWD=run_dir, so a relative dir doubles up
-    # inside payload paths (workers run with CWD=run_dir: generate_blocks
-    # circuit-breaker on `output/.../segments/...` missing). Single funnel
-    # for every subcommand; mirrors cmd_generate's resolve-once rule.
-    return Path(value).resolve()
-
-
-def resolve_run_dir(value: str) -> Path:
-    """Canonical run-dir resolution (issue 008/057: one helper, every verb).
-
-    Absolute + normalized so worker CWD-relative payloads never double up.
-    Kept as a named alias of `_run_dir_arg` (which predates it and stays
-    for backward-compatible imports) — new code should call this one.
-    """
-    return _run_dir_arg(value)
-
 
 _RESERVED_FOLDER_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
@@ -42,11 +20,8 @@ _RESERVED_FOLDER_NAMES = frozenset(
 def is_flat_folder_name(value: str) -> bool:
     """Whether the value is usable as a single output folder name (008).
 
-    Mirrors the TUI `_flat_folder_name` check (`tui_state.py`): rejects
-    path separators and parent-dotdot so a crafted `--run-id` cannot
-    escape `output/` (imported locally here, not from the TUI, because
-    the TUI imports this module's `parse_duration` — reverse import
-    would be circular). Also rejects `.` and reserved basenames (080).
+    Rejects path separators and parent-dotdot so a crafted name cannot
+    escape `output/`. Also rejects `.` and reserved basenames (080).
     """
     text = value.strip()
     if not text or "/" in text or "\\" in text or ".." in text:
@@ -86,26 +61,11 @@ def resolve_run_ref(*, run: str | None, name: str | None) -> Path | None:
             return None
         return (output_root() / stripped).resolve()
     if run:
-        return _run_dir_arg(run)
+        # Absolute: workers spawn with CWD=run_dir, so a relative dir
+        # doubles up inside payload paths.
+        return Path(run).resolve()
     print("error: one of --run or --name is required", file=sys.stderr)
     return None
-
-
-def _effective_run_id(args: argparse.Namespace) -> str:
-    """Run name for init/generate: --name wins, --run-id is the legacy alias.
-
-    Strips padding (issue 116): `is_flat_folder_name` validates the
-    stripped value, and the TUI strips before building its namespace, so
-    the accessor strips too — all three agree, and a pasted `" boba "`
-    lands in `output/boba/` on both surfaces. A missing/blank `--name`
-    falls back to `--run-id` (also stripped); both missing yields ""
-    so `_check_run_id` reports exit 2 instead of an AttributeError.
-    """
-    named = getattr(args, "name", None)
-    if isinstance(named, str) and named.strip() != "":
-        return named.strip()
-    fallback = getattr(args, "run_id", "")
-    return fallback.strip() if isinstance(fallback, str) else str(fallback)
 
 
 def output_root() -> Path:

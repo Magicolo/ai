@@ -133,10 +133,9 @@ _CUDA_SFX_BACKENDS: frozenset[str] = frozenset(
 _CUDA_BACKENDS = _CUDA_VIDEO_BACKENDS | _CUDA_AUDIO_BACKENDS | _CUDA_SFX_BACKENDS
 """Legacy union across the video/audio/sfx vocabularies (issue 021).
 
-Kept for the TUI warning import (tui_state.gpu_warning) and any reader
-that only needs "does this name need CUDA". Per-branch checks above are
-the vocabulary-correct source — never test a video backend against the
-union (``acestep``/``mmaudio`` are not video backends).
+Per-branch checks above are the vocabulary-correct source — never test
+a video backend against the union (``acestep``/``mmaudio`` are not
+video backends).
 """
 
 
@@ -185,18 +184,17 @@ def _require_cuda_stack(config: ProjectConfig) -> bool:
     find_spec locates torch without importing it — the supervisor never
     imports GPU libraries (§83).
     """
-    # Seam dispatch (issue 080): torch presence resolves through the
-    # voyage.cli namespace at call time (this shadows the module-global
-    # definition below on purpose), so patching voyage.cli._torch_available
-    # keeps intercepting the preflight exactly as pre-split.
-    from voyage.cli import _torch_available as _seam_torch_available
+    # Seam dispatch: torch presence resolves through this module's
+    # namespace at call time, so patching
+    # `voyage.cli_planning._torch_available` intercepts the preflight.
+    # (Two-verb CLI: the old `voyage.cli` re-export seam is gone.)
 
     needs_cuda = (
         config.video.backend in _CUDA_VIDEO_BACKENDS
         or config.audio.backend in _CUDA_AUDIO_BACKENDS
         or config.sfx.backend in _CUDA_SFX_BACKENDS
     )
-    if not needs_cuda or _seam_torch_available():
+    if not needs_cuda or _torch_available():
         return True
     offenders = _cuda_offenders(config)
     label = " + ".join(offenders) if offenders else config.video.backend

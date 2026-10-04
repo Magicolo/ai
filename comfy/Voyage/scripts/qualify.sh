@@ -4,16 +4,19 @@
 # Usage: ./scripts/qualify.sh [--backend ltxv|causvid|ltx25|ltx23] [--segments N] <run-dir>
 #   e.g. ./scripts/qualify.sh /tmp/qual-ltxv
 #        ./scripts/qualify.sh --backend causvid --segments 2 /tmp/qual-causvid
-#   <run-dir> MUST be absolute: workers spawn with CWD=run_dir, so a
-#   relative dir doubles up inside payload paths (issue 064 leg b).
-#   Default backend is ltx25 (the config default since 2026-10-02).
+#   <run-dir> MUST be absolute AND equal to $PWD/output/<basename>:
+#   the two-verb CLI addresses runs by NAME (`output/<name>` under the
+#   repo root — workers spawn with CWD=run_dir, so a relative dir
+#   doubles up inside payload paths (issue 064 leg b)). Default backend
+#   is ltx25 (the config default since 2026-10-02).
 #   The helper is
-#   backend-agnostic — it benchmarks, runs, validates, and tees the JSON
+#   backend-agnostic — it configures, generates, and tees the JSON
 #   summary for whatever backend the run dir was generated with.
 #
 # Stages: nvidia-smi presence -> idle gate -> absolute-path gate ->
-# disk preflight -> benchmark video -> N-segment run -> validate ->
-# JSON summary teed to reports/ (issue 064 legs c/d, 060 artifacts).
+# disk preflight -> configure -> N-segment generate (validates +
+# finalizes inline) -> JSON summary teed to reports/ (issue 064 legs
+# c/d, 060 artifacts).
 # Crash recovery (kill -9 the video worker mid-segment, then resume) and
 # the eyeball visual review stay MANUAL — see reports/video-backends.md.
 # NEVER run under contention: the gate aborts when >2 GiB on GPU 0 is held
@@ -115,14 +118,14 @@ if [ -n "$avail_kib" ] && [ "$avail_kib" -lt $((min_free_gib * 1024 * 1024)) ]; 
   exit 5
 fi
 if [ ! -f "$run_dir/manifest.json" ]; then
-  echo "qualify: no manifest.json in $run_dir — generate first:" >&2
-  echo "  ./scripts/run.sh generate --name qual-${backend} \\" >&2
-  echo "    --style 'pastel neon line-art, peaceful' --backend ${backend}" >&2
+  echo "qualify: no manifest.json in $run_dir — configure first:" >&2
+  echo "  ./scripts/run.sh configure <name> --backend ${backend} --segments <N> \\" >&2
+  echo "    --style 'pastel neon line-art, peaceful'" >&2
   exit 2
 fi
-./scripts/run.sh benchmark video --run "$run_dir" --warmup 1 --measured 3
-./scripts/run.sh run --run "$run_dir" --segments "$segments"
-./scripts/run.sh validate --run "$run_dir"
+# Two-verb CLI: the run dir must be the generate-addressable
+# output/<name> (configure + generate take NAME, not --run).
+./scripts/run.sh generate "$(basename "$run_dir")"
 # Artifact persistence (issue 064 leg c, 060): the summary used to be
 # stdout-only, so every qualification evaporated. Tee to reports/ and
 # print the path; the filename carries backend run id + date.

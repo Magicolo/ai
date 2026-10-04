@@ -1,7 +1,7 @@
 # ARCHITECTURE — processes and ownership
 
 ```text
-┌─ supervisor (voyage run) ──────────────────────────────┐
+┌─ supervisor (voyage generate) ──────────────────────────┐
 │ owns: state.json, segments/, novelty/, logs/, config   │
 │ single writer of all run state; workers own nothing    │
 │ persistent across the whole run                        │

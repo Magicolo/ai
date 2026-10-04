@@ -172,10 +172,11 @@ RUN pip install "safetensors==0.8.0" "Pillow==12.3.0"
 RUN mkdir -p /opt/causvid/wan_models \
     && ln -sfn /models/Wan2.1-T2V-1.3B /opt/causvid/wan_models/Wan2.1-T2V-1.3B
 
-# Console progress (rich) + launcher TUI (textual) land first (issue 054):
-# pure-leaf installs before any COPY, so voyage-code edits never reinstall
-# them. Versions match the slim lockfile.
-RUN pip install "rich==15.0.0" "textual==8.2.8"
+# Console progress (rich) lands first (issue 054):
+# pure-leaf install before any COPY, so voyage-code edits never reinstall
+# it. Version matches the slim lockfile. (textual launcher TUI removed
+# with the two-verb CLI — bare `voyage` prints help.)
+RUN pip install "rich==15.0.0"
 
 # Voyage supervisor package (pure-python here; torch lives only behind the
 # worker module import). --no-deps: pydantic already pinned above, so the
@@ -299,10 +300,8 @@ ENV PYTHONPATH=/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
 # Keep `-w /app` in run.sh as belt-and-braces.
 WORKDIR /app
 
-# Build-time doctor gate (issue 048): same probe the slim image runs —
-# verifies ffmpeg/torch-CUDA/disk/models facts inside THIS image's CUDA
-# stack. Exit code is ffmpeg-only, so missing models at build time warn
-# via facts without failing the build.
-RUN voyage doctor
+# Build-time CLI gate (two-verb CLI): same probe the slim image runs —
+# verifies both verbs register inside THIS image's stack.
+RUN voyage configure --help && voyage generate --help
 
-CMD ["voyage", "doctor"]
+CMD ["voyage", "--help"]

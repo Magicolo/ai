@@ -254,10 +254,8 @@ ENV PYTHONPATH=/opt/comfyui:/app \
 # themselves with absolute voyage paths.
 WORKDIR /app
 
-# Build-time doctor gate (same contract as the video image): verifies
-# ffmpeg/torch-CUDA/disk/models facts inside THIS image's CUDA stack.
-# Exit code is ffmpeg-only, so missing models at build time warn via
-# facts without failing the build.
-RUN voyage doctor
+# Build-time CLI gate (two-verb CLI): same probe the video image runs —
+# verifies both verbs register inside THIS image's stack.
+RUN voyage configure --help && voyage generate --help
 
-CMD ["voyage", "doctor"]
+CMD ["voyage", "--help"]

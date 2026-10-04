@@ -1,11 +1,9 @@
 """Shared CLI core: console factory, run loading, augment overrides.
 
-DESIGN §58 — leaf module of the issue-080 split: the small helpers every verb
-needs (`get_console`, `_load_run`, `_augment_overrides`) without any
-verb-to-verb edge, so verb modules import them at top level and the
-only lazy imports left are the three orchestration call-throughs
-(`cmd_stop→cmd_finalize`, `cmd_generate` fan-out, `cmd_inspect→
-validate_run`). `voyage.cli` re-exports all.
+DESIGN §58 — leaf module: the small helpers both verbs need
+(`get_console`, `_load_run`, `_augment_overrides`) without any
+verb-to-verb edge, so `cli_configure`/`cli_generate`/`cli_finalize`
+import them at top level.
 """
 
 from __future__ import annotations

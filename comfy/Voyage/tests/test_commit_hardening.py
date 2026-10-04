@@ -22,7 +22,7 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.errors import (
     ConfigurationError,
     FatalWorkerError,

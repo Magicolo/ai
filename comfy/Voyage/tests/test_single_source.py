@@ -38,25 +38,6 @@ def test_duration_epsilon_is_single_sourced() -> None:
     assert backends.FLOAT_DUST_EPSILON == 1e-9
 
 
-def test_tui_fallbacks_match_fake_row() -> None:
-    """Unknown-backend planning falls back to the fake registry row."""
-    from voyage import tui_state
-
-    fake = BACKEND_REGISTRY["fake"]
-    assert fake.segment_frames == tui_state._FALLBACK_FRAMES_PER_SEGMENT
-    assert fake.fps == tui_state._FALLBACK_FPS
-
-
-def test_reserved_names_are_single_sourced() -> None:
-    """CLI + TUI reserved sets equal the cli_paths source (no fork)."""
-    from voyage import cli, cli_paths, tui_state
-
-    assert set(cli._RESERVED_FOLDER_NAMES) == set(cli_paths._RESERVED_FOLDER_NAMES)
-    assert set(tui_state._RESERVED_FOLDER_NAMES) == set(cli_paths._RESERVED_FOLDER_NAMES)
-    assert cli.is_flat_folder_name("con") is False
-    assert tui_state._flat_folder_name("con") is False
-
-
 def test_streaming_sets_agree() -> None:
     """Supervisor tuple, backends frozenset, and registry projection match."""
     from_registry = {name for name, record in BACKEND_REGISTRY.items() if record.streaming}

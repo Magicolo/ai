@@ -14,7 +14,7 @@ from typing import Any
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.persistence import read_effective_config, read_state
 from voyage.supervisor import Supervisor
 

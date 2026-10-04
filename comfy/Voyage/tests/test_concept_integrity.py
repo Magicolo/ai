@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage.cli import validate_run
+from voyage.cli_validate import validate_run
 from voyage.concepts import ConceptStore, validate_concepts
 from voyage.errors import StateError
 from voyage.persistence import read_effective_config
