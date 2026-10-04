@@ -37,7 +37,7 @@ continuation OOMs ~11 s into the block.
   works — automate the fresh-process path: restart the worker or session
   after each commit).
 - Reduce resident pressure before continuation blocks (offload TE after
-  encode, as VAE-offload-for-generate does for longlive2).
+  encode, as VAE-offload-for-generate does).
 - Shrink the dequant spike (per-layer dequant already? check GGUF ops —
   the 3.75 GiB alloc suggests a whole-tensor materialization).
 - At minimum: supervisor should auto-retry a 0-frame block after a worker

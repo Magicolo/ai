@@ -11,8 +11,7 @@ directly.
 - `STREAMING_VIDEO_BACKENDS`: backends holding a resident session
   (multi-block payload, resume-hook restart path, acestep audio GPU swap).
 - `audio_worker_module` / `video_worker_module`: resolvers raising
-  `ConfigurationError` on unknown backends (the video path keeps the
-  079 longlive2 migration hint via `removed_backend_suffix`).
+  `ConfigurationError` on unknown backends.
 """
 
 from __future__ import annotations
@@ -64,9 +63,6 @@ def video_worker_module(backend: str) -> str:
     try:
         return VIDEO_WORKER_MODULES[backend]
     except KeyError:
-        from voyage.config import removed_backend_suffix
-
         raise ConfigurationError(
             f"unknown video backend {backend!r} (known: {sorted(VIDEO_WORKER_MODULES)})"
-            f"{removed_backend_suffix(backend)}"
         ) from None

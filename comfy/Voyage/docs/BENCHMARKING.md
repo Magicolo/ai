@@ -82,6 +82,6 @@ relative dir doubles up inside payload paths). The driver benchmarks,
 runs, validates, and tees the JSON summary to `reports/`; crash
 recovery (kill -9 the video worker mid-segment, then resume) and the
 eyeball visual review stay manual. Past qualification evidence lives in
-`reports/video-backends.md` and `reports/longlive-audit.md`. Never run
+`reports/video-backends.md`. Never run
 under contention: the driver aborts when >2 GiB on GPU 0 is held by
 another process.

@@ -2184,13 +2184,13 @@ audio continuity
 
 ---
 
-# 44. LTX-2.5 versus LongLive comparison hook
+# 44. LTX-2.5 versus CausVid comparison hook
 
-The outcome should ultimately be compared against the current LongLive 2.0 plan.
+The outcome should ultimately be compared against the current CausVid plan.
 
-For the best LTX candidate and the current LongLive candidate, compare:
+For the best LTX candidate and the current CausVid candidate, compare:
 
-| Metric | LTX | LongLive |
+| Metric | LTX | CausVid |
 |---|---:|---:|
 | quality | | |
 | temporal coherence | | |

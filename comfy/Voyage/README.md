@@ -137,6 +137,5 @@ pick `fake` on GPU-less boxes for CPU smoke runs.
 - `docs/OPERATIONS.md` — runbook: run/pause/resume/stop/recover/finalize.
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — benchmark/soak protocol and reports.
-- `docs/UPSTREAM_LONG_LIVE_PATCHES.md` — historical: removed-backend runtime patches (issue 079).
 - `docs/UPSTREAM_CAUSVID_NOTES.md` — CausVid integration notes.
 - `docs/UPSTREAM_LTXV_NOTES.md` — LTXV integration notes.

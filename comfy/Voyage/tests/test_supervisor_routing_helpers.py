@@ -7,8 +7,7 @@ backend-routing block moved to `voyage.supervisor_routing` so
 identical to the pre-split module-level names — the facade re-export is
 the same object (single source, not a copy), the streaming tuple and the
 worker-module keys agree with the `BACKEND_REGISTRY` projection
-(issues 023/025), and unknown backends raise `ConfigurationError`
-(the video path keeps the 079 longlive2 migration hint).
+(issues 023/025), and unknown backends raise `ConfigurationError`.
 """
 
 from __future__ import annotations
@@ -63,15 +62,9 @@ def test_unknown_audio_backend_raises() -> None:
         audio_worker_module("nope")
 
 
-def test_unknown_video_backend_keeps_longlive2_hint() -> None:
-    """Unknown video backends fail fast; removed longlive2 keeps the 079 hint."""
+def test_unknown_video_backend_raises() -> None:
+    """Unknown video backends fail fast with the known set."""
     from voyage.errors import ConfigurationError
 
     with pytest.raises(ConfigurationError, match="unknown video backend"):
         video_worker_module("nope")
-    with pytest.raises(ConfigurationError) as excinfo:
-        video_worker_module("longlive2")
-    message = str(excinfo.value).lower()
-    assert "longlive2" in message
-    assert "ltxv" in message
-    assert "tape" in message

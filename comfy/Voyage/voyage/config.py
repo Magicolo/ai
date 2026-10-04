@@ -23,34 +23,6 @@ VideoBackendName = Literal["fake", "ltxv", "causvid", "ltx25", "ltx23"]
 and the streaming set are keyed by this — a typo fails at typecheck
 instead of after GPU init."""
 
-REMOVED_VIDEO_BACKENDS: tuple[str, ...] = ("longlive2",)
-"""Video backends removed outright (issue 079, full delete).
-
-`longlive2` was the heaviest legacy (1264L worker, own `.pt` tape,
-checkpoint-load OOM in archived issue 096). Silent remap to `ltxv` is
-FORBIDDEN: it changes geometry mid-run (1280x704/29f -> 768x512/96f),
-invalidating committed segment durations, while longlive `.pt` tapes can
-never resume on the ltxv JSON-tape path. Stored `backend = "longlive2"`
-runs must fail fast with the migration hint below.
-"""
-
-
-def removed_backend_suffix(backend: str) -> str:
-    """Migration-hint suffix for removed backends (issue 079), else empty.
-
-    Pure string helper so every unknown-backend site (`_video_preset`,
-    `_audio_preset`, `_sfx_preset`, `video_worker_module`) shares one hint
-    instead of restating it.
-    """
-    if backend in REMOVED_VIDEO_BACKENDS:
-        return (
-            ' — video backend "longlive2" was removed (issue 079); '
-            "re-init with --backend ltxv (tapes do not transfer; "
-            "existing segments stay valid media, only continuation stops)"
-        )
-    return ""
-
-
 AudioBackendName = Literal["fake", "acestep"]
 """Audio backend vocabulary (issue 022): fake sine vs the ACE-Step music stack."""
 
@@ -870,9 +842,7 @@ def _video_preset(backend: str) -> dict[str, str | int | list[int]]:
         return _VIDEO_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_VIDEO_BACKEND_PRESETS))
-        raise ValueError(
-            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
-        ) from None
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
 
 
 def _audio_preset(backend: str) -> dict[str, str]:
@@ -881,9 +851,7 @@ def _audio_preset(backend: str) -> dict[str, str]:
         return _AUDIO_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_AUDIO_BACKEND_PRESETS))
-        raise ValueError(
-            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
-        ) from None
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
 
 
 def _sfx_preset(backend: str) -> dict[str, str]:
@@ -899,9 +867,7 @@ def _sfx_preset(backend: str) -> dict[str, str]:
         return _SFX_BACKEND_PRESETS[backend]
     except KeyError:
         known = ", ".join(sorted(_SFX_BACKEND_PRESETS))
-        raise ValueError(
-            f"unknown video backend {backend!r} (known: {known}){removed_backend_suffix(backend)}"
-        ) from None
+        raise ValueError(f"unknown video backend {backend!r} (known: {known})") from None
 
 
 def with_video_backend(config: ProjectConfig, backend: VideoBackendName) -> ProjectConfig:

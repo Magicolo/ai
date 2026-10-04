@@ -25,9 +25,9 @@ from voyage import model_registry
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DOCKERFILE = REPO_ROOT / "worker" / "Dockerfile.video"
 
-# Issue 079 deleted the only `-r requirements.txt` row with the longlive2
-# backend (its upstream requirements could never be frozen without a GPU-box
-# build). No `-r` row remains: any NEW one fails.
+# No `-r requirements.txt` row remains in the video image: upstream
+# requirements can never be frozen without a GPU-box build, so any NEW
+# `-r` row fails.
 _NO_REQUIREMENT_ROWS: list[str] = []
 
 _OPTIONS_WITH_VALUE = frozenset(
@@ -105,18 +105,16 @@ def test_video_dockerfile_has_no_floating_pins() -> None:
     assert requirement_files == _NO_REQUIREMENT_ROWS
 
 
-def test_wan22_pins_removed_with_longlive2_backend() -> None:
-    """Issue 079 closes 070 by deletion: the floating Wan2.2 base is gone."""
+def test_wan22_pins_absent() -> None:
+    """The floating Wan2.2 base is gone with its backend."""
     assert not hasattr(model_registry, "WAN_HF_REVISION")
     assert not hasattr(model_registry, "WAN_HF_REPO")
-    assert "longlive2-bf16" not in model_registry.MODEL_SPECS
 
 
 def test_floating_snapshot_set_is_empty() -> None:
-    """Issue 070 closed (characterization, not TDD): no floating snapshot remains.
+    """Closed (characterization, not TDD): no floating snapshot remains.
 
-    The only floating row was Wan2.2 (longlive2-bf16); issue 079 deleted the
-    backend with it. Fails if a NEW floating row appears.
+    Fails if a NEW floating row appears.
     """
     floating = {
         (name, snapshot.repo_id)
