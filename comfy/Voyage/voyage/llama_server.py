@@ -35,6 +35,7 @@ without `shell=True`).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import DEVNULL, Popen, TimeoutExpired
@@ -62,6 +63,9 @@ LLAMA_SERVER_BINARY_NAME = "llama-server"
 
 LLAMA_SERVER_BINARY_ENVIRONMENT_VARIABLE = "VOYAGE_LLAMA_SERVER_BIN"
 """Explicit binary override (tests/dev): an absolute path wins over PATH."""
+
+LLAMA_SERVER_VISIBLE_DEVICES_ENVIRONMENT_VARIABLE = "CUDA_VISIBLE_DEVICES"
+"""Child-env key masking the sidecar to one GPU (the literal CUDA name)."""
 
 LLAMA_SERVER_READY_TIMEOUT_SECONDS = 120.0
 """Bounded readiness deadline: a cold CUDA init plus a ~3 GiB weight
@@ -120,6 +124,25 @@ def port_for_endpoint(endpoint: str) -> int:
     if not 1 <= parsed.port <= 65535:
         raise LlamaServerError(f"llama endpoint {endpoint!r} has an invalid port")
     return parsed.port
+
+
+def visible_devices_for(device: str) -> str | None:
+    """Physical GPU index masking the sidecar, or None for no mask.
+
+    `cuda:N` (and bare `cuda`, torch's default-device alias for index 0)
+    maps to the index string the CUDA runtime expects in
+    `CUDA_VISIBLE_DEVICES`, so the server process sees exactly one card.
+    Anything else (`cpu`, or garbage — unreachable via the config
+    validator, total anyway) returns None, keeping today's
+    inherited-visibility behavior: the sidecar is GPU-only by design
+    (`-ngl 99`), so a non-cuda device carries no index to pin. Masking
+    beats `--tensor-split`: the process never opens a context on the
+    other card at all, instead of merely holding no layers there.
+    """
+    match = re.fullmatch(r"cuda(?::(\d+))?", device.strip())
+    if match is None:
+        return None
+    return match.group(1) or "0"
 
 
 def gguf_path_for(models_dir: str | Path) -> Path:
@@ -192,8 +215,16 @@ def start(
     port: int = LLAMA_SERVER_PORT,
     context_size: int = LLAMA_SERVER_CONTEXT_SIZE,
     gpu_layers: int = LLAMA_SERVER_GPU_LAYERS,
+    visible_devices: str | None = None,
 ) -> LlamaSidecar:
     """Spawn the sidecar and wait for readiness (fail loud, never orphan).
+
+    `visible_devices` masks the child to one physical GPU via
+    `CUDA_VISIBLE_DEVICES` (the parent env is otherwise inherited whole);
+    None passes `env=None`, which Popen documents as plain inheritance.
+    The supervisor derives it from the director device, so the default
+    cuda:1 run pins the server to the 2060 and it can never straddle the
+    video card.
 
     Raises `LlamaServerError` when the weight file is missing, the binary
     cannot spawn, the process exits early, or readiness times out — a
@@ -210,8 +241,16 @@ def start(
     command = build_server_argv(
         binary, model_path, port=port, context_size=context_size, gpu_layers=gpu_layers
     )
+    child_env: dict[str, str] | None = None
+    if visible_devices is not None:
+        child_env = {
+            **os.environ,
+            LLAMA_SERVER_VISIBLE_DEVICES_ENVIRONMENT_VARIABLE: visible_devices,
+        }
     try:
-        process = Popen(command, stdout=DEVNULL, stderr=DEVNULL)
+        # env=None inherits the parent env (Popen contract), so the masked
+        # and unmasked paths share one call shape.
+        process = Popen(command, stdout=DEVNULL, stderr=DEVNULL, env=child_env)
     except OSError as exc:
         raise LlamaServerError(
             f"cannot spawn llama-server {binary!r}: {exc} "

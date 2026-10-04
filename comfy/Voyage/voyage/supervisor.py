@@ -487,15 +487,21 @@ class Supervisor:
         """Start the loopback sidecar before the director initializes.
 
         No-op unless the llama backend is active (or already started).
-        A readiness failure raises `FatalWorkerError`: the run aborts
-        instead of silently falling back to AWQ, which would corrupt the
-        experiment with mixed-backend directives.
+        The child is masked to the director device via CUDA_VISIBLE_DEVICES
+        (default cuda:1 = the 2060), so the server can never straddle the
+        video card. A readiness failure raises `FatalWorkerError`: the run
+        aborts instead of silently falling back to AWQ, which would corrupt
+        the experiment with mixed-backend directives.
         """
         if not self._llama_backend_active() or self._llama_sidecar is not None:
             return
         try:
             port = llama_server.port_for_endpoint(self._config.director.llama_endpoint)
-            self._llama_sidecar = llama_server.start(self._config.video.models_dir, port=port)
+            self._llama_sidecar = llama_server.start(
+                self._config.video.models_dir,
+                port=port,
+                visible_devices=llama_server.visible_devices_for(self._config.director.device),
+            )
         except llama_server.LlamaServerError as exc:
             raise FatalWorkerError(f"llama sidecar failed to start: {exc}") from exc
 

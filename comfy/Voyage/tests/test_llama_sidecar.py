@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -87,6 +88,7 @@ def _install_process_stub(
 
     def _fake_popen(*args: Any, **kwargs: Any) -> _FakeProcess:
         commands.append(list(args[0]))
+        process.keywords = dict(kwargs)
         return process
 
     monkeypatch.setattr(llama_server, "Popen", _fake_popen)
@@ -668,3 +670,90 @@ def test_init_parser_accepts_llama_director() -> None:
 
     args = build_parser().parse_args(["generate", "--style", "s", "--director", "llama"])
     assert args.director == "llama"
+
+
+# ---------------------------------------------------------------------------
+# GPU pinning: the sidecar must never straddle cards (2060-only by default).
+# ---------------------------------------------------------------------------
+
+
+def test_visible_devices_for_maps_cuda_device_to_index() -> None:
+    """cuda:N masks the child to physical GPU N (bare cuda = index 0)."""
+    assert llama_server.visible_devices_for("cuda:1") == "1"
+    assert llama_server.visible_devices_for("cuda:0") == "0"
+    assert llama_server.visible_devices_for("cuda") == "0"
+
+
+def test_visible_devices_for_returns_none_without_cuda_device() -> None:
+    """cpu (and anything non-cuda) means no mask: inherited visibility."""
+    assert llama_server.visible_devices_for("cpu") is None
+    assert llama_server.visible_devices_for("") is None
+
+
+def test_start_masks_child_env_to_visible_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """visible_devices lands in the child env; the rest inherits the parent."""
+    _write_gguf(tmp_path, QWEN35_GGUF_MIN_BYTES)
+    process = _FakeProcess()
+    _install_process_stub(monkeypatch, process)
+    _install_probe_stub(monkeypatch, [True])
+    _install_fast_clock(monkeypatch, [0.0, 0.0])
+    llama_server.start(tmp_path, port=SIDECAR_PORT, visible_devices="1")
+    child_env = process.keywords.get("env")
+    assert isinstance(child_env, dict)
+    assert child_env["CUDA_VISIBLE_DEVICES"] == "1"
+    assert child_env.get("PATH") == os.environ.get("PATH")
+
+
+def test_start_without_visible_devices_inherits_parent_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset mask = today's exact behavior: Popen gets env=None (inherit)."""
+    _write_gguf(tmp_path, QWEN35_GGUF_MIN_BYTES)
+    process = _FakeProcess()
+    _install_process_stub(monkeypatch, process)
+    _install_probe_stub(monkeypatch, [True])
+    _install_fast_clock(monkeypatch, [0.0, 0.0])
+    llama_server.start(tmp_path, port=SIDECAR_PORT)
+    assert process.keywords.get("env") is None
+
+
+def test_start_workers_forwards_director_device_to_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default cuda:1 director masks the sidecar to physical GPU 1."""
+    run_dir = tmp_path / "run"
+    supervisor = _supervisor_with_backend(run_dir, "llama")
+    calls: dict[str, Any] = {}
+
+    def _record_sidecar(*args: Any, **kwargs: Any) -> None:
+        del args
+        calls["kwargs"] = dict(kwargs)
+
+    monkeypatch.setattr(llama_server, "start", _record_sidecar)
+    for worker_name in ("_video", "_audio", "_director"):
+        monkeypatch.setattr(getattr(supervisor, worker_name), "start", lambda: None)
+    supervisor.start_workers()
+    assert calls["kwargs"].get("visible_devices") == "1"
+
+
+def test_start_workers_leaves_sidecar_unmasked_for_cpu_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cpu device carries no CUDA index: no mask (today's behavior, documented)."""
+    run_dir = tmp_path / "run"
+    base = ProjectConfig(style="llama sidecar probe")
+    config = resolve_config(base, director="llama", director_device="cpu")
+    supervisor = Supervisor(run_dir, config)
+    calls: dict[str, Any] = {}
+
+    def _record_sidecar(*args: Any, **kwargs: Any) -> None:
+        del args
+        calls["kwargs"] = dict(kwargs)
+
+    monkeypatch.setattr(llama_server, "start", _record_sidecar)
+    for worker_name in ("_video", "_audio", "_director"):
+        monkeypatch.setattr(getattr(supervisor, worker_name), "start", lambda: None)
+    supervisor.start_workers()
+    assert calls["kwargs"].get("visible_devices") is None
