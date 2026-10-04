@@ -27,6 +27,7 @@ from voyage.augment_sidecar import (
     STAGE_UPSCALED,
     ChunkKey,
     append_chunk_record,
+    chunk_output_complete,
     load_chunk_ledger,
     missing_chunk_indexes,
     plan_dir_for_segment,
@@ -233,7 +234,19 @@ def upscale_poll_once(
         records = load_chunk_ledger(ledger_path)
         windows = list(chunk_windows(source.total_frames, chunk_frames))
         indexes = list(range(len(windows)))
-        missing = missing_chunk_indexes(records, indexes, stage=UPSCALE_STAGE)
+        ledger_missing = missing_chunk_indexes(records, indexes, stage=UPSCALE_STAGE)
+        ledger_missing_set = set(ledger_missing)
+        # Ledger-truth plus output-truth: a ledgered chunk whose output
+        # is gone or short (deletion, corruption, crash after prune)
+        # rejoins the missing set instead of deadlocking the skip.
+        missing = list(ledger_missing)
+        for index in indexes:
+            if index in ledger_missing_set:
+                continue
+            _start, count = windows[index]
+            if not chunk_output_complete(_chunk_output_dir(plan_dir, index), count):
+                missing.append(index)
+        missing.sort()
         chunks_skipped += len(indexes) - len(missing)
         for index in missing:
             start, count = windows[index]

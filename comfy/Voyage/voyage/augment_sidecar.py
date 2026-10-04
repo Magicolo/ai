@@ -156,16 +156,25 @@ def append_chunk_record(ledger: Path, key: ChunkKey, *, stage: str, path: str) -
 
 
 def load_chunk_ledger(ledger: Path) -> list[dict[str, Any]]:
-    """Read the sidecar ledger (missing file → empty; blank lines tolerated)."""
+    """Read the sidecar ledger (missing file → empty; blank lines tolerated).
+
+    Torn trailing lines (a crash mid-append between `write` and the
+    newline+fsync) are skipped, not fatal: the interrupted chunk simply
+    has no record and is re-rendered on the next poll.
+    """
     if not ledger.exists():
         return []
     records: list[dict[str, Any]] = []
     for line in ledger.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped:
+        if not stripped:
+            continue
+        try:
             parsed = json.loads(stripped)
-            if isinstance(parsed, dict):
-                records.append(parsed)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
     return records
 
 
@@ -200,6 +209,32 @@ def missing_chunk_indexes(
     resolved_stage = _require_stage(stage)
     done = completed_stages(records)
     return [index for index in indexes if resolved_stage not in done.get(index, set())]
+
+
+def chunk_output_complete(output_dir: Path, expected: int) -> bool:
+    """Whether a ledgered chunk's output dir holds all expected frames.
+
+    Output-truth companion to the ledger: the ledger alone never skips —
+    only a present dir with exactly `expected` non-empty `frame_*.png`
+    files counts as complete. A crash, cleanup, or disk corruption can
+    remove output after its record was appended; anything incomplete is
+    re-rendered (or waited on) instead of deadlocking the skip.
+    """
+    if not output_dir.is_dir() or output_dir.is_symlink():
+        return False
+    try:
+        frames = sorted(output_dir.glob("frame_*.png"))
+    except OSError:
+        return False
+    if len(frames) != expected:
+        return False
+    for frame in frames:
+        try:
+            if not frame.is_file() or frame.stat().st_size == 0:
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def prune_stale_partials(target: Path) -> int:

@@ -36,6 +36,7 @@ from voyage.augment_sidecar import (
     STAGE_UPSCALED,
     ChunkKey,
     append_chunk_record,
+    chunk_output_complete,
     completed_stages,
     load_chunk_ledger,
     missing_chunk_indexes,
@@ -173,13 +174,32 @@ def interp_poll_once(
         done = completed_stages(records)
         windows = list(chunk_windows(source.total_frames, chunk_frames))
         indexes = list(range(len(windows)))
-        ready = [index for index in indexes if STAGE_UPSCALED in done.get(index, set())]
+        ledger_ready = [index for index in indexes if STAGE_UPSCALED in done.get(index, set())]
+        # Output-truth on the upscaled inputs: a ledgered chunk whose
+        # upscaled output is gone or short waits (the upscale poller
+        # heals it) instead of failing loud here.
+        ready = [
+            index
+            for index in ledger_ready
+            if chunk_output_complete(plan_dir / f"upscaled_{index:02d}", windows[index][1])
+        ]
         chunks_waiting += len(indexes) - len(ready)
-        missing = missing_chunk_indexes(
+        ledger_missing = missing_chunk_indexes(
             [record for record in records if record.get("stage") == INTERP_STAGE],
             ready,
             stage=INTERP_STAGE,
         )
+        ledger_missing_set = set(ledger_missing)
+        # Ledger-truth plus output-truth on our own outputs: a ledgered
+        # chunk whose interpolated dir is gone or short rejoins missing.
+        missing = list(ledger_missing)
+        for index in ready:
+            if index in ledger_missing_set:
+                continue
+            expected = interpolated_frame_count(windows[index][1], multiplier)
+            if not chunk_output_complete(plan_dir / f"interpolated_{index:02d}", expected):
+                missing.append(index)
+        missing.sort()
         chunks_skipped += len(ready) - len(missing)
         for index in missing:
             start, count = windows[index]
