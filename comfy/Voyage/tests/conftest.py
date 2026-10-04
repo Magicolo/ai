@@ -168,6 +168,6 @@ def _never_spawn_llama_sidecar(request: pytest.FixtureRequest, monkeypatch: pyte
         "tests.test_llama_sidecar"
     ):
         return
-    import voyage.supervisor as supervisor_module
+    from voyage import llama_server
 
-    monkeypatch.setattr(supervisor_module.llama_server, "start", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llama_server, "start", lambda *args, **kwargs: None)

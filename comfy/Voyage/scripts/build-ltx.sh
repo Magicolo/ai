@@ -25,6 +25,12 @@ rm -rf worker/ltx_mask_utils
 cp -r "$PACK_SRC" worker/ltx_mask_utils
 trap 'rm -rf worker/ltx_mask_utils' EXIT
 voyage_build_image voyage-ltx:latest worker/Dockerfile.ltx
+# llama-server sidecar binary (DESIGN §140 llama entry): the default generate
+# path (video=ltx25 + director=llama) spawns it, so the bake must carry it.
+# File-existence only (no --version: the CUDA binary cannot start without
+# libcuda.so.1, absent in the build container without --gpus).
+docker run --rm --entrypoint test voyage-ltx:latest -x /opt/llama.cpp/bin/llama-server
+docker run --rm --entrypoint test voyage-ltx:latest -x /usr/local/bin/llama-server
 docker run --rm --gpus all "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" \
   --entrypoint python3 voyage-ltx:latest -c "
 import importlib.util, sys, types

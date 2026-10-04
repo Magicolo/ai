@@ -58,7 +58,7 @@ ride the GPU (the `-ngl` exact-number form, same idiom as the upstream
 CUDA server examples)."""
 
 LLAMA_SERVER_BINARY_NAME = "llama-server"
-"""Binary name on PATH (installed by worker/Dockerfile.video)."""
+"""Binary name on PATH (installed by worker/Dockerfile.video and worker/Dockerfile.ltx)."""
 
 LLAMA_SERVER_BINARY_ENVIRONMENT_VARIABLE = "VOYAGE_LLAMA_SERVER_BIN"
 """Explicit binary override (tests/dev): an absolute path wins over PATH."""
@@ -215,7 +215,7 @@ def start(
     except OSError as exc:
         raise LlamaServerError(
             f"cannot spawn llama-server {binary!r}: {exc} "
-            "(the video image installs it — see worker/Dockerfile.video)"
+            "(the CUDA images install it — see worker/Dockerfile.video and worker/Dockerfile.ltx)"
         ) from exc
     handle = LlamaSidecar(process=process, endpoint=endpoint_for(port), model_path=model_path)
     try:

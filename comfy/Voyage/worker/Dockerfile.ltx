@@ -112,6 +112,62 @@ RUN python3.11 -m venv /opt/venvs/director \
 COPY worker/ltx_mask_utils/ /opt/comfyui/custom_nodes/ltx_mask_utils/
 RUN grep -q 'LTXPrefixFreeze' /opt/comfyui/custom_nodes/ltx_mask_utils/prefix_freeze.py
 
+# llama-server sidecar (Qwen director, DESIGN §140 llama entry): same pinned
+# SOURCE build as worker/Dockerfile.video (this ltx image serves the default
+# `generate` path — video=ltx25 + director=llama — so it needs the binary too;
+# its absence was the `cannot spawn llama-server ... Errno 2` generate failure).
+# Pinned tag b11146 (2026-09-23) with a hard sha256 gate on the source tarball
+# (37,561,762 bytes). `python3.11 -m pip` for the cmake wheel (no bare `pip`
+# exists in this image); CUDA comes from the image toolkit (nvcc present).
+# Only the `llama-server` target builds, for sm_75 (RTX 2060) + sm_86
+# (RTX 4060 Ti) only. One layer, cached on success; sources removed after
+# install so only /opt/llama.cpp survives. Re-pin procedure: update tag +
+# source sha below, rebuild (mirror any change into Dockerfile.video).
+RUN set -eux; \
+    python3.11 -m pip install --no-cache-dir "cmake==4.1.3" && \
+    python3 <<'PYEOF'
+import hashlib
+import tarfile
+import urllib.request
+url = "https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11146.tar.gz"
+expected_sha256 = "25eb89e300a0600bfdfadaac2acc7ec3a93cd23b992b7eff3c0eeae7987e4474"
+archive_path = "/tmp/llama-source.tar.gz"
+urllib.request.urlretrieve(url, archive_path)
+digest = hashlib.sha256()
+with open(archive_path, "rb") as archive:
+    for chunk in iter(lambda: archive.read(1048576), b""):
+        digest.update(chunk)
+actual_sha256 = digest.hexdigest()
+if actual_sha256 != expected_sha256:
+    raise SystemExit(f"llama.cpp source sha mismatch: {actual_sha256}")
+with tarfile.open(archive_path) as archive:
+    archive.extractall("/tmp/llama-source")
+PYEOF
+# A heredoc terminator cannot carry a `\` continuation, so the RUN above
+# ends at PYEOF — configure/build/install/smoke are their own layer.
+# NOTE: no `cmake --install` here on purpose — installing the
+# `llama-server` target alone leaves the `tests` install rules with
+# unbuilt files and the install step fails. The binary + its shared libs
+# are copied out directly instead; the loader finds the libs via
+# LD_LIBRARY_PATH below (no RUNPATH is baked in by a plain copy).
+ENV LD_LIBRARY_PATH=/opt/llama.cpp/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+RUN set -eux; \
+    cmake -S /tmp/llama-source/llama.cpp-b11146 -B /tmp/llama-build \
+        -DGGML_CUDA=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release \
+        "-DCMAKE_CUDA_ARCHITECTURES=75;86" \
+        "-DCMAKE_INSTALL_RPATH=$$ORIGIN/../lib" && \
+    cmake --build /tmp/llama-build --target llama-server -j"$(nproc)" && \
+    mkdir -p /opt/llama.cpp/bin /opt/llama.cpp/lib && \
+    cp /tmp/llama-build/bin/llama-server /opt/llama.cpp/bin/ && \
+    find /tmp/llama-build -name 'lib*.so*' -exec cp -P {} /opt/llama.cpp/lib/ \; && \
+    rm -rf /tmp/llama-source /tmp/llama-build /tmp/llama-source.tar.gz && \
+    test -x /opt/llama.cpp/bin/llama-server && \
+    ln -sfn /opt/llama.cpp/bin/llama-server /usr/local/bin/llama-server
+# NOTE: no `llama-server --version` smoke gate here on purpose — the
+# build container has no GPU, so libcuda.so.1 (driver-provided) is
+# absent and the CUDA binary cannot start until runtime with --gpus.
+# The live GPU run is the real smoke test.
+
 # Run as the invoking host user (same contract as the video image): the
 # supervisor and its worker subprocesses share bind mounts with the host,
 # so a root container leaves root-owned renders behind. A real user
@@ -134,7 +190,7 @@ RUN set -eux; \
     fi; \
   fi; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
-  chown -R "${UID}:${GID}" /opt/comfyui /opt/venvs;
+  chown -R "${UID}:${GID}" /opt/comfyui /opt/venvs /opt/llama.cpp;
 ENV HOME=/home/voyager
 USER voyager
 
