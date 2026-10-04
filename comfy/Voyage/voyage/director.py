@@ -53,6 +53,9 @@ derived from the style charter + the evolving general prompt
 (current world → destination) — (1) video stages with concrete visual
 detail (motion, scenes, objects, characters, shots, angles), (2) a
 music caption in musical terms (instruments, harmony, melody, texture),
+always with a dark experimental touch (minor and modal harmony, deep
+sub-bass pressure, sparse dissonant accents, shadowed cinematic
+texture) worked into the charter's mood rather than replacing it,
 (3) an sfx_caption with concrete sound descriptions (objects,
 environments, creatures, materials in action). All three families must
 evolve gradually as the general prompt drifts: continue from the
@@ -206,9 +209,10 @@ def deterministic_decision(
         ),
         audio=DirectorAudioPlan(
             music_caption=(
-                f"slow ambient electronic composition for {concept}: "
-                f"soft pads and low drones in {charter}, "
-                "sparse bell melody, gentle harmonic drift"
+                f"dark experimental electronic composition for {concept}: "
+                f"low detuned drones and minor-key pads in {charter}, "
+                "sparse dissonant bell melody, deep sub-bass pressure, "
+                "slow shadowed harmonic drift"
             ),
             sfx_caption=(
                 f"quiet concrete sounds of {concept}: soft air movement, "
