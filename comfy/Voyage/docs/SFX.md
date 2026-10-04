@@ -96,7 +96,7 @@ modified). Caption source is per-segment director captions unless
 `--sfx-caption` overrides — required for runs committed before SFX
 captions existed.
 
-Pins (all in-memory, never written to `voyage.toml` unless noted):
+Pins (all in-memory — the run manifest carries the effective config, no TOML):
 
 - `--sfx-caption` (finalize + `sfx` verb): one caption for the whole
   timeline; default is per-segment director captions.

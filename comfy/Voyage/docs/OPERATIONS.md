@@ -4,7 +4,7 @@
 ./scripts/run.sh doctor
 ./scripts/run.sh models verify
 ./scripts/run.sh generate --backend ltxv --duration 5s --style "..."
-./scripts/run.sh init --output <dir> --run-id <id> --style "..." --force
+./scripts/run.sh generate --name <id> --style "..."
 ./scripts/run.sh run --run <dir> [--segments N] [--draft] [--quantization fp8|bf16]
 ./scripts/run.sh status --run <dir>
 ./scripts/run.sh pause --run <dir>     # safe pause at next boundary
@@ -181,7 +181,7 @@ get real ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Extra run
 failure aborts before finalize unless `--skip-bad`; on a GPU box with no
 visible GPU a warning is printed (the worker will fail at init). `run.sh`
 selects the container automatically: a CUDA backend (`ltxv`, `causvid`,
-`acestep` — from `--backend` or the run's `voyage.toml`) switches to
+`acestep` — from `--backend` or the run's `run_manifest.json`) switches to
 `voyage-video:latest` with `--gpus all` and pins `-w /app`, unless
 `VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. Bare `run.sh` (the TUI,
 backend picked interactively) counts as CUDA-needing when the host has a

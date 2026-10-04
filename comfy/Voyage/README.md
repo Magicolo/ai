@@ -73,16 +73,16 @@ Step-by-step (for pause/resume and unbounded runs):
 
 ```bash
 # New run (style charter = the permanent visual identity):
-./scripts/run.sh init --output /tmp/vdemo --run-id vdemo \
-  --style "pastel neon line-art, peaceful" --force
+./scripts/run.sh generate --name vdemo \
+  --style "pastel neon line-art, peaceful"
 
 # Generate 2 segments, then check them:
-./scripts/run.sh run --run /tmp/vdemo --segments 2
-./scripts/run.sh validate --run /tmp/vdemo
+./scripts/run.sh run --run output/vdemo --segments 2
+./scripts/run.sh validate --run output/vdemo
 
 # Ongoing status, then finalize to one MP4:
-./scripts/run.sh status --run /tmp/vdemo
-./scripts/run.sh finalize --run /tmp/vdemo --output /tmp/vdemo/final.mp4
+./scripts/run.sh status --run output/vdemo
+./scripts/run.sh finalize --run output/vdemo --output output/vdemo/final.mp4
 ```
 
 Omit `--segments` to run until `voyage pause` / `voyage stop` / SIGINT.

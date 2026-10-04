@@ -11,8 +11,8 @@ ladder): `docs/SFX.md`.
 
 ## Style charter
 
-`voyage init --style "..."` sets the run's permanent visual identity
-(`config.style`). It is injected into **every** video prompt, stage
+`voyage generate --name <id> --style "..."` sets the run's permanent visual identity
+(`config.style`, stored in the run manifest). It is injected into **every** video prompt, stage
 prompt, and director proposal by code — never left to the model to
 remember. Changing it mid-run changes the voyage's identity; prefer a
 new run for a new look.
