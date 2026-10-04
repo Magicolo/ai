@@ -1,8 +1,8 @@
 """Project configuration (DESIGN task group B).
 
 CLI-is-config: the effective `ProjectConfig` is built directly from the
-`generate` flags (`preset_config` + `resolve_config`) and persisted as
-structured data inside `run_manifest.json` — there is no TOML layer.
+`configure` flags (`preset_config` + `resolve_config`) and persisted as
+structured data inside `manifest.json` — there is no TOML layer.
 Validation lives in the model validators; the manifest digest traces
 runs to their exact configuration.
 """

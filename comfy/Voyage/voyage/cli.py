@@ -10,6 +10,9 @@ import argparse
 import sys
 from typing import Any
 
+from voyage.cli_configure import (
+    cmd_configure,
+)
 from voyage.cli_core import (
     _augment_overrides,
     _load_run,
@@ -149,6 +152,7 @@ __all__ = [
     "_SEGMENT_ID_PATTERN",
     "_add_augment_args",
     "_add_benchmark_parser",
+    "_add_configure_parser",
     "_add_console_args",
     "_add_doctor_parser",
     "_add_finalize_parser",
@@ -206,6 +210,7 @@ __all__ = [
     "check_ffmpeg",
     "check_free_space",
     "cmd_benchmark",
+    "cmd_configure",
     "cmd_doctor",
     "cmd_finalize",
     "cmd_generate",
@@ -489,6 +494,73 @@ def _add_run_ref(parser: argparse.ArgumentParser, *, noun: str) -> None:
     )
 
 
+def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
+    """`configure` verb: init or update a run manifest (all run options live here)."""
+    conf = sub.add_parser(
+        "configure", help="Init or update a run manifest (all run options live here)"
+    )
+    conf.add_argument("name", help="run name (flat folder name → output/<name>)")
+    conf.add_argument(
+        "--backend",
+        choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
+        default=None,
+        help="video backend preset written into the run config",
+    )
+    conf.add_argument(
+        "--duration",
+        type=parse_duration,
+        required=False,
+        default=None,
+        help=f"target length, e.g. {_DURATION_EXAMPLES} (converts to a segment count; "
+        "exactly one of --duration/--segments on first configure)",
+    )
+    conf.add_argument(
+        "--segments",
+        type=int,
+        default=None,
+        help="planned segment count (exactly one of --duration/--segments on first configure)",
+    )
+    conf.add_argument("--style", default=None, help="permanent style charter for the run")
+    conf.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="master seed for the run (omit for a fresh random seed, printed at init)",
+    )
+    conf.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
+    conf.add_argument(
+        "--final-video",
+        default=None,
+        help="final mp4 path (default <run>/final.mp4)",
+    )
+    conf.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="finalize past corrupt segments instead of aborting",
+    )
+    conf.add_argument(
+        "--no-download",
+        action="store_true",
+        help="fail instead of downloading missing models (verify only)",
+    )
+    conf.add_argument(
+        "--draft",
+        action="store_true",
+        help="apply the [draft] profile (fast low-res iteration settings)",
+    )
+    conf.add_argument(
+        "--director",
+        default=None,
+        choices=("qwen", "deterministic", "llama"),
+        help="director backend",
+    )
+    _add_generation_overrides(conf)
+    _add_sfx_args(conf)
+    _add_augment_args(conf)
+    _add_console_args(conf)
+    conf.set_defaults(func=cmd_configure)
+
+
 def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`run` verb: generate segments (infinite unless --segments)."""
     run = sub.add_parser("run", help="Generate segments (infinite unless --segments)")
@@ -744,6 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_doctor_parser(sub)
     _add_models_parser(sub)
+    _add_configure_parser(sub)
     _add_run_parser(sub)
     _add_generate_parser(sub)
 

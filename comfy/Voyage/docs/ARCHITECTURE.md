@@ -17,7 +17,7 @@
 ## Process ownership
 
 - **Supervisor** (`voyage/supervisor.py`): the only process that reads or
-  writes `state.json`, `run_manifest.json` (`voyage/paths.py:29`),
+  writes `state.json`, `manifest.json` (`voyage/paths.py:29`),
   segment dirs, the concept store, the audio ledger, and `metrics.jsonl`. Workers receive file paths in
   RPC payloads and write only the media files they are told to.
 - **Workers**: stateless across segments except the video stream session
@@ -60,7 +60,7 @@ audio swap ever runs for them — only `fake` commits real audio inline
 
 ## What lives where in a run dir
 
-`run_manifest.json` (`voyage/paths.py:29` — carries the effective config,
+`manifest.json` (`voyage/paths.py:29` — carries the effective config,
 CLI-is-config, no TOML), `state.json` (`:31`), `concepts.jsonl` (`:32`), `novelty/` (vectors +
 index + jsonl), `segments/NNNNNN/` (video.mp4, audio.wav,
 world/transition/prompt-plan/audio-state/metrics.json, sha256.json,

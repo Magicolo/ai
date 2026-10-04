@@ -1,7 +1,7 @@
 """Run-directory layout (DESIGN §21 persistent files, §29 segment dir).
 
 run/
-  run_manifest.json   (carries the effective config — CLI-is-config, no TOML)
+  manifest.json   (carries the effective config — CLI-is-config, no TOML)
   state.json
   concepts.jsonl
   segments/
@@ -26,7 +26,7 @@ MAX_SEGMENT_NUMBER = 999999
 #: `06` in the format spec) so the padding visibly tracks the max above.
 SEGMENT_ID_WIDTH = 6
 
-MANIFEST_FILENAME = "run_manifest.json"
+MANIFEST_FILENAME = "manifest.json"
 SEGMENT_MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
 CONCEPTS_FILENAME = "concepts.jsonl"

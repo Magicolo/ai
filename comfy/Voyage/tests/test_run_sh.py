@@ -20,7 +20,7 @@ RUN_SH = Path(__file__).resolve().parent.parent / "scripts" / "run.sh"
 # run.sh resolves --user from `id -u`/`id -g` on every path (including the
 # dry-run seam), so the isolated PATH must provide it alongside coreutils.
 # python3 is needed for the stored-config manifest sniff (run.sh parses
-# DIR/run_manifest.json with the stdlib parser when --backend is absent).
+# DIR/manifest.json with the stdlib parser when --backend is absent).
 _CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname", "id", "python3")
 _SMI_MODE = Literal["present-ok", "present-fail", "absent"]
 
@@ -190,7 +190,7 @@ def test_run_dir_with_ltx_manifest_selects_ltx_image(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
-    run_dir.joinpath("run_manifest.json").write_text(
+    run_dir.joinpath("manifest.json").write_text(
         json.dumps({"effective_config": {"video": {"backend": "ltx25"}}}),
         encoding="utf-8",
     )

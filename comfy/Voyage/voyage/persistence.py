@@ -48,6 +48,10 @@ def build_manifest(
     hardware: dict[str, str],
     software: dict[str, str],
     argv: list[str] | None = None,
+    segments: int | None = None,
+    final_video: str | None = None,
+    skip_bad: bool = False,
+    no_sfx: bool = False,
 ) -> dict[str, object]:
     return {
         "schema_version": paths.SCHEMA_VERSION,
@@ -58,6 +62,10 @@ def build_manifest(
         "style": config.style,
         "argv": list(argv) if argv is not None else [],
         "effective_config": config.model_dump(mode="json"),
+        "segments": segments,
+        "final_video": final_video,
+        "skip_bad": skip_bad,
+        "no_sfx": no_sfx,
         "hardware": hardware,
         "software": software,
         "models": {
@@ -161,7 +169,15 @@ def initial_state(config: ProjectConfig) -> RunState:
     )
 
 
-def create_run_dir(run_dir: Path, config: ProjectConfig, argv: list[str] | None = None) -> str:
+def create_run_dir(
+    run_dir: Path,
+    config: ProjectConfig,
+    argv: list[str] | None = None,
+    segments: int | None = None,
+    final_video: str | None = None,
+    skip_bad: bool = False,
+    no_sfx: bool = False,
+) -> str:
     """Scaffold a fresh run directory (sole creator: `generate` + tests).
 
     CLI-is-config: mkdirs segments/logs, then writes the manifest
@@ -176,6 +192,19 @@ def create_run_dir(run_dir: Path, config: ProjectConfig, argv: list[str] | None 
     digest = effective_config_digest(config)
     hardware = {"note": "recorded at creation; see `voyage doctor` for live facts"}
     software = {"python": sys.version.split()[0]}
-    write_manifest(run_dir, build_manifest(config, digest, hardware, software, argv=argv))
+    write_manifest(
+        run_dir,
+        build_manifest(
+            config,
+            digest,
+            hardware,
+            software,
+            argv=argv,
+            segments=segments,
+            final_video=final_video,
+            skip_bad=skip_bad,
+            no_sfx=no_sfx,
+        ),
+    )
     write_state(run_dir, initial_state(config))
     return digest

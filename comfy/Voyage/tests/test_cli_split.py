@@ -29,6 +29,7 @@ from voyage.config import BACKEND_REGISTRY, VideoBackendName
 EXPECTED_VERBS = (
     "doctor",
     "models",
+    "configure",
     "run",
     "generate",
     "status",

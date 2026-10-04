@@ -114,8 +114,8 @@ if [ -n "$avail_kib" ] && [ "$avail_kib" -lt $((min_free_gib * 1024 * 1024)) ]; 
   echo "qualify: only ~${avail_gib} GiB free under $run_dir (need ${min_free_gib})" >&2
   exit 5
 fi
-if [ ! -f "$run_dir/run_manifest.json" ]; then
-  echo "qualify: no run_manifest.json in $run_dir — generate first:" >&2
+if [ ! -f "$run_dir/manifest.json" ]; then
+  echo "qualify: no manifest.json in $run_dir — generate first:" >&2
   echo "  ./scripts/run.sh generate --name qual-${backend} \\" >&2
   echo "    --style 'pastel neon line-art, peaceful' --backend ${backend}" >&2
   exit 2

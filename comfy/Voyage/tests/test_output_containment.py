@@ -89,7 +89,7 @@ def test_init_outside_output_warns_but_proceeds(
         == 0
     )
     assert "outside" in capsys.readouterr().err
-    assert (target / "run_manifest.json").exists()
+    assert (target / "manifest.json").exists()
 
 
 def test_init_inside_output_is_quiet(

@@ -264,7 +264,7 @@ def test_qualify_sh_missing_run_dir_reaches_generate_hint(tmp_path: Path) -> Non
 
     Regression: the `df` preflight on a nonexistent dir once tripped
     `set -e` (pipefail) inside the command substitution, so the script
-    died rc=1 before the run_manifest.json check. `|| true` keeps the gate
+    died rc=1 before the manifest.json check. `|| true` keeps the gate
     total — unknown space skips the preflight, it never aborts it.
     """
     import shutil
@@ -290,4 +290,4 @@ def test_qualify_sh_missing_run_dir_reaches_generate_hint(tmp_path: Path) -> Non
         env=env,
     )
     assert completed.returncode == 2
-    assert "run_manifest.json" in completed.stderr
+    assert "manifest.json" in completed.stderr

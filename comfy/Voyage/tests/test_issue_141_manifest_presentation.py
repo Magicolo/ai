@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 def _read_manifest(run_dir: Path) -> dict[str, object]:
-    return json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+    return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
 def test_manifest_records_presentation_floors(tmp_path: Path) -> None:
