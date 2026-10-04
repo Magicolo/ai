@@ -1,10 +1,12 @@
 """Finalize GPU defaults: MMAudio SFX on cuda:0, model pass on cuda:1, parallel.
 
 TDD contract for the user-approved defaults change (DESIGN §140): the
-joint-audio backends (ltx25/ltx23) dub MMAudio SFX over their native
-soundtrack at finalize on the 4060 (cuda:0), while the Real-ESRGAN + FILM
-model pass runs on the 2060 (cuda:1) — side by side when two GPUs are
-visible, sequentially otherwise.
+streaming backends defer ACE-Step music to finalize (timeline-exact
+silent stubs at commit, takes rendered after the video worker stops —
+no joint-audio GPU contention on the 4060), then dub MMAudio SFX over
+the rendered music at finalize on the 4060 (cuda:0), while the
+Real-ESRGAN + FILM model pass runs on the 2060 (cuda:1) — side by side
+when two GPUs are visible, sequentially otherwise.
 """
 
 from __future__ import annotations
@@ -16,8 +18,8 @@ from typing import cast
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.config import ProjectConfig, VideoBackendName, with_video_backend
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -26,9 +28,9 @@ def _config_with_style() -> ProjectConfig:
 
 
 def _commit_two(run_dir: Path) -> None:
-    from voyage.config import load_config, resolve_config
+    from voyage.config import resolve_config
 
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     # Pin the deterministic director: finalize-path coverage must not
     # depend on whichever decider backend is the tree default today.
     config = resolve_config(config, director="deterministic")
@@ -41,13 +43,13 @@ def _commit_two(run_dir: Path) -> None:
         supervisor.stop_workers()
 
 
-def test_joint_backends_pair_sfx_mmaudio_on_cuda0() -> None:
-    """ltx25/ltx23: native joint soundtrack (audio stays fake/cpu) but the
-    finalize SFX dub runs MMAudio on cuda:0 by default."""
+def test_ltx_backends_pair_acestep_music_and_sfx_mmaudio_on_cuda0() -> None:
+    """ltx25/ltx23: ACE-Step music (deferred to finalize, planner long
+    takes) and the finalize SFX dub runs MMAudio on cuda:0 by default."""
     for backend in ("ltx25", "ltx23"):
         config = with_video_backend(_config_with_style(), cast(VideoBackendName, backend))
-        assert config.audio.backend == "fake"
-        assert config.audio.device == "cpu"
+        assert config.audio.backend == "acestep"
+        assert config.audio.device == "cuda:0"
         assert config.sfx.backend == "mmaudio"
         assert config.sfx.device == "cuda:0"
 
@@ -102,9 +104,10 @@ def test_fake_backend_never_routes_to_parallel() -> None:
     )
 
 
-def test_joint_backends_require_sfx_stack_without_ace() -> None:
-    """`required_specs` for a joint backend with SFX enabled pulls the
-    SFX stack but never ACE-Step (the native audio.wav is the music)."""
+def test_ltx_backends_require_sfx_stack_with_acestep() -> None:
+    """`required_specs` for an ltx backend with SFX enabled pulls both the
+    SFX stack and ACE-Step (continuous planner music, not the worker's
+    joint track)."""
     from voyage.models_ensure import required_specs
 
     for backend, spec in (("ltx25", "ltx25"), ("ltx23", "ltx23")):
@@ -114,19 +117,19 @@ def test_joint_backends_require_sfx_stack_without_ace() -> None:
         config.sfx.backend = "mmaudio"
         specs = {item.spec for item in required_specs(config, sfx_enabled=True)}
         assert "sfx-mmaudio" in specs
-        assert "audio-acestep" not in specs
+        assert "audio-acestep" in specs
         assert spec in specs
 
 
 def test_model_pass_defaults_on_everywhere() -> None:
     """The model pass is default-on: config dataclass, stored TOML text,
     and the TUI form state all agree."""
-    from voyage.config import AugmentConfig, default_config_toml
+    from voyage.config import AugmentConfig, preset_config
     from voyage.tui_state import GenerateFormState
 
     assert AugmentConfig().use_model_pass is True
     assert GenerateFormState().use_model_pass is True
-    assert "use_model_pass = true" in default_config_toml("story", "style", 7)
+    assert preset_config("story", "style", 7).augment.use_model_pass is True
 
 
 def test_model_pass_devices_pins_secondary_gpu() -> None:

@@ -24,13 +24,9 @@ from voyage.config import VideoConfig, with_video_backend
 
 def test_no_cuda_warning_for_cpu_device(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from voyage.cli import _warn_if_no_cuda
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11, video_backend="fake"),
-        encoding="utf-8",
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11, video_backend="fake")
     _warn_if_no_cuda(config)
     assert capsys.readouterr().err == ""
 
@@ -40,13 +36,10 @@ def test_cuda_warning_when_no_gpu_visible(
 ) -> None:
     import voyage.doctor
     from voyage.cli import _warn_if_no_cuda
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
     monkeypatch.setattr(voyage.doctor, "probe", lambda: {"nvidia_smi": None, "gpus": []})
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     _warn_if_no_cuda(with_video_backend(config, "ltxv"))
     assert "no GPU is visible" in capsys.readouterr().err
 
@@ -90,12 +83,9 @@ def test_segments_for_duration_rounds_up(
 
 
 def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     ltxv = with_video_backend(config, "ltxv")
     assert ltxv.video.backend == "ltxv"
     assert ltxv.video.profile == "ltxv-512p"
@@ -107,12 +97,9 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
 
 def test_removed_longlive2_preset_rejected_with_migration_hint(tmp_path: Path) -> None:
     """Issue 079: the deleted backend fails fast with a hint, never remaps."""
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     with pytest.raises(ValueError, match="longlive2"):
         with_video_backend(config, "longlive2")  # type: ignore[arg-type]
     try:
@@ -133,12 +120,9 @@ def test_run_dir_arg_resolves_absolute(tmp_path: Path) -> None:
 
 def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:
     """ltxv duration math must use the 96-novel steady state, not 121 fresh."""
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     one_block = with_video_backend(config, "ltxv")
     assert _frames_per_segment(one_block) == 96
     two_blocks = one_block.model_copy(
@@ -148,12 +132,9 @@ def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:
 
 
 def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     causvid = with_video_backend(config, "causvid")
     assert causvid.video.backend == "causvid"
     assert causvid.video.profile == "causvid-480p"
@@ -172,12 +153,9 @@ def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
 
 def test_frames_per_segment_causvid_uses_novel_minimum(tmp_path: Path) -> None:
     """causvid duration math must use the 72-novel steady state, not 81 rollout."""
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     one_block = with_video_backend(config, "causvid")
     assert _frames_per_segment(one_block) == 72
     two_blocks = one_block.model_copy(
@@ -187,53 +165,40 @@ def test_frames_per_segment_causvid_uses_novel_minimum(tmp_path: Path) -> None:
 
 
 def test_unknown_backend_rejected(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     with pytest.raises(ValueError, match="unknown video backend"):
         with_video_backend(config, "framepack")  # type: ignore[arg-type]
 
 
 def test_cuda_presets_select_acestep_audio(tmp_path: Path) -> None:
     """CUDA video presets must pair with real ACE-Step music, not fake sine."""
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
-    for backend in ("ltxv", "causvid"):
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
+    for backend in ("ltxv", "causvid", "ltx25", "ltx23"):
         applied = with_video_backend(config, backend)
         assert applied.audio.backend == "acestep"
         assert applied.audio.device == "cuda:0"
         assert applied.audio.models_dir == "/models"
     # Source config untouched (pure function) — the default preset is
-    # ltx25 with joint audio, so its own audio row stays fake.
-    assert config.audio.backend == "fake"
+    # ltx25 with ACE-Step music for continuous mood.
+    assert config.audio.backend == "acestep"
 
 
 def test_fake_preset_keeps_fake_audio(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
     assert with_video_backend(config, "fake").audio.backend == "fake"
 
 
-def test_init_toml_carries_audio_preset(tmp_path: Path) -> None:
-    """`init --backend ltxv` writes the audio preset into the toml directly."""
-    from voyage.config import default_config_toml, load_config
+def test_preset_carries_audio_preset(tmp_path: Path) -> None:
+    """`preset_config(..., video_backend="ltxv")` pairs the ACE audio preset directly."""
+    from voyage.config import preset_config
 
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("preset", "pastel neon line-art, peaceful", 11, video_backend="ltxv"),
-        encoding="utf-8",
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11, video_backend="ltxv")
     assert config.audio.backend == "acestep"
     assert config.audio.device == "cuda:0"
 
@@ -387,14 +352,10 @@ def test_cuda_guard_passes_for_fake_without_torch(
     import importlib.util
 
     from voyage.cli import _require_cuda_stack
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("guard", "pastel neon line-art, peaceful", 11, video_backend="fake"),
-        encoding="utf-8",
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("guard", "pastel neon line-art, peaceful", 11, video_backend="fake")
     assert _require_cuda_stack(config) is True
 
 
@@ -404,13 +365,10 @@ def test_cuda_guard_fails_for_ltxv_without_torch(
     import importlib.util
 
     from voyage.cli import _require_cuda_stack
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("guard", "pastel neon line-art, peaceful", 11), encoding="utf-8"
-    )
-    config, _ = load_config(tmp_path / "voyage.toml")
+    config = preset_config("guard", "pastel neon line-art, peaceful", 11)
     assert _require_cuda_stack(with_video_backend(config, "ltxv")) is False
     assert "voyage-video" in capsys.readouterr().err
 
@@ -438,31 +396,59 @@ def test_generate_aborts_before_init_without_cuda_stack(
     assert "voyage-video" in capsys.readouterr().err
 
 
-def test_omitted_seed_randomizes_init(tmp_path: Path) -> None:
+def test_omitted_seed_randomizes_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Omitting --seed writes a fresh random master seed (non-reproducible)."""
-    from voyage.cli import build_parser, cmd_init
-    from voyage.config import load_config
+    import voyage.cli as cli_module
+    import voyage.models_ensure as ensure_module
+    from voyage.cli import build_parser, cmd_generate
+    from voyage.persistence import read_effective_config
+
+    monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
+    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
+    monkeypatch.chdir(tmp_path)
 
     first = tmp_path / "first"
     second = tmp_path / "second"
     assert (
-        cmd_init(
+        cmd_generate(
             build_parser().parse_args(
-                ["init", "--output", str(first), "--style", "pastel neon line-art, peaceful"]
+                [
+                    "generate",
+                    "--output",
+                    str(first),
+                    "--style",
+                    "pastel neon line-art, peaceful",
+                    "--backend",
+                    "fake",
+                    "--duration",
+                    "2s",
+                ]
             )
         )
         == 0
     )
     assert (
-        cmd_init(
+        cmd_generate(
             build_parser().parse_args(
-                ["init", "--output", str(second), "--style", "pastel neon line-art, peaceful"]
+                [
+                    "generate",
+                    "--output",
+                    str(second),
+                    "--style",
+                    "pastel neon line-art, peaceful",
+                    "--backend",
+                    "fake",
+                    "--duration",
+                    "2s",
+                ]
             )
         )
         == 0
     )
-    seed_first, _ = load_config(first / "voyage.toml")
-    seed_second, _ = load_config(second / "voyage.toml")
+    seed_first, _ = read_effective_config(first)
+    seed_second, _ = read_effective_config(second)
     assert isinstance(seed_first.seed, int)
     assert isinstance(seed_second.seed, int)
     # 1-in-2^31 collision odds — a repeat means the RNG broke, not luck.
@@ -476,24 +462,16 @@ def test_stop_key_listener_requests_stop_at_boundary(
     import io
 
     from voyage.cli_generate import _start_stop_key_listener
-    from voyage.config import default_config_toml, load_config
     from voyage.console import VoyageConsole
-    from voyage.persistence import (
-        build_manifest,
-        initial_state,
-        read_state,
-        write_manifest,
-        write_state,
-    )
+    from voyage.persistence import read_state
 
-    (tmp_path / "segments").mkdir()
-    (tmp_path / "logs").mkdir()
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("stopkey", "pastel neon line-art, peaceful", 7), encoding="utf-8"
+    (tmp_path / "segments").mkdir(exist_ok=True)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    from tests.conftest import initialize_run_directory
+
+    initialize_run_directory(
+        tmp_path, run_id="stopkey", style="pastel neon line-art, peaceful", seed=7
     )
-    config, digest = load_config(tmp_path / "voyage.toml")
-    write_manifest(tmp_path, build_manifest(config, digest, {}, {}))
-    write_state(tmp_path, initial_state(config))
     monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
     console = VoyageConsole(stream=io.StringIO())
     thread = _start_stop_key_listener(tmp_path, console)

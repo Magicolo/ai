@@ -114,11 +114,10 @@ def test_cuda_backends_include_augmentation_by_default() -> None:
         assert {"film", "realesrgan-anime"} <= specs
 
 
-def test_ltx_backends_require_own_spec_without_audio_stacks() -> None:
-    """ltx25/ltx23 render joint A/V: own spec + director + augment + the
-    SFX stack, never ACE-Step — even when a config pairs those audio
-    stacks (the joint audio.wav is the music, MMAudio only dubs SFX over
-    it at finalize; DESIGN §140 GPU defaults).
+def test_ltx_backends_require_own_spec_with_acestep() -> None:
+    """ltx25/ltx23 take continuous music from ACE-Step: own spec +
+    director + augment + the ACE stack + SFX (the worker's joint
+    audio.wav is ignored; DESIGN §140 audio continuity).
 
     Phase 4 extends `VideoBackendName` + presets; until then the cast pins
     the intended Literal membership (dataclasses never validate at runtime).
@@ -137,7 +136,14 @@ def test_ltx_backends_require_own_spec_without_audio_stacks() -> None:
         # whichever director backend is the tree default today.
         config.director.backend = "qwen"
         specs = {item.spec for item in required_specs(config, sfx_enabled=True)}
-        assert specs == {spec, "director-qwen4b-awq", "film", "realesrgan-anime", "sfx-mmaudio"}
+        assert specs == {
+            spec,
+            "director-qwen4b-awq",
+            "film",
+            "realesrgan-anime",
+            "sfx-mmaudio",
+            "audio-acestep",
+        }
 
 
 def test_augment_disabled_excludes_film_and_realesrgan() -> None:

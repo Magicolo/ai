@@ -66,15 +66,6 @@ _VIDEO_SPEC_FOR_BACKEND = {
 }
 """CUDA video backend → its registry spec (fake needs no files)."""
 
-JOINT_AUDIO_BACKENDS = frozenset({"ltx25", "ltx23"})
-"""Video backends that generate their own joint A/V track (DESIGN §140 ltx
-plan): ACE-Step music takes and the MMAudio SFX pass are never required for
-them, even if a config pairs those audio stacks (Phase 4 presets pair
-nothing). The committed joint audio.wav is the full soundtrack. The manual
-`voyage sfx` verb stays available outside generate — `cmd_sfx` ensures
-nothing itself (it relies on a manual `models download sfx-mmaudio`).
-Imported by the supervisor bypass; single source."""
-
 
 @dataclass(frozen=True)
 class RequiredModel:
@@ -103,18 +94,18 @@ def required_specs(
     `augment_enabled` gates the finalize-stage augmentation floors (FILM
     interpolation + Real-ESRGAN anime upscaler): CUDA backends include
     them by default, `False` restores the pre-augmentation set (tests,
-    weight-free probes).     Joint-audio backends (`JOINT_AUDIO_BACKENDS`)
-    never pull ACE-Step: their video model renders the full soundtrack,
-    so that stack is skipped even when paired. Their SFX stack IS pulled
-    when enabled: MMAudio dubs effects under the native soundtrack at
-    finalize on cuda:0, after the video worker has stopped (DESIGN §140
-    GPU defaults).
+    weight-free probes). ACE-Step is required whenever the effective
+    config pairs it (`audio.backend == "acestep"`): ltx25/ltx23 take
+    their continuous music from the ACE planner's long caption-driven
+    takes (DESIGN §140 audio continuity), not from the worker's joint
+    track. SFX is pulled when enabled: MMAudio dubs effects under the
+    soundtrack at finalize on cuda:0, after the video worker has
+    stopped (DESIGN §140 GPU defaults).
     `VideoBackendName` is a closed Literal, so past the fake early-return
     the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
     """
     if config.video.backend == "fake":
         return []
-    joint_audio = config.video.backend in JOINT_AUDIO_BACKENDS
     required = [
         RequiredModel(
             spec=_VIDEO_SPEC_FOR_BACKEND[config.video.backend],
@@ -134,7 +125,7 @@ def required_specs(
                 ),
             ]
         )
-    if config.audio.backend == "acestep" and not joint_audio:
+    if config.audio.backend == "acestep":
         required.append(
             RequiredModel(
                 spec="audio-acestep",
@@ -164,9 +155,8 @@ def required_specs(
             )
         )
     if sfx_enabled and config.sfx.backend == "mmaudio":
-        # No joint-audio carve-out (DESIGN §140 GPU defaults): joint
-        # backends keep their native soundtrack (ACE-Step stays skipped
-        # above) but still dub MMAudio SFX over it at finalize.
+        # SFX dubs over the ACE-planner soundtrack at finalize (DESIGN
+        # §140 GPU defaults).
         required.append(
             RequiredModel(
                 spec="sfx-mmaudio",

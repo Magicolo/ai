@@ -1,27 +1,21 @@
 """Project configuration (DESIGN task group B).
 
-TOML loader + validation + sha256 hash. A snapshot of the config is
-written into each run directory at init time; the hash is recorded in
-the run manifest so runs are traceable to exact configuration.
+CLI-is-config: the effective `ProjectConfig` is built directly from the
+`generate` flags (`preset_config` + `resolve_config`) and persisted as
+structured data inside `run_manifest.json` — there is no TOML layer.
+Validation lives in the model validators; the manifest digest traces
+runs to their exact configuration.
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Literal, TypeGuard, TypeVar
-
-try:
-    import tomllib
-except ImportError:  # Python 3.10 worker image (upstream env)
-    import tomli as tomllib
+from typing import Literal, TypeGuard, TypeVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from voyage.errors import ConfigurationError
 from voyage.models import DEFAULT_MUSIC_STYLE
 
 VideoBackendName = Literal["fake", "ltxv", "causvid", "ltx25", "ltx23"]
@@ -45,8 +39,8 @@ def removed_backend_suffix(backend: str) -> str:
     """Migration-hint suffix for removed backends (issue 079), else empty.
 
     Pure string helper so every unknown-backend site (`_video_preset`,
-    `_audio_preset`, `_sfx_preset`, `load_config`, `video_worker_module`,
-    `cmd_init`) shares one hint instead of restating it.
+    `_audio_preset`, `_sfx_preset`, `video_worker_module`) shares one hint
+    instead of restating it.
     """
     if backend in REMOVED_VIDEO_BACKENDS:
         return (
@@ -130,7 +124,7 @@ class BackendRecord:
     height: int
     fps: int
     # Natural novel frames per committed segment at blocks_per_segment=1
-    # (the duration-math source for presets/toml; the per-backend segment
+    # (the duration-math source for registry presets; the per-backend segment
     # duration formulas in cli stay authoritative for planning).
     segment_frames: int
     latent_shape: tuple[int, ...]
@@ -145,7 +139,7 @@ class BackendRecord:
 
 BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # Single source of truth for `generate --backend` presets (also used
-    # by default_config_toml). ltxv renders native 768x512 on CUDA (both
+    # by preset_config). ltxv renders native 768x512 on CUDA (both
     # /32 and /64 clean for the two-stage multiscale pipeline; 1024x576
     # was tried 2026-09-24 but needs ~15.6 GB in the forward — beyond the
     # 16 GB card even via the dynamic-fp8 fallback — so it stays reverted
@@ -154,8 +148,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # out for explicitness; causvid renders
     # native 832x480 @ 16 fps (the worker rejects anything else — same
     # native-geometry rule a removed backend once enforced).
-    # fps + latent_shape ride the row too (default_config_toml writes them
-    # into voyage.toml — hardcoding 24/[1,8,48,44,80] there made the
+    # fps + latent_shape ride the row too (preset_config resolves them
+    # through the row — hardcoding 24/[1,8,48,44,80] once made the
     # causvid preset a lie: the supervisor sent fps 24 and the worker
     # refused).
     "fake": BackendRecord(
@@ -218,13 +212,14 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # convention); the workers enforce the fixed native geometry
     # themselves. Quantization, text encoder, and VAE are implicit
     # per family (Q3_K_M DiT only — OOM is a clean failure, no
-    # fallback rung). Both render their own joint soundtrack, so the music
-    # side pairs fake/cpu (no ACE-Step takes — the supervisor commits the
-    # worker's audio.wav directly) while the finalize SFX dub pairs
-    # mmaudio/cuda:0 (MMAudio dubs effects under the native soundtrack at
+    # fallback rung). Both pair ACE-Step music takes (acestep/cuda:0,
+    # sequential residency with the video worker — evict video, render
+    # take, evict audio, rebuild video): the ACE planner's long
+    # caption-driven takes carry the continuous mood across segments
+    # (DESIGN §140 audio continuity), while the finalize SFX dub pairs
+    # mmaudio/cuda:0 (MMAudio dubs effects under the soundtrack at
     # finalize, after the video worker has stopped — DESIGN §140 GPU
-    # defaults; models_ensure.JOINT_AUDIO_BACKENDS still skips ACE-Step
-    # even when paired).
+    # defaults). The workers' own joint audio.wav files are ignored.
     "ltx25": BackendRecord(
         profile="ltx25-704p",
         width=1216,
@@ -233,8 +228,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         segment_frames=96,
         latent_shape=(1, 128, 16, 19, 11),
         device="cuda:0",
-        audio_backend="fake",
-        audio_device="cpu",
+        audio_backend="acestep",
+        audio_device="cuda:0",
         sfx_backend="mmaudio",
         sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
@@ -248,8 +243,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         segment_frames=96,
         latent_shape=(1, 128, 16, 19, 11),
         device="cuda:0",
-        audio_backend="fake",
-        audio_device="cpu",
+        audio_backend="acestep",
+        audio_device="cuda:0",
         sfx_backend="mmaudio",
         sfx_device="cuda:0",
         state_mode="reconstructable_prefix",
@@ -299,7 +294,7 @@ class VideoConfig(BaseModel):
     # 1.31 = 14.44 GiB peak). Upstream uses 32 (needs >24GB VRAM).
     local_attn_size: int = 16
     # Explicit video-caption pin (CLI --video-caption, in-memory only —
-    # never written to voyage.toml). When set, every segment's staged
+    # never persisted to the run manifest). When set, every segment's staged
     # prompt uses it instead of the director's evolving stages (no drift
     # for this family, still style-checked against the charter); when
     # None the director drives (stages evolve with the general prompt).
@@ -358,7 +353,7 @@ class AudioConfig(BaseModel):
     models_dir: str = "/models"
     device: str = "cpu"
     # Explicit music-caption pin (CLI --music-caption, in-memory only —
-    # never written to voyage.toml). When set, every take uses it instead
+    # never persisted to the run manifest). When set, every take uses it instead
     # of the director's evolving caption (no drift for this family);
     # when None the director drives (captions evolve with the general
     # prompt). Empty string is falsy → falls back like an absent pin.
@@ -749,193 +744,37 @@ def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int
     return value
 
 
-def _toml_basic_string(raw_value: str) -> str:
-    """Quote free-text as a TOML basic string (single shared escaper).
-
-    Why one escaper: style/run_id are creator free-text persisted into
-    the run charter, so a quote or newline would otherwise break the
-    generated TOML or inject live tables (issue 009). Short escapes
-    cover backslash/quote/newline/return/tab; every other C0 control
-    plus DEL becomes ``\\uXXXX`` so one stray byte can never emit a
-    file our own reader rejects (issue 020). The TUI helper delegates
-    here (lazy import, same single source) to preserve its stdlib-only
-    import time.
-    """
-    escaped_value = (
-        raw_value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-    for code in range(0x20):
-        control = chr(code)
-        if control in ("\n", "\r", "\t"):
-            continue
-        escaped_value = escaped_value.replace(control, f"\\u{code:04X}")
-    escaped_value = escaped_value.replace("\x7f", "\\u007F")
-    return f'"{escaped_value}"'
-
-
-def default_config_toml(
+def preset_config(
     run_id: str,
     style: str,
     seed: int,
     video_backend: VideoBackendName = "ltx25",
     director_backend: str = "llama",
     director_device: str = "cuda:1",
-) -> str:
-    preset = _video_preset(video_backend)
-    # Fallbacks below read `_DEFAULT_ROW` (issue 085 single source), never
-    # restated literals: preset dicts are complete projections of
-    # BACKEND_REGISTRY, so these defaults never fire for known backends —
-    # they only pin the shape for hypothetical partial rows. (The old
-    # `device` fallback said "cpu" while the default row is cuda:0; that
-    # literal was unreachable for the same reason, so deriving it changes
-    # no generated TOML.)
-    backend = str(preset.get("backend", video_backend))
-    profile = str(preset.get("profile", _DEFAULT_ROW.profile))
-    width = _preset_int(preset, "width", _DEFAULT_ROW.width)
-    height = _preset_int(preset, "height", _DEFAULT_ROW.height)
-    fps = _preset_int(preset, "fps", _DEFAULT_ROW.fps)
-    segment_frames = _preset_int(preset, "segment_frames", _DEFAULT_ROW.segment_frames)
-    raw_latent = preset.get("latent_shape", list(_DEFAULT_ROW.latent_shape))
-    latent_dims = (
-        [int(dim) for dim in raw_latent]
-        if isinstance(raw_latent, list)
-        else list(_DEFAULT_ROW.latent_shape)
+) -> ProjectConfig:
+    """Build the stock run config directly from creator inputs (no TOML).
+
+    CLI-is-config: `generate` calls this, then layers the flag overrides
+    via `resolve_config`. The base carries the dev-box reserve
+    (`DEV_MIN_FREE_SPACE_GIB`); every other stock value is the model
+    default, and the backend row (geometry + audio/SFX pairing +
+    models_dir) plus the director selection resolve through the same
+    `resolve_config` every other override path uses — so the preset can
+    never drift from the resolver. Raises ValidationError on empty
+    style / unknown backend, exactly like the old file round-trip did.
+    """
+    base = ProjectConfig(
+        run_id=run_id,
+        style=style,
+        seed=seed,
+        min_free_space_gib=DEV_MIN_FREE_SPACE_GIB,
     )
-    latent_toml = "[" + ", ".join(str(dim) for dim in latent_dims) + "]"
-    device = str(preset.get("device", _DEFAULT_ROW.device))
-    audio_preset = _audio_preset(video_backend)
-    audio_backend = audio_preset["backend"]
-    audio_device = audio_preset["device"]
-    sfx_preset = _sfx_preset(video_backend)
-    sfx_backend = sfx_preset["backend"]
-    sfx_device = sfx_preset["device"]
-    escaped_run_id = _toml_basic_string(run_id)
-    escaped_style = _toml_basic_string(style)
-    escaped_music_style = _toml_basic_string(DEFAULT_MUSIC_STYLE)
-    return f"""\
-schema_version = 1
-run_id = {escaped_run_id}
-style = {escaped_style}
-seed = {seed}
-min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}
-
-[video]
-# "ltxv" (CUDA) | "causvid" (CUDA, 16 fps) | "ltx25"/"ltx23" (CUDA, joint A/V)
-# | "fake" (built-in testsrc)
-backend = "{backend}"
-profile = "{profile}"
-width = {width}
-height = {height}
-fps = {fps}
-segment_frames = {segment_frames}
-device = "{device}"
-models_dir = "/models"
-latent_shape = {latent_toml}
-blocks_per_segment = 1
-quantization = "fp8"
-
-[audio]
-backend = "{audio_backend}"
-sample_rate = 48000
-channels = 2
-music_style = {escaped_music_style}
-energy = 0.5
-take_seconds = 45.0
-ahead_seconds = 20.0
-crossfade_seconds = 2.0
-repaint_similarity_threshold = 0.5
-beats_per_segment = 4
-final_overlap_fraction = 0.1
-final_overlap_cap_seconds = 0.5
-models_dir = "/models"
-device = "{audio_device}"
-
-[sfx]
-# "mmaudio" (CUDA) | "fake" (built-in noise — CPU-only/test runs)
-backend = "{sfx_backend}"
-device = "{sfx_device}"
-models_dir = "/models"
-model_size = "large_44k_v2"
-
-[augment]
-# Finalize-time floors: 0 disables a floor (min_fps = 0, or 0x0 geometry).
-# Defaults track the ltx25 high-quality native (1216x704@24, DESIGN §140):
-# true-native ltx25 sources pass through unaugmented by default.
-min_fps = 24
-min_width = 1216
-min_height = 704
-# Model pass (issue 166; DESIGN §140 GPU defaults): Real-ESRGAN upscale
-# + FILM interpolate when provisioned (pinned to cuda:1 when two GPUs
-# are visible); off (false) keeps the ffmpeg floors only.
-use_model_pass = true
-# Interpolation multiplier (DESIGN §56): FILM frames per pair (default
-# 4); 1 keeps the frame count — upscale without interpolating.
-interp_multiplier = 4
-
-[director]
-backend = "{director_backend}"
-model_id = "Qwen/Qwen3-8B"
-device = "{director_device}"
-llama_endpoint = "{DEFAULT_LLAMA_ENDPOINT}"
-temperature = 0.7
-enable_thinking = false
-max_new_tokens = 1024
-embedding_model_id = "sentence-transformers/all-MiniLM-L6-v2"
-inspector_model_id = "Qwen/Qwen3.5-9B"
-
-[voyage]
-allow_concept_revisit = false
-major_transition_min_seconds = 30.0
-major_transition_max_seconds = 120.0
-world_decision_interval_seconds = 16.0
-blocks_per_prompt_stage = 3
-novelty_threshold = 0.85
-novelty_max_attempts = 3
-novelty_max_rejections = 2
-max_worker_restarts = 3
-rpc_timeout_seconds = 600.0
-drift_every_n_segments = 1
-resource_gauge_interval_segments = 1
-
-[experimental]
-visual_inspector = false
-
-[draft]
-width = 640
-height = 352
-latent_shape = [1, 8, 48, 22, 40]
-blocks_per_segment = 1
-take_seconds = 45.0
-"""
-
-
-def load_config(path: Path) -> tuple[ProjectConfig, str]:
-    """Load TOML config, returning (config, sha256_of_file_bytes)."""
-    try:
-        raw: dict[str, Any] = tomllib.loads(path.read_bytes().decode("utf-8"))
-    except FileNotFoundError as exc:
-        raise ConfigurationError(f"config file not found: {path}") from exc
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigurationError(f"cannot parse config {path}: {exc}") from exc
-    video_section = raw.get("video")
-    if isinstance(video_section, dict):
-        stored_backend = video_section.get("backend")
-        if isinstance(stored_backend, str) and stored_backend in REMOVED_VIDEO_BACKENDS:
-            known = ", ".join(sorted(BACKEND_REGISTRY))
-            raise ConfigurationError(
-                f"invalid config {path}: unknown video backend {stored_backend!r} "
-                f"(known: {known}){removed_backend_suffix(stored_backend)}"
-            )
-    try:
-        config = ProjectConfig.model_validate(raw)
-    except Exception as exc:
-        raise ConfigurationError(f"invalid config {path}: {exc}") from exc
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return config, digest
+    return resolve_config(
+        base,
+        backend=video_backend,
+        director=director_backend,
+        director_device=director_device,
+    )
 
 
 def resolve_config(
@@ -1108,12 +947,11 @@ def apply_draft_overrides(
     )
 
 
-# Audio backend paired with each video row: ltxv/causvid get the real
-# ACE-Step music stack (models + device mirror the video row); the
-# joint-audio ltx25/ltx23 rows pair fake (soundtrack ships with the
-# video — the supervisor commits it directly); fake video keeps the
-# fake sine backend for CPU-only test runs. The pairing lives in
-# BackendRecord.audio_backend/audio_device — these dicts
+# Audio backend paired with each video row: ltxv/causvid/ltx25/ltx23 get
+# the real ACE-Step music stack (models + device mirror the video row —
+# the ACE planner's long caption-driven takes carry the continuous mood);
+# fake video keeps the fake sine backend for CPU-only test runs. The
+# pairing lives in BackendRecord.audio_backend/audio_device — these dicts
 # are derived views (issue 022), never a second source.
 _VIDEO_BACKEND_PRESETS: dict[str, dict[str, str | int | list[int]]] = {
     name: {
@@ -1171,11 +1009,10 @@ def _sfx_preset(backend: str) -> dict[str, str]:
     """SFX pairing row as a plain dict (derived from BACKEND_REGISTRY).
 
     ltxv/causvid pair the MMAudio stack on cuda:0 (SFX/music on by
-    default on GPU); the joint-audio ltx25/ltx23 rows pair fake music
-    (their soundtrack ships with the video) but still pair MMAudio SFX
-    on cuda:0 (the finalize dub runs after the video worker stops —
-    DESIGN §140 GPU defaults); fake keeps the fake-noise backend
-    on CPU so CPU-only test runs never touch weights.
+    default on GPU); ltx25/ltx23 pair ACE-Step music (continuous takes)
+    plus MMAudio SFX on cuda:0 (the finalize dub runs after the video
+    worker stops — DESIGN §140 GPU defaults); fake keeps the fake-noise
+    backend on CPU so CPU-only test runs never touch weights.
     """
     try:
         return _SFX_BACKEND_PRESETS[backend]

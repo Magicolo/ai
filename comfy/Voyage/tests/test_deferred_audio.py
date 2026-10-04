@@ -74,11 +74,11 @@ def _segment_with_decision(
 
 
 def test_is_deferred_backend_only_ltxv_causvid() -> None:
-    """Only the take-based CUDA backends defer; joint + fake never do."""
+    """Every streaming CUDA backend defers; only fake commits inline."""
     assert is_deferred_backend("ltxv")
     assert is_deferred_backend("causvid")
-    assert not is_deferred_backend("ltx25")
-    assert not is_deferred_backend("ltx23")
+    assert is_deferred_backend("ltx25")
+    assert is_deferred_backend("ltx23")
     assert not is_deferred_backend("fake")
 
 
@@ -177,7 +177,6 @@ def test_cover_audio_deferred_branch_skips_take_path(tmp_path: Path) -> None:
         cast("EvolutionDecision", SimpleNamespace()),
         None,
         {},
-        None,
     )
     assert covered.take_action == "deferred"
     assert covered.audio_plan.take_ids == []
@@ -528,8 +527,10 @@ def test_derive_conditioning_tail_fails_loud_without_video(tmp_path: Path) -> No
 def test_deferred_tail_frames_match_worker_resume_counts() -> None:
     """Tail lengths pin each worker's resume derive (short tails adopt wrong)."""
     assert deferred_tail_frames("ltxv") == 25
+    assert deferred_tail_frames("ltx25") == 25
+    assert deferred_tail_frames("ltx23") == 25
     assert deferred_tail_frames("causvid") == 25
     assert deferred_tail_frames("causvid", overlap_frames=7) == 25
     assert deferred_tail_frames("causvid", overlap_frames=8) == 29
     with pytest.raises(MediaError):
-        deferred_tail_frames("ltx25")
+        deferred_tail_frames("fake")

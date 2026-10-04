@@ -39,10 +39,7 @@ class RenderedVideo(NamedTuple):
     `frames` is the worker-reported count after the issue-006 ceiling
     gate (never the raw report); `video_time` is the timeline offset the
     audio coverage starts from; `recovery_tape` is the validated absolute
-    wire path (None when the worker reported none); `joint_audio_path`
-    carries a joint-audio backend's worker-side soundtrack file for the
-    supervisor to commit as the segment audio.wav (None for take-based
-    backends — DESIGN §140 ltx plan).
+    wire path (None when the worker reported none).
     """
 
     frames: int
@@ -50,7 +47,6 @@ class RenderedVideo(NamedTuple):
     video_time: float
     recovery_tape: str | None
     video_stage_ms: dict[str, float]
-    joint_audio_path: str | None = None
 
 
 class CoveredAudio(NamedTuple):

@@ -104,27 +104,19 @@ def test_fake_sfx_evict_is_uniform() -> None:
 
 
 def test_sfx_pairs_by_backend_cuda_on_fake_off(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config, with_video_backend
+    from voyage.config import preset_config, with_video_backend
 
-    config_path = tmp_path / "voyage.toml"
-    # Default template is ltx25 (CUDA joint A/V): the SFX dub pairs on
-    # GPU by default while music ships with the worker (audio fake).
-    config_path.write_text(
-        default_config_toml("demo", "pastel neon line-art, peaceful", 1),
-        encoding="utf-8",
-    )
-    config, _ = load_config(config_path)
+    # Default preset is ltx25 (CUDA): the SFX dub pairs on GPU by
+    # default and music comes from ACE-Step long takes (audio acestep).
+    config = preset_config("demo", "pastel neon line-art, peaceful", 1)
     assert config.sfx.backend == "mmaudio"
     assert config.sfx.device == "cuda:0"
     assert config.sfx.model_size == "large_44k_v2"
-    assert config.audio.backend == "fake"
-    assert "[sfx]" in config_path.read_text(encoding="utf-8")
-    # Fake stays CPU-only (gates never touch weights); old runs without
-    # an [sfx] section keep byte-identical behavior via SfxConfig defaults.
-    fake_toml = default_config_toml(
-        "demo", "pastel neon line-art, peaceful", 1, video_backend="fake"
-    )
-    assert 'backend = "fake"' in fake_toml
+    assert config.audio.backend == "acestep"
+    # Fake stays CPU-only (gates never touch weights); SfxConfig defaults
+    # keep byte-identical behavior for old runs.
+    fake_config = preset_config("demo", "pastel neon line-art, peaceful", 1, video_backend="fake")
+    assert fake_config.sfx.backend == "fake"
     from voyage.config import SfxConfig
 
     assert SfxConfig().backend == "fake"
@@ -138,33 +130,25 @@ def test_sfx_pairs_by_backend_cuda_on_fake_off(tmp_path: Path) -> None:
 
 
 def test_caption_overrides_pin_families() -> None:
-    import tempfile
-
-    from voyage.config import default_config_toml, load_config, resolve_config
+    from voyage.config import preset_config, resolve_config
     from voyage.supervisor import effective_music_caption, effective_video_stages
 
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = Path(tmp) / "voyage.toml"
-        config_path.write_text(
-            default_config_toml("demo", "pastel neon line-art, peaceful", 1),
-            encoding="utf-8",
-        )
-        config, _ = load_config(config_path)
-        # Director drives by default (None pins nothing).
-        assert config.audio.music_caption is None
-        assert config.video.video_caption is None
-        assert effective_music_caption(None, "director music", "style") == "director music"
-        assert effective_video_stages(None, ["a", "b"]) == ["a", "b"]
-        # Explicit flags pin the family (no drift), style still fallback.
-        pinned = resolve_config(config, music_caption="brass fanfare", video_caption="red dune")
-        assert pinned.audio.music_caption == "brass fanfare"
-        assert pinned.video.video_caption == "red dune"
-        assert (
-            effective_music_caption(pinned.audio.music_caption, "director music", "style")
-            == "brass fanfare"
-        )
-        assert effective_video_stages(pinned.video.video_caption, ["a", "b"]) == ["red dune"]
-        assert effective_music_caption("", "", "style") == "style"
+    config = preset_config("demo", "pastel neon line-art, peaceful", 1)
+    # Director drives by default (None pins nothing).
+    assert config.audio.music_caption is None
+    assert config.video.video_caption is None
+    assert effective_music_caption(None, "director music", "style") == "director music"
+    assert effective_video_stages(None, ["a", "b"]) == ["a", "b"]
+    # Explicit flags pin the family (no drift), style still fallback.
+    pinned = resolve_config(config, music_caption="brass fanfare", video_caption="red dune")
+    assert pinned.audio.music_caption == "brass fanfare"
+    assert pinned.video.video_caption == "red dune"
+    assert (
+        effective_music_caption(pinned.audio.music_caption, "director music", "style")
+        == "brass fanfare"
+    )
+    assert effective_video_stages(pinned.video.video_caption, ["a", "b"]) == ["red dune"]
+    assert effective_music_caption("", "", "style") == "style"
 
 
 def test_sfx_config_rejects_unknown_backend_and_size() -> None:
