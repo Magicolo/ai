@@ -1,18 +1,18 @@
-"""SFX caption rendered in both live surfaces (issue 161, TDD red-first).
+"""SFX caption rendered in the live surface (issue 161, TDD red-first).
 
 Why this file exists: the supervisor ships ``audio_sfx_caption`` in the
-plan dict, but neither ``console.segment_plan`` nor ``TuiProgress``
-reads it — the third caption family's drift is invisible until the
-finalize pass dubs stems. These tests pin one non-verbose SFX line per
-sink (present/absent/empty), mirroring ``tests/test_console.py`` style.
-The ``video_caption`` CLI pin is not in the plan dict (supervisor-owned,
-out of scope) and stays a logged residual.
+plan dict, and ``console.segment_plan`` must surface it — the third
+caption family's drift is invisible until the finalize pass dubs stems.
+These tests pin one non-verbose SFX line (present/absent/empty),
+mirroring ``tests/test_console.py`` style. The ``video_caption`` CLI
+pin is not in the plan dict (supervisor-owned, out of scope) and stays
+a logged residual.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, cast
+from typing import Any
 
 
 def _plan_info(sfx_caption: Any) -> dict[str, Any]:
@@ -49,31 +49,6 @@ def _plan_info(sfx_caption: Any) -> dict[str, Any]:
     }
 
 
-def _tui_lines(plan: dict[str, Any]) -> list[str]:
-    """Drive TuiProgress.segment_plan, return posted lines (sync fake)."""
-    import pytest
-
-    pytest.importorskip("textual")
-    from voyage.tui import TuiProgress
-
-    class _FakeApp:
-        def __init__(self) -> None:
-            self.lines: list[str] = []
-
-        def call_from_thread(self, callback: Any, *args: Any) -> Any:
-            return callback(*args)
-
-        def append_run_line(self, text: str) -> None:
-            self.lines.append(text)
-
-        def advance_run_bar(self, done: int, total: int) -> None:
-            del done, total
-
-    fake = _FakeApp()
-    TuiProgress(cast(Any, fake), 1).segment_plan(plan)
-    return list(fake.lines)
-
-
 def test_console_plan_renders_sfx_caption() -> None:
     """Console prints the SFX caption alongside the music caption."""
     from voyage.console import VoyageConsole
@@ -96,20 +71,3 @@ def test_console_plan_marks_missing_sfx_caption() -> None:
         stream = io.StringIO()
         VoyageConsole(stream=stream).segment_plan(plan)
         assert "sfx" in stream.getvalue().lower()
-
-
-def test_tui_plan_renders_sfx_caption() -> None:
-    """TUI posts the SFX caption line after the music line."""
-    blob = "\n".join(_tui_lines(_plan_info("rain on canvas")))
-    assert "rain on canvas" in blob
-    assert "slow ambient electronic composition" in blob
-
-
-def test_tui_plan_marks_missing_sfx_caption() -> None:
-    """Empty/missing SFX caption is itself visible in the TUI log."""
-    for missing in ("", None):
-        plan = _plan_info(missing)
-        if missing is None:
-            del plan["audio_sfx_caption"]
-        blob = "\n".join(_tui_lines(plan))
-        assert "sfx" in blob.lower()

@@ -122,13 +122,10 @@ def test_ltx_backends_require_sfx_stack_with_acestep() -> None:
 
 
 def test_model_pass_defaults_on_everywhere() -> None:
-    """The model pass is default-on: config dataclass, stored TOML text,
-    and the TUI form state all agree."""
+    """The model pass is default-on: config dataclass and stored config agree."""
     from voyage.config import AugmentConfig, preset_config
-    from voyage.tui_state import GenerateFormState
 
     assert AugmentConfig().use_model_pass is True
-    assert GenerateFormState().use_model_pass is True
     assert preset_config("story", "style", 7).augment.use_model_pass is True
 
 

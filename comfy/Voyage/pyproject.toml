@@ -35,6 +35,13 @@ dev = [
   # exact pins so gate behavior never drifts between rebuilds.
   "hypothesis==6.168.0",
   "coverage==7.16.1",
+  # Parallel test execution (2026-10-04 speedup: 32-core box runs the
+  # 2000-test suite ~10x faster with `-n auto`; scripts/test.sh passes it
+  # by default). Exact pin like the rest — gate behavior must not drift.
+  "pytest-xdist==3.8.0",
+  # Parallel-aware coverage for the xdist run (plain `coverage run` only
+  # measures the controller process, not the workers). Same exact-pin rule.
+  "pytest-cov==7.1.0",
 ]
 
 [project.scripts]

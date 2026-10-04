@@ -25,7 +25,7 @@ docker build -q --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" -t voyage:
 # GPU-marked tests never run in gates (issue 041) — they need model workers;
 # run them explicitly via test.sh on an idle GPU.
 # mypy scope (issue 033): `voyage` plus the converted test modules below
-# (164 files: the package + conftest + 162 test modules). The remaining tests/ files
+# (151 files: the package + conftest + 149 test modules). The remaining tests/ files
 # carry pre-existing errors (attr-defined re-exports, overloads — see issues
 # 033/034) that belong to the owning passes; append a module path here as
 # each file is annotated. Untracked/in-flight test files stay out until
@@ -44,9 +44,9 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_augment_config.py tests/test_augment_contract_166.py tests/test_augment_models.py tests/test_augment_plan.py \
     tests/test_augment_preset_fanout.py tests/test_augment_runner.py tests/test_augment_weight_loading.py tests/test_backend_registry.py \
     tests/test_beat_quantize_ties_121.py tests/test_beats_bpm_cap_120.py tests/test_benchmark.py tests/test_benchmark_counts.py \
-    tests/test_causvid_prep.py tests/test_causvid_worker.py tests/test_checkpoint_safety.py tests/test_cli_benchmark_sfx_augment.py tests/test_cli_group_a.py \
-    tests/test_cli_hardening.py tests/test_cli_inspect_metrics.py tests/test_cli_run_ops_pruning.py tests/test_cli_scoreboard.py \
-    tests/test_cli_split.py tests/test_cli_tui_split.py tests/test_cli_validate_handoff.py tests/test_commit_hardening.py tests/test_commit_side_integrity_095_101_104.py tests/test_commit_slice_compensation.py \
+    tests/test_causvid_prep.py tests/test_causvid_worker.py tests/test_checkpoint_safety.py tests/test_cli_group_a.py \
+    tests/test_cli_hardening.py tests/test_cli_run_ops_pruning.py \
+    tests/test_cli_validate_handoff.py tests/test_commit_hardening.py tests/test_commit_side_integrity_095_101_104.py tests/test_commit_slice_compensation.py \
     tests/test_concept_integrity.py tests/test_concepts_pruning.py tests/test_concepts_unicode_117.py tests/test_config_resolution.py \
     tests/test_console.py tests/test_containers_rank2.py tests/test_crash_matrix.py tests/test_cuda_preflight_021.py tests/test_director_default.py \
     tests/test_director_device.py tests/test_director_init_strict_127.py tests/test_director_models_dir.py tests/test_director_request_validation.py \
@@ -55,10 +55,10 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_e2_tape_fsync_122.py tests/test_e2_vision_edges_126.py tests/test_e2_worker_init_strict_127.py tests/test_enter_repo_trees.py \
     tests/test_failure_policy.py tests/test_fake_backends.py tests/test_feedback.py tests/test_feedback_six_metrics_180.py \
     tests/test_finalize_encode_rank2.py tests/test_finalize_fastpath.py tests/test_generate.py tests/test_generate_ensure.py tests/test_generation_stack.py tests/test_init_run_ratchet.py \
-    tests/test_inspect_metrics_fps_029.py tests/test_inspector.py tests/test_inspector_wiring.py tests/test_issue098_orphan_audio_root.py \
-    tests/test_issue195_doctor_coverage.py tests/test_issue197_torn_manifest.py tests/test_issue_140_inspect_frame_logs.py \
-    tests/test_issue_142_inspect_failsoft.py tests/test_issue_152_blend_probe_memo.py tests/test_issue_152_parity_research.py tests/test_issue_152_wide_manual_join_proof.py \
-    tests/test_issue_166_model_pass_select.py tests/test_issue_166_resolve_weights.py tests/test_issue_191_sfx_bounds_streams.py     tests/test_issue_citation_gate.py tests/test_ledger_rotation_rank2.py tests/test_lock_manifest_agreement.py \
+    tests/test_inspector.py tests/test_inspector_wiring.py tests/test_issue098_orphan_audio_root.py \
+    tests/test_issue195_doctor_coverage.py tests/test_issue197_torn_manifest.py \
+    tests/test_issue_152_blend_probe_memo.py tests/test_issue_152_parity_research.py tests/test_issue_152_wide_manual_join_proof.py \
+    tests/test_issue_166_model_pass_select.py tests/test_issue_166_resolve_weights.py tests/test_issue_191_sfx_bounds_streams.py tests/test_ledger_rotation_rank2.py tests/test_lock_manifest_agreement.py \
     tests/test_ltxv.py tests/test_ltxv_failure_hygiene.py \
     tests/test_ltxv_stage_ms.py tests/test_ltxv_tensor_handoff.py tests/test_media_audio_split.py tests/test_media_augment_unified_083.py tests/test_media_memory.py \
     tests/test_media_robustness_rank2.py tests/test_models_ranges_119.py tests/test_novelty_steer_accept.py tests/test_observability.py tests/test_observability_rank2.py tests/test_ops_visibility_rank2.py     tests/test_output_containment.py \
@@ -72,10 +72,10 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_stage_a_telemetry.py tests/test_state_integrity.py tests/test_supervisor_av_align.py tests/test_supervisor_commit_types.py tests/test_supervisor_hardening.py \
     tests/test_supervisor_lifecycle.py tests/test_supervisor_lock_helpers.py tests/test_supervisor_plan_info_helpers.py tests/test_supervisor_prefetch_helpers.py \
     tests/test_supervisor_proposal_helpers.py tests/test_supervisor_routing_helpers.py tests/test_supervisor_tape_helpers.py tests/test_surface_rank2.py \
-    tests/test_tail_derive.py tests/test_tape_trust_123_171.py tests/test_three_captions.py tests/test_tui.py \
-    tests/test_tui_app.py tests/test_unit.py tests/test_video_common.py tests/test_vision_metrics.py tests/test_vocoder_allowlist.py \
+    tests/test_tail_derive.py tests/test_tape_trust_123_171.py tests/test_three_captions.py \
+    tests/test_unit.py tests/test_video_common.py tests/test_vision_metrics.py tests/test_vocoder_allowlist.py \
     tests/test_wire_boundary_118.py tests/test_wire_contract.py tests/test_worker_perf_rank2.py tests/test_worker_validators_unified_084.py \
-    && coverage run -m pytest -q -m 'not gpu' && coverage report"
+    && python -m pytest -q -p no:cacheprovider -m 'not gpu' -n auto --cov=voyage --cov-report= && coverage report"
 # Cache guard (issue 089): fail loud when gate caches leak into the
 # bind-mounted tree. Sourced from lib/common.sh (owned) so the check and
 # the VOYAGE_CACHE_ENV contract cannot drift apart.

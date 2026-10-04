@@ -570,13 +570,13 @@ def test_158_two_workers_pass_with_two_visible(
 
 def test_158_preflight_lists_mmaudio_sfx() -> None:
     """CPU-box + mmaudio-SFX is a preflight offender (021 membership holds)."""
-    from voyage.cli import _cuda_offenders
+    from voyage.cli_planning import _cuda_offenders
     from voyage.config import ProjectConfig
 
     config = ProjectConfig.model_validate(
         {
             "schema_version": 1,
-            "run_id": "probe",
+            "name": "probe",
             "style": "x",
             "seed": 0,
             "video": {"backend": "fake"},
@@ -585,15 +585,3 @@ def test_158_preflight_lists_mmaudio_sfx() -> None:
         }
     )
     assert any(offender.startswith("sfx ") for offender in _cuda_offenders(config))
-
-
-def test_158_sfx_workers_help_names_two_gpu_need(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """--sfx-workers help states the 2-visible-GPU requirement."""
-    from voyage.cli import build_parser
-
-    with pytest.raises(SystemExit) as exc:
-        build_parser().parse_args(["sfx", "--help"])
-    assert exc.value.code == 0
-    assert "2 visible GPUs" in capsys.readouterr().out
