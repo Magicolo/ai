@@ -26,7 +26,6 @@ import contextlib
 import json
 import math
 import os
-import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage.atomic import fsync_dir
-from voyage.errors import MediaError
+from voyage.errors import MediaError, StateError
 
 MORPH_BACKENDS = frozenset({"ltx25", "ltx23"})
 """Backends whose finalize joints get morph-cuts (user decision: ltx pair only)."""
@@ -92,29 +91,21 @@ def morph_enabled_for_backend(backend: str) -> bool:
 
 
 def morph_backend_for_run(run_dir: Path) -> str | None:
-    """Backend for morph gating, read from the run's voyage.toml (None = plain path).
+    """Backend for morph gating, read from the run manifest (None = plain path).
 
-    Any unreadable/missing config reads as None — finalize must never break
-    old runs that predate the morph, it just concats them as before.
+    Any missing/unreadable manifest reads as None — finalize must never
+    break runs that predate the morph, it just concats them as before.
     """
     try:
-        text = (run_dir / "voyage.toml").read_text(encoding="utf-8")
-    except OSError:
+        from voyage.persistence import read_effective_config
+    except ImportError:
         return None
-    # Minimal section-aware parse (no tomllib on py3.10 worker images):
-    # find the [video] section, then its backend = "..." value.
-    in_video = False
-    backend: str | None = None
-    for line in text.splitlines():
-        stripped = line.split("#", 1)[0].strip()
-        if stripped.startswith("["):
-            in_video = stripped == "[video]"
-            continue
-        if in_video:
-            match = re.match(r'backend\s*=\s*["\']([^"\']+)["\']', stripped)
-            if match:
-                backend = match.group(1)
-    if backend is None or not morph_enabled_for_backend(backend):
+    try:
+        config, _ = read_effective_config(run_dir)
+    except StateError:
+        return None
+    backend = config.video.backend
+    if not morph_enabled_for_backend(backend):
         return None
     return backend
 

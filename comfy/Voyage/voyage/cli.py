@@ -71,7 +71,6 @@ from voyage.cli_planning import (
     segments_for_duration,
 )
 from voyage.cli_run_ops import (
-    cmd_init,
     cmd_run,
 )
 from voyage.cli_status import (
@@ -154,7 +153,6 @@ __all__ = [
     "_add_finalize_parser",
     "_add_generate_parser",
     "_add_generation_overrides",
-    "_add_init_parser",
     "_add_inspect_parser",
     "_add_models_parser",
     "_add_pause_parser",
@@ -209,7 +207,6 @@ __all__ = [
     "cmd_doctor",
     "cmd_finalize",
     "cmd_generate",
-    "cmd_init",
     "cmd_inspect",
     "cmd_models",
     "cmd_pause",
@@ -278,47 +275,6 @@ def launch_tui() -> int:
     from voyage.tui import run_tui
 
     return run_tui()
-
-
-def _add_init_parser(sub: argparse._SubParsersAction[Any]) -> None:
-    """`init` verb: create a new run directory."""
-    init = sub.add_parser("init", help="Create a new run directory")
-    init.add_argument("--output", required=True, help="run directory to create")
-    init.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
-    init.add_argument(
-        "--name",
-        default=None,
-        help="run name (primary spelling; wins over --run-id, same flat folder rule)",
-    )
-    init.add_argument("--style", required=True, help="permanent style charter for the run")
-    init.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="master seed for the run (omit for a fresh random seed, printed at init)",
-    )
-    init.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
-    init.add_argument(
-        "--backend",
-        choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
-        default="ltx25",
-        help="video backend preset written into the run config",
-    )
-    init.add_argument(
-        "--director",
-        choices=("qwen", "deterministic", "llama"),
-        default="llama",
-        help="director backend written into the run config "
-        "(default llama = loopback llama-server sidecar; "
-        "qwen = in-process AWQ; deterministic disables the LLM)",
-    )
-    init.add_argument(
-        "--director-device",
-        default="cuda:1",
-        help="director decider placement written into the run config "
-        "(default cuda:1; cpu = legacy bf16 CPU path)",
-    )
-    init.set_defaults(func=cmd_init)
 
 
 def _add_doctor_parser(sub: argparse._SubParsersAction[Any]) -> None:
@@ -746,7 +702,6 @@ def build_parser() -> argparse.ArgumentParser:
     # interactive launcher TUI (see main), which configures `generate`.
     sub = parser.add_subparsers(dest="command", required=False)
 
-    _add_init_parser(sub)
     _add_doctor_parser(sub)
     _add_models_parser(sub)
     _add_run_parser(sub)

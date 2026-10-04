@@ -1,8 +1,7 @@
 """Run-directory layout (DESIGN §21 persistent files, §29 segment dir).
 
 run/
-  voyage.toml
-  run_manifest.json
+  run_manifest.json   (carries the effective config — CLI-is-config, no TOML)
   state.json
   concepts.jsonl
   segments/
@@ -27,7 +26,6 @@ MAX_SEGMENT_NUMBER = 999999
 #: `06` in the format spec) so the padding visibly tracks the max above.
 SEGMENT_ID_WIDTH = 6
 
-CONFIG_FILENAME = "voyage.toml"
 MANIFEST_FILENAME = "run_manifest.json"
 SEGMENT_MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"

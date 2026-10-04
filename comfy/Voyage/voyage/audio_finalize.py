@@ -1,13 +1,16 @@
 """Finalize-time ACE music rendering for deferred backends (DESIGN §140).
 
-Why: ltxv/causvid commit no ACE takes (full move to finalize — no
-per-segment `_with_audio_gpu` evict/render/evict/rebuild on the 4060).
-Commit writes a timeline-exact silent stub (`write_deferred_stub_audio`);
-finalize replays the stored director decisions in segment order
-(`ensure_deferred_takes`) and renders takes through the injected
-`render_take_fn` seam (production: ACE-Step `SubprocessWorker`, same
-spawn pattern as `render_sfx_bed`; tests: stdlib sine). ltx25/ltx23
-joint-audio never enters this module (`is_deferred_backend` gate).
+Why: ltxv/causvid/ltx25/ltx23 commit no ACE takes (full move to finalize —
+no per-segment `_with_audio_gpu` evict/render/evict/rebuild on the 4060,
+and no joint-audio GPU contention between the resident video worker and
+the ACE-Step stack). Commit writes a timeline-exact silent stub
+(`write_deferred_stub_audio`); finalize replays the stored director
+decisions in segment order (`ensure_deferred_takes`) and renders takes
+through the injected `render_take_fn` seam (production: ACE-Step
+`SubprocessWorker`, same spawn pattern as `render_sfx_bed`; tests:
+stdlib sine). Joint (non-deferred) audio never enters this module
+(`is_deferred_backend` gate) — every streaming backend is deferred, so
+only `fake` commits real audio inline.
 
 Ledger contract mirrors `audio/planner.py` (`flush+fsync+fsync_dir`,
 issue 101): a take is appended only after its file renders, so a
@@ -23,6 +26,7 @@ continuing (96f).
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -42,7 +46,7 @@ from voyage.segment_manifest import load_metrics, load_transition
 from voyage.supervisor_proposal import effective_music_caption
 
 #: Backends whose ACE music renders at finalize, never at commit.
-DEFERRED_AUDIO_BACKENDS = frozenset({"ltxv", "causvid"})
+DEFERRED_AUDIO_BACKENDS = frozenset({"ltxv", "causvid", "ltx25", "ltx23"})
 
 #: Commit stub sample format (matches the take path: 48 kHz stereo s16le).
 _STUB_CODEC = "pcm_s16le"
@@ -64,7 +68,7 @@ _BEATS_PER_SEGMENT = 4
 
 
 def is_deferred_backend(backend: str) -> bool:
-    """True for take-based CUDA backends whose music moves to finalize."""
+    """True for streaming CUDA backends, whose music moves to finalize."""
     return backend in DEFERRED_AUDIO_BACKENDS
 
 
@@ -117,18 +121,18 @@ def deferred_tail_frames(
 ) -> int:
     """Conditioning-tail length matching each deferred worker's resume derive.
 
-    ltxv resumes onto `CONDITIONING_TAIL_FRAMES` (25); causvid resumes
-    onto `max(25, reencode_window(overlap))`. The commit-time derive must
-    write exactly this many frames: a short tail would be adopted
-    untouched by resume (existing tail wins) and silently anchor the
-    next segment on too few frames.     Raises `MediaError` for unknown
+    ltxv/ltx25/ltx23 resume onto `CONDITIONING_TAIL_FRAMES` (25); causvid
+    resumes onto `max(25, reencode_window(overlap))`. The commit-time
+    derive must write exactly this many frames: a short tail would be
+    adopted untouched by resume (existing tail wins) and silently anchor
+    the next segment on too few frames. Raises `MediaError` for unknown
     backends — guessing a length is worse than failing loud.
     """
     # Local import (§12 GPU ban): `workers.video_common` pulls torch at
     # module scope, which the supervisor/CLI side must never import.
     from voyage.workers import video_common
 
-    if backend == "ltxv":
+    if backend in ("ltxv", "ltx25", "ltx23"):
         return video_common.DERIVED_TAIL_FRAMES
     if backend == "causvid":
         window = 4 * (overlap_frames - 1) + 1
@@ -434,6 +438,10 @@ def spawn_ace_render_fn(
         run_dir / "logs" / "ace-finalize.log",
         init_op="init",
         init_payload={"models_dir": str(models_dir), "device": device},
+        # ACE-Step venv (DESIGN §140 audio continuity): the ACE stack is
+        # isolated in /opt/venvs/acestep on voyage-ltx; unset (video
+        # image, tests) falls back to the supervisor interpreter.
+        executable=os.environ.get("VOYAGE_ACESTEP_PYTHON"),
     )
     worker.start()
 

@@ -4,8 +4,8 @@ DESIGN §58 — leaf module of the issue-080 split: the small helpers every verb
 needs (`get_console`, `_load_run`, `_augment_overrides`) without any
 verb-to-verb edge, so verb modules import them at top level and the
 only lazy imports left are the three orchestration call-throughs
-(`cmd_stop→cmd_finalize`, `cmd_generate` fan-out, `cmd_benchmark→
-cmd_init`, `cmd_inspect→validate_run`). `voyage.cli` re-exports all.
+(`cmd_stop→cmd_finalize`, `cmd_generate` fan-out, `cmd_inspect→
+validate_run`). `voyage.cli` re-exports all.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from voyage import paths
-from voyage.config import ProjectConfig, is_provided, load_config
+from voyage.config import ProjectConfig, is_provided
 from voyage.console import VoyageConsole
+from voyage.persistence import read_effective_config
 
 
 def get_console(args: argparse.Namespace) -> VoyageConsole:
@@ -28,7 +28,8 @@ def get_console(args: argparse.Namespace) -> VoyageConsole:
 
 
 def _load_run(run: Path) -> tuple[ProjectConfig, str]:
-    return load_config(run / paths.CONFIG_FILENAME)
+    """Load the run's effective config from its manifest (CLI-is-config)."""
+    return read_effective_config(run)
 
 
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:

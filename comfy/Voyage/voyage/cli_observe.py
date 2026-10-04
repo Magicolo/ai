@@ -1,9 +1,10 @@
 """`benchmark`, `soak`, and `inspect` verbs (DESIGN §§43-44, 104).
 
 Verb module of the issue-080 split: performance reporting and the
-visual-inspector entry point. `cmd_benchmark` reuses `cmd_init` and
-`cmd_soak` reuses `validate_run` via seam-dispatch imports (from voyage.cli
-at call time, so patching the seam keeps intercepting them).
+visual-inspector entry point. `cmd_benchmark` scaffolds its throwaway
+run via `persistence.create_run_dir` and `cmd_soak` reuses `validate_run`
+via seam-dispatch imports (from voyage.cli at call time, so patching
+the seam keeps intercepting them).
 """
 
 from __future__ import annotations
@@ -529,7 +530,8 @@ def _soak_sfx_section(run_dir: Path) -> dict[str, object]:
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
     from voyage.bench import format_report, summarize_gauges
-    from voyage.cli import cmd_init  # seam dispatch (issue 080)
+    from voyage.config import preset_config
+    from voyage.persistence import create_run_dir
 
     target = args.benchmark_target
     warmup = int(args.warmup)
@@ -585,17 +587,11 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         )
         return 2
     with tempfile.TemporaryDirectory(prefix="voyage-bench-") as tmp:
-        init_args = argparse.Namespace(
-            output=str(Path(tmp) / "run"),
-            run_id="benchmark",
-            style="pastel neon line-art, peaceful",
-            seed=11,
-            force=True,
-            backend="fake",
+        run_dir = Path(tmp) / "run"
+        create_run_dir(
+            run_dir,
+            preset_config("benchmark", "pastel neon line-art, peaceful", 11, video_backend="fake"),
         )
-        if cmd_init(init_args) != 0:
-            return 1
-        run_dir = Path(init_args.output)
         config, _digest = _load_run(run_dir)
         committed = Supervisor(run_dir, config).run_segments(segments)
         events = _read_all_metric_events(run_dir)

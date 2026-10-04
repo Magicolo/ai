@@ -1,8 +1,10 @@
 """`generate` one-shot verb (DESIGN §58).
 
-Verb module of the issue-080 split: init → run → validate →
-finalize orchestration. Fans out to the sibling verb modules via
-function-level imports (the verb-module cycle rule).
+Verb module of the issue-080 split: create → run → validate →
+finalize orchestration. Sole run creator (CLI-is-config): builds the
+effective config from flags and writes it into the run manifest.
+Fans out to the sibling verb modules via function-level imports (the
+verb-module cycle rule).
 """
 
 from __future__ import annotations
@@ -11,14 +13,14 @@ import argparse
 import sys
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
 
 from pydantic import ValidationError
 
-from voyage.cli_core import _augment_overrides, _load_run, get_console
+from voyage.cli_core import _augment_overrides, get_console
 from voyage.cli_paths import (
     _check_run_id,
     _effective_run_id,
@@ -32,55 +34,16 @@ from voyage.cli_planning import (
     _require_cuda_stack,
     segments_for_duration,
 )
-from voyage.config import ProjectConfig, apply_draft_overrides, default_config_toml
+from voyage.config import (
+    BACKEND_REGISTRY,
+    VideoBackendName,
+    apply_draft_overrides,
+    preset_config,
+    removed_backend_suffix,
+)
 from voyage.errors import DiskSpaceError
-from voyage.persistence import read_state
+from voyage.persistence import create_run_dir, read_state
 from voyage.seeds import random_master_seed
-
-
-def _pre_init_override_gate(args: argparse.Namespace, run_id: str, style: str, seed: int) -> int:
-    """Dry-run the override resolution against the preset config (110).
-
-    Renders the exact TOML `cmd_init` would write and applies the same
-    overrides the post-init path applies — pure, no directory touched.
-    Returns 0 when the overrides resolve, else prints the error and
-    returns 2. Any exception shape here (ValidationError from the model
-    validators, ValueError from unknown presets) maps to exit 2, exactly
-    like the post-init gate it guards.
-    """
-    import tomllib
-
-    try:
-        preset_config = ProjectConfig.model_validate(
-            tomllib.loads(
-                default_config_toml(
-                    run_id,
-                    style,
-                    seed,
-                    video_backend=args.backend,
-                    director_backend=args.director,
-                    director_device=getattr(args, "director_device", None) or "cuda:1",
-                )
-            )
-        )
-        apply_draft_overrides(
-            preset_config,
-            draft=args.draft,
-            director=args.director,
-            director_device=getattr(args, "director_device", None),
-            blocks=args.blocks,
-            take_seconds=args.take_seconds,
-            quantization=args.quantization,
-            beats_per_segment=args.beats_per_segment,
-            drift_every_n_segments=args.drift_every_n,
-            music_caption=getattr(args, "music_caption", None),
-            video_caption=getattr(args, "video_caption", None),
-            **_augment_overrides(args),
-        )
-    except (ValidationError, ValueError) as exc:
-        print(f"error: invalid numeric override: {exc}", file=sys.stderr)
-        return 2
-    return 0
 
 
 def _start_stop_key_listener(
@@ -138,7 +101,7 @@ def _start_stop_key_listener(
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    """One-shot video: init -> run -> validate -> finalize.
+    """One-shot video: create -> run -> validate -> finalize.
 
     With --duration the run covers at least that long (rounded up to whole
     segments). Without it the run continues until the operator presses
@@ -154,12 +117,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
         check_ffmpeg,
         check_free_space,
         cmd_finalize,
-        cmd_init,
         cmd_run,
         validate_run,
     )
 
-    # Fail before init: generate always writes a fresh config from the
+    # Fail before creation: generate always builds a fresh config from the
     # backend preset (CUDA video backends pair with ACE-Step audio), so the
     # preset alone decides the stack.
     if args.backend in _CUDA_VIDEO_BACKENDS and not _torch_available():
@@ -172,52 +134,50 @@ def cmd_generate(args: argparse.Namespace) -> int:
     # (payloads, takes, slices) must be absolute or they double up.
     output = Path(args.output) if args.output else Path("output") / run_id
     run_dir = resolve_run_dir(str(output))
-    # Validate-before-mutate (issue 110): numeric overrides are pure config
-    # math knowable before the first byte is written, so gate them against
-    # the preset-resolved config BEFORE cmd_init. A bad override exits 2
-    # with no orphan run dir for the retry to trip over. Blank styles skip
-    # the gate — cmd_init reports those itself, litter-free since 143/185.
+    warn_if_outside_output_dir(run_dir, flag="--output")
+    if run_dir.exists() and any(run_dir.iterdir()) and not getattr(args, "force", False):
+        print(
+            f"refusing to generate into non-empty directory {run_dir} (use --force)",
+            file=sys.stderr,
+        )
+        return 2
     style_value = getattr(args, "style", None)
+    if not isinstance(style_value, str) or not style_value.strip():
+        print("error: --style must be a non-empty human-owned style string", file=sys.stderr)
+        return 2
     seed_value = getattr(args, "seed", None)
     if seed_value is None:
         seed_value = random_master_seed()
         args.seed = seed_value
         print(f"random seed for this run: {seed_value} (re-run with --seed {seed_value})")
-    if (
-        isinstance(style_value, str)
-        and style_value.strip()
-        and isinstance(seed_value, int)
-        and not isinstance(seed_value, bool)
-    ):
-        gate_code = _pre_init_override_gate(args, run_id, style_value, seed_value)
-        if gate_code != 0:
-            return gate_code
-    init_args = argparse.Namespace(
-        output=str(run_dir),
-        run_id=run_id,
-        name=run_id,
-        style=args.style,
-        seed=args.seed,
-        force=args.force,
-        backend=args.backend,
-        director=args.director,
-        director_device=getattr(args, "director_device", None),
-    )
-    code = cmd_init(init_args)
-    if code != 0:
-        return code
-    config, _digest = _load_run(run_dir)
-    if not _require_cuda_stack(config):
-        return 1
-    _warn_if_no_cuda(config)
-    # `generate` enables the full stack by default: qwen director drift,
-    # beat-grid audio and overlap-blend finalize all ride the run config
-    # written at init; explicit flags still win. The parser default for
-    # --director is qwen, so args.director carries it directly.
-    director = args.director
+    if isinstance(seed_value, bool) or not isinstance(seed_value, int):
+        print(f"error: --seed must be an integer, got {seed_value!r}", file=sys.stderr)
+        return 2
+    backend_value = getattr(args, "backend", None) or "ltx25"
+    if backend_value not in BACKEND_REGISTRY:
+        known = ", ".join(sorted(BACKEND_REGISTRY))
+        print(
+            f"error: unknown video backend {backend_value!r} (known: {known})"
+            f"{removed_backend_suffix(str(backend_value))}",
+            file=sys.stderr,
+        )
+        return 2
+    # `generate` is the sole run creator (CLI-is-config): the effective
+    # config resolves here — preset first, then every flag override —
+    # and is written into the run manifest. Validate-before-mutate
+    # (issue 110): pure config math resolves BEFORE the first mkdir, so
+    # a bad override exits 2 with no orphan run dir for the retry.
+    director = getattr(args, "director", None) or "llama"
     try:
         effective = apply_draft_overrides(
-            config,
+            preset_config(
+                run_id,
+                style_value,
+                seed_value,
+                video_backend=cast(VideoBackendName, backend_value),
+                director_backend=director,
+                director_device=getattr(args, "director_device", None) or "cuda:1",
+            ),
             draft=args.draft,
             director=director,
             director_device=getattr(args, "director_device", None),
@@ -233,6 +193,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
     except (ValidationError, ValueError) as exc:
         print(f"error: invalid numeric override: {exc}", file=sys.stderr)
         return 2
+    if not _require_cuda_stack(effective):
+        return 1
+    _warn_if_no_cuda(effective)
+    create_run_dir(run_dir, effective, argv=sys.argv[1:])
+    print(f"initialized voyage run at {run_dir}")
     frames_per_segment = _frames_per_segment(effective)
     raw_duration = getattr(args, "duration", None)
     if raw_duration is None:
@@ -356,8 +321,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     final_video = getattr(args, "final_video", None)
     final = Path(final_video).resolve() if final_video else run_dir / "final.mp4"
     if final_video:
-        # Containment warning (issue 024): the run dir already warned via
-        # cmd_init's funnel; the final video is this verb's own write.
+        # Containment warning: the run dir already warned via the creation
+        # funnel above; the final video is this verb's own write.
         warn_if_outside_output_dir(final, flag="--final-video")
     final.parent.mkdir(parents=True, exist_ok=True)
     final_code = cmd_finalize(

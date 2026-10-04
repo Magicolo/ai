@@ -18,7 +18,6 @@ from pathlib import Path
 from voyage import paths
 from voyage.cli_paths import _run_dir_arg, resolve_run_dir
 from voyage.concepts import ConceptStore
-from voyage.config import load_config
 from voyage.doctor import probe
 from voyage.errors import StateError, VoyageError
 from voyage.logrotate import iter_metric_files
@@ -165,7 +164,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"status: BROKEN ({exc})", file=sys.stderr)
         return 1
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        from voyage.persistence import read_effective_config
+
+        config, _ = read_effective_config(run_dir)
     except VoyageError:
         config = None
     seconds = state.timeline_frames / state.fps if state.fps else 0

@@ -882,8 +882,9 @@ def build_final_audio(
     `MediaError` instead of shipping silence — takes must have rendered
     via `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
     divides the timeline fps so the mix covers the stretched video; the
-    joint-backend fallback paths (no takes ledger — ltx25/ltx23 commit
-    worker audio directly) retime via `atempo` instead of shipping the
+    joint-backend fallback paths (no takes ledger — pre-deferred runs whose
+    ltx25/ltx23 segments committed worker audio directly) retime via `atempo`
+    instead of shipping the
     1x mix under stretched video.
     """
     from voyage.audio.planner import AudioPlanner, load_takes

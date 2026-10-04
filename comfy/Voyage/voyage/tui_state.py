@@ -503,17 +503,29 @@ def plan_summary(state: GenerateFormState) -> str:
 
 
 def _toml_string(raw: str) -> str:
-    """Quote a string as a TOML basic string (single shared escaper).
+    """Quote a string as a TOML basic string (TUI-local escaper).
 
-    Thin alias over ``voyage.config._toml_basic_string`` (lazy import so
-    this module stays stdlib-only at import time): short escapes cover
+    Owned here since the CLI-is-config migration removed the shared
+    config escaper: this only ever quotes TUI prefill values into the
+    user-local `tui-last.toml`, never run config. Short escapes cover
     backslash/quote/newline/return/tab and every other C0 control plus
     DEL becomes ``\\uXXXX`` (issue 020 — one stray byte can never corrupt
     tui-last.toml into a total form reset, issue 072).
     """
-    from voyage.config import _toml_basic_string
-
-    return _toml_basic_string(raw)
+    escaped_value = (
+        raw.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    for code in range(0x20):
+        control = chr(code)
+        if control in ("\n", "\r", "\t"):
+            continue
+        escaped_value = escaped_value.replace(control, f"\\u{code:04X}")
+    escaped_value = escaped_value.replace("\x7f", "\\u007F")
+    return f'"{escaped_value}"'
 
 
 def save_last_settings(state: GenerateFormState, path: Path | None = None) -> None:

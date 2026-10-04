@@ -7,6 +7,9 @@ supervisor only — the director proposes, the supervisor commits.
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
+import sys
 from pathlib import Path
 
 import voyage
@@ -28,11 +31,23 @@ FINAL_VIDEO_WIDTH = 768
 FINAL_VIDEO_HEIGHT = 432
 
 
+def effective_config_digest(config: ProjectConfig) -> str:
+    """Traceability digest over the effective config (clean-break rule).
+
+    CLI-is-config: the digest covers the canonical JSON of the in-memory
+    effective config, not file bytes — there is no TOML file to hash.
+    `sort_keys` + compact separators keep it stable across writers.
+    """
+    canonical = json.dumps(config.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def build_manifest(
     config: ProjectConfig,
     config_sha256: str,
     hardware: dict[str, str],
     software: dict[str, str],
+    argv: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": paths.SCHEMA_VERSION,
@@ -41,6 +56,8 @@ def build_manifest(
         "voyage_version": voyage.__version__,
         "config_sha256": config_sha256,
         "style": config.style,
+        "argv": list(argv) if argv is not None else [],
+        "effective_config": config.model_dump(mode="json"),
         "hardware": hardware,
         "software": software,
         "models": {
@@ -89,6 +106,30 @@ def read_manifest(run_dir: Path) -> dict[str, object]:
     return data
 
 
+def read_effective_config(run_dir: Path) -> tuple[ProjectConfig, str]:
+    """Load the run's effective config from its manifest (clean break).
+
+    No TOML fallback: runs created before the CLI-is-config migration
+    carry no `effective_config` and fail loud with the re-generate hint.
+    Returns (config, digest) mirroring the old file-loader shape; the
+    digest is recomputed over the stored config, never trusted blind.
+    """
+    manifest = read_manifest(run_dir)
+    raw = manifest.get("effective_config")
+    if not isinstance(raw, dict):
+        raise StateError(
+            f"{paths.MANIFEST_FILENAME} in {run_dir} carries no effective config "
+            "(run created before CLI-is-config — re-generate; no legacy format is read)"
+        )
+    try:
+        config = ProjectConfig.model_validate(raw)
+    except Exception as exc:
+        raise StateError(
+            f"invalid effective config in {paths.MANIFEST_FILENAME} ({run_dir}): {exc}"
+        ) from exc
+    return config, effective_config_digest(config)
+
+
 def write_state(run_dir: Path, state: RunState) -> None:
     atomic_write_json(run_dir / paths.STATE_FILENAME, state.model_dump())
 
@@ -118,3 +159,23 @@ def initial_state(config: ProjectConfig) -> RunState:
         current_concept=config.style,
         destination_concept=config.style,
     )
+
+
+def create_run_dir(run_dir: Path, config: ProjectConfig, argv: list[str] | None = None) -> str:
+    """Scaffold a fresh run directory (sole creator: `generate` + tests).
+
+    CLI-is-config: mkdirs segments/logs, then writes the manifest
+    carrying the full effective config plus the invoking argv, and the
+    initial state. Returns the traceability digest. The caller owns all
+    validation (non-empty guard, style, seed, backend) before calling —
+    this function only writes.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
+    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
+    digest = effective_config_digest(config)
+    hardware = {"note": "recorded at creation; see `voyage doctor` for live facts"}
+    software = {"python": sys.version.split()[0]}
+    write_manifest(run_dir, build_manifest(config, digest, hardware, software, argv=argv))
+    write_state(run_dir, initial_state(config))
+    return digest
