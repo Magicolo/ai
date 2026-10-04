@@ -19,8 +19,9 @@ from voyage.cli_core import _augment_overrides, _load_run, get_console
 from voyage.cli_paths import resolve_run_ref, warn_if_outside_output_dir
 from voyage.config import resolve_config
 from voyage.errors import DiskSpaceError, MediaError, StateError
-from voyage.media import finalize_run
+from voyage.media import finalize_run, presented_frames
 from voyage.media import probe as media_probe
+from voyage.persistence import read_state, record_final_coverage
 
 
 def cmd_finalize(args: argparse.Namespace) -> int:
@@ -101,6 +102,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                     sfx_device=getattr(args, "sfx_device", None) or config.sfx.device,
                     sfx_model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
                     sfx_caption=getattr(args, "sfx_caption", None),
+                    invoker=getattr(args, "invoker", None),
                 )
             except SfxBedError as exc:
                 print(
@@ -113,7 +115,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 return 1
     if not parallel:
         try:
-            finalize_run(run_dir, output, **video_kwargs)
+            finalize_run(run_dir, output, **video_kwargs, invoker=getattr(args, "invoker", None))
         except (MediaError, StateError, DiskSpaceError) as exc:
             print(f"finalize failed: {exc}", file=sys.stderr)
             return 1
@@ -138,6 +140,17 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             except (MediaError, StateError) as exc:
                 print(f"sfx pass failed (music-only kept at {output}): {exc}", file=sys.stderr)
                 return 1
+    # Freshness stamp for the generate 'nothing to do' gate (redundant
+    # finalize fix): records what final.mp4 actually presents, so a revisit
+    # compares presented-against-presented. Only on full success — an SFX
+    # failure returns above, and its music-only final must stay re-finalizable.
+    coverage_frames = presented_frames(output)
+    if coverage_frames is not None:
+        record_final_coverage(
+            run_dir,
+            presented_frames=coverage_frames,
+            segments=read_state(run_dir).committed_segments,
+        )
     console = get_console(args)
     try:
         info = media_probe(output)

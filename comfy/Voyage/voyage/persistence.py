@@ -43,6 +43,23 @@ def write_manifest(run_dir: Path, manifest: dict[str, object]) -> None:
     atomic_write_json(run_dir / paths.MANIFEST_FILENAME, manifest)
 
 
+def record_final_coverage(run_dir: Path, presented_frames: int, segments: int) -> None:
+    """Stamp the shipped coverage into the manifest (redundant-finalize gate).
+
+    `final_coverage` records what `final.mp4` actually presents (ffprobe
+    presented frames + committed segment count at finalize success), so the
+    generate 'nothing to do' gate compares presented-against-presented
+    instead of presented-against-source-timeline (which never matched
+    under interp + slow-mo). Extra manifest keys are ignored by
+    `read_effective_config`, and `build_manifest` never emits this key —
+    every `configure` wipes coverage, i.e. conservative invalidation of
+    the freshness stamp on any plan/settings change for free.
+    """
+    manifest = read_manifest(run_dir)
+    manifest["final_coverage"] = {"segments": segments, "presented_frames": presented_frames}
+    write_manifest(run_dir, manifest)
+
+
 def read_manifest(run_dir: Path) -> dict[str, object]:
     path = run_dir / paths.MANIFEST_FILENAME
     if not path.exists():

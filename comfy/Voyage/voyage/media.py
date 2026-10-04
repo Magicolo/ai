@@ -726,6 +726,38 @@ def committed_usable_segments(run_dir: Path, skip_bad: bool) -> list[Path]:
     return usable
 
 
+def presented_frames(video: Path) -> int | None:
+    """ffprobe presented-frame count, None when the file is unreadable.
+
+    Shared by the generate freshness gate and the finalize coverage stamp
+    — one probe shape, so recorded and compared counts always agree.
+    """
+    try:
+        proc = run_capture(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=nw=1:nk=1",
+                str(video),
+            ]
+        )
+    except (OSError, MediaError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -751,6 +783,7 @@ def finalize_run(
     deferred_audio: bool | None = None,
     seed: int = 0,
     audio_config: AudioConfig | None = None,
+    invoker: str | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -1273,6 +1306,7 @@ def finalize_run(
                     "presentation_fps": effective_presentation_fps,
                     "slowmo_factor": round(stretch, 4),
                     "deferred_audio": effective_deferred_audio,
+                    "invoker": invoker,
                     "model_pass_timings_s": {
                         key: round(value, 3)
                         for key, value in model_pass_timings.items()

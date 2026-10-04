@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,11 +20,12 @@ if TYPE_CHECKING:
 
 from voyage.cli_core import get_console
 from voyage.cli_paths import _check_run_id, output_root
-from voyage.cli_planning import _require_cuda_stack
+from voyage.cli_planning import _frames_per_segment, _require_cuda_stack, segments_for_duration
 from voyage.cli_validate import validate_run
 from voyage.console import RichSegmentProgress
 from voyage.errors import DiskSpaceError, StateError
-from voyage.persistence import read_effective_config, read_manifest, read_state
+from voyage.media import presented_frames
+from voyage.persistence import read_effective_config, read_manifest, read_state, write_manifest
 from voyage.supervisor import Supervisor
 
 
@@ -59,37 +59,27 @@ def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
     return removed
 
 
-def _final_covers_timeline(final: Path, timeline_frames: int) -> bool:
-    """True when final.mp4 exists with exactly the committed frame count."""
-    if timeline_frames <= 0 or not final.is_file():
+def _final_is_fresh(run_dir: Path, final: Path, committed: int) -> bool:
+    """True when final.mp4 matches the recorded finalize coverage.
+
+    Compares presented-against-presented: the manifest's `final_coverage`
+    (segments + presented frames, stamped at finalize success) against the
+    current commit count + a fresh ffprobe count. Any mismatch — new
+    segments, a missing/unreadable final, a re-configure (which wipes the
+    stamp), or a changed present — reads as stale and re-finalizes.
+    """
+    if committed <= 0 or not final.is_file():
         return False
     try:
-        proc = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-count_frames",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=nb_read_frames",
-                "-of",
-                "default=nw=1:nk=1",
-                str(final),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
+        coverage = read_manifest(run_dir).get("final_coverage")
+    except StateError:
         return False
-    if proc.returncode != 0:
+    if not isinstance(coverage, dict):
         return False
-    try:
-        return int(proc.stdout.strip()) == timeline_frames
-    except ValueError:
+    if coverage.get("segments") != committed:
         return False
+    presented = presented_frames(final)
+    return presented is not None and presented == coverage.get("presented_frames")
 
 
 def _finalize_run_dir(
@@ -99,10 +89,7 @@ def _finalize_run_dir(
     console: VoyageConsole | None = None,
 ) -> int:
     """Run the finalize step with manifest policy (final_video/skip_bad/no_sfx)."""
-    # Seam dispatch (issue 080): the finalize leaf resolves through the
-    # voyage.cli namespace at call time, exactly as when they shared one
-    # module — monkeypatching voyage.cli.cmd_finalize keeps intercepting.
-    from voyage.cli import cmd_finalize
+    from voyage.cli_finalize import cmd_finalize
 
     final_value = manifest.get("final_video")
     final = Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
@@ -125,6 +112,7 @@ def _finalize_run_dir(
             verbose=bool(getattr(args, "verbose", False)),
             no_color=bool(getattr(args, "no_color", False)),
             progress_sink=getattr(args, "progress_sink", None),
+            invoker="generate",
         )
     )
 
@@ -149,11 +137,64 @@ def _pre_finalize_errors(run_dir: Path, manifest: dict[str, Any], effective: Any
     return [error for error in errors if not is_healable_sfx_shortfall(error)]
 
 
+def _extend_plan(
+    args: argparse.Namespace,
+    run_dir: Path,
+    manifest: dict[str, object],
+    effective: Any,
+) -> int | None:
+    """Additive plan extension from --segments XOR --duration (0 if neither).
+
+    The new plan is `manifest segments + added`, written back in place
+    (every other key — config, finalize policy, final_coverage — is
+    preserved; the coverage stamp goes stale on its own once new
+    segments commit, so the next finalize re-runs correctly). Returns
+    the added count; bad values print an error and return None,
+    leaving the manifest untouched (configure precedent).
+    """
+    segments = getattr(args, "segments", None)
+    duration = getattr(args, "duration", None)
+    if segments is None and duration is None:
+        return 0
+    if segments is not None and duration is not None:
+        print("error: pass only one of --segments or --duration", file=sys.stderr)
+        return None
+    if segments is not None:
+        if isinstance(segments, bool) or not isinstance(segments, int) or segments <= 0:
+            print(f"error: --segments must be positive, got {segments}", file=sys.stderr)
+            return None
+        added = segments
+    elif duration is not None:
+        try:
+            added = segments_for_duration(
+                float(duration), effective.video.fps, _frames_per_segment(effective)
+            )
+        except (TypeError, ValueError) as exc:
+            print(f"error: bad --duration: {exc}", file=sys.stderr)
+            return None
+    else:
+        return 0  # Unreachable: both-None returned above; keeps the chain exhaustive.
+    old = manifest.get("segments")
+    if isinstance(old, bool) or not isinstance(old, int):
+        print(
+            f"error: manifest in {run_dir} has no planned segment count "
+            "— re-run `voyage configure`",
+            file=sys.stderr,
+        )
+        return None
+    manifest["segments"] = old + added
+    write_manifest(run_dir, manifest)
+    print(f"extended plan: {old} -> {old + added} segments")
+    return added
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     """Generate (or resume) the run NAME to its manifest plan.
 
     1. Resolve `output/<NAME>`; missing manifest → exit 2 (`configure` first).
     2. Read manifest plan (segment count) + state (committed truth).
+    2b. With --segments/--duration (exclusive): extend the stored plan
+        additively (manifest segments + added) before reconciling.
     3. Delete numeric segment folders beyond the committed count.
     4. Nothing left to do (planned covered + validate clean + final.mp4
        covers the timeline) → print + exit 0 without touching workers.
@@ -161,7 +202,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     """
     # Test seams: Supervisor + validate_run resolve as module globals so
     # tests patch `voyage.cli_generate` directly; cmd_finalize resolves
-    # through `voyage.cli` (see _finalize_run_dir) per the seam rule.
+    # through `voyage.cli_finalize` (see _finalize_run_dir) per the seam rule.
     name = getattr(args, "name", None)
     if not isinstance(name, str) or not name.strip():
         print(
@@ -191,6 +232,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    added = _extend_plan(args, run_dir, manifest, effective)
+    if added is None:
+        return 2
+    planned += added
     try:
         state = read_state(run_dir)
     except StateError as exc:
@@ -221,10 +266,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
         final = (
             Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
         )
-        if _final_covers_timeline(final, state.timeline_frames):
+        if _final_is_fresh(run_dir, final, state.committed_segments):
             print(
                 f"nothing to do: {state.committed_segments} segment(s) committed, "
-                f"{final.name} covers {state.timeline_frames} frames"
+                f"{final.name} is current"
             )
             return 0
         return _finalize_run_dir(run_dir, manifest, args, console)

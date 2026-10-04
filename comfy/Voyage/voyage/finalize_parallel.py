@@ -165,6 +165,7 @@ def run_parallel_finalize(
     sfx_device: str = "cuda:0",
     sfx_model_size: str = "large_44k_v2",
     sfx_caption: str | None = None,
+    invoker: str | None = None,
 ) -> Path:
     """Finalize with the model pass and the SFX dub running side by side.
 
@@ -289,6 +290,7 @@ def run_parallel_finalize(
                 deferred_audio=deferred_audio,
                 seed=seed,
                 audio_config=audio_config,
+                invoker=invoker,
             )
 
         def _run_bed() -> Path:

@@ -606,6 +606,22 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Generate (or resume) a configured run to its manifest plan",
     )
     gen.add_argument("name", help="run name (flat folder name → output/<name>)")
+    gen.add_argument(
+        "--segments",
+        type=int,
+        default=None,
+        help="extend the stored plan by this many segments (additive: "
+        "new plan = manifest segments + N; exactly one of --segments/--duration)",
+    )
+    gen.add_argument(
+        "--duration",
+        type=parse_duration,
+        required=False,
+        default=None,
+        help=f"extend the stored plan by this much video, e.g. {_DURATION_EXAMPLES} "
+        "(additive: converts to segments rounding up, like configure; "
+        "exactly one of --segments/--duration)",
+    )
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 

@@ -60,7 +60,7 @@ def test_generate_new_run_renders_planned_segments(
         return 0
 
     monkeypatch.setattr(gen_ops, "Supervisor", _FakeSupervisor)
-    monkeypatch.setattr("voyage.cli.cmd_finalize", _fake_finalize)
+    monkeypatch.setattr("voyage.cli_finalize.cmd_finalize", _fake_finalize)
     monkeypatch.setattr(gen_ops, "validate_run", lambda run_dir: [])
     assert gen_ops.cmd_generate(_generate_namespace("fresh")) == 0
     assert calls["segments"] == 2
@@ -109,6 +109,9 @@ def test_generate_noop_when_complete(
     state.next_segment_number = 1
     state.timeline_frames = 48
     write_state(run_dir, state)
+    from voyage.persistence import record_final_coverage
+
+    record_final_coverage(run_dir, presented_frames=48, segments=1)
     from voyage.fake_backends import FakeVideoBackend
 
     FakeVideoBackend().generate_segment(
@@ -119,7 +122,7 @@ def test_generate_noop_when_complete(
         raise AssertionError("complete run must do no work")
 
     monkeypatch.setattr(gen_ops, "Supervisor", _explode)
-    monkeypatch.setattr("voyage.cli.cmd_finalize", _explode)
+    monkeypatch.setattr("voyage.cli_finalize.cmd_finalize", _explode)
     assert gen_ops.cmd_generate(_generate_namespace("done")) == 0
     assert "nothing to do" in capsys.readouterr().out
 
@@ -159,7 +162,7 @@ def test_generate_removes_extra_segments_then_resumes(
             return ["000002"]
 
     monkeypatch.setattr(gen_ops, "Supervisor", _FakeSupervisor)
-    monkeypatch.setattr("voyage.cli.cmd_finalize", lambda ns: 0)
+    monkeypatch.setattr("voyage.cli_finalize.cmd_finalize", lambda ns: 0)
     monkeypatch.setattr(gen_ops, "validate_run", lambda run_dir: [])
     assert gen_ops.cmd_generate(_generate_namespace("messy")) == 0
     assert not (run_dir / "segments" / "000002").exists()
