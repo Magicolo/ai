@@ -115,6 +115,156 @@ def test_sfx_window_constants_match_ladder() -> None:
     assert SFX_WINDOW_OVERLAP == 1.0
 
 
+def test_stale_request_misses_cache_hit() -> None:
+    """Swansy regression: windows planned short on an older timeline re-render.
+
+    The 5-segment ledger held w0000=7.4375s / w0001=7.90625s; the 6-segment
+    plan wants 8.0s for both. The old 0.6s fuzzy budget cache-hit those
+    stale lines (diffs 0.5625/0.09375) and the bed came up ~0.75s short.
+    Request identity within float noise must miss both.
+    """
+    from voyage.sfx_finalize import SfxWindow, _stem_cache_hit
+
+    for logged_duration in (7.4375, 7.90625):
+        window = SfxWindow("w0000", 0.0, 8.0, "rain", 7)
+        record = {
+            "window_id": "w0000",
+            "caption": "rain",
+            "seed": 7,
+            "model_size": "small_44k",
+            "duration": logged_duration,
+            "path": "audio/sfx/w0000.wav",
+        }
+        assert _stem_cache_hit(record, window, "small_44k") is False
+
+
+def test_honest_shortfall_still_hits_cache() -> None:
+    """An encode shortfall (probed reality under request) must not re-render.
+
+    The hit-test compares the ledger *request* against the plan request,
+    so a stem that probed hundredths short still hits and re-finalize
+    stays cheap — only the coverage math follows the probed duration.
+    """
+    from voyage.sfx_finalize import SfxWindow, _stem_cache_hit
+
+    window = SfxWindow("w0000", 0.0, 8.0, "rain", 7)
+    record = {
+        "window_id": "w0000",
+        "caption": "rain",
+        "seed": 7,
+        "model_size": "small_44k",
+        "duration": 8.0,
+        "probed_duration": 7.95,
+        "path": "audio/sfx/w0000.wav",
+    }
+    assert _stem_cache_hit(record, window, "small_44k") is True
+
+
+def test_validate_coverage_follows_probed_duration(tmp_path: Path) -> None:
+    """Coverage math uses the stem's probed duration, not the plan request."""
+    from voyage.sfx_finalize import (
+        append_sfx_window,
+        is_healable_sfx_shortfall,
+        validate_sfx_ledger,
+    )
+
+    ledger = tmp_path / "audio" / "sfx" / "sfx.jsonl"
+    append_sfx_window(
+        ledger,
+        SfxWindow("w0000", 0.0, 8.0, "rain", 7),
+        path="audio/sfx/w0000.wav",
+        model_size="small_44k",
+        probed_duration=7.38,
+    )
+    (tmp_path / "audio" / "sfx" / "w0000.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    errors = validate_sfx_ledger(tmp_path, 8.0)
+    shortfalls = [error for error in errors if "short of timeline" in error]
+    assert len(shortfalls) == 1
+    assert is_healable_sfx_shortfall(shortfalls[0])
+
+
+def test_validate_legacy_line_without_probe_uses_request(tmp_path: Path) -> None:
+    """Pre-split ledger lines (no probed_duration) validate on the request."""
+    from voyage.sfx_finalize import append_sfx_window, validate_sfx_ledger
+
+    ledger = tmp_path / "audio" / "sfx" / "sfx.jsonl"
+    append_sfx_window(
+        ledger,
+        SfxWindow("w0000", 0.0, 8.0, "rain", 7),
+        path="audio/sfx/w0000.wav",
+        model_size="small_44k",
+    )
+    (tmp_path / "audio" / "sfx" / "w0000.wav").write_bytes(b"RIFF" + b"\0" * 100)
+    assert validate_sfx_ledger(tmp_path, 8.0) == []
+
+
+class _NestedResultSfxWorker:
+    """SubprocessWorker double returning the real nested result shape.
+
+    Writes a valid WAV of the requested duration but reports a lying
+    nested `sfx.duration_seconds`, proving the ledger probe (not the
+    worker payload) is authoritative for reality.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    def start(self) -> None:
+        return None
+
+    def call(self, op: str, payload: dict[str, object]) -> dict[str, object]:
+        import wave
+
+        del op
+        out = str(payload["output_path"])
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        duration = float(payload["duration_seconds"])  # type: ignore[arg-type]
+        frames = max(1, int(48000 * duration))
+        with wave.open(out, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(48000)
+            wav.writeframes(b"\0" * frames * 4)
+        return {
+            "artifacts": {"path": out},
+            "sfx": {"path": out, "backend": "fake", "duration_seconds": 123.456},
+        }
+
+    def stop(self) -> None:
+        return None
+
+
+def test_render_ledgers_request_plus_file_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger records the plan request plus the stem file's probe."""
+    from voyage.sfx_finalize import load_sfx_ledger, render_sfx_bed
+
+    monkeypatch.setattr("voyage.rpc.SubprocessWorker", _NestedResultSfxWorker)
+    run_dir = tmp_path / "run"
+    final_video = tmp_path / "final.mp4"
+    final_video.write_bytes(b"fake-video")
+    render_sfx_bed(
+        run_dir,
+        final_video,
+        4.0,
+        [(0.0, 4.0, "rain")],
+        tmp_path,
+        "fake",
+        "/models",
+        "cpu",
+        "small_44k",
+        0,
+        48000,
+        2,
+        1,
+    )
+    records = load_sfx_ledger(run_dir / "audio" / "sfx" / "sfx.jsonl")
+    assert len(records) == 1
+    assert records[0]["duration"] == 4.0
+    assert abs(float(records[0]["probed_duration"]) - 4.0) < 0.05
+
+
 def _make_finalize_segment(run_dir: Path, seg_id: str, duration: float, sfx_caption: str) -> None:
     import subprocess
 

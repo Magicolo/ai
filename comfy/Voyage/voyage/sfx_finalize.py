@@ -24,7 +24,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from voyage import paths
 from voyage.atomic import fsync_dir
@@ -59,6 +59,17 @@ BOUNDS_RESCALE_IDENTITY_TOLERANCE = 1e-6
 """Timelines within this (seconds) count as identical — float noise from
 probing must not rescale the SFX bounds (byte-identical legacy path)."""
 
+SFX_REQUEST_MATCH_TOLERANCE = 1e-6
+"""Request-identity match budget (seconds) for the stem cache hit-test.
+
+The ledger `duration` is the *requested* plan duration, so a re-finalize
+only hits when the plan asks for (almost) exactly what it asked before —
+float noise from probing still hits, but a stale window from a shorter
+timeline (tenths of a second off) always re-renders. Reality lives in
+`probed_duration` (ffprobe of the stem file right after the atomic
+replace); coverage math follows the stem, not the plan.
+"""
+
 SFX_LEDGER_NAME = "sfx.jsonl"
 SFX_STEMS_DIRNAME = "sfx"
 
@@ -86,6 +97,23 @@ class SfxWindow:
     duration: float
     caption: str
     seed: int
+
+
+class _RenderedWindow(NamedTuple):
+    """One planned window's render outcome (serial-join handoff, 054).
+
+    `logged` is the request window to ledger-append (None on a cache
+    hit); `probed` is the stem file's probed duration — probed on both
+    paths so the join below reuses it instead of re-spawning ffprobe
+    (issue 152 probe budget). Named fields beat the old positional
+    tuple now that the probe rides along.
+    """
+
+    stem: Path
+    logged: SfxWindow | None
+    stored: str
+    model_size: str
+    probed: float
 
 
 def plan_sfx_windows(
@@ -240,8 +268,20 @@ def _scale_bounds_to_timeline(
     return [(start * factor, end * factor, caption) for start, end, caption in bounds]
 
 
-def append_sfx_window(ledger: Path, window: SfxWindow, path: str, model_size: str) -> None:
+def append_sfx_window(
+    ledger: Path,
+    window: SfxWindow,
+    path: str,
+    model_size: str,
+    probed_duration: float | None = None,
+) -> None:
     """Durably append one rendered window (flush + fsync + fsync_dir, takes pattern).
+
+    `window.duration` is the requested plan duration (cache-hit identity);
+    `probed_duration` is the stem file's probed duration (reality — the
+    bed join and coverage math follow the stem, not the plan). Legacy
+    lines without `probed_duration` read back as requested duration,
+    which is exact for them: pre-split ledgers always recorded the plan.
 
     File fsync persists content; the directory sync persists the namespace
     entry (issue 101 twin of `append_take`, in-tree contract in
@@ -259,6 +299,8 @@ def append_sfx_window(ledger: Path, window: SfxWindow, path: str, model_size: st
         "path": path,
         "model_size": model_size,
     }
+    if probed_duration is not None:
+        record["probed_duration"] = probed_duration
     with ledger.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
         handle.flush()
@@ -278,6 +320,18 @@ def load_sfx_ledger(ledger: Path) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _record_covered_duration(record: dict[str, Any]) -> float:
+    """Stem reality for coverage math: probed duration first, request fallback.
+
+    Lines written with a stem probe carry `probed_duration` (what the bed
+    join actually consumed); legacy lines predate the probe and recorded
+    the request, so the fallback is exact for them.
+    """
+    if record.get("probed_duration") is not None:
+        return float(record["probed_duration"])
+    return float(record.get("duration", 0.0))
 
 
 def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
@@ -314,7 +368,7 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
                 f"sfx coverage gap: window {record.get('window_id')} starts at "
                 f"{start:.2f}s, expected ~{cursor:.2f}s"
             )
-        covered_until = start + float(record.get("duration", 0.0))
+        covered_until = start + _record_covered_duration(record)
         cursor = covered_until - SFX_WINDOW_OVERLAP
     if covered_until < timeline_seconds - AV_ALIGNMENT_TOLERANCE_SECONDS:
         errors.append(
@@ -347,10 +401,14 @@ def _sfx_worker_module(backend: str) -> str:
 def _stem_cache_hit(record: dict[str, Any], window: SfxWindow, model_size: str) -> bool:
     """Whether a ledger record satisfies a planned window (153, pure).
 
-    Duration matches fuzzily within `AV_ALIGNMENT_TOLERANCE_SECONDS` (the
-    same budget the bed/timeline checks use) so a re-finalize after float
-    rounding drift still hits; caption/seed/model_size must match exactly
-    so real plan changes always re-render. Malformed durations miss.
+    The ledger `duration` is the requested plan duration, so the hit-test
+    is request identity within float noise (`SFX_REQUEST_MATCH_TOLERANCE`):
+    a re-finalize after probe rounding still hits, while a stale window
+    from a shorter timeline (tenths of a second off) always re-renders.
+    Caption/seed/model_size must match exactly so real plan changes always
+    re-render. Malformed durations miss. Stem reality (`probed_duration`)
+    never participates: an honest encode shortfall (hundredths of a
+    second) must not force a re-render every finalize.
     """
     if record.get("caption") != window.caption:
         return False
@@ -362,7 +420,7 @@ def _stem_cache_hit(record: dict[str, Any], window: SfxWindow, model_size: str) 
         logged = float(record.get("duration", float("nan")))
     except (TypeError, ValueError):
         return False
-    return abs(logged - window.duration) <= AV_ALIGNMENT_TOLERANCE_SECONDS
+    return abs(logged - window.duration) <= SFX_REQUEST_MATCH_TOLERANCE
 
 
 def _prune_stale_partials(sfx_dir: Path) -> int:
@@ -467,15 +525,17 @@ def render_sfx_bed(
             worker.start()
             workers.append(worker)
 
-        def _render_one(index: int, window: SfxWindow) -> tuple[Path, SfxWindow | None, str, str]:
+        def _render_one(index: int, window: SfxWindow) -> _RenderedWindow:
             """Render one window; ledger append is deferred to the serial join (054).
 
-            Returns `(stem, logged, stored, model_size)` where `logged` is the
-            window to ledger-append or None on a cache hit. Stems land via
-            atomic replace in the worker threads (distinct files, safe in
-            parallel); the ledger itself is appended serially in plan order
-            after the pool joins, so two workers can never interleave lines
-            or race the order. No threading.Lock needed by construction.
+            Returns a `_RenderedWindow` whose `logged` is the request
+            window to ledger-append (or None on a cache hit) and whose
+            `probed` is the stem file's probed duration (probed on both
+            paths so the join reuses it). Stems land via atomic replace in
+            the worker threads (distinct files, safe in parallel); the
+            ledger itself is appended serially in plan order after the
+            pool joins, so two workers can never interleave lines or race
+            the order. No threading.Lock needed by construction.
             """
             stem = sfx_dir / f"{window.window_id}.wav"
             stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}.wav"
@@ -486,7 +546,8 @@ def render_sfx_bed(
                 and _stem_cache_hit(record, window, sizes[slot])
                 and resolve_stored_path(run_dir, str(record.get("path", ""))).exists()
             ):
-                return (resolve_stored_path(run_dir, str(record["path"])), None, "", "")
+                hit = resolve_stored_path(run_dir, str(record["path"]))
+                return _RenderedWindow(hit, None, "", "", _audio_duration_seconds(hit))
             # Render-to-temp + atomic replace (153): a failed render leaves
             # the old stem and ledger line intact — validate never sees a
             # half-written window, and the old stem stays the valid fallback.
@@ -516,17 +577,14 @@ def render_sfx_bed(
                     tmp_stem.unlink()
                 raise MediaError(f"sfx {window.window_id}: worker returned no result")
             os.replace(tmp_stem, stem)
-            # Truncated tail (EOF edge): the ledger records reality so the
-            # bed join and coverage math follow the stem, not the plan.
-            resolved = result.get("duration_seconds", window.duration)
-            logged = SfxWindow(
-                window.window_id,
-                window.start,
-                float(resolved),
-                window.caption,
-                window.seed,
-            )
-            return (stem, logged, stored, sizes[slot])
+            # Truncated tail (EOF edge): the ledger records the request for
+            # identity plus the stem file's probed duration for reality, so
+            # the bed join and coverage math follow the stem, not the plan.
+            # The probe (not the worker's nested `sfx.duration_seconds`) is
+            # authoritative: backends echo the request or report yielded
+            # frames, while the file is what the join consumes.
+            probed = _audio_duration_seconds(stem)
+            return _RenderedWindow(stem, window, stored, sizes[slot], probed)
 
         if num_workers == 1:
             pending = [_render_one(index, window) for index, window in enumerate(windows)]
@@ -534,10 +592,12 @@ def render_sfx_bed(
             with ThreadPoolExecutor(max_workers=num_workers) as pool:
                 pending = list(pool.map(_render_one, range(len(windows)), windows))
         stems = []
-        for stem, logged, stored, size in pending:
-            if logged is not None:
-                append_sfx_window(ledger, logged, stored, size)
-            stems.append(stem)
+        for row in pending:
+            if row.logged is not None:
+                append_sfx_window(
+                    ledger, row.logged, row.stored, row.model_size, probed_duration=row.probed
+                )
+            stems.append(row.stem)
     finally:
         for worker in workers:
             # Best-effort teardown: a stop failure must never mask the
@@ -565,7 +625,10 @@ def render_sfx_bed(
             run_dir, windows, backend, device, model_size, started, append_line
         )
         return bed
-    stem_seconds = [_audio_duration_seconds(stem) for stem in stems]
+    # Stem durations ride along from `_render_one` (probed on both the
+    # render and cache-hit paths) so the join never re-spawns ffprobe
+    # per stem (issue 152 probe budget).
+    stem_seconds = [row.probed for row in pending]
     joined = tmpdir / "sfx_joined.wav"
     _join_audio_single_graph(
         stems,
