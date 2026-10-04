@@ -9,7 +9,7 @@
 #   Default backend is ltx25 (the config default since 2026-10-02).
 #   The helper is
 #   backend-agnostic — it benchmarks, runs, validates, and tees the JSON
-#   summary for whatever backend the run dir was inited with.
+#   summary for whatever backend the run dir was generated with.
 #
 # Stages: nvidia-smi presence -> idle gate -> absolute-path gate ->
 # disk preflight -> benchmark video -> N-segment run -> validate ->
@@ -114,10 +114,10 @@ if [ -n "$avail_kib" ] && [ "$avail_kib" -lt $((min_free_gib * 1024 * 1024)) ]; 
   echo "qualify: only ~${avail_gib} GiB free under $run_dir (need ${min_free_gib})" >&2
   exit 5
 fi
-if [ ! -f "$run_dir/voyage.toml" ]; then
-  echo "qualify: no voyage.toml in $run_dir — init first:" >&2
-  echo "  ./scripts/run.sh init --output $run_dir --run-id qual-${backend} \\" >&2
-  echo "    --style 'pastel neon line-art, peaceful' --backend ${backend} --force" >&2
+if [ ! -f "$run_dir/run_manifest.json" ]; then
+  echo "qualify: no run_manifest.json in $run_dir — generate first:" >&2
+  echo "  ./scripts/run.sh generate --name qual-${backend} \\" >&2
+  echo "    --style 'pastel neon line-art, peaceful' --backend ${backend}" >&2
   exit 2
 fi
 ./scripts/run.sh benchmark video --run "$run_dir" --warmup 1 --measured 3

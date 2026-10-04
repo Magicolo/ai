@@ -22,7 +22,8 @@ cd "$(dirname "$0")/.."
 # Backend-aware defaults: the CUDA worker stacks (torch + LTXV/ACE)
 # only exist in voyage-video. Detect the requested backend from
 # --backend <name> / --backend=<name> (defaulting to ltx25 for `generate`);
-# for run-like commands with --run DIR, read it from DIR/voyage.toml.
+# for run-like commands with --run DIR, read it from DIR/run_manifest.json
+# (CLI-is-config: the manifest carries the effective config; no TOML).
 # Explicit VOYAGE_IMAGE / VOYAGE_GPUS always win.
 #
 # Argument-contract: --backend and --run are each accepted in BOTH the
@@ -54,17 +55,18 @@ done
 if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
   requested_backend="ltx25"
 fi
-# Section-aware TOML sniff via the stdlib parser: reads the video/audio/sfx
-# backends only, so [director] backends (or indentation/layout changes) can
-# never select the wrong image. Unparseable/missing key -> empty (slim
-# default), never a launcher failure. Any CUDA backend in any of the three
-# sections selects the video image (issue 090: [audio].backend=acestep +
-# video=fake used to stay slim, then died late in cli._require_cuda_stack;
-# the same holds for [sfx].backend=mmaudio + fake/fake).
+# Manifest sniff via the stdlib JSON parser: reads the video/audio/sfx
+# backends from the manifest's effective config, so [director] backends
+# (or layout changes) can never select the wrong image.
+# Unparseable/missing key -> empty (slim default), never a launcher
+# failure. Any CUDA backend in any of the three sections selects the
+# video image (issue 090: [audio].backend=acestep + video=fake used to
+# stay slim, then died late in cli._require_cuda_stack; the same holds
+# for [sfx].backend=mmaudio + fake/fake).
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
-    && [ -f "$run_dir/voyage.toml" ]; then
+    && [ -f "$run_dir/run_manifest.json" ]; then
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import os, tomllib; cfg = tomllib.load(open(os.path.join(os.environ["RUN_DIR"], "voyage.toml"), "rb")); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
+    'import json, os; cfg = json.load(open(os.path.join(os.environ["RUN_DIR"], "run_manifest.json")))["effective_config"]; bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
 fi
 needs_cuda=0
