@@ -32,6 +32,16 @@ def build_manifest(
     into ProjectConfig (extra manifest keys are ignored).
     """
     manifest = config.model_dump(mode="json")
+    # Caption pins are in-memory only (config.py): a stored pin would
+    # freeze every future segment to one caption instead of letting the
+    # director evolve them, so they never reach the manifest.
+    for section_name, pin_key in (
+        ("video", "video_caption"),
+        ("audio", "music_caption"),
+    ):
+        section = manifest.get(section_name)
+        if isinstance(section, dict):
+            section.pop(pin_key, None)
     manifest["segments"] = segments
     manifest["final_video"] = final_video
     manifest["skip_bad"] = skip_bad

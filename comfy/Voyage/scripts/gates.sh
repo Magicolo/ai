@@ -60,7 +60,7 @@ docker run --rm --user="$(id -u):$(id -g)" \
     tests/test_issue_152_blend_probe_memo.py tests/test_issue_152_parity_research.py tests/test_issue_152_wide_manual_join_proof.py \
     tests/test_issue_166_model_pass_select.py tests/test_issue_166_resolve_weights.py tests/test_issue_191_sfx_bounds_streams.py tests/test_ledger_rotation_rank2.py tests/test_lock_manifest_agreement.py \
     tests/test_ltxv.py tests/test_ltxv_failure_hygiene.py \
-    tests/test_ltxv_stage_ms.py tests/test_ltxv_tensor_handoff.py tests/test_media_audio_split.py tests/test_media_augment_unified_083.py tests/test_media_memory.py \
+    tests/test_ltxv_stage_ms.py tests/test_ltxv_tensor_handoff.py tests/test_manifest_no_stale_fields.py tests/test_media_audio_split.py tests/test_media_augment_unified_083.py tests/test_media_memory.py \
     tests/test_media_robustness_rank2.py tests/test_models_ranges_119.py tests/test_novelty_steer_accept.py tests/test_observability.py tests/test_observability_rank2.py tests/test_ops_visibility_rank2.py     tests/test_output_containment.py \
     tests/test_perf_regressions.py tests/test_phase3.py tests/test_precision.py tests/test_prefetch_invalidated_136_168.py tests/test_qualification.py tests/test_recovery.py \
     tests/test_registry_audio_split.py tests/test_registry_causvid_split.py tests/test_registry_director_split.py tests/test_registry_film_split.py \

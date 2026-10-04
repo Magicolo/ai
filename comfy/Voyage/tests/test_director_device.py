@@ -63,7 +63,6 @@ def test_default_toml_round_trips_director_device(tmp_path: Path) -> None:
 
     config = preset_config("device-probe", "pastel neon line-art", 7)
     assert config.director.device == "cuda:1"
-    assert config.director.model_id == "Qwen/Qwen3-8B"
 
     cpu_config = preset_config("device-probe", "pastel neon line-art", 7, director_device="cpu")
     assert cpu_config.director.device == "cpu"

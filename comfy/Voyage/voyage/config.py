@@ -523,7 +523,6 @@ class DirectorConfig(BaseModel):
     # for single-GPU/CI boxes without a second GPU); the worker routes on
     # endpoint presence, so the wire backend stays `qwen` either way.
     backend: DirectorBackendName = "llama"
-    model_id: str = "Qwen/Qwen3-8B"
     # Decider placement: the unified worker image runs the Qwen decider on
     # cuda:1 (second GPU) via a 4-bit AWQ model; "cpu" keeps the legacy bf16
     # path (explicit opt-out for single-GPU / CI boxes). The worker falls
@@ -539,10 +538,6 @@ class DirectorConfig(BaseModel):
     # Qwen worker: non-thinking mode (no <think> parsing), JSON-only output.
     enable_thinking: bool = False
     max_new_tokens: int = 1024
-    embedding_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
-    # VLM inspector (Phase 5): Qwen3.5-9B lives in the director image
-    # (transformers 5.x); a local path works for E2E (/models/Qwen3.5-9B).
-    inspector_model_id: str = "Qwen/Qwen3.5-9B"
 
     @field_validator("device")
     @classmethod

@@ -1255,7 +1255,6 @@ class Supervisor:
                 "destination_concept": state.destination_concept,
                 "style": style_spec.prompt,
                 "backend": config.director.backend,
-                "model_id": config.director.model_id,
                 "device": config.director.device,
                 "temperature": config.director.temperature,
                 "max_new_tokens": config.director.max_new_tokens,
