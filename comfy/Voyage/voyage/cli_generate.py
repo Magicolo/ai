@@ -1,213 +1,237 @@
-"""`generate` one-shot verb (DESIGN §58).
+"""`generate <NAME>` verb (DESIGN §58, two-verb CLI).
 
-Verb module of the issue-080 split: create → run → validate →
-finalize orchestration. Sole run creator (CLI-is-config): builds the
-effective config from flags and writes it into the run manifest.
-Fans out to the sibling verb modules via function-level imports (the
-verb-module cycle rule).
+The manifest plans; `state.json` rules. Generate reconciles the run
+directory against both: manifest-only means a new run, segment folders
+beyond the committed count are removed as uncommitted work before
+resuming, and a validated run whose `final.mp4` already covers the
+timeline does no work.
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 import sys
-import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
 
-from pydantic import ValidationError
-
-from voyage.cli_core import _augment_overrides, get_console
-from voyage.cli_paths import (
-    _check_run_id,
-    _effective_run_id,
-    resolve_run_dir,
-    warn_if_outside_output_dir,
-)
-from voyage.cli_planning import (
-    _CUDA_VIDEO_BACKENDS,
-    _cuda_stack_error,
-    _frames_per_segment,
-    _require_cuda_stack,
-    segments_for_duration,
-)
-from voyage.config import (
-    BACKEND_REGISTRY,
-    VideoBackendName,
-    apply_draft_overrides,
-    preset_config,
-    removed_backend_suffix,
-)
-from voyage.errors import DiskSpaceError
-from voyage.persistence import create_run_dir, read_state
-from voyage.seeds import random_master_seed
+from voyage.cli_core import get_console
+from voyage.cli_paths import _check_run_id, output_root
+from voyage.cli_planning import _require_cuda_stack
+from voyage.cli_validate import validate_run
+from voyage.console import RichSegmentProgress
+from voyage.errors import DiskSpaceError, StateError
+from voyage.persistence import read_effective_config, read_manifest, read_state
+from voyage.supervisor import Supervisor
 
 
-def _start_stop_key_listener(
-    run_dir: Path, console: VoyageConsole, sentinel: str = "s"
-) -> threading.Thread:
-    """Watch stdin for the stop sentinel; request stop at the next boundary.
+def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
+    """Delete segment folders at/after the committed count + transient partials.
 
-    Daemon thread: a line whose first non-space character matches the
-    sentinel (case-insensitive) flips the run to STOP_REQUESTED via the
-    state.json control plane, so the current segment finishes before
-    finalize. Obvious console feedback on arm, on trigger, and on EOF.
-    Returns the thread (daemon, never joined — the process exits past it).
+    `state.json` rules: folders beyond it are incomplete/corrupt work by
+    definition (e.g. a crash between DONE and the state advance). Only
+    six-digit numeric segment dirs are touched, plus `*.partial`/`*.tmp*`
+    transients; everything else is left for `validate_run` to report.
+    Returns the number of removed entries.
     """
-    from voyage.persistence import read_state, write_state
+    from voyage import paths
 
-    def _watch() -> None:
-        import sys
+    removed = 0
+    segments_dir = run_dir / paths.SEGMENTS_DIRNAME
+    if segments_dir.is_dir():
+        for child in sorted(segments_dir.iterdir()):
+            if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= committed:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                    removed += 1
+                elif child.is_file():
+                    child.unlink()
+                    removed += 1
+        for pattern in ("*.partial", "*.tmp*"):
+            for stray in sorted(segments_dir.glob(pattern)):
+                if stray.is_file():
+                    stray.unlink()
+                    removed += 1
+    return removed
 
-        try:
-            for line in sys.stdin:
-                if line.strip()[:1].lower() == sentinel:
-                    try:
-                        state = read_state(run_dir)
-                        state.status = "STOP_REQUESTED"
-                        write_state(run_dir, state)
-                    except Exception as exc:
-                        print(
-                            f"warning: stop key ignored ({exc})",
-                            file=sys.stderr,
-                        )
-                        continue
-                    try:
-                        console.ok(
-                            "stop key received — finishing the current segment, then finalizing ..."
-                        )
-                        print(
-                            "stop key received — finishing the current segment, then finalizing ..."
-                        )
-                    except Exception:
-                        pass
-                    return
-        except Exception:
-            pass
-        try:
-            console.warn(
-                "stop-key listener ended (stdin closed) — use Ctrl-C or "
-                "`voyage stop` to finish instead"
-            )
-        except Exception:
-            pass
 
-    thread = threading.Thread(target=_watch, name="voyage-stop-key", daemon=True)
-    thread.start()
-    return thread
+def _final_covers_timeline(final: Path, timeline_frames: int) -> bool:
+    """True when final.mp4 exists with exactly the committed frame count."""
+    if timeline_frames <= 0 or not final.is_file():
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=nw=1:nk=1",
+                str(final),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        return int(proc.stdout.strip()) == timeline_frames
+    except ValueError:
+        return False
+
+
+def _finalize_run_dir(
+    run_dir: Path,
+    manifest: dict[str, object],
+    args: argparse.Namespace,
+    console: VoyageConsole | None = None,
+) -> int:
+    """Run the finalize step with manifest policy (final_video/skip_bad/no_sfx)."""
+    # Seam dispatch (issue 080): the finalize leaf resolves through the
+    # voyage.cli namespace at call time, exactly as when they shared one
+    # module — monkeypatching voyage.cli.cmd_finalize keeps intercepting.
+    from voyage.cli import cmd_finalize
+
+    final_value = manifest.get("final_video")
+    final = Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    return cmd_finalize(
+        argparse.Namespace(
+            run=str(run_dir),
+            output=str(final),
+            skip_bad=bool(manifest.get("skip_bad", False)),
+            no_sfx=bool(manifest.get("no_sfx", False)),
+            sfx_backend=None,
+            sfx_caption=None,
+            sfx_device=None,
+            sfx_model_size=None,
+            sfx_workers=1,
+            min_fps=None,
+            min_resolution=None,
+            no_augment=False,
+            use_model_pass=None,
+            verbose=bool(getattr(args, "verbose", False)),
+            no_color=bool(getattr(args, "no_color", False)),
+            progress_sink=getattr(args, "progress_sink", None),
+        )
+    )
+
+
+def _pre_finalize_errors(run_dir: Path, manifest: dict[str, Any], effective: Any) -> list[str]:
+    """Validate errors minus the healable SFX tail shortfall.
+
+    SFX stems render only at finalize, so a resume-generate on a run whose
+    ledger predates the new segments always trips the pure-shortfall line
+    — which finalize heals via `render_sfx_bed` (cache-hits + renders).
+    The filter applies only when the SFX pass will actually run; with
+    `no_sfx` (or a fake sfx backend) nothing heals it, so it stays hard.
+    """
+    from voyage.sfx_finalize import is_healable_sfx_shortfall
+
+    errors = validate_run(run_dir)
+    sfx_enabled = not bool(manifest.get("no_sfx", False)) and (
+        getattr(getattr(effective, "sfx", None), "backend", "fake") != "fake"
+    )
+    if not sfx_enabled:
+        return errors
+    return [error for error in errors if not is_healable_sfx_shortfall(error)]
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    """One-shot video: create -> run -> validate -> finalize.
+    """Generate (or resume) the run NAME to its manifest plan.
 
-    With --duration the run covers at least that long (rounded up to whole
-    segments). Without it the run continues until the operator presses
-    's' (finishing the current segment first), Ctrl-C, or `voyage stop`.
+    1. Resolve `output/<NAME>`; missing manifest → exit 2 (`configure` first).
+    2. Read manifest plan (segment count) + state (committed truth).
+    3. Delete numeric segment folders beyond the committed count.
+    4. Nothing left to do (planned covered + validate clean + final.mp4
+       covers the timeline) → print + exit 0 without touching workers.
+    5. Else render the remainder, validate, finalize.
     """
-    # Seam dispatch (issue 080): orchestration targets + test-patched
-    # leaves resolve through the voyage.cli namespace at call time, exactly
-    # as when they shared one module — monkeypatching voyage.cli keeps
-    # intercepting every fan-out edge below.
-    from voyage.cli import (
-        _torch_available,
-        _warn_if_no_cuda,
-        check_ffmpeg,
-        check_free_space,
-        cmd_finalize,
-        cmd_run,
-        validate_run,
-    )
-
-    # Fail before creation: generate always builds a fresh config from the
-    # backend preset (CUDA video backends pair with ACE-Step audio), so the
-    # preset alone decides the stack.
-    if args.backend in _CUDA_VIDEO_BACKENDS and not _torch_available():
-        print(_cuda_stack_error(args.backend), file=sys.stderr)
-        return 1
-    run_id = _effective_run_id(args)
-    if _check_run_id(run_id) != 0:
-        return 2
-    # Resolve once: workers spawn with CWD=run_dir, so every downstream path
-    # (payloads, takes, slices) must be absolute or they double up.
-    output = Path(args.output) if args.output else Path("output") / run_id
-    run_dir = resolve_run_dir(str(output))
-    warn_if_outside_output_dir(run_dir, flag="--output")
-    if run_dir.exists() and any(run_dir.iterdir()) and not getattr(args, "force", False):
+    # Test seams: Supervisor + validate_run resolve as module globals so
+    # tests patch `voyage.cli_generate` directly; cmd_finalize resolves
+    # through `voyage.cli` (see _finalize_run_dir) per the seam rule.
+    name = getattr(args, "name", None)
+    if not isinstance(name, str) or not name.strip():
         print(
-            f"refusing to generate into non-empty directory {run_dir} (use --force)",
+            "error: generate needs a run NAME (run `voyage configure <name>` first)",
             file=sys.stderr,
         )
         return 2
-    style_value = getattr(args, "style", None)
-    if not isinstance(style_value, str) or not style_value.strip():
-        print("error: --style must be a non-empty human-owned style string", file=sys.stderr)
+    name = name.strip()
+    if _check_run_id(name) != 0:
         return 2
-    seed_value = getattr(args, "seed", None)
-    if seed_value is None:
-        seed_value = random_master_seed()
-        args.seed = seed_value
-        print(f"random seed for this run: {seed_value} (re-run with --seed {seed_value})")
-    if isinstance(seed_value, bool) or not isinstance(seed_value, int):
-        print(f"error: --seed must be an integer, got {seed_value!r}", file=sys.stderr)
-        return 2
-    backend_value = getattr(args, "backend", None) or "ltx25"
-    if backend_value not in BACKEND_REGISTRY:
-        known = ", ".join(sorted(BACKEND_REGISTRY))
-        print(
-            f"error: unknown video backend {backend_value!r} (known: {known})"
-            f"{removed_backend_suffix(str(backend_value))}",
-            file=sys.stderr,
-        )
-        return 2
-    # `generate` is the sole run creator (CLI-is-config): the effective
-    # config resolves here — preset first, then every flag override —
-    # and is written into the run manifest. Validate-before-mutate
-    # (issue 110): pure config math resolves BEFORE the first mkdir, so
-    # a bad override exits 2 with no orphan run dir for the retry.
-    director = getattr(args, "director", None) or "llama"
+    run_dir = (output_root() / name).resolve()
     try:
-        effective = apply_draft_overrides(
-            preset_config(
-                run_id,
-                style_value,
-                seed_value,
-                video_backend=cast(VideoBackendName, backend_value),
-                director_backend=director,
-                director_device=getattr(args, "director_device", None) or "cuda:1",
-            ),
-            draft=args.draft,
-            director=director,
-            director_device=getattr(args, "director_device", None),
-            blocks=args.blocks,
-            take_seconds=args.take_seconds,
-            quantization=args.quantization,
-            beats_per_segment=args.beats_per_segment,
-            drift_every_n_segments=args.drift_every_n,
-            music_caption=getattr(args, "music_caption", None),
-            video_caption=getattr(args, "video_caption", None),
-            **_augment_overrides(args),
-        )
-    except (ValidationError, ValueError) as exc:
-        print(f"error: invalid numeric override: {exc}", file=sys.stderr)
+        manifest = read_manifest(run_dir)
+    except StateError as exc:
+        print(f"error: {exc} — run `voyage configure {name}` first", file=sys.stderr)
         return 2
-    if not _require_cuda_stack(effective):
+    try:
+        effective = read_effective_config(run_dir)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    _warn_if_no_cuda(effective)
-    create_run_dir(run_dir, effective, argv=sys.argv[1:])
-    print(f"initialized voyage run at {run_dir}")
-    frames_per_segment = _frames_per_segment(effective)
-    raw_duration = getattr(args, "duration", None)
-    if raw_duration is None:
-        segments = None
-        planned_frames = None
-    else:
-        segments = segments_for_duration(raw_duration, effective.video.fps, frames_per_segment)
-        planned_frames = segments * frames_per_segment
+    planned = manifest.get("segments")
+    if isinstance(planned, bool) or not isinstance(planned, int) or planned <= 0:
+        print(
+            f"error: manifest in {run_dir} has no planned segment count "
+            f"— re-run `voyage configure {name}`",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        state = read_state(run_dir)
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    removed = _discard_uncommitted_segments(run_dir, state.committed_segments)
+    if removed:
+        plural = "y" if removed == 1 else "ies"
+        print(f"reconcile: removed {removed} uncommitted segment entr{plural}")
+    remaining = planned - state.committed_segments
     console = get_console(args)
     sink = getattr(args, "progress_sink", None)
+    if remaining <= 0:
+        errors = _pre_finalize_errors(run_dir, manifest, effective)
+        if errors:
+            print("INVALID:")
+            for error in errors:
+                print(f"  - {error}")
+            if not bool(manifest.get("skip_bad", False)):
+                print(
+                    "aborting before finalize "
+                    "(re-run `voyage configure` with --skip-bad to salvage)",
+                    file=sys.stderr,
+                )
+                return 1
+            print("continuing with --skip-bad ...", file=sys.stderr)
+        final_value = manifest.get("final_video")
+        final = (
+            Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
+        )
+        if _final_covers_timeline(final, state.timeline_frames):
+            print(
+                f"nothing to do: {state.committed_segments} segment(s) committed, "
+                f"{final.name} covers {state.timeline_frames} frames"
+            )
+            return 0
+        return _finalize_run_dir(run_dir, manifest, args, console)
+    if not _require_cuda_stack(effective):
+        return 1
+    from voyage.cli import check_ffmpeg, check_free_space
+
     ffmpeg_ok, ffmpeg_message = check_ffmpeg()
     if not ffmpeg_ok:
         print(f"error: {ffmpeg_message}", file=sys.stderr)
@@ -220,8 +244,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
             effective.sfx.models_dir,
         }
         for stack_dir in sorted(stack_dirs):
-            # The mount may not exist yet (downloads create it): check the
-            # nearest existing ancestor so a missing dir never crashes.
             anchor = Path(stack_dir)
             while not anchor.exists():
                 anchor = anchor.parent
@@ -231,18 +253,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
     from voyage.models_ensure import ensure_models
 
-    sfx_enabled = (
-        not bool(getattr(args, "no_sfx", False))
-        and (getattr(args, "sfx_backend", None) or effective.sfx.backend) != "fake"
-    )
+    sfx_enabled = not bool(manifest.get("no_sfx", False)) and effective.sfx.backend != "fake"
     if (
         ensure_models(
             effective,
             sfx_enabled,
             console,
-            allow_download=not bool(getattr(args, "no_download", False)),
-            augment_enabled=not bool(getattr(args, "no_augment", False))
-            and (effective.augment.min_fps > 0 or effective.augment.min_width > 0),
+            allow_download=True,
+            augment_enabled=effective.augment.min_fps > 0 or effective.augment.min_width > 0,
         )
         != 0
     ):
@@ -250,117 +268,43 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if sink is None:
         console.rule(
             f"voyage generate · {effective.video.backend} "
-            f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps · "
-            f"director {effective.director.backend}"
+            f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps"
         )
-        if planned_frames is None:
-            console.info(
-                f"plan: open-ended run (no --duration) · {frames_per_segment}f/segment · "
-                f"{effective.audio.beats_per_segment} beats/segment · "
-                f"drift every {effective.voyage.drift_every_n_segments}"
-            )
-            print(
-                "generating until you press 's' "
-                f"({frames_per_segment}f per segment) "
-                f"with {effective.video.backend} ..."
-            )
-            print("PRESS 's' + Enter at any time to finish the current segment,")
-            print("then the run validates and finalizes automatically.")
-            print("TIP: keep this terminal focused — the 's' key is read from stdin.")
-        else:
-            console.info(
-                f"plan: ~{planned_frames / effective.video.fps:.1f}s "
-                f"({segments} segments, {planned_frames} frames) "
-                f"· {effective.audio.beats_per_segment} beats/segment · "
-                f"drift every {effective.voyage.drift_every_n_segments}"
-            )
-            print(
-                f"generating ~{planned_frames / effective.video.fps:.1f}s "
-                f"({segments} segments, {planned_frames} frames) "
-                f"with {effective.video.backend} ..."
-            )
-    if planned_frames is None:
-        console.info("stop-key armed: type 's' + Enter to stop after the current segment")
-        print("stop-key armed: type 's' + Enter to stop after the current segment")
-        _start_stop_key_listener(run_dir, console)
-    cmd_run(
-        argparse.Namespace(
-            run=str(run_dir),
-            segments=segments,
-            no_finalize=True,
-            draft=args.draft,
-            director=director,
-            director_device=getattr(args, "director_device", None),
-            blocks=args.blocks,
-            take_seconds=args.take_seconds,
-            quantization=args.quantization,
-            beats_per_segment=args.beats_per_segment,
-            drift_every_n=args.drift_every_n,
-            music_caption=getattr(args, "music_caption", None),
-            video_caption=getattr(args, "video_caption", None),
-            min_fps=getattr(args, "min_fps", None),
-            min_resolution=getattr(args, "min_resolution", None),
-            no_augment=bool(getattr(args, "no_augment", False)),
-            use_model_pass=getattr(args, "use_model_pass", None),
-            verbose=console.verbose,
-            no_color=getattr(args, "no_color", False),
-            progress_sink=sink,
+        print(
+            f"generating {remaining} segment(s) "
+            f"with {effective.video.backend} (resuming at segment {state.committed_segments}) ..."
         )
-    )
-    errors = validate_run(run_dir)
+    progress = sink if sink is not None else RichSegmentProgress(console)
+    supervisor = Supervisor(run_dir, effective, progress=progress)
+    committed = supervisor.run_segments(remaining)
+    if sink is None:
+        console.ok(f"run finished · {len(committed)} segment(s) committed")
+    errors = _pre_finalize_errors(run_dir, manifest, effective)
     if errors:
         print("INVALID:")
         for error in errors:
             print(f"  - {error}")
-        if not getattr(args, "skip_bad", False):
+        if not bool(manifest.get("skip_bad", False)):
             print(
-                "aborting before finalize (re-run with --skip-bad to salvage)",
+                "aborting before finalize (re-run `voyage configure` with --skip-bad to salvage)",
                 file=sys.stderr,
             )
             return 1
         print("continuing with --skip-bad ...", file=sys.stderr)
-    final_video = getattr(args, "final_video", None)
-    final = Path(final_video).resolve() if final_video else run_dir / "final.mp4"
-    if final_video:
-        # Containment warning: the run dir already warned via the creation
-        # funnel above; the final video is this verb's own write.
-        warn_if_outside_output_dir(final, flag="--final-video")
-    final.parent.mkdir(parents=True, exist_ok=True)
-    final_code = cmd_finalize(
-        argparse.Namespace(
-            run=str(run_dir),
-            output=str(final),
-            skip_bad=getattr(args, "skip_bad", False),
-            no_sfx=getattr(args, "no_sfx", False),
-            sfx_backend=getattr(args, "sfx_backend", None),
-            sfx_caption=getattr(args, "sfx_caption", None),
-            sfx_device=getattr(args, "sfx_device", None),
-            sfx_model_size=getattr(args, "sfx_model_size", None),
-            sfx_workers=getattr(args, "sfx_workers", 1),
-            min_fps=getattr(args, "min_fps", None),
-            min_resolution=getattr(args, "min_resolution", None),
-            no_augment=bool(getattr(args, "no_augment", False)),
-            use_model_pass=getattr(args, "use_model_pass", None),
-            # Console context rides both child stages (issue 147): the run
-            # call above already forwards these three, the finalize call
-            # dropped them — so generate --verbose went silent exactly
-            # when the final video assembled.
-            verbose=console.verbose,
-            no_color=getattr(args, "no_color", False),
-            progress_sink=sink,
-        )
-    )
+    final_code = _finalize_run_dir(run_dir, manifest, args, console)
     if final_code != 0:
         return final_code
     state = read_state(run_dir)
     actual_seconds = state.timeline_frames / effective.video.fps
+    final_value = manifest.get("final_video")
     if sink is None:
         console.ok(
-            f"generated {final} ({state.committed_segments} segments, "
+            f"generated {final_value if isinstance(final_value, str) else run_dir / 'final.mp4'} "
+            f"({state.committed_segments} segments, "
             f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
         )
         print(
-            f"generated {final} ({state.committed_segments} segments, "
+            f"generated ({state.committed_segments} segments, "
             f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
         )
     return 0

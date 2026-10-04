@@ -196,7 +196,7 @@ def test_segment_committed_carries_stage_breakdown(tmp_path: Path) -> None:
     assert len(events) == 1
     stages = events[0].get("stages")
     assert isinstance(stages, dict)
-    assert set(stages) == {"inspect", "director", "video", "audio", "validate", "commit"}
+    assert set(stages) == {"director", "video", "audio", "validate", "commit"}
     elapsed = events[0]["elapsed_seconds"]
     assert isinstance(elapsed, (int, float))
     total = 0.0

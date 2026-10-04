@@ -386,6 +386,7 @@ def test_worker_failure_restores_form_with_error(
     def _boom(_args: object) -> int:
         raise RuntimeError("boom")
 
+    monkeypatch.setattr("voyage.cli.cmd_configure", lambda _args: 0)
     monkeypatch.setattr("voyage.cli.cmd_generate", _boom)
 
     async def _run() -> None:
@@ -714,6 +715,7 @@ def test_base_exception_in_worker_restores_form(
     def _quit(_args: object) -> int:
         raise SystemExit(2)
 
+    monkeypatch.setattr("voyage.cli.cmd_configure", lambda _args: 0)
     monkeypatch.setattr("voyage.cli.cmd_generate", _quit)
 
     async def _run() -> None:
@@ -813,6 +815,7 @@ def test_slow_run_stays_responsive_and_reaches_monitoring_view(
         release.wait(30)
         return 0
 
+    monkeypatch.setattr("voyage.cli.cmd_configure", lambda _args: 0)
     monkeypatch.setattr("voyage.cli.cmd_generate", _slow_generate)
 
     async def _run() -> None:
@@ -867,6 +870,7 @@ def test_mid_run_progress_reaches_log_before_completion(
         release.wait(30)
         return 0
 
+    monkeypatch.setattr("voyage.cli.cmd_configure", lambda _args: 0)
     monkeypatch.setattr("voyage.cli.cmd_generate", _posting_generate)
 
     async def _run() -> None:
@@ -907,6 +911,7 @@ def test_cuda_fast_fail_returns_to_form_with_error(
     VoyageApp = _require_app()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("voyage.cli._torch_available", lambda: False)
+    monkeypatch.setattr("voyage.models_ensure.ensure_models", lambda *a, **k: 0)
 
     async def _run() -> None:
         from textual.containers import ScrollableContainer
@@ -950,6 +955,7 @@ def test_run_head_ticks_elapsed_while_running(
         release.wait(30)
         return 0
 
+    monkeypatch.setattr("voyage.cli.cmd_configure", lambda _args: 0)
     monkeypatch.setattr("voyage.cli.cmd_generate", _slow_generate)
 
     async def _run() -> None:

@@ -45,8 +45,8 @@ def test_augment_defaults() -> None:
         "min_width": 1216,
         "min_height": 704,
         "use_model_pass": True,
-        "interp_multiplier": 4,
-        "presentation_fps": None,
+        "interp_multiplier": 2,
+        "presentation_fps": 32,
     }
     assert _base_config().augment == AugmentConfig()
 
@@ -166,7 +166,7 @@ def _augment_defaults(args: argparse.Namespace) -> dict[str, object]:
 def test_augment_parser_defaults() -> None:
     for verb in (
         ["finalize", "--run", "r", "--output", "o.mp4"],
-        ["generate", "--style", "x", "--duration", "5s"],
+        ["configure", "calm", "--segments", "1"],
         ["run", "--run", "r"],
     ):
         assert _augment_defaults(_parse(verb)) == {
@@ -199,10 +199,10 @@ def test_augment_flags_parse() -> None:
 
 
 def test_run_and_generate_share_augment_flags() -> None:
-    """The shared helper keeps all three verbs in lockstep (mirrors 020)."""
+    """The shared helper keeps run/configure/finalize in lockstep (mirrors 020)."""
     flags = ["--min-fps", "60", "--min-resolution", "1920x1080", "--no-augment"]
     run_args = _parse(["run", "--run", "r", *flags])
-    gen_args = _parse(["generate", "--duration", "5s", "--style", "calm", *flags])
+    gen_args = _parse(["configure", "calm", "--segments", "1", *flags])
     fin_args = _parse(["finalize", "--run", "r", "--output", "o.mp4", *flags])
     assert _augment_defaults(run_args) == _augment_defaults(gen_args) == _augment_defaults(fin_args)
 
@@ -342,7 +342,7 @@ def _sfx_defaults(args: argparse.Namespace) -> dict[str, object]:
 
 def test_all_finalizing_verbs_carry_sfx_flags() -> None:
     parser = build_parser()
-    generate = parser.parse_args(["generate", "--style", "x", "--duration", "5s"])
+    generate = parser.parse_args(["configure", "calm", "--segments", "1"])
     finalize = parser.parse_args(["finalize", "--run", "r", "--output", "o.mp4"])
     stop = parser.parse_args(["stop", "--run", "r"])
     assert _sfx_defaults(generate) == _sfx_defaults(finalize) == _sfx_defaults(stop)
@@ -352,11 +352,10 @@ def test_generate_sfx_overrides_parse() -> None:
     parser = build_parser()
     args = parser.parse_args(
         [
-            "generate",
-            "--style",
-            "x",
-            "--duration",
-            "5s",
+            "configure",
+            "calm",
+            "--segments",
+            "1",
             "--no-sfx",
             "--sfx-device",
             "cuda:1",

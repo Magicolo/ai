@@ -665,10 +665,10 @@ def test_models_download_target_for_gguf(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_init_parser_accepts_llama_director() -> None:
-    """`generate --director llama` parses (backend threaded through the CLI)."""
+    """`configure --director llama` parses (backend threaded through the CLI)."""
     from voyage.cli import build_parser
 
-    args = build_parser().parse_args(["generate", "--style", "s", "--director", "llama"])
+    args = build_parser().parse_args(["configure", "s", "--segments", "1", "--director", "llama"])
     assert args.director == "llama"
 
 

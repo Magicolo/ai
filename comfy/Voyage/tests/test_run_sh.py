@@ -185,13 +185,13 @@ def test_explicit_ltxv_backend_stays_video_image_despite_gpu(tmp_path: Path) -> 
 
 @needs_bash
 def test_run_dir_with_ltx_manifest_selects_ltx_image(tmp_path: Path) -> None:
-    """Stored-config runs sniff effective_config.video.backend for ltx."""
+    """Stored-config runs sniff manifest video.backend for ltx."""
     import json
 
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
     run_dir.joinpath("manifest.json").write_text(
-        json.dumps({"effective_config": {"video": {"backend": "ltx25"}}}),
+        json.dumps({"video": {"backend": "ltx25"}}),
         encoding="utf-8",
     )
     selection = _dry_run(tmp_path, ["run", "--run", str(run_dir)], "absent")

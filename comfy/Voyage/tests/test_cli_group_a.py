@@ -68,8 +68,9 @@ def test_stop_parser_offers_full_finalize_surface() -> None:
 def test_generate_finalize_inherits_console_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The finalize third of `generate` honors --verbose/--no-color (147)."""
+    """The generate-driven finalize honors --verbose/--no-color (147)."""
     import voyage.cli as cli_module
+    import voyage.cli_generate as gen_ops
 
     captured: dict[str, argparse.Namespace] = {}
 
@@ -77,28 +78,35 @@ def test_generate_finalize_inherits_console_flags(
         captured["namespace"] = namespace
         return 0
 
-    monkeypatch.setattr(cli_module, "cmd_finalize", _capture_finalize)
+    class _FakeSupervisor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def run_segments(self, count: object) -> list[str]:
+            return ["000000"]
+
     monkeypatch.chdir(tmp_path)
     assert (
         main(
             [
-                "generate",
+                "configure",
+                "console-probe",
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--style",
                 _STYLE,
-                "--name",
-                "console-probe",
                 "--seed",
                 "11",
-                "--verbose",
-                "--no-color",
             ]
         )
         == 0
     )
+    monkeypatch.setattr(cli_module, "cmd_finalize", _capture_finalize)
+    monkeypatch.setattr(gen_ops, "Supervisor", _FakeSupervisor)
+    monkeypatch.setattr(gen_ops, "validate_run", lambda run_dir: [])
+    assert main(["generate", "console-probe", "--verbose", "--no-color"]) == 0
     assert captured["namespace"].verbose is True
     assert captured["namespace"].no_color is True
 
@@ -111,15 +119,14 @@ def test_generate_rejects_bad_take_seconds_before_init(
     assert (
         main(
             [
-                "generate",
+                "configure",
+                "orphan-probe",
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--style",
                 _STYLE,
-                "--name",
-                "orphan-probe",
                 "--take-seconds",
                 "5",
             ]
@@ -138,15 +145,14 @@ def test_cmd_generate_rejects_blank_style_without_litter(
     assert (
         main(
             [
-                "generate",
+                "configure",
+                "blank-probe",
                 "--backend",
                 "fake",
                 "--style",
                 "   ",
-                "--name",
-                "blank-probe",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
             ]
         )
         == 2
@@ -162,37 +168,31 @@ def test_cmd_generate_missing_attributes_exit_without_litter(
     from voyage.cli_generate import cmd_generate
 
     monkeypatch.chdir(tmp_path)
-    base = {
-        "output": str(tmp_path / "run"),
-        "run_id": "group-a",
-        "name": "group-a",
-        "force": True,
-        "backend": "fake",
-        "director": "deterministic",
-        "director_device": "cpu",
-        "draft": False,
-        "blocks": None,
-        "take_seconds": None,
-        "quantization": None,
-        "beats_per_segment": None,
-        "drift_every_n": None,
-        "music_caption": None,
-        "video_caption": None,
-        "duration": None,
-    }
-    run_dir = tmp_path / "run"
-    assert cmd_generate(argparse.Namespace(**{**base, "seed": 11})) == 2  # missing style
-    assert not run_dir.exists()
+    assert cmd_generate(argparse.Namespace()) == 2
+    assert not (tmp_path / "output").exists()
     # Missing seed randomizes instead of exiting 2 (mock downstream past creation).
-    import voyage.cli as cli_module
     import voyage.models_ensure as ensure_module
+    from voyage.persistence import read_effective_config
 
     monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
-    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
-    assert cmd_generate(argparse.Namespace(**{**base, "style": _STYLE, "seed": None})) == 0
-    assert run_dir.exists()
+    assert (
+        main(
+            [
+                "configure",
+                "group-a",
+                "--backend",
+                "fake",
+                "--segments",
+                "1",
+                "--style",
+                _STYLE,
+            ]
+        )
+        == 0
+    )
+    config = read_effective_config(tmp_path / "output" / "group-a")
+    assert isinstance(config.seed, int)
+    assert (tmp_path / "output" / "group-a" / "manifest.json").exists()
 
 
 def test_tui_rejects_take_seconds_at_or_below_ahead_window() -> None:

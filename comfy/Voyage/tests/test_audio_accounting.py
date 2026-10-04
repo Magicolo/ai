@@ -208,7 +208,7 @@ def test_commit_clamps_short_take_to_file(tmp_path: Path, monkeypatch: pytest.Mo
         return _probe_seconds(short)
 
     monkeypatch.setattr(supervisor_module, "probed_take_seconds", _probed_short)
-    config, _digest = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     committed = Supervisor(run_dir, config).run_segments(1)
     assert committed == ["000000"]
     ledger = [

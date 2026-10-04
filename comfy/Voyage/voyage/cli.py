@@ -591,69 +591,12 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
 
 
 def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
-    """`generate` verb: one-shot video (fixed duration, or until 's' is pressed)."""
+    """`generate` verb: reconcile a configured run to its manifest plan."""
     gen = sub.add_parser(
         "generate",
-        help="One-shot video (init + run + validate + finalize; omit --duration to stop with 's')",
+        help="Generate (or resume) a configured run to its manifest plan",
     )
-    gen.add_argument(
-        "--backend",
-        choices=("fake", "ltxv", "causvid", "ltx25", "ltx23"),
-        default="ltx25",
-        help="video backend preset written into the run config",
-    )
-    gen.add_argument(
-        "--duration",
-        type=parse_duration,
-        required=False,
-        default=None,
-        help=f"target length, e.g. {_DURATION_EXAMPLES} (rounds up to whole segments; "
-        "omit to generate until 's' is pressed, finishing the current segment first)",
-    )
-    gen.add_argument("--style", required=True, help="permanent style charter for the run")
-    gen.add_argument("--run-id", default="voyage", help="run name (flat folder name, no slashes)")
-    gen.add_argument(
-        "--name",
-        default=None,
-        help="run name (primary spelling; wins over --run-id, same flat folder rule)",
-    )
-    gen.add_argument("--output", default=None, help="run directory (default output/<name>)")
-    gen.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="master seed for the run (omit for a fresh random seed, printed at init)",
-    )
-    gen.add_argument("--force", action="store_true", help="allow init into a non-empty directory")
-    gen.add_argument(
-        "--final-video",
-        default=None,
-        help="final mp4 path (default <run>/final.mp4)",
-    )
-    gen.add_argument(
-        "--skip-bad",
-        action="store_true",
-        help="finalize past corrupt segments instead of aborting",
-    )
-    gen.add_argument(
-        "--no-download",
-        action="store_true",
-        help="fail instead of downloading missing models (verify only)",
-    )
-    _add_sfx_args(gen)
-    _add_augment_args(gen)
-    gen.add_argument(
-        "--draft",
-        action="store_true",
-        help="apply the [draft] profile (fast low-res iteration settings)",
-    )
-    gen.add_argument(
-        "--director",
-        default="llama",
-        choices=("qwen", "deterministic", "llama"),
-        help="director backend (default llama)",
-    )
-    _add_generation_overrides(gen)
+    gen.add_argument("name", help="run name (flat folder name → output/<name>)")
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 

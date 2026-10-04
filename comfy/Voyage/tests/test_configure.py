@@ -80,7 +80,7 @@ def test_configure_creates_manifest_with_segments(
     assert manifest["segments"] == 3
     assert manifest["style"] == "dark harbors"
     assert manifest["seed"] == 7
-    assert manifest["effective_config"]["video"]["backend"] == "ltx25"
+    assert manifest["video"]["backend"] == "ltx25"
 
 
 def test_configure_create_needs_style_and_count(

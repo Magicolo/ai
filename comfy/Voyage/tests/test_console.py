@@ -202,7 +202,7 @@ def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config, progress=progress)
     assert supervisor.run_segments(1) == ["000000"]
     assert progress.starts == [(0, "000000")]
-    assert progress.stages == ["inspect", "director", "video", "audio", "validate", "commit"]
+    assert progress.stages == ["director", "video", "audio", "validate", "commit"]
     assert len(progress.plans) == 1
     plan = progress.plans[0]
     assert plan["video_prompts"] and all(plan["video_prompts"])

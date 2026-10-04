@@ -310,30 +310,40 @@ def test_parallel_downloads_plain_fallback_prints_per_model() -> None:
     assert "audio-acestep" in output
 
 
-def _fake_generate_argv(run_dir: Path, *extra: str) -> list[str]:
-    return [
-        "generate",
-        "--backend",
-        "fake",
-        "--duration",
-        "2s",
-        "--style",
-        "pastel neon line-art, peaceful",
-        "--output",
-        str(run_dir),
-        "--run-id",
-        "ensure",
-        "--seed",
-        "11",
-        *extra,
-    ]
-
-
-def test_generate_no_download_flag_passes_for_fake(tmp_path: Path) -> None:
+def _configure_fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> None:
+    """Configure a fake-backend run (two-verb flow prerequisite)."""
     from voyage.cli import main
 
-    assert main(_fake_generate_argv(tmp_path / "run", "--no-download")) == 0
-    assert (tmp_path / "run" / "final.mp4").exists()
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "configure",
+                "ensure",
+                "--backend",
+                "fake",
+                "--duration",
+                "2s",
+                "--style",
+                "pastel neon line-art, peaceful",
+                "--seed",
+                "11",
+                *extra,
+            ]
+        )
+        == 0
+    )
+
+
+def test_generate_no_download_flag_passes_for_fake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voyage.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    _configure_fake(tmp_path, monkeypatch, "--no-download")
+    assert main(["generate", "ensure"]) == 0
+    assert (tmp_path / "output" / "ensure" / "final.mp4").exists()
 
 
 def test_generate_fails_without_ffmpeg(
@@ -341,8 +351,9 @@ def test_generate_fails_without_ffmpeg(
 ) -> None:
     import voyage.cli as cli
 
+    _configure_fake(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "check_ffmpeg", lambda: (False, "ffmpeg not found on PATH"))
-    assert cli.main(_fake_generate_argv(tmp_path / "run")) == 1
+    assert cli.main(["generate", "ensure"]) == 1
     assert "ffmpeg" in capsys.readouterr().err
 
 
@@ -355,8 +366,9 @@ def test_generate_fails_on_low_disk(
     def _no_space(_path: Path, _reserve: float) -> float:
         raise DiskSpaceError("free space 0.0 GiB below reserve 5.0 GiB")
 
+    _configure_fake(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "check_free_space", _no_space)
-    assert cli.main(_fake_generate_argv(tmp_path / "run")) == 1
+    assert cli.main(["generate", "ensure"]) == 1
     assert "free space" in capsys.readouterr().err
 
 
@@ -364,9 +376,10 @@ def test_generate_aborts_when_ensure_fails(tmp_path: Path, monkeypatch: pytest.M
     import voyage.cli as cli
     import voyage.models_ensure as ensure
 
+    _configure_fake(tmp_path, monkeypatch)
     monkeypatch.setattr(ensure, "ensure_models", lambda *args, **kwargs: 1)
-    assert cli.main(_fake_generate_argv(tmp_path / "run")) == 1
-    assert not (tmp_path / "run" / "final.mp4").exists()
+    assert cli.main(["generate", "ensure"]) == 1
+    assert not (tmp_path / "output" / "ensure" / "final.mp4").exists()
 
 
 def test_generate_ensure_receives_selective_scope(
@@ -393,8 +406,10 @@ def test_generate_ensure_receives_selective_scope(
         seen["augment_enabled"] = augment_enabled
         return real_ensure(config, sfx_enabled, console, models_root)
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ensure, "ensure_models", _spy)
-    assert cli.main(_fake_generate_argv(tmp_path / "run")) == 0
+    _configure_fake(tmp_path, monkeypatch)
+    assert cli.main(["generate", "ensure"]) == 0
     assert seen == {
         "video": "fake",
         "sfx_enabled": False,

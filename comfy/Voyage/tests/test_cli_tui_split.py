@@ -45,16 +45,19 @@ def test_run_parser_defaults() -> None:
 
 
 def test_generate_parser_defaults() -> None:
-    args = _parse(["generate", "--style", "calm"])
-    assert args.func is cli.cmd_generate
-    assert args.backend == "ltx25"
+    args = _parse(["configure", "calm"])
+    assert args.func is cli.cmd_configure
+    assert args.name == "calm"
+    assert args.backend is None
     assert args.duration is None
+    assert args.segments is None
+    assert args.style is None
     assert args.seed is None
-    assert args.director == "llama"
+    assert args.director is None
 
 
 def test_generate_parser_accepts_explicit_duration() -> None:
-    args = _parse(["generate", "--duration", "5s", "--style", "calm"])
+    args = _parse(["configure", "calm", "--duration", "5s"])
     assert args.duration == 5.0
 
 
@@ -75,7 +78,7 @@ def test_finalize_benchmark_soak_inspect_parsers() -> None:
 
 
 def test_run_and_generate_share_override_flags() -> None:
-    """The shared override helper keeps both verbs in lockstep (020)."""
+    """The shared override helper keeps run and configure in lockstep (020)."""
     flags = [
         "--blocks",
         "3",
@@ -89,7 +92,7 @@ def test_run_and_generate_share_override_flags() -> None:
         "2",
     ]
     run_args = _parse(["run", "--run", "r", *flags])
-    gen_args = _parse(["generate", "--duration", "5s", "--style", "calm", *flags])
+    gen_args = _parse(["configure", "calm", *flags])
     for field in ("blocks", "take_seconds", "quantization", "beats_per_segment", "drift_every_n"):
         assert getattr(run_args, field) == getattr(gen_args, field)
 

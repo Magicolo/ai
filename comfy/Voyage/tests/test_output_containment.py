@@ -58,67 +58,56 @@ def test_warn_reports_flag_once(
 def test_init_outside_output_warns_but_proceeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Warn-only: outside-tree generate still exits 0 (documented /tmp flows) (024)."""
-    import voyage.cli as cli_module
+    """Configure always lands inside output/ by construction (024).
+
+    The old generate --output escape hatch is gone (positional NAME under
+    cwd/output); there is no outside-tree write to warn about.
+    """
     import voyage.models_ensure as ensure_module
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
-    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
-    target = tmp_path / "run"
+    target = tmp_path / "output" / "warned"
     assert (
         main(
             [
-                "generate",
-                "--output",
-                str(target),
-                "--name",
+                "configure",
                 "warned",
                 "--style",
                 _STYLE,
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--seed",
                 "11",
             ]
         )
         == 0
     )
-    assert "outside" in capsys.readouterr().err
+    assert "outside" not in capsys.readouterr().err
     assert (target / "manifest.json").exists()
 
 
 def test_init_inside_output_is_quiet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Contained generate prints no containment warning (024)."""
-    import voyage.cli as cli_module
+    """Contained configure prints no containment warning (024)."""
     import voyage.models_ensure as ensure_module
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
-    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
-    target = tmp_path / "output" / "run"
     assert (
         main(
             [
-                "generate",
-                "--output",
-                str(target),
-                "--name",
-                "quiet",
+                "configure",
+                "run",
                 "--style",
                 _STYLE,
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--seed",
                 "11",
             ]

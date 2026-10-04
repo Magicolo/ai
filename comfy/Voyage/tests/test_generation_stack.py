@@ -232,31 +232,32 @@ def test_build_final_audio_falls_back_without_takes(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_generate_defaults_to_llama_director_with_offline_fallback(tmp_path: Path) -> None:
-    """`generate` without --director resolves llama; the unstarted sidecar
+def test_generate_defaults_to_llama_director_with_offline_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`configure` without --director resolves llama; the unstarted sidecar
     (this CPU-only image) degrades to the deterministic fallback via the
     worker §51 chain — the run still validates and finalizes."""
     from voyage.cli import main
 
-    run_dir = tmp_path / "run"
+    monkeypatch.chdir(tmp_path)
+    run_dir = tmp_path / "output" / "gen-qwen-default"
     code = main(
         [
-            "generate",
+            "configure",
+            "gen-qwen-default",
             "--backend",
             "fake",
-            "--duration",
-            "2s",
+            "--segments",
+            "1",
             "--style",
             "pastel neon line-art, peaceful",
-            "--output",
-            str(run_dir),
-            "--run-id",
-            "gen-qwen-default",
             "--seed",
             "11",
         ]
     )
     assert code == 0
+    assert main(["generate", "gen-qwen-default"]) == 0
     assert (run_dir / "final.mp4").exists()
     config = read_effective_config(run_dir)
     assert config.director.backend == "llama"  # stored config matches the llama default

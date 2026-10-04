@@ -129,14 +129,14 @@ def test_config_threads_knob() -> None:
 
 
 def test_cli_flag_parity_and_mapping() -> None:
-    """All finalizing verbs accept `--use-model-pass`; overrides map it."""
+    """Finalize-time verbs accept `--use-model-pass`; overrides map it."""
     from voyage.cli import build_parser
     from voyage.cli_core import _augment_overrides
 
     parser = build_parser()
     for verb in (
         ["finalize", "--run", "r", "--output", "o.mp4"],
-        ["generate", "--style", "x", "--duration", "5s"],
+        ["configure", "calm", "--segments", "1"],
         ["run", "--run", "r"],
         ["stop", "--run", "r"],
     ):
@@ -212,7 +212,9 @@ def test_finalize_consults_seam_only_when_on(
 ) -> None:
     """Knob off never touches the registry seam; knob on resolves once."""
     import voyage.augment as augment_module
+    from voyage.config import preset_config, resolve_config
     from voyage.media import finalize_run
+    from voyage.persistence import create_run_dir
 
     calls: list[str] = []
 
@@ -222,7 +224,11 @@ def test_finalize_consults_seam_only_when_on(
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _recording)
     run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="knob166", style="pastel neon line-art, peaceful")
+    stored = resolve_config(
+        preset_config("knob166", "pastel neon line-art, peaceful", 7, video_backend="fake"),
+        use_model_pass=False,
+    )
+    create_run_dir(run_dir, stored)
     _commit(run_dir, 1)
     empty_models = tmp_path / "empty-models"
     empty_models.mkdir()

@@ -64,17 +64,14 @@ def test_init_rejects_traversal_run_id(tmp_path: Path, capsys: pytest.CaptureFix
     assert (
         main(
             [
-                "generate",
-                "--output",
-                str(target),
-                "--name",
+                "configure",
                 "../../tmp/evil-run",
-                "--style",
-                _STYLE,
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
+                "--style",
+                _STYLE,
                 "--force",
             ]
         )
@@ -87,20 +84,19 @@ def test_init_rejects_traversal_run_id(tmp_path: Path, capsys: pytest.CaptureFix
 def test_generate_rejects_traversal_run_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`generate` validates --run-id before creating anything (008)."""
+    """`configure` validates the NAME before creating anything (008)."""
     monkeypatch.chdir(tmp_path)
     assert (
         main(
             [
-                "generate",
+                "configure",
+                "a/b",
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--style",
                 _STYLE,
-                "--run-id",
-                "a/b",
             ]
         )
         == 2
@@ -157,24 +153,21 @@ def test_run_rejects_invalid_numeric_overrides(
 
 
 def test_generate_rejects_invalid_numeric_override(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`generate` override typos also exit 2 with stderr (061)."""
-    output = tmp_path / "gen"
+    """`configure` override typos also exit 2 with stderr (061)."""
+    monkeypatch.chdir(tmp_path)
     assert (
         main(
             [
-                "generate",
+                "configure",
+                "gen",
                 "--backend",
                 "fake",
-                "--duration",
-                "2s",
+                "--segments",
+                "1",
                 "--style",
                 _STYLE,
-                "--output",
-                str(output),
-                "--run-id",
-                "gen",
                 "--blocks",
                 "0",
             ]
@@ -194,16 +187,18 @@ def test_run_rejects_bogus_director(tmp_path: Path) -> None:
 
 
 def test_generate_parser_director_choices() -> None:
-    """Generate accepts llama/qwen, rejects QWEN at parse time (073)."""
+    """Configure accepts llama/qwen, rejects QWEN at parse time (073)."""
     parser = build_parser()
-    args = parser.parse_args(["generate", "--duration", "2s", "--style", _STYLE])
-    assert args.director == "llama"
+    args = parser.parse_args(["configure", "probe", "--segments", "1", "--style", _STYLE])
+    assert args.director is None
     args = parser.parse_args(
-        ["generate", "--duration", "2s", "--style", _STYLE, "--director", "qwen"]
+        ["configure", "probe", "--segments", "1", "--style", _STYLE, "--director", "qwen"]
     )
     assert args.director == "qwen"
     with pytest.raises(SystemExit) as exc_info:
-        parser.parse_args(["generate", "--duration", "2s", "--style", _STYLE, "--director", "QWEN"])
+        parser.parse_args(
+            ["configure", "probe", "--segments", "1", "--style", _STYLE, "--director", "QWEN"]
+        )
     assert exc_info.value.code == 2
 
 

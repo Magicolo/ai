@@ -25,7 +25,6 @@ from voyage.config import (
     VideoBackendName,
     is_provided,
     preset_config,
-    removed_backend_suffix,
     resolve_config,
 )
 from voyage.errors import DiskSpaceError, MediaError, StateError
@@ -174,8 +173,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
         if backend_value not in BACKEND_REGISTRY:
             known = ", ".join(sorted(BACKEND_REGISTRY))
             print(
-                f"error: unknown video backend {backend_value!r} (known: {known})"
-                f"{removed_backend_suffix(str(backend_value))}",
+                f"error: unknown video backend {backend_value!r} (known: {known})",
                 file=sys.stderr,
             )
             return 2
@@ -203,7 +201,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 **_augment_overrides(args),
             )
         except (ValidationError, ValueError) as exc:
-            print(f"error: invalid option value: {exc}", file=sys.stderr)
+            print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
         planned = _resolve_segments(args, effective.video.fps, _frames_per_segment(effective))
         if planned is None:
@@ -248,7 +246,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
             if is_provided(getattr(args, "seed", None)):
                 effective = effective.model_copy(update={"seed": args.seed})
         except (ValidationError, ValueError) as exc:
-            print(f"error: invalid option value: {exc}", file=sys.stderr)
+            print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
         planned = _resolve_segments(args, effective.video.fps, _frames_per_segment(effective))
         if planned is None and (

@@ -1,8 +1,9 @@
-"""`voyage generate` one-shot tests: duration parsing, segment math, backend
-presets, and the full init -> run -> validate -> finalize pipeline.
+"""`voyage generate` helper tests: duration parsing, segment math, backend
+presets, CUDA guards, and the stop-key listener.
 
-Fake backends (real media, no GPU) in-container; GPU presets are asserted
-at the TOML level only, never executed.
+Creation-flow coverage lives in `test_configure.py` (manifest init) and
+reconcile coverage in `test_generate_reconcile.py`; this file keeps only
+tests that never invoke the old create-flow `cmd_generate`.
 """
 
 from __future__ import annotations
@@ -14,10 +15,8 @@ import pytest
 from voyage.cli import (
     _frames_per_segment,
     _run_dir_arg,
-    main,
     parse_duration,
     segments_for_duration,
-    validate_run,
 )
 from voyage.config import VideoConfig, with_video_backend
 
@@ -95,21 +94,13 @@ def test_ltxv_preset_mirrors_verified_e2e_toml(tmp_path: Path) -> None:
     assert config.video.backend == "ltx25"
 
 
-def test_removed_longlive2_preset_rejected_with_migration_hint(tmp_path: Path) -> None:
-    """Issue 079: the deleted backend fails fast with a hint, never remaps."""
+def test_unknown_video_preset_rejected(tmp_path: Path) -> None:
+    """Unknown video backends fail fast with the known set, never remap."""
     from voyage.config import preset_config
 
     config = preset_config("preset", "pastel neon line-art, peaceful", 11)
-    with pytest.raises(ValueError, match="longlive2"):
-        with_video_backend(config, "longlive2")  # type: ignore[arg-type]
-    try:
-        with_video_backend(config, "longlive2")  # type: ignore[arg-type]
-    except ValueError as exc:
-        message = str(exc).lower()
-        assert "ltxv" in message
-        assert "tape" in message
-    else:  # pragma: no cover
-        raise AssertionError("expected ValueError")
+    with pytest.raises(ValueError, match="unknown video backend"):
+        with_video_backend(config, "nope")  # type: ignore[arg-type]
 
 
 def test_run_dir_arg_resolves_absolute(tmp_path: Path) -> None:
@@ -201,280 +192,3 @@ def test_preset_carries_audio_preset(tmp_path: Path) -> None:
     config = preset_config("preset", "pastel neon line-art, peaceful", 11, video_backend="ltxv")
     assert config.audio.backend == "acestep"
     assert config.audio.device == "cuda:0"
-
-
-def _generate_args(output: Path, *extra: str) -> list[str]:
-    return [
-        "generate",
-        "--backend",
-        "fake",
-        "--duration",
-        "4s",
-        "--style",
-        "pastel neon line-art, peaceful",
-        "--output",
-        str(output),
-        "--run-id",
-        "gen",
-        "--seed",
-        "11",
-        *extra,
-    ]
-
-
-@pytest.mark.slow
-def test_generate_fake_end_to_end_validated_finalized(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    assert main(_generate_args(run_dir)) == 0
-    final = run_dir / "final.mp4"
-    assert final.exists() and final.stat().st_size > 0
-    assert validate_run(run_dir) == []
-    from voyage.persistence import read_state
-
-    state = read_state(run_dir)
-    assert state.committed_segments == 2  # 4s @24fps, 48f segments
-    assert state.timeline_frames >= 4 * 24  # rounded-up, never short
-
-
-def test_generate_refuses_nonempty_dir_without_force(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir(parents=True)
-    (run_dir / "existing.txt").write_text("other agent's data", encoding="utf-8")
-    assert main(_generate_args(run_dir)) == 2
-    assert not (run_dir / "final.mp4").exists()
-
-
-def test_generate_name_routes_to_output_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`generate --name boba` lands in output/boba (the user-facing spelling)."""
-    monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "generate",
-                "--backend",
-                "fake",
-                "--duration",
-                "2s",
-                "--style",
-                "pastel neon line-art, peaceful",
-                "--name",
-                "boba",
-                "--seed",
-                "11",
-            ]
-        )
-        == 0
-    )
-    assert (tmp_path / "output" / "boba" / "final.mp4").exists()
-
-
-def test_generate_name_wins_over_run_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """--name is primary; legacy --run-id loses when both are given."""
-    monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "generate",
-                "--backend",
-                "fake",
-                "--duration",
-                "2s",
-                "--style",
-                "pastel neon line-art, peaceful",
-                "--run-id",
-                "legacy",
-                "--name",
-                "boba",
-                "--seed",
-                "11",
-            ]
-        )
-        == 0
-    )
-    assert (tmp_path / "output" / "boba" / "final.mp4").exists()
-    assert not (tmp_path / "output" / "legacy").exists()
-
-
-def test_generate_rejects_traversal_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Crafted --name cannot escape the output tree (same rule as --run-id)."""
-    monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "generate",
-                "--backend",
-                "fake",
-                "--duration",
-                "2s",
-                "--style",
-                "pastel neon line-art, peaceful",
-                "--name",
-                "../evil",
-                "--seed",
-                "11",
-            ]
-        )
-        == 2
-    )
-    assert not (tmp_path / "output" / "evil").exists()
-
-
-def test_generate_defaults_to_output_run_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "generate",
-                "--backend",
-                "fake",
-                "--duration",
-                "2s",
-                "--style",
-                "pastel neon line-art, peaceful",
-                "--run-id",
-                "gen-default",
-                "--seed",
-                "11",
-            ]
-        )
-        == 0
-    )
-    assert (tmp_path / "output" / "gen-default" / "final.mp4").exists()
-
-
-def test_cuda_guard_passes_for_fake_without_torch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import importlib.util
-
-    from voyage.cli import _require_cuda_stack
-    from voyage.config import preset_config
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    config = preset_config("guard", "pastel neon line-art, peaceful", 11, video_backend="fake")
-    assert _require_cuda_stack(config) is True
-
-
-def test_cuda_guard_fails_for_ltxv_without_torch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import importlib.util
-
-    from voyage.cli import _require_cuda_stack
-    from voyage.config import preset_config
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    config = preset_config("guard", "pastel neon line-art, peaceful", 11)
-    assert _require_cuda_stack(with_video_backend(config, "ltxv")) is False
-    assert "voyage-video" in capsys.readouterr().err
-
-
-def test_generate_aborts_before_init_without_cuda_stack(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import importlib.util
-
-    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    monkeypatch.chdir(tmp_path)
-    code = main(
-        [
-            "generate",
-            "--backend",
-            "ltxv",
-            "--duration",
-            "5s",
-            "--style",
-            "pastel neon line-art, peaceful",
-        ]
-    )
-    assert code == 1
-    assert not (tmp_path / "output" / "voyage").exists()
-    assert "voyage-video" in capsys.readouterr().err
-
-
-def test_omitted_seed_randomizes_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Omitting --seed writes a fresh random master seed (non-reproducible)."""
-    import voyage.cli as cli_module
-    import voyage.models_ensure as ensure_module
-    from voyage.cli import build_parser, cmd_generate
-    from voyage.persistence import read_effective_config
-
-    monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
-    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
-    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
-    monkeypatch.chdir(tmp_path)
-
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    assert (
-        cmd_generate(
-            build_parser().parse_args(
-                [
-                    "generate",
-                    "--output",
-                    str(first),
-                    "--style",
-                    "pastel neon line-art, peaceful",
-                    "--backend",
-                    "fake",
-                    "--duration",
-                    "2s",
-                ]
-            )
-        )
-        == 0
-    )
-    assert (
-        cmd_generate(
-            build_parser().parse_args(
-                [
-                    "generate",
-                    "--output",
-                    str(second),
-                    "--style",
-                    "pastel neon line-art, peaceful",
-                    "--backend",
-                    "fake",
-                    "--duration",
-                    "2s",
-                ]
-            )
-        )
-        == 0
-    )
-    seed_first, _ = read_effective_config(first)
-    seed_second, _ = read_effective_config(second)
-    assert isinstance(seed_first.seed, int)
-    assert isinstance(seed_second.seed, int)
-    # 1-in-2^31 collision odds — a repeat means the RNG broke, not luck.
-    assert seed_first.seed != seed_second.seed
-
-
-def test_stop_key_listener_requests_stop_at_boundary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Typing 's' flips the run to STOP_REQUESTED so the segment finishes first."""
-    import io
-
-    from voyage.cli_generate import _start_stop_key_listener
-    from voyage.console import VoyageConsole
-    from voyage.persistence import read_state
-
-    (tmp_path / "segments").mkdir(exist_ok=True)
-    (tmp_path / "logs").mkdir(exist_ok=True)
-    from tests.conftest import initialize_run_directory
-
-    initialize_run_directory(
-        tmp_path, run_id="stopkey", style="pastel neon line-art, peaceful", seed=7
-    )
-    monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
-    console = VoyageConsole(stream=io.StringIO())
-    thread = _start_stop_key_listener(tmp_path, console)
-    thread.join(timeout=10)
-    assert not thread.is_alive()
-    assert read_state(tmp_path).status == "STOP_REQUESTED"

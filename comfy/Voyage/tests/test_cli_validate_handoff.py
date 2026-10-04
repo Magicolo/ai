@@ -12,7 +12,6 @@ commit-side (supervisor), registry, and media internals.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from typing import Literal
 
@@ -87,52 +86,3 @@ def test_toml_round_trip_holds_for_control_text(data: DataObject) -> None:
     raw = data.draw(strategies.text(alphabet=alphabet, max_size=24))
     style = f"x{raw}y"  # non-empty even when the draw is empty/blank
     assert preset_config("probe", style, 0).style == style
-
-
-def test_generate_forwards_caption_pins_to_inner_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Contract: generate --music/--video-caption must reach cmd_run (022)."""
-    import voyage.cli as cli_module
-    import voyage.models_ensure as ensure_module
-
-    run_dir = tmp_path / "run"
-    parser = cli_module.build_parser()
-    args = parser.parse_args(
-        [
-            "generate",
-            "--backend",
-            "fake",
-            "--duration",
-            "2s",
-            "--style",
-            "pastel neon line-art, peaceful",
-            "--output",
-            str(run_dir),
-            "--run-id",
-            "pins",
-            "--seed",
-            "11",
-            "--music-caption",
-            "brass fanfare",
-            "--video-caption",
-            "red dune",
-        ]
-    )
-    assert isinstance(args, argparse.Namespace)
-    captured: dict[str, argparse.Namespace] = {}
-
-    def _fake_run(inner: argparse.Namespace) -> int:
-        captured["namespace"] = inner
-        return 0
-
-    monkeypatch.setattr(cli_module, "cmd_run", _fake_run)
-    monkeypatch.setattr(cli_module, "cmd_finalize", lambda _final: 0)
-    monkeypatch.setattr(cli_module, "validate_run", lambda _run: [])
-    monkeypatch.setattr(cli_module, "_warn_if_no_cuda", lambda _config: None)
-    monkeypatch.setattr(cli_module, "check_free_space", lambda _a, _b: 0.0)
-    monkeypatch.setattr(ensure_module, "ensure_models", lambda *_a, **_k: 0)
-    assert cli_module.cmd_generate(args) == 0
-    inner = captured["namespace"]
-    assert getattr(inner, "music_caption", None) == "brass fanfare"
-    assert getattr(inner, "video_caption", None) == "red dune"

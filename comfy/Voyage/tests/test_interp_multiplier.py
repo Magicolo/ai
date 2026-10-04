@@ -24,10 +24,10 @@ from voyage.persistence import read_effective_config
 
 
 def test_augment_config_interp_multiplier_default_and_validation() -> None:
-    """Default 4 preserves current behavior; <1 fails loud (DESIGN §56)."""
+    """Default 2 is the poulah-effective value; <1 fails loud (DESIGN §56)."""
     from voyage.config import AugmentConfig
 
-    assert AugmentConfig().interp_multiplier == 4
+    assert AugmentConfig().interp_multiplier == 2
     assert AugmentConfig(interp_multiplier=1).interp_multiplier == 1
     with pytest.raises(ValidationError):
         AugmentConfig(interp_multiplier=0)
@@ -43,7 +43,7 @@ def test_resolve_config_applies_interp_multiplier(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="mult", style="s")
     config = read_effective_config(run_dir)
-    assert config.augment.interp_multiplier == 4
+    assert config.augment.interp_multiplier == 2
     resolved = resolve_config(config, interp_multiplier=1)
     assert resolved.augment.interp_multiplier == 1
 

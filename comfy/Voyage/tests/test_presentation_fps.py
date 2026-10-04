@@ -19,8 +19,8 @@ from voyage.media import plan_augmentation, slowmo_factor
 from voyage.persistence import read_effective_config
 
 
-def test_presentation_fps_defaults_to_none() -> None:
-    assert AugmentConfig().presentation_fps is None
+def test_presentation_fps_defaults_to_thirty_two() -> None:
+    assert AugmentConfig().presentation_fps == 32
 
 
 def test_presentation_fps_rejects_negative_and_maps_zero_to_none() -> None:
@@ -67,7 +67,7 @@ def test_resolve_config_applies_presentation_fps(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="pres", style="s")
     config = read_effective_config(run_dir)
-    assert config.augment.presentation_fps is None
+    assert config.augment.presentation_fps == 32
     resolved = resolve_config(config, presentation_fps=32)
     assert resolved.augment.presentation_fps == 32
 
@@ -95,7 +95,7 @@ def test_augment_overrides_passes_presentation_fps() -> None:
     assert "presentation_fps" not in _augment_overrides(absent)
 
 
-def test_default_toml_parses_without_presentation_key(tmp_path: Path) -> None:
+def test_preset_parses_without_presentation_key(tmp_path: Path) -> None:
 
     config = preset_config("pres", "s", 0)
-    assert config.augment.presentation_fps is None
+    assert config.augment.presentation_fps == 32

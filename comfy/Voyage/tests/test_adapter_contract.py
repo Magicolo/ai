@@ -583,7 +583,7 @@ def test_propose_segment_returns_staged_plan(tmp_path: Path) -> None:
         assert proposed.decision.destination_concept.strip()
         assert proposed.prompt_plan.stages
         assert len(proposed.block_prompts) == proposed.num_blocks == 1
-        assert set(stage_seconds) == {"inspect", "director"}
+        assert set(stage_seconds) == {"director"}
         assert proposed.prefetch_hit is False
         assert proposed.drift_hold == (0 % max(1, config.voyage.drift_every_n_segments) != 0)
     finally:
@@ -699,7 +699,7 @@ def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
         fresh = read_state(run_dir)
         assert fresh.committed_segments == 1
         assert fresh.timeline_frames == rendered.frames
-        assert set(stage_seconds) == {"inspect", "director", "video", "audio", "validate", "commit"}
+        assert set(stage_seconds) == {"director", "video", "audio", "validate", "commit"}
         assert validate_run(run_dir) == []
     finally:
         supervisor.stop_workers()

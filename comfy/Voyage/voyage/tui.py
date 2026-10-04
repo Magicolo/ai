@@ -1041,7 +1041,7 @@ class VoyageApp(App[None]):
         return Path(output).resolve()
 
     def _generate_in_thread(self, namespace: argparse.Namespace, run_dir: Path, total: int) -> None:
-        from voyage.cli import cmd_generate
+        from voyage.cli import cmd_configure, cmd_generate
         from voyage.errors import VoyageError
 
         self._run_dir = run_dir
@@ -1049,7 +1049,9 @@ class VoyageApp(App[None]):
         buffer = io.StringIO()
         try:
             with redirect_stdout(buffer), redirect_stderr(buffer):
-                code = cmd_generate(namespace)
+                # Two-verb CLI: the form owns the plan (configure writes the
+                # manifest), then generate reconciles and runs it.
+                code = 1 if cmd_configure(namespace) != 0 else cmd_generate(namespace)
         except VoyageError as exc:
             self._flush_captured_output(buffer)
             self.call_from_thread(self._finish_generation, f"✗ generation failed: {exc}")

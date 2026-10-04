@@ -258,7 +258,7 @@ def test_run_and_generate_accept_caption_pins() -> None:
     assert run_args.music_caption == "brass"
     assert run_args.video_caption == "dune"
     gen_args = build_parser().parse_args(
-        ["generate", "--style", "x", "--duration", "5s", "--music-caption", "brass"]
+        ["configure", "x", "--segments", "1", "--music-caption", "brass"]
     )
     assert gen_args.music_caption == "brass"
     assert gen_args.video_caption is None

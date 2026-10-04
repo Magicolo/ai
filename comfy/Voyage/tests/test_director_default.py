@@ -14,6 +14,8 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from voyage.cli import _add_generate_parser, _add_run_parser
 from voyage.config import DirectorConfig, preset_config
 from voyage.workers import director as director_worker
@@ -49,12 +51,18 @@ def _parse(parser_adder: Callable[..., None], args: list[str]) -> argparse.Names
     return parser.parse_args(args)
 
 
-def test_generate_parser_defaults_to_llama() -> None:
+def test_generate_parser_takes_name_only() -> None:
     args = _parse(
         _add_generate_parser,
-        ["generate", "--duration", "2s", "--style", "calm"],
+        ["generate", "calm"],
     )
-    assert args.director == "llama"
+    assert args.name == "calm"
+    with pytest.raises(SystemExit) as exc_info:
+        _parse(
+            _add_generate_parser,
+            ["generate", "calm", "--director", "llama"],
+        )
+    assert exc_info.value.code == 2
 
 
 def test_run_parser_leaves_stored_config_alone() -> None:
