@@ -1025,7 +1025,14 @@ def finalize_run(
                 channels=(getattr(audio_config, "channels", 2) if audio_config is not None else 2),
             )
         else:
-            audio_stretch = 1.0
+            # Joint backends (ltx25/ltx23) commit real audio takes, but a
+            # slow-mo present still stretches the video — the mix must ride
+            # the stretched timeline too (build_final_audio retimes the
+            # joint concat via atempo; the takes-ledger path widens its
+            # windows over fps/stretch). Without this the SFX bed (built
+            # to the stretched video timeline) can never mix with 1x
+            # music, and the alignment gate fails every slow-mo finalize.
+            audio_stretch = stretch if slowmo else 1.0
         # Blended final mix (overlap re-sliced from takes; previews untouched).
         final_audio = build_final_audio(
             run_dir,
