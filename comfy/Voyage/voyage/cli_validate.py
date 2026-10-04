@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from voyage import paths
-from voyage.cli_paths import _run_dir_arg
+from voyage.cli_paths import resolve_run_ref
 from voyage.concepts import validate_concepts
 from voyage.errors import MediaError, StateError
 from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS
@@ -265,7 +265,9 @@ def validate_run(run_dir: Path) -> list[str]:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     """Read-only consistency check (DESIGN §70). Never mutates the run."""
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     errors = validate_run(run_dir)
     if errors:
         print("INVALID:")

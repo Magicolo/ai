@@ -26,27 +26,33 @@ cd "$(dirname "$0")/.."
 # (CLI-is-config: the manifest carries the effective config; no TOML).
 # Explicit VOYAGE_IMAGE / VOYAGE_GPUS always win.
 #
-# Argument-contract: --backend and --run are each accepted in BOTH the
+# Argument-contract: --backend/--run/--name are each accepted in BOTH the
 # separate-arg form (--run DIR) and the equals form (--run=DIR). The sniff
-# loop below must keep the two flags symmetric — a dropped form leaves
+# loop below must keep the three flags symmetric — a dropped form leaves
 # run_dir/backend unset and silently selects the slim image for a CUDA run
-# (issues 037/069). Covers only flag parsing; values are validated later.
+# (issues 037/069). --name resolves to output/<name>, mirroring the CLI
+# resolver (relative to this directory, which is also the CLI cwd root).
+# Covers only flag parsing; values are validated later.
 requested_backend=""
 run_dir=""
 prev_arg=""
 for arg in "$@"; do
-  if [ "$prev_arg" = "--backend" ] || [ "$prev_arg" = "--run" ]; then
+  if [ "$prev_arg" = "--backend" ] || [ "$prev_arg" = "--run" ] || [ "$prev_arg" = "--name" ]; then
     if [ "$prev_arg" = "--backend" ]; then
       requested_backend="$arg"
-    else
+    elif [ "$prev_arg" = "--run" ]; then
       run_dir="$arg"
+    else
+      run_dir="output/$arg"
     fi
     prev_arg=""
   elif [[ "$arg" == --backend=* ]]; then
     requested_backend="${arg#--backend=}"
   elif [[ "$arg" == --run=* ]]; then
     run_dir="${arg#--run=}"
-  elif [[ "$arg" == --backend || "$arg" == --run ]]; then
+  elif [[ "$arg" == --name=* ]]; then
+    run_dir="output/${arg#--name=}"
+  elif [[ "$arg" == --backend || "$arg" == --run || "$arg" == --name ]]; then
     prev_arg="$arg"
   else
     prev_arg=""

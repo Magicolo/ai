@@ -67,6 +67,30 @@ def _check_run_id(run_id: str) -> int:
     return 0
 
 
+def resolve_run_ref(*, run: str | None, name: str | None) -> Path | None:
+    """`--run` vs `--name` → run dir (None + stderr on misuse).
+
+    `--name jango` is the short spelling for the default output path
+    (`output/jango`, resolved against the cwd like `generate`'s default
+    and the TUI). Passing both flags is exit 2 (ambiguous); passing
+    neither is exit 2 (nothing to resolve); a non-flat `--name` is
+    exit 2 (traversal guard, same rule as `--run-id`). Empty strings
+    read as absent (benchmark defaults `--run` to `""`).
+    """
+    if run and name:
+        print("error: pass only one of --run or --name", file=sys.stderr)
+        return None
+    if name:
+        stripped = name.strip()
+        if _check_run_id(stripped) != 0:
+            return None
+        return (output_root() / stripped).resolve()
+    if run:
+        return _run_dir_arg(run)
+    print("error: one of --run or --name is required", file=sys.stderr)
+    return None
+
+
 def _effective_run_id(args: argparse.Namespace) -> str:
     """Run name for init/generate: --name wins, --run-id is the legacy alias.
 

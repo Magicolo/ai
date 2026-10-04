@@ -287,6 +287,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         argparse.Namespace(
             run=str(run_dir),
             segments=segments,
+            no_finalize=True,
             draft=args.draft,
             director=director,
             director_device=getattr(args, "director_device", None),

@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from voyage.audio_finalize import is_deferred_backend
 from voyage.cli_core import _augment_overrides, _load_run, get_console
-from voyage.cli_paths import _run_dir_arg, warn_if_outside_output_dir
+from voyage.cli_paths import resolve_run_ref, warn_if_outside_output_dir
 from voyage.config import resolve_config
 from voyage.errors import DiskSpaceError, MediaError, StateError
 from voyage.media import finalize_run
@@ -24,7 +24,9 @@ from voyage.media import probe as media_probe
 
 
 def cmd_finalize(args: argparse.Namespace) -> int:
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     config, _digest = _load_run(run_dir)
     try:
         # CLI floors ride the stored [augment] section: explicit flags win,
@@ -166,7 +168,9 @@ def cmd_sfx(args: argparse.Namespace) -> int:
 
     from voyage.sfx_finalize import finalize_sfx_pass
 
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     config, _digest = _load_run(run_dir)
     video = Path(args.video).resolve() if args.video else run_dir / "final.mp4"
     if not video.exists():

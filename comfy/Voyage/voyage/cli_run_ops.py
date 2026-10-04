@@ -11,16 +11,53 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+from pathlib import Path
 from types import FrameType
 
 from pydantic import ValidationError
 
 from voyage.cli_core import _augment_overrides, _load_run, get_console
-from voyage.cli_paths import _run_dir_arg
+from voyage.cli_paths import resolve_run_ref
 from voyage.cli_planning import _require_cuda_stack
 from voyage.config import apply_draft_overrides, is_provided
 from voyage.console import RichSegmentProgress
 from voyage.supervisor import Supervisor
+
+
+def maybe_refinalize(args: argparse.Namespace, run_dir: Path, new_commits: list[str]) -> int:
+    """Re-finalize `final.mp4` after an extend, iff segments committed.
+
+    No new segments (or `--no-finalize`) → no-op returning 0. SFX /
+    augment / skip-bad flags forward into the finalize step (same
+    namespace shape `generate` fans out with); console context rides
+    along so `--verbose` stays loud through the assembly.
+    """
+    if not new_commits or bool(getattr(args, "no_finalize", False)):
+        return 0
+    # Seam dispatch (issue 080): resolve through the voyage.cli namespace
+    # at call time, exactly like `cmd_stop --finalize` does.
+    from voyage.cli import cmd_finalize
+
+    return cmd_finalize(
+        argparse.Namespace(
+            run=str(run_dir),
+            output=str(run_dir / "final.mp4"),
+            skip_bad=bool(getattr(args, "skip_bad", False)),
+            no_sfx=bool(getattr(args, "no_sfx", False)),
+            sfx_backend=getattr(args, "sfx_backend", None),
+            sfx_caption=getattr(args, "sfx_caption", None),
+            sfx_device=getattr(args, "sfx_device", None),
+            sfx_model_size=getattr(args, "sfx_model_size", None),
+            sfx_workers=getattr(args, "sfx_workers", 1),
+            min_fps=getattr(args, "min_fps", None),
+            min_resolution=getattr(args, "min_resolution", None),
+            no_augment=bool(getattr(args, "no_augment", False)),
+            use_model_pass=getattr(args, "use_model_pass", None),
+            verbose=getattr(args, "verbose", False),
+            no_color=getattr(args, "no_color", False),
+            progress_sink=getattr(args, "progress_sink", None),
+        )
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -30,7 +67,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     config, _digest = _load_run(run_dir)
     # Absent-encoding (issue 045): TUI namespaces carry Unset, argparse
     # carries None — branch on the predicate so an unset TUI field is
@@ -115,4 +154,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             signal.signal(signal.SIGINT, previous)
     if sink is None:
         console.ok(f"run finished · {len(committed)} segment(s) committed")
+    if committed:
+        final_code = maybe_refinalize(args, run_dir, committed)
+        if final_code != 0:
+            return final_code
     return 0

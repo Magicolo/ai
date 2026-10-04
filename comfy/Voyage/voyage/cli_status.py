@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from voyage import paths
-from voyage.cli_paths import _run_dir_arg, resolve_run_dir
+from voyage.cli_paths import resolve_run_ref
 from voyage.concepts import ConceptStore
 from voyage.doctor import probe
 from voyage.errors import StateError, VoyageError
@@ -156,7 +156,9 @@ def _status_restart_counts(run_dir: Path) -> tuple[dict[str, int], int]:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     try:
         state = read_state(run_dir)
         manifest = read_manifest(run_dir)
@@ -318,12 +320,31 @@ def _set_status(run: Path, status: str) -> int:
     return 0
 
 
+def _run_or_none(args: argparse.Namespace) -> Path | None:
+    """Resolve `--run`/`--name` for the control-plane verbs (None on misuse)."""
+    return resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+
+
 def cmd_pause(args: argparse.Namespace) -> int:
-    return _set_status(_run_dir_arg(args.run), "PAUSE_REQUESTED")
+    run_dir = _run_or_none(args)
+    if run_dir is None:
+        return 2
+    return _set_status(run_dir, "PAUSE_REQUESTED")
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
-    return _set_status(_run_dir_arg(args.run), "RUNNING")
+    run_dir = _run_or_none(args)
+    if run_dir is None:
+        return 2
+    code = _set_status(run_dir, "RUNNING")
+    if code != 0:
+        return code
+    # Resume flips status only — it commits no segments, so the
+    # refinalize gate (new commits required) never fires here. Wired
+    # through the shared helper so the rule stays in one place.
+    from voyage.cli_run_ops import maybe_refinalize
+
+    return maybe_refinalize(args, run_dir, [])
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
@@ -332,8 +353,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
     # (the pre-split interception point) keeps working.
     from voyage.cli import cmd_finalize
 
-    code = _set_status(_run_dir_arg(args.run), "STOP_REQUESTED")
+    run_dir = _run_or_none(args)
+    if run_dir is None:
+        return 2
+    code = _set_status(run_dir, "STOP_REQUESTED")
     if code == 0 and args.finalize:
-        args.output = str(resolve_run_dir(args.run) / "final.mp4")
+        args.output = str(run_dir / "final.mp4")
         return cmd_finalize(args)
     return code

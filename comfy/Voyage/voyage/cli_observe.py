@@ -19,7 +19,7 @@ from pathlib import Path
 from voyage import paths
 from voyage.augment import DEFAULT_CHUNK_FRAMES
 from voyage.cli_core import _load_run, get_console
-from voyage.cli_paths import _run_dir_arg
+from voyage.cli_paths import resolve_run_ref
 from voyage.cli_planning import _require_cuda_stack
 from voyage.cli_status import _read_all_metric_events
 from voyage.concepts import ConceptStore
@@ -255,8 +255,10 @@ def _benchmark_sfx(args: argparse.Namespace, warmup: int, measured: int) -> int:
     `--run` is given, else the torch-free fake probe with no run dir."""
     if _check_benchmark_counts(warmup, measured) != 0:
         return 2
-    if args.run:
-        run_dir = _run_dir_arg(args.run)
+    if args.run or getattr(args, "name", None):
+        run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
+        if run_dir is None:
+            return 2
         config, _digest = _load_run(run_dir)
         if not _require_cuda_stack(config):
             return 1
@@ -414,8 +416,10 @@ def _benchmark_augment(args: argparse.Namespace, warmup: int, measured: int) -> 
 
     if _check_benchmark_counts(warmup, measured) != 0:
         return 2
-    if args.run:
-        run_dir = _run_dir_arg(args.run)
+    if args.run or getattr(args, "name", None):
+        run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
+        if run_dir is None:
+            return 2
         config, _digest = _load_run(run_dir)
         persist_dir: Path | None = run_dir
     else:
@@ -543,10 +547,12 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     if target in ("video", "audio"):
         if _check_benchmark_counts(warmup, measured) != 0:
             return 2
-        if not args.run:
+        if not args.run and not getattr(args, "name", None):
             print("benchmark video/audio requires --run <dir>", file=sys.stderr)
             return 2
-        run_dir = _run_dir_arg(args.run)
+        run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
+        if run_dir is None:
+            return 2
         config, _digest = _load_run(run_dir)
         # Same fast-fail run/generate gate (issue 115): a CUDA backend
         # without torch dies late at worker init otherwise — for soak,
@@ -638,7 +644,9 @@ def cmd_soak(args: argparse.Namespace) -> int:
     from voyage.cli import validate_run  # seam dispatch (issue 080)
     from voyage.supervisor import summarize_prefetch_outcome
 
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     segments = int(args.segments)
     if segments <= 0:
         print(
@@ -701,7 +709,9 @@ def _probe_media_line(name: Path) -> str:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    run_dir = _run_dir_arg(args.run)
+    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
+    if run_dir is None:
+        return 2
     if args.inspect_target == "scoreboard":
         from voyage.cli_scoreboard import render_scoreboard
 

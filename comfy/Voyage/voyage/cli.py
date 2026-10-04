@@ -51,6 +51,7 @@ from voyage.cli_paths import (
     _run_dir_arg,
     is_flat_folder_name,
     resolve_run_dir,
+    resolve_run_ref,
 )
 from voyage.cli_planning import (
     _CAUSVID_NOVEL_PER_ROLLOUT,
@@ -158,6 +159,7 @@ __all__ = [
     "_add_pause_parser",
     "_add_resume_parser",
     "_add_run_parser",
+    "_add_run_ref",
     "_add_sfx_args",
     "_add_sfx_parser",
     "_add_soak_parser",
@@ -235,6 +237,7 @@ __all__ = [
     "main",
     "parse_duration",
     "resolve_run_dir",
+    "resolve_run_ref",
     "segments_for_duration",
     "validate_run",
     "verify_audio_models",
@@ -466,15 +469,46 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_run_ref(parser: argparse.ArgumentParser, *, noun: str) -> None:
+    """`--run` vs `--name` selector shared by every run verb.
+
+    `--name jango` resolves to the default output path (`output/jango`);
+    passing both flags (or a non-flat name) is exit 2 at resolve time.
+    `--run` stays accepted everywhere for scripts and tmp_path flows.
+    """
+    parser.add_argument(
+        "--run",
+        required=False,
+        default=None,
+        help=f"run directory (absolute or relative; exactly one of --run/--name) — {noun}",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="run name: shortcut for output/<name> (exactly one of --run/--name)",
+    )
+
+
 def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`run` verb: generate segments (infinite unless --segments)."""
     run = sub.add_parser("run", help="Generate segments (infinite unless --segments)")
-    run.add_argument("--run", required=True, help="run directory (absolute or relative)")
+    _add_run_ref(run, noun="run directory to extend")
     run.add_argument(
         "--segments",
         type=int,
         default=None,
         help="segments to generate (must be positive; omit to run until pause/stop/SIGINT)",
+    )
+    run.add_argument(
+        "--no-finalize",
+        action="store_true",
+        help="skip the automatic re-finalize of final.mp4 after new segments commit",
+    )
+    run.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="finalize past corrupt segments instead of aborting "
+        "(forwarded to the re-finalize step)",
     )
     run.add_argument(
         "--draft",
@@ -489,6 +523,7 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     _add_generation_overrides(run)
     _add_augment_args(run)
+    _add_sfx_args(run)
     _add_console_args(run)
     run.set_defaults(func=cmd_run)
 
@@ -564,28 +599,28 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
 def _add_status_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`status` verb: show run status."""
     status = sub.add_parser("status", help="Show run status")
-    status.add_argument("--run", required=True, help="run directory to report on")
+    _add_run_ref(status, noun="run directory to report on")
     status.set_defaults(func=cmd_status)
 
 
 def _add_pause_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`pause` verb: request a safe pause."""
     pause = sub.add_parser("pause", help="Request a safe pause")
-    pause.add_argument("--run", required=True, help="run directory to pause")
+    _add_run_ref(pause, noun="run directory to pause")
     pause.set_defaults(func=cmd_pause)
 
 
 def _add_resume_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`resume` verb: resume from last commit."""
     resume = sub.add_parser("resume", help="Resume from last commit")
-    resume.add_argument("--run", required=True, help="run directory to resume")
+    _add_run_ref(resume, noun="run directory to resume")
     resume.set_defaults(func=cmd_resume)
 
 
 def _add_stop_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`stop` verb: safely stop generation."""
     stop = sub.add_parser("stop", help="Safely stop generation")
-    stop.add_argument("--run", required=True, help="run directory to stop")
+    _add_run_ref(stop, noun="run directory to stop")
     stop.add_argument(
         "--finalize",
         action="store_true",
@@ -605,14 +640,14 @@ def _add_stop_parser(sub: argparse._SubParsersAction[Any]) -> None:
 def _add_validate_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`validate` verb: offline consistency check (read-only)."""
     validate = sub.add_parser("validate", help="Offline consistency check (read-only)")
-    validate.add_argument("--run", required=True, help="run directory to check")
+    _add_run_ref(validate, noun="run directory to check")
     validate.set_defaults(func=cmd_validate)
 
 
 def _add_finalize_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`finalize` verb: assemble the final MP4."""
     finalize = sub.add_parser("finalize", help="Assemble the final MP4")
-    finalize.add_argument("--run", required=True, help="run directory to finalize")
+    _add_run_ref(finalize, noun="run directory to finalize")
     finalize.add_argument("--output", required=True, help="final mp4 path to write")
     finalize.add_argument(
         "--skip-bad",
@@ -628,7 +663,7 @@ def _add_finalize_parser(sub: argparse._SubParsersAction[Any]) -> None:
 def _add_sfx_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`sfx` verb: dub SFX onto an existing video (no re-finalize)."""
     sfx = sub.add_parser("sfx", help="Dub SFX onto an existing video")
-    sfx.add_argument("--run", required=True, help="run directory (captions + ledger + seeds)")
+    _add_run_ref(sfx, noun="run directory (captions + ledger + seeds)")
     sfx.add_argument(
         "--video",
         default=None,
@@ -654,9 +689,14 @@ def _add_benchmark_parser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     benchmark.add_argument(
         "--run",
-        default="",
+        default=None,
         help="run directory (required for video/audio; sfx/augment use the run's "
         "config when given — fake sfx and the augment ffmpeg probe need no run)",
+    )
+    benchmark.add_argument(
+        "--name",
+        default=None,
+        help="run name: shortcut for output/<name> (exactly one of --run/--name)",
     )
     benchmark.add_argument("--warmup", type=int, default=1, help="warmup iterations (must be >= 0)")
     benchmark.add_argument(
@@ -674,7 +714,7 @@ def _add_benchmark_parser(sub: argparse._SubParsersAction[Any]) -> None:
 def _add_soak_parser(sub: argparse._SubParsersAction[Any]) -> None:
     """`soak` verb: stability run with a resource-trend report."""
     soak = sub.add_parser("soak", help="Stability run with a resource-trend report")
-    soak.add_argument("--run", required=True, help="run directory to soak-test")
+    _add_run_ref(soak, noun="run directory to soak-test")
     soak.add_argument(
         "--segments", type=int, required=True, help="segments to run (must be positive)"
     )
@@ -690,7 +730,7 @@ def _add_inspect_parser(sub: argparse._SubParsersAction[Any]) -> None:
         choices=["concepts", "segments", "media", "metrics", "scoreboard"],
         help="which artifact view to print",
     )
-    inspect.add_argument("--run", required=True, help="run directory to inspect")
+    _add_run_ref(inspect, noun="run directory to inspect")
     inspect.set_defaults(func=cmd_inspect)
 
 
