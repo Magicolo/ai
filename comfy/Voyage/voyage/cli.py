@@ -216,6 +216,19 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="video backend preset written into the run config",
     )
     conf.add_argument(
+        "--low-definition",
+        action="store_true",
+        help="lowest native reasonable resolution for the effective backend "
+        "(mutually exclusive with --high-definition)",
+    )
+    conf.add_argument(
+        "--high-definition",
+        action="store_true",
+        help="highest native reasonable resolution for the effective backend "
+        "(default on create when neither tier flag is passed; mutually "
+        "exclusive with --low-definition)",
+    )
+    conf.add_argument(
         "--from",
         dest="from_run",
         default=None,

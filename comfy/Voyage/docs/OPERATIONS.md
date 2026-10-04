@@ -61,7 +61,11 @@ configure time (rounds **up**, so the video never runs short).
 Backend presets set geometry/device automatically (`ltxv`: 768×512 on
 `cuda:0`; `causvid`: 832×480 @ 16 fps on `cuda:0`; `fake`: CPU smoke
 runs) and pair the audio backend too (`ltxv`/`causvid` get real
-ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Extra
+ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Add
+`--low-definition` for the lowest native reasonable resolution of the
+effective backend instead (fresh creates default to high;
+`--high-definition` selects it explicitly; both together is an error;
+tier changes on committed runs are refused). Extra
 run flags (`--director`, `--blocks`, `--take-seconds`,
 `--quantization`) live on `configure`. Validation failure aborts
 before finalize unless `--skip-bad`; on a GPU box with no visible GPU

@@ -86,13 +86,35 @@ CONDITIONING_TAIL_FRAMES = 25
 COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 
 # Mode A geometry (Phase-0 default): stage 1 at half resolution, commit
-# at 1216x704. Both clear /64 (two-stage contract). Fixed — the worker
-# rejects anything else loudly (implicit parameterization).
+# at 1216x704. Both clear /64 (two-stage contract). The worker accepts
+# the configured commit sizes only (high 1216x704 + low 768x448, see
+# COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
 STAGE1_WIDTH = 608
 STAGE1_HEIGHT = 352
 COMMIT_WIDTH = 1216
 COMMIT_HEIGHT = 704
 NATIVE_FPS = 24
+
+# Low-definition tier (`--low-definition`): 768x448 commit with a 384x224
+# stage 1, same 121f/25-carry accounting as the high tier. Both sizes
+# clear /64, so the two-stage latent-upscale contract holds either way.
+LOW_STAGE1_WIDTH = 384
+LOW_STAGE1_HEIGHT = 224
+LOW_COMMIT_WIDTH = 768
+LOW_COMMIT_HEIGHT = 448
+
+COMMIT_SIZE_OPTIONS = frozenset(
+    {
+        (COMMIT_WIDTH, COMMIT_HEIGHT),
+        (LOW_COMMIT_WIDTH, LOW_COMMIT_HEIGHT),
+    }
+)
+
+STAGE1_FOR_COMMIT_SIZE = {
+    (COMMIT_WIDTH, COMMIT_HEIGHT): (STAGE1_WIDTH, STAGE1_HEIGHT),
+    (LOW_COMMIT_WIDTH, LOW_COMMIT_HEIGHT): (LOW_STAGE1_WIDTH, LOW_STAGE1_HEIGHT),
+}
+"""Stage-1 (half-resolution) size per configured commit size."""
 
 # Validated schedules (Spike A graph s0_121_B.json): stage-1 distilled
 # 8-sigma euler_ancestral CFG 1.0, stage-2 3-step euler refine.
@@ -321,6 +343,7 @@ def build_mode_a_graph(
     save_prefix: str,
     prefix_filenames: list[str] | None = None,
     strength: float = 1.0,
+    stage1_size: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """Build the validated Mode A prompt-format graph (pure — CPU-testable).
 
@@ -332,8 +355,12 @@ def build_mode_a_graph(
     With `prefix_filenames` (25 input-root PNGs, Spike B convention) the
     graph gains LoadImage x25 (ids 30-54) + BatchImagesNode (55) +
     LTXVImgToVideoInplace (56, strength frozen by default) and node 10 consumes
-    the pinned latent instead of the empty one.
+    the pinned latent instead of the empty one. `stage1_size` overrides the
+    baked stage-1 node for the low-definition tier (defaults to 608x352).
     """
+    stage1_width, stage1_height = (
+        stage1_size if stage1_size is not None else (STAGE1_WIDTH, STAGE1_HEIGHT)
+    )
     graph: dict[str, Any] = {
         "1": {
             "class_type": "UnetLoaderGGUF",
@@ -368,8 +395,8 @@ def build_mode_a_graph(
         "8": {
             "class_type": "EmptyLTXVLatentVideo",
             "inputs": {
-                "width": STAGE1_WIDTH,
-                "height": STAGE1_HEIGHT,
+                "width": stage1_width,
+                "height": stage1_height,
                 "length": SEGMENT_TARGET_FRAMES,
                 "batch_size": 1,
             },
@@ -524,9 +551,19 @@ def _run_ffmpeg(argv: list[str], purpose: str) -> None:
         raise RuntimeError(f"LTX23 {purpose} failed: {completed.stderr[-500:]}")
 
 
-def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
-    """Decode a tail mp4 to RGB uint8 arrays (oldest-first)."""
+def _decode_tail_frames(
+    tail_path: Path, frame_count: int, commit_size: tuple[int, int] | None = None
+) -> list[Any]:
+    """Decode a tail mp4 to RGB uint8 arrays (oldest-first).
+
+    `commit_size` overrides the baked commit dims for the
+    low-definition tier (defaults to 1216x704).
+    """
     import numpy as np
+
+    commit_width, commit_height = (
+        commit_size if commit_size is not None else (COMMIT_WIDTH, COMMIT_HEIGHT)
+    )
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -548,16 +585,16 @@ def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
     )
     if completed.returncode != 0:
         raise RuntimeError(f"LTX23 tail decode failed: {completed.stderr.decode()[-500:]}")
-    pixel_bytes = bytes(COMMIT_WIDTH * COMMIT_HEIGHT * 3)
+    pixel_bytes = bytes(commit_width * commit_height * 3)
     raw = completed.stdout
     if len(raw) != frame_count * len(pixel_bytes):
         raise ValueError(
             f"LTX23 tail {tail_path} decoded to {len(raw)} bytes, "
-            f"expected {frame_count} frames of {COMMIT_WIDTH}x{COMMIT_HEIGHT}"
+            f"expected {frame_count} frames of {commit_width}x{commit_height}"
         )
     return [
         np.frombuffer(raw[offset : offset + len(pixel_bytes)], dtype=np.uint8).reshape(
-            (COMMIT_HEIGHT, COMMIT_WIDTH, 3)
+            (commit_height, commit_width, 3)
         )
         for offset in range(0, len(raw), len(pixel_bytes))
     ]
@@ -684,7 +721,11 @@ class LTX23Session:
         return time.perf_counter() - started
 
     def _block_prefix(
-        self, conditioning_frames: int, segment_id: str, block_index: int
+        self,
+        conditioning_frames: int,
+        segment_id: str,
+        block_index: int,
+        commit_size: tuple[int, int],
     ) -> list[str]:
         """Materialize prefix PNGs in the input dir (Spike B LoadImage-root rule)."""
         from PIL import Image
@@ -693,7 +734,7 @@ class LTX23Session:
             if self._conditioning_tail_path is None:
                 raise RuntimeError("LTX23 continued block has no conditioning tail")
             self._tail_frames = _decode_tail_frames(
-                Path(self._conditioning_tail_path), CONDITIONING_TAIL_FRAMES
+                Path(self._conditioning_tail_path), CONDITIONING_TAIL_FRAMES, commit_size
             )
         tail = self._tail_frames
         if len(tail) != conditioning_frames:
@@ -756,10 +797,13 @@ class LTX23Session:
         are measured from disk, never assumed.
         """
         validate_spatial_size(width, height)
-        if (width, height) != (COMMIT_WIDTH, COMMIT_HEIGHT):
-            raise ValueError(
-                f"LTX23 commits fixed {COMMIT_WIDTH}x{COMMIT_HEIGHT} Mode A (got {width}x{height})"
+        commit_size = (width, height)
+        if commit_size not in COMMIT_SIZE_OPTIONS:
+            options = ", ".join(
+                f"{option[0]}x{option[1]}" for option in sorted(COMMIT_SIZE_OPTIONS)
             )
+            raise ValueError(f"LTX23 commits one of {options} Mode A (got {width}x{height})")
+        stage1_size = STAGE1_FOR_COMMIT_SIZE[commit_size]
         if fps != NATIVE_FPS:
             raise ValueError(f"LTX23 runs fixed at {NATIVE_FPS} fps (got {fps})")
         if not prompts:
@@ -788,7 +832,7 @@ class LTX23Session:
             conditioning_frames = CONDITIONING_TAIL_FRAMES if continued else 0
             save_prefix = f"seg{segment_id}-b{block_index}"
             prefix_filenames = (
-                self._block_prefix(conditioning_frames, segment_id, block_index)
+                self._block_prefix(conditioning_frames, segment_id, block_index, commit_size)
                 if continued
                 else None
             )
@@ -798,6 +842,7 @@ class LTX23Session:
                 save_prefix=save_prefix,
                 prefix_filenames=prefix_filenames,
                 strength=continuation_strength,
+                stage1_size=stage1_size,
             )
             prompt_id = f"ltx23-{segment_id}-{block_index}"
             denoise_total_ms += self._execute_graph(graph, prompt_id) * MILLISECONDS_PER_SECOND

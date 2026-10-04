@@ -48,6 +48,15 @@ def _manifest_path(run_dir: Path) -> Path:
     return run_dir / paths.MANIFEST_FILENAME
 
 
+def _definition_tier(args: argparse.Namespace) -> str | None:
+    """'low'/'high' from the tier flags (None = inherit stored geometry)."""
+    if bool(getattr(args, "low_definition", False)):
+        return "low"
+    if bool(getattr(args, "high_definition", False)):
+        return "high"
+    return None
+
+
 def _resolve_segments(args: argparse.Namespace, fps: int, frames_per_segment: int) -> int | None:
     """Planned segment count from --segments XOR --duration (None if neither)."""
     segments = getattr(args, "segments", None)
@@ -148,6 +157,14 @@ def cmd_configure(args: argparse.Namespace) -> int:
     run_dir = (output_root() / name.strip()).resolve()
     manifest_path = _manifest_path(run_dir)
     from_name = getattr(args, "from_run", None)
+    if bool(getattr(args, "low_definition", False)) and bool(
+        getattr(args, "high_definition", False)
+    ):
+        print(
+            "error: pass only one of --low-definition or --high-definition",
+            file=sys.stderr,
+        )
+        return 2
     if manifest_path.is_file() and is_provided(from_name):
         print(
             "error: --from only applies when creating a run "
@@ -219,6 +236,15 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        tier_flag = _definition_tier(args)
+        if tier_flag is not None:
+            definition_value: str | None = tier_flag
+        elif source_config is not None and not is_provided(getattr(args, "backend", None)):
+            # --from without --backend inherits the source geometry untouched.
+            definition_value = None
+        else:
+            # Fresh creates default to high definition for the effective backend.
+            definition_value = "high"
         try:
             if source_config is not None:
                 base = source_config.model_copy(
@@ -236,6 +262,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
             effective = resolve_config(
                 base,
                 backend=getattr(args, "backend", None),
+                definition=definition_value,
                 director=getattr(args, "director", None),
                 director_device=getattr(args, "director_device", None),
                 blocks=getattr(args, "blocks", None),
@@ -279,9 +306,11 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 )
                 return 2
         try:
+            tier_flag = _definition_tier(args)
             effective = resolve_config(
                 stored_config,
                 backend=getattr(args, "backend", None),
+                definition=tier_flag,
                 director=getattr(args, "director", None),
                 director_device=getattr(args, "director_device", None),
                 blocks=getattr(args, "blocks", None),
@@ -299,6 +328,22 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 effective = effective.model_copy(update={"style": style_value})
             if is_provided(getattr(args, "seed", None)):
                 effective = effective.model_copy(update={"seed": args.seed})
+            if tier_flag is not None and (
+                effective.video.width != stored_config.video.width
+                or effective.video.height != stored_config.video.height
+            ):
+                try:
+                    committed_now = read_state(run_dir).committed_segments
+                except StateError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+                if committed_now > 0:
+                    print(
+                        "error: definition-tier change on a committed run is refused "
+                        "(geometries would mix — configure a fresh NAME instead)",
+                        file=sys.stderr,
+                    )
+                    return 2
         except (ValidationError, ValueError) as exc:
             print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2

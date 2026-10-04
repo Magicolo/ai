@@ -232,6 +232,75 @@ _DEFAULT_ROW: BackendRecord = BACKEND_REGISTRY["ltx25"]
 """VideoConfig defaults spell this row (issues 025 + 2026-10-02 ltx25 decision)."""
 
 
+@dataclass(frozen=True)
+class DefinitionTier:
+    """One definition tier for a backend: native geometry + profile name.
+
+    `latent_shape=None` keeps the backend row's latent (fake/ltxv/causvid
+    derive or ignore it); a tuple overrides it (ltx25/ltx23 low tier
+    halves both stage-1 axes, so the stage-1 video latent shrinks from
+    [1, 128, 16, 19, 11] to [1, 128, 16, 12, 7]).
+    """
+
+    width: int
+    height: int
+    profile: str
+    latent_shape: tuple[int, ...] | None
+
+
+DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
+    # Lowest / highest native reasonable resolution per backend
+    # (`voyage configure --low-definition / --high-definition`): low
+    # tiers stay on divisor-clean native geometry the worker accepts
+    # (fake /32-able, ltxv /32, ltx25/ltx23 /64); causvid is fixed
+    # 832x480, so both tiers are identical by design.
+    "fake": {
+        "low": DefinitionTier(width=512, height=288, profile="fake-288p", latent_shape=None),
+        "high": DefinitionTier(width=768, height=432, profile="fake-432p", latent_shape=None),
+    },
+    "ltxv": {
+        "low": DefinitionTier(width=512, height=320, profile="ltxv-320p", latent_shape=None),
+        "high": DefinitionTier(width=768, height=512, profile="ltxv-512p", latent_shape=None),
+    },
+    "causvid": {
+        "low": DefinitionTier(width=832, height=480, profile="causvid-480p", latent_shape=None),
+        "high": DefinitionTier(width=832, height=480, profile="causvid-480p", latent_shape=None),
+    },
+    "ltx25": {
+        "low": DefinitionTier(
+            width=768,
+            height=448,
+            profile="ltx25-448p",
+            latent_shape=(1, 128, 16, 12, 7),
+        ),
+        "high": DefinitionTier(
+            width=1216,
+            height=704,
+            profile="ltx25-704p",
+            latent_shape=(1, 128, 16, 19, 11),
+        ),
+    },
+    "ltx23": {
+        "low": DefinitionTier(
+            width=768,
+            height=448,
+            profile="ltx23-448p",
+            latent_shape=(1, 128, 16, 12, 7),
+        ),
+        "high": DefinitionTier(
+            width=1216,
+            height=704,
+            profile="ltx23-704p",
+            latent_shape=(1, 128, 16, 19, 11),
+        ),
+    },
+}
+"""Backend name → low/high definition tiers (geometry + profile + latent
+override). High tiers equal their BACKEND_REGISTRY rows (pinned by
+tests/test_backend_registry.py); the resolver applies the tier AFTER
+the backend preset, so `--backend` then tier always agrees."""
+
+
 class VideoConfig(BaseModel):
     # Defaults ARE the ltx25 registry row (issue 025) — change the row,
     # not these references. Pinned by tests/test_backend_registry.py.
@@ -693,6 +762,7 @@ def resolve_config(
     take_seconds: float | None | UnsetType = Unset,
     quantization: str | None | UnsetType = Unset,
     beats_per_segment: int | None | UnsetType = Unset,
+    definition: str | None | UnsetType = Unset,
     drift_every_n_segments: int | None | UnsetType = Unset,
     music_caption: str | None | UnsetType = Unset,
     video_caption: str | None | UnsetType = Unset,
@@ -729,6 +799,13 @@ def resolve_config(
             **{**audio.model_dump(), **_audio_preset(backend), "models_dir": "/models"}
         )
         sfx = SfxConfig(**{**sfx.model_dump(), **_sfx_preset(backend), "models_dir": "/models"})
+    if is_provided(definition):
+        # Definition tier resolves against the already-preset backend
+        # (--backend first, then tier), so the geometry always belongs
+        # to the effective backend. Unknown tiers raise ValueError.
+        video = VideoConfig(
+            **{**video.model_dump(), **_definition_preset(video.backend, definition)}
+        )
     if is_provided(director):
         director_config = DirectorConfig(**{**director_config.model_dump(), "backend": director})
     if is_provided(director_device):
@@ -824,6 +901,32 @@ _SFX_BACKEND_PRESETS: dict[str, dict[str, str]] = {
     name: {"backend": record.sfx_backend, "device": record.sfx_device}
     for name, record in BACKEND_REGISTRY.items()
 }
+
+
+def _definition_preset(tier_backend: str, tier: str) -> dict[str, str | int | list[int]]:
+    """Geometry override for a definition tier (derived from DEFINITION_TIERS).
+
+    Applied after the backend preset, keyed by the resolved backend so
+    `--backend X --low-definition` always yields X's low geometry.
+    A `None` latent keeps the backend row's latent_shape.
+    """
+    if tier not in ("low", "high"):
+        raise ValueError(f"unknown definition tier {tier!r} (expected 'low' or 'high')")
+    try:
+        tiers = DEFINITION_TIERS[tier_backend]  # type: ignore[index]
+    except KeyError:
+        raise ValueError(f"unknown backend {tier_backend!r} for definition tier") from None
+    tier_geometry = tiers[tier]
+    row = BACKEND_REGISTRY[tier_backend]  # type: ignore[index]
+    latent = tier_geometry.latent_shape
+    if latent is None:
+        latent = row.latent_shape
+    return {
+        "width": tier_geometry.width,
+        "height": tier_geometry.height,
+        "profile": tier_geometry.profile,
+        "latent_shape": list(latent),
+    }
 
 
 def _video_preset(backend: str) -> dict[str, str | int | list[int]]:

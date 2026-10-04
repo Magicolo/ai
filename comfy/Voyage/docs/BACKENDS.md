@@ -47,7 +47,13 @@ finalizer concat path, and checksums run exactly as in production.
 | director | `qwen` | `voyage-video:latest` (`/opt/venvs/director` via `VOYAGE_DIRECTOR_PYTHON`) | Qwen3-4B-AWQ on cuda:1 (default) or Qwen3-8B bf16 on CPU (`--director-device cpu`), non-thinking, temp 0.7 |
 
 Select at `configure` time (`--backend`, `--director`,
-`--quantization`, …) into the run manifest.
+`--quantization`, …) into the run manifest. Resolution tiers:
+`configure --low-definition` / `--high-definition` pick the lowest /
+highest native reasonable geometry for the effective backend (fresh
+creates default to high; both flags together is an error; tier changes
+on committed runs are refused). Tiers: fake 512x288/768x432, ltxv
+512x320/768x512, causvid 832x480 (both tiers — fixed geometry), ltx25 /
+ltx23 768x448/1216x704.
 
 ## LTXV chaining model (`ltxv`, Phase 7 alternative)
 
@@ -112,7 +118,8 @@ SFX dubbed at finalize. The tail file
 `video_tail.mp4` beside the segment video is the crash-recovery anchor;
 `recovery.pt` carries the §5.3 JSON record with profile `ltx25` (tapes
 never resume across backends); `scene_cut` forces a fresh start. Native
-1216×704 @ 24 fps. Needs `models download ltx25`. The `benchmark` op
+1216×704 @ 24 fps (high tier); low tier renders 768×448 with a 384×224
+stage 1, same 121/25/96 chaining. Needs `models download ltx25`. The `benchmark` op
 saves/restores tail state around its probes, so it does not advance any
 stream — safe to run mid-sequence.
 
@@ -124,7 +131,7 @@ the text-encoder node (`DualCLIPLoaderGGUF` with the Gemma3-Q2K backbone
 plus the distilled embeddings connectors), the unsloth distilled
 video/audio VAEs, and the Q3_K_M DiT file — the spatial upscaler is the
 shared LTX-2.5 file (no duplication). Same Mode-A geometry (1216×704 @
-24 fps), same 121/25/96 chaining, same ACE-Step music pairing, same
+24 fps high tier, 768×448 low tier), same 121/25/96 chaining, same ACE-Step music pairing, same
 `reconstructable_prefix` state mode; `recovery.pt` carries profile
 `ltx23`. Needs `models download ltx23`. The `benchmark` op
 saves/restores tail state around its probes — safe to run mid-sequence.

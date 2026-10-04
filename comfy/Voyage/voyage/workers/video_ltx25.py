@@ -78,8 +78,9 @@ CONDITIONING_TAIL_FRAMES = 25
 COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 
 # Mode A geometry (Phase-0 default): stage 1 at half resolution, commit
-# at 1216x704. Both clear /64 (two-stage contract). Fixed — the worker
-# rejects anything else loudly (implicit parameterization).
+# at 1216x704. Both clear /64 (two-stage contract). The worker accepts
+# the configured commit sizes only (high 1216x704 + low 768x448, see
+# COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
 STAGE1_WIDTH = 608
 STAGE1_HEIGHT = 352
 COMMIT_WIDTH = 1216
@@ -115,6 +116,23 @@ FAST_COMMIT_WIDTH = 768
 FAST_COMMIT_HEIGHT = 448
 FAST_TARGET_FRAMES = 49
 FAST_TAIL_FRAMES = 9
+
+# Configured commit sizes (`--low-definition` / `--high-definition`): the
+# low tier reuses the fast experiment profile's 768x448 commit geometry
+# (and its 384x224 stage 1) with production 121f/25-carry accounting.
+# The worker accepts exactly these two sizes and fails loud otherwise.
+COMMIT_SIZE_OPTIONS = frozenset(
+    {
+        (COMMIT_WIDTH, COMMIT_HEIGHT),
+        (FAST_COMMIT_WIDTH, FAST_COMMIT_HEIGHT),
+    }
+)
+
+STAGE1_FOR_COMMIT_SIZE = {
+    (COMMIT_WIDTH, COMMIT_HEIGHT): (STAGE1_WIDTH, STAGE1_HEIGHT),
+    (FAST_COMMIT_WIDTH, FAST_COMMIT_HEIGHT): (FAST_STAGE1_WIDTH, FAST_STAGE1_HEIGHT),
+}
+"""Stage-1 (half-resolution) size per configured commit size."""
 
 
 @dataclass(frozen=True)
@@ -407,6 +425,7 @@ def build_mode_a_graph(
     save_prefix: str,
     prefix_filenames: list[str] | None = None,
     strength: float = 1.0,
+    stage1_size: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """Build the validated Mode A prompt-format graph (pure — CPU-testable).
 
@@ -420,9 +439,13 @@ def build_mode_a_graph(
     (strength frozen by default) and node 10 consumes the pinned latent
     instead of the empty one. Geometry/accounting resolve from the
     experiment profile (production 121f/25-carry unless VOYAGE_LTX_FAST
-    or VOYAGE_LTX_CARRY select the Phase-1 fast profile).
+    or VOYAGE_LTX_CARRY select the Phase-1 fast profile); `stage1_size`
+    overrides the profile stage-1 node for the low-definition tier.
     """
     profile = resolve_experiment_profile()
+    stage1_width, stage1_height = (
+        stage1_size if stage1_size is not None else (profile.stage1_width, profile.stage1_height)
+    )
     graph: dict[str, Any] = {
         "1": {
             "class_type": "UnetLoaderGGUF",
@@ -453,8 +476,8 @@ def build_mode_a_graph(
         "8": {
             "class_type": "EmptyLTXVLatentVideo",
             "inputs": {
-                "width": profile.stage1_width,
-                "height": profile.stage1_height,
+                "width": stage1_width,
+                "height": stage1_height,
                 "length": profile.target_frames,
                 "batch_size": 1,
             },
@@ -605,11 +628,20 @@ def _run_ffmpeg(argv: list[str], purpose: str) -> None:
         raise RuntimeError(f"LTX25 {purpose} failed: {completed.stderr[-500:]}")
 
 
-def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
-    """Decode a tail mp4 to RGB uint8 arrays (oldest-first)."""
+def _decode_tail_frames(
+    tail_path: Path, frame_count: int, commit_size: tuple[int, int] | None = None
+) -> list[Any]:
+    """Decode a tail mp4 to RGB uint8 arrays (oldest-first).
+
+    `commit_size` overrides the profile commit dims for the
+    low-definition tier (defaults to the experiment profile).
+    """
     import numpy as np
 
     profile = resolve_experiment_profile()
+    commit_width, commit_height = (
+        commit_size if commit_size is not None else (profile.commit_width, profile.commit_height)
+    )
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("LTX25 needs an ffmpeg binary on PATH")
@@ -630,17 +662,16 @@ def _decode_tail_frames(tail_path: Path, frame_count: int) -> list[Any]:
     )
     if completed.returncode != 0:
         raise RuntimeError(f"LTX25 tail decode failed: {completed.stderr.decode()[-500:]}")
-    pixel_bytes = bytes(profile.commit_width * profile.commit_height * 3)
+    pixel_bytes = bytes(commit_width * commit_height * 3)
     raw = completed.stdout
     if len(raw) != frame_count * len(pixel_bytes):
         raise ValueError(
             f"LTX25 tail {tail_path} decoded to {len(raw)} bytes, "
-            f"expected {frame_count} frames of "
-            f"{profile.commit_width}x{profile.commit_height}"
+            f"expected {frame_count} frames of {commit_width}x{commit_height}"
         )
     return [
         np.frombuffer(raw[offset : offset + len(pixel_bytes)], dtype=np.uint8).reshape(
-            (profile.commit_height, profile.commit_width, 3)
+            (commit_height, commit_width, 3)
         )
         for offset in range(0, len(raw), len(pixel_bytes))
     ]
@@ -763,7 +794,11 @@ class LTX25Session:
         return time.perf_counter() - started
 
     def _block_prefix(
-        self, conditioning_frames: int, segment_id: str, block_index: int
+        self,
+        conditioning_frames: int,
+        segment_id: str,
+        block_index: int,
+        commit_size: tuple[int, int],
     ) -> list[str]:
         """Materialize prefix PNGs in the input dir (Spike B LoadImage-root rule)."""
         from PIL import Image
@@ -772,7 +807,9 @@ class LTX25Session:
             if self._conditioning_tail_path is None:
                 raise RuntimeError("LTX25 continued block has no conditioning tail")
             tail_length = resolve_experiment_profile().tail_frames
-            self._tail_frames = _decode_tail_frames(Path(self._conditioning_tail_path), tail_length)
+            self._tail_frames = _decode_tail_frames(
+                Path(self._conditioning_tail_path), tail_length, commit_size
+            )
         tail = self._tail_frames
         if len(tail) != conditioning_frames:
             raise ValueError(f"LTX25 tail holds {len(tail)} frames, need {conditioning_frames}")
@@ -837,11 +874,13 @@ class LTX25Session:
         """
         profile = resolve_experiment_profile()
         validate_spatial_size(width, height)
-        if (width, height) != (profile.commit_width, profile.commit_height):
-            raise ValueError(
-                f"LTX25 commits fixed {profile.commit_width}x{profile.commit_height} "
-                f"Mode A (got {width}x{height})"
+        commit_size = (width, height)
+        if commit_size not in COMMIT_SIZE_OPTIONS:
+            options = ", ".join(
+                f"{option[0]}x{option[1]}" for option in sorted(COMMIT_SIZE_OPTIONS)
             )
+            raise ValueError(f"LTX25 commits one of {options} Mode A (got {width}x{height})")
+        stage1_size = STAGE1_FOR_COMMIT_SIZE[commit_size]
         if fps != NATIVE_FPS:
             raise ValueError(f"LTX25 runs fixed at {NATIVE_FPS} fps (got {fps})")
         if not prompts:
@@ -870,7 +909,7 @@ class LTX25Session:
             conditioning_frames = profile.tail_frames if continued else 0
             save_prefix = f"seg{segment_id}-b{block_index}"
             prefix_filenames = (
-                self._block_prefix(conditioning_frames, segment_id, block_index)
+                self._block_prefix(conditioning_frames, segment_id, block_index, commit_size)
                 if continued
                 else None
             )
@@ -880,6 +919,7 @@ class LTX25Session:
                 save_prefix=save_prefix,
                 prefix_filenames=prefix_filenames,
                 strength=continuation_strength,
+                stage1_size=stage1_size,
             )
             prompt_id = f"ltx25-{segment_id}-{block_index}"
             denoise_total_ms += self._execute_graph(graph, prompt_id) * MILLISECONDS_PER_SECOND
