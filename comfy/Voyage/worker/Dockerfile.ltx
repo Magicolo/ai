@@ -168,6 +168,54 @@ RUN set -eux; \
 # absent and the CUDA binary cannot start until runtime with --gpus.
 # The live GPU run is the real smoke test.
 
+# ACE-Step music venv (DESIGN §140 audio continuity): ltx25/ltx23 take
+# continuous music from the ACE planner, so this image needs the ACE stack
+# — but ACE-Step-1.5 pins transformers>=4.51,<4.58 while the validated LTX
+# freeze above runs transformers 5.17. Isolated venv (same pattern as the
+# director venv): torch trio matching the main env (cu130) + the video
+# image's ACE leaf deps + transformers pin-back; the supervisor spawns the
+# audio worker with this interpreter via VOYAGE_ACESTEP_PYTHON below.
+# Verified-fetch clone (same contract as above). Placed after the slow
+# layers so only the fast user-setup layers rerun; the recursive chown
+# below covers the venv + clone.
+RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-Step-1.5 \
+    && git -C /opt/ACE-Step-1.5 fetch --depth 1 origin ca1e85fe9430179831e6bc6be790c332190a3866 \
+    && git -C /opt/ACE-Step-1.5 checkout ca1e85fe9430179831e6bc6be790c332190a3866 \
+    && git -C /opt/ACE-Step-1.5 rev-parse --verify HEAD \
+    && python3.11 -m venv /opt/venvs/acestep \
+    && /opt/venvs/acestep/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/acestep/bin/pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu130 \
+    && /opt/venvs/acestep/bin/pip install soundfile==0.14.0 loguru==0.7.3 numba==0.67.0 vector-quantize-pytorch==1.31.6 "sentence-transformers==6.1.0" "einops==0.8.2" "safetensors==0.8.0" "pydantic==2.10.6" "diffusers==0.31.0" \
+    && /opt/venvs/acestep/bin/pip install transformers==4.57.6 \
+    && ACE_SITE="$(/opt/venvs/acestep/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && echo "/opt/ACE-Step-1.5" > "${ACE_SITE}/ace-step-1.5.pth" \
+    && test -d /opt/ACE-Step-1.5/.git \
+    && test -f "${ACE_SITE}/ace-step-1.5.pth" \
+    && test -x /opt/venvs/acestep/bin/python
+
+# MMAudio SFX venv (DESIGN §140 SFX continuity): ltx finalize dubs SFX
+# through the MMAudio worker, so this image needs that stack too — but the
+# main env is the validated LTX freeze, so it stays isolated (same venv
+# pattern as above): torch trio matching the main env (cu130) + the video
+# image's MMAudio inference closure (no-deps editable clone + open_clip
+# tower + audio/math leaf deps); finalize spawns the SFX worker with this
+# interpreter via VOYAGE_SFX_PYTHON below. Verified-fetch clone (same
+# contract as above). Placed after the slow layers so only the fast
+# user-setup layers rerun; the recursive chown below covers venv + clone.
+RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
+    && git -C /opt/mmaudio fetch --depth 1 origin 974010a026c731054592d8f777218bd9d85a6c24 \
+    && git -C /opt/mmaudio checkout 974010a026c731054592d8f777218bd9d85a6c24 \
+    && git -C /opt/mmaudio rev-parse --verify HEAD \
+    && python3.11 -m venv /opt/venvs/sfx \
+    && /opt/venvs/sfx/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/sfx/bin/pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu130 \
+    && /opt/venvs/sfx/bin/pip install --no-deps -e /opt/mmaudio \
+    && /opt/venvs/sfx/bin/pip install "open_clip_torch==3.3.0" "librosa==0.11.0" "torchdiffeq==0.2.5" "accelerate==1.15.0" "colorlog==6.12.0" soundfile==0.14.0 "einops==0.8.2" "safetensors==0.8.0" "pydantic==2.10.6" "av==13.1.0" Pillow tqdm huggingface_hub numpy "omegaconf==2.3.1" "easydict==1.13" "ftfy==6.3.1" \
+    && test -d /opt/mmaudio/.git \
+    && test -x /opt/venvs/sfx/bin/python
+
 # Run as the invoking host user (same contract as the video image): the
 # supervisor and its worker subprocesses share bind mounts with the host,
 # so a root container leaves root-owned renders behind. A real user
@@ -190,12 +238,14 @@ RUN set -eux; \
     fi; \
   fi; \
   mkdir -p /home/voyager && chown "${UID}:${GID}" /home/voyager && chmod 755 /home/voyager; \
-  chown -R "${UID}:${GID}" /opt/comfyui /opt/venvs /opt/llama.cpp;
+  chown -R "${UID}:${GID}" /opt/comfyui /opt/ACE-Step-1.5 /opt/mmaudio /opt/venvs /opt/llama.cpp;
 ENV HOME=/home/voyager
 USER voyager
 
 ENV PYTHONPATH=/opt/comfyui:/app \
     VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
+    VOYAGE_ACESTEP_PYTHON=/opt/venvs/acestep/bin/python \
+    VOYAGE_SFX_PYTHON=/opt/venvs/sfx/bin/python \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

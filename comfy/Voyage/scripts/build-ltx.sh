@@ -73,3 +73,28 @@ assert 'LTXPrefixFreeze' in maskmod.NODE_CLASS_MAPPINGS, 'LTXPrefixFreeze'
 
 print('ltx smoke ok: torch', torch.__version__, '+ comfy exec + GGUF loaders + gemma4 patch')
 "
+# ACE-Step music venv (DESIGN §140 audio continuity): the ACE stack is
+# isolated from the validated LTX freeze (transformers pin), so the audio
+# worker spawns with this interpreter via VOYAGE_ACESTEP_PYTHON.
+# Import-level only (no GPU needed for imports; the take render is proven
+# by a GPU run, not the build).
+docker run --rm --entrypoint /opt/venvs/acestep/bin/python voyage-ltx:latest -c "
+import acestep.handler, acestep.llm_inference, acestep.inference
+assert hasattr(acestep.handler, 'AceStepHandler'), 'AceStepHandler'
+assert hasattr(acestep.llm_inference, 'LLMHandler'), 'LLMHandler'
+assert hasattr(acestep.inference, 'generate_music'), 'generate_music'
+print('ace venv ok')
+"
+# MMAudio SFX venv (DESIGN §140 SFX continuity): the SFX stack is isolated
+# from the validated LTX freeze, so finalize spawns the SFX worker with
+# this interpreter via VOYAGE_SFX_PYTHON.
+# Import-level only (no GPU needed for imports; the SFX bed render is
+# proven by a GPU run, not the build).
+docker run --rm --entrypoint /opt/venvs/sfx/bin/python voyage-ltx:latest -c "
+import mmaudio.ext.autoencoder.autoencoder, mmaudio.model.utils.features_utils
+import mmaudio.model.networks
+from mmaudio.model.flow_matching import FlowMatching
+import av
+assert FlowMatching is not None, 'FlowMatching'
+print('sfx venv ok')
+"

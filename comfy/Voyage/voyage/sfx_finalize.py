@@ -445,6 +445,10 @@ def render_sfx_bed(
                     "device": devices[slot],
                     "model_size": sizes[slot],
                 },
+                # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
+                # stack is isolated from the LTX freeze; unset (video
+                # image, tests) falls back to the supervisor interpreter.
+                executable=os.environ.get("VOYAGE_SFX_PYTHON"),
             )
             worker.start()
             workers.append(worker)
