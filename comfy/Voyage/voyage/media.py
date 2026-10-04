@@ -202,6 +202,32 @@ def presentation_stretch(source_fps: float, interp_multiplier: int, out_fps: int
     return slowmo_factor(source_fps, interp_multiplier, out_fps)
 
 
+def upscale_factor_for(source_w: int, source_h: int, out_w: int, out_h: int) -> int:
+    """Model-pass upscale factor for one finalize (pure, DESIGN §140).
+
+    High-quality natives (ltx25 1216x704) are considered sufficient: when
+    the output box fits inside the source box there is no genuine
+    resolution lift, so the factor is 1 and the interp leg runs at
+    source resolution (which also fits small GPUs — FILM at 2432x1408
+    OOMs the 6 GB 2060 even solo). A genuine lift on either axis keeps
+    the validated 2x recipe. Non-positive geometry fails loud, never a
+    silent factor.
+    """
+    for name, value in (
+        ("source_w", source_w),
+        ("source_h", source_h),
+        ("out_w", out_w),
+        ("out_h", out_h),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an int (got {type(value).__name__})")
+        if value <= 0:
+            raise ValueError(f"{name} must be positive (got {value})")
+    if out_w <= source_w and out_h <= source_h:
+        return 1
+    return 2
+
+
 #: Stretch values within this of 1.0 count as no-stretch (float noise
 #: from `slowmo_factor` must not arm the slow-mo path).
 SLOWMO_STRETCH_TOLERANCE = 1e-9
@@ -938,6 +964,11 @@ def finalize_run(
                 # finalize retries only the missing chunks.
                 from voyage.augment_finalize import run_durable_model_pass
 
+                # Native-resolution finalize (DESIGN §140): upscale only
+                # on a genuine resolution lift — high-quality natives
+                # (ltx25 1216x704) interpolate at source resolution, so
+                # the 2060 can serve the FILM leg instead of OOMing on
+                # the upscaled size.
                 tensor_intermediate, _ = run_durable_model_pass(
                     run_dir,
                     usable,
@@ -945,6 +976,7 @@ def finalize_run(
                     out_height=out_h,
                     source_fps=source_fps,
                     weights=resolved_weights,
+                    upscale_factor=upscale_factor_for(source_w, source_h, out_w, out_h),
                     multiplier=effective_interp_multiplier,
                     crf=effective_crf,
                     preset=effective_preset,

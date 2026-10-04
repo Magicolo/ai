@@ -147,7 +147,30 @@ def _default_upscale_pngs(
     device: str,
     upscale_factor: int,
 ) -> list[Path]:
-    """Upscale decoded PNGs via the resident ESRGAN leg (lazy torch import)."""
+    """Upscale decoded PNGs via the resident ESRGAN leg (lazy torch import).
+
+    Factor 1 (native-resolution finalize, DESIGN §140) is a CPU file
+    copy: same names, identical bytes, no torch/PIL/model — the slim
+    image carries none of them. Other factors take the model path
+    (factors outside (1, 2, 4) fail here, before any GPU work).
+    """
+    if isinstance(upscale_factor, bool) or not isinstance(upscale_factor, int):
+        raise TypeError(f"upscale factor must be an int (got {type(upscale_factor).__name__})")
+    if upscale_factor not in (1, 2, 4):
+        raise ValueError(f"upscale factor must be one of (1, 2, 4) (got {upscale_factor})")
+    if upscale_factor == 1:
+        # The decode stage already staged the source PNGs in dest_dir
+        # (same contract as the model path, which overwrites them in
+        # place) — a same-file copy would raise SameFileError, so only
+        # copy across distinct paths (e.g. tests staging elsewhere).
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for frame_path in frame_paths:
+            dest = dest_dir / frame_path.name
+            if dest.resolve() != frame_path.resolve():
+                shutil.copyfile(frame_path, dest)
+            copied.append(dest)
+        return copied
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
     from voyage.workers.augment_worker import upscale_frames
 
