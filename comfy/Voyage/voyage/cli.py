@@ -507,6 +507,15 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="video backend preset written into the run config",
     )
     conf.add_argument(
+        "--from",
+        dest="from_run",
+        default=None,
+        help="inherit style + tuning + segment count from another run's "
+        "manifest (output/<NAME>/manifest.json); only on create, "
+        "explicit flags override inherited values, seed stays fresh "
+        "unless --seed is passed",
+    )
+    conf.add_argument(
         "--duration",
         type=parse_duration,
         required=False,

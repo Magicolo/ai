@@ -3,7 +3,10 @@
 All run options live here. `configure <NAME>` creates `output/<NAME>/`
 with `manifest.json` (full effective config + planned segment count),
 or updates the stored config in place touching only provided flags.
-`generate <NAME>` later reconciles the directory against the manifest.
+`--from <OTHER>` (create only) inherits style + tuning + segment count
+from another run's manifest — explicit flags override, the seed stays
+fresh unless `--seed` is passed. `generate <NAME>` later reconciles
+the directory against the manifest.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from voyage.cli_core import _augment_overrides, get_console
 from voyage.cli_paths import _check_run_id, output_root
 from voyage.cli_planning import _frames_per_segment, segments_for_duration
 from voyage.config import (
+    ProjectConfig,
     VideoBackendName,
     is_provided,
     preset_config,
@@ -142,6 +146,14 @@ def cmd_configure(args: argparse.Namespace) -> int:
         return 2
     run_dir = (output_root() / name.strip()).resolve()
     manifest_path = _manifest_path(run_dir)
+    from_name = getattr(args, "from_run", None)
+    if manifest_path.is_file() and is_provided(from_name):
+        print(
+            "error: --from only applies when creating a run "
+            "(update touches only provided flags instead)",
+            file=sys.stderr,
+        )
+        return 2
     stored_config = None
     if manifest_path.is_file():
         try:
@@ -149,8 +161,31 @@ def cmd_configure(args: argparse.Namespace) -> int:
         except StateError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+    source_config: ProjectConfig | None = None
+    source_segments: int | None = None
+    if stored_config is None and is_provided(from_name):
+        if not isinstance(from_name, str) or not from_name.strip():
+            print("error: --from needs a run name (output/<NAME>)", file=sys.stderr)
+            return 2
+        if _check_run_id(from_name.strip()) != 0:
+            return 2
+        src_dir = (output_root() / from_name.strip()).resolve()
+        try:
+            source_config = read_effective_config(src_dir)
+            raw_segments = read_manifest(src_dir).get("segments")
+        except StateError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if (
+            isinstance(raw_segments, int)
+            and not isinstance(raw_segments, bool)
+            and raw_segments > 0
+        ):
+            source_segments = raw_segments
     if stored_config is None:
         style_value = getattr(args, "style", None)
+        if source_config is not None and not is_provided(style_value):
+            style_value = source_config.style
         if not isinstance(style_value, str) or not style_value.strip():
             print("error: --style must be a non-empty human-owned style string", file=sys.stderr)
             return 2
@@ -167,28 +202,39 @@ def cmd_configure(args: argparse.Namespace) -> int:
         if isinstance(seed_value, bool) or not isinstance(seed_value, int):
             print(f"error: --seed must be an integer, got {seed_value!r}", file=sys.stderr)
             return 2
-        backend_value = getattr(args, "backend", None) or "ltx25"
+        backend_value = getattr(args, "backend", None)
+        director_value = getattr(args, "director", None)
+        director_device_value = getattr(args, "director_device", None)
         from voyage.config import BACKEND_REGISTRY
 
-        if backend_value not in BACKEND_REGISTRY:
+        if source_config is None:
+            backend_value = backend_value or "ltx25"
+            director_value = director_value or "llama"
+            director_device_value = director_device_value or "cuda:1"
+        if is_provided(backend_value) and backend_value not in BACKEND_REGISTRY:
             known = ", ".join(sorted(BACKEND_REGISTRY))
             print(
                 f"error: unknown video backend {backend_value!r} (known: {known})",
                 file=sys.stderr,
             )
             return 2
-        director = getattr(args, "director", None) or "llama"
         try:
-            effective = preset_config(
-                name.strip(),
-                style_value,
-                seed_value,
-                video_backend=cast(VideoBackendName, backend_value),
-                director_backend=director,
-                director_device=getattr(args, "director_device", None) or "cuda:1",
-            )
+            if source_config is not None:
+                base = source_config.model_copy(
+                    update={"name": name.strip(), "style": style_value, "seed": seed_value}
+                )
+            else:
+                base = preset_config(
+                    name.strip(),
+                    style_value,
+                    seed_value,
+                    video_backend=cast(VideoBackendName, backend_value),
+                    director_backend=cast(str, director_value),
+                    director_device=cast(str, director_device_value),
+                )
             effective = resolve_config(
-                effective,
+                base,
+                backend=getattr(args, "backend", None),
                 director=getattr(args, "director", None),
                 director_device=getattr(args, "director_device", None),
                 blocks=getattr(args, "blocks", None),
@@ -204,6 +250,13 @@ def cmd_configure(args: argparse.Namespace) -> int:
             print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
         planned = _resolve_segments(args, effective.video.fps, _frames_per_segment(effective))
+        if (
+            planned is None
+            and source_segments is not None
+            and not is_provided(getattr(args, "segments", None))
+            and not is_provided(getattr(args, "duration", None))
+        ):
+            planned = source_segments
         if planned is None:
             print(
                 "error: pass one of --segments or --duration to configure a new run",

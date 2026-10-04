@@ -31,6 +31,7 @@ def _configure_namespace(name: str, **overrides: object) -> argparse.Namespace:
     base: dict[str, object] = {
         "name": name,
         "backend": None,
+        "from_run": None,
         "duration": None,
         "segments": None,
         "style": None,
@@ -219,3 +220,90 @@ def test_old_run_manifest_json_is_ignored(tmp_path: Path, monkeypatch: pytest.Mo
     (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(StateError, match="manifest.json"):
         read_effective_config(run_dir)
+
+
+def _create_source_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = "src") -> Path:
+    """Configure a tuned source run; returns its run dir."""
+    from voyage import cli_configure
+
+    monkeypatch.chdir(tmp_path)
+    args = _configure_namespace(
+        name,
+        style="dark harbors",
+        segments=5,
+        seed=7,
+        backend="ltxv",
+        blocks=3,
+        take_seconds=30.0,
+        no_download=True,
+    )
+    assert cli_configure.cmd_configure(args) == 0
+    return tmp_path / "output" / name
+
+
+def test_configure_from_copies_style_tuning_and_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voyage import cli_configure
+
+    _create_source_run(tmp_path, monkeypatch)
+    monkeypatch.setattr("voyage.seeds.random_master_seed", lambda: 999)
+    monkeypatch.chdir(tmp_path)
+    args = _configure_namespace("child", from_run="src", no_download=True)
+    assert cli_configure.cmd_configure(args) == 0
+    manifest = json.loads((tmp_path / "output" / "child" / "manifest.json").read_text())
+    assert manifest["name"] == "child"
+    assert manifest["style"] == "dark harbors"
+    assert manifest["seed"] == 999
+    assert manifest["video"]["backend"] == "ltxv"
+    assert manifest["video"]["blocks_per_segment"] == 3
+    assert manifest["audio"]["take_seconds"] == 30.0
+    assert manifest["segments"] == 5
+
+
+def test_configure_from_explicit_flags_win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voyage import cli_configure
+
+    _create_source_run(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    args = _configure_namespace(
+        "child",
+        from_run="src",
+        style="fresh style",
+        backend="fake",
+        segments=2,
+        seed=11,
+        no_download=True,
+    )
+    assert cli_configure.cmd_configure(args) == 0
+    manifest = json.loads((tmp_path / "output" / "child" / "manifest.json").read_text())
+    assert manifest["style"] == "fresh style"
+    assert manifest["video"]["backend"] == "fake"
+    assert manifest["segments"] == 2
+    assert manifest["seed"] == 11
+
+
+def test_configure_from_missing_source_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voyage import cli_configure
+
+    monkeypatch.chdir(tmp_path)
+    args = _configure_namespace("child", from_run="nope", style="s", segments=2, no_download=True)
+    assert cli_configure.cmd_configure(args) == 1
+    assert not (tmp_path / "output" / "child").exists()
+
+
+def test_configure_from_on_existing_run_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voyage import cli_configure
+
+    _create_source_run(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    first = _configure_namespace("child", style="s", segments=2, seed=1, no_download=True)
+    assert cli_configure.cmd_configure(first) == 0
+    again = _configure_namespace("child", from_run="src", no_download=True)
+    assert cli_configure.cmd_configure(again) == 2
+    manifest = json.loads((tmp_path / "output" / "child" / "manifest.json").read_text())
+    assert manifest["style"] == "s"
