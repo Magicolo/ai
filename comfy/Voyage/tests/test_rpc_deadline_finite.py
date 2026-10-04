@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from voyage.config import DraftConfig, VoyageConfig
+from voyage.config import VoyageConfig
 from voyage.errors import RecoverableWorkerError, VoyageError
 from voyage.rpc import SubprocessWorker
 
@@ -58,14 +58,6 @@ def test_voyage_config_keeps_finite_positive_contract() -> None:
         VoyageConfig(rpc_timeout_seconds=0.0)
     with pytest.raises(ValidationError):
         VoyageConfig(rpc_timeout_seconds=-5.0)
-
-
-@pytest.mark.parametrize("hostile_value", [float("nan"), float("inf"), float("-inf")])
-def test_draft_config_rejects_non_finite_take_seconds(hostile_value: float) -> None:
-    """The draft take length feeds audio loop bounds, so it gets the same gate."""
-    with pytest.raises(ValidationError):
-        DraftConfig(take_seconds=hostile_value)
-    assert DraftConfig(take_seconds=45.0).take_seconds == 45.0
 
 
 @pytest.mark.parametrize("hostile_value", [float("nan"), float("inf"), float("-inf")])

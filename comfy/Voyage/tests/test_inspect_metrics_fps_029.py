@@ -1,14 +1,10 @@
-"""Rotation-aware inspect metrics + fail-loud fps (issues 029/055).
+"""Rotation-aware inspect metrics reader (issue 029; 055 superseded here).
 
 ``inspect metrics`` opened only the live ``metrics.jsonl`` while every
 sibling reader spans live + rotated files via ``iter_metric_files`` —
 after a daily rotation the count dropped and pre-rotation history
-vanished (055 is the same reader, superseded by 029 here). Separately,
-``RunState`` tolerates legacy ``fps=0`` while ``status`` shows a
-zero-length timeline and ``validate`` silently substituted 24 for the
-SFX-ledger check. These tests pin the shared reader plus the
-fail-loud ``fps <= 0`` validate error (the 24 fallback stays for the
-SFX math only after reporting). CPU-only: synthetic logs, no workers.
+vanished. These tests pin the shared reader. CPU-only: synthetic logs,
+no workers.
 """
 
 from __future__ import annotations
@@ -21,8 +17,7 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.cli import cmd_inspect, validate_run
-from voyage.persistence import read_state, write_state
+from voyage.cli import cmd_inspect
 
 
 def _write_metric_event(log_path: Path, segment_id: str) -> None:
@@ -61,28 +56,3 @@ def test_inspect_metrics_reports_file_span(
     assert cmd_inspect(args) == 0
     output = capsys.readouterr().out
     assert "2 files" in output
-
-
-def test_validate_reports_nonpositive_fps(tmp_path: Path) -> None:
-    """A legacy fps=0 state fails loud naming fps (was: silent VALID)."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="fps")
-    state = read_state(run_dir)
-    state.fps = 0
-    state.timeline_frames = 48
-    write_state(run_dir, state)
-    errors = validate_run(run_dir)
-    assert any("fps" in error for error in errors)
-
-
-def test_validate_keeps_sfx_fallback_after_reporting(tmp_path: Path) -> None:
-    """Remaining checks still run after the fps error (no early return)."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="fps")
-    state = read_state(run_dir)
-    state.fps = 0
-    state.timeline_frames = 48
-    write_state(run_dir, state)
-    errors = validate_run(run_dir)
-    assert any("fps" in error for error in errors)
-    assert any("timeline frames 48 != sum of segment frames 0" in error for error in errors)

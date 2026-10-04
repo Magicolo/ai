@@ -29,7 +29,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from voyage import llama_server, paths
-from voyage.atomic import JsonValue, atomic_write_bytes, atomic_write_json
+from voyage.atomic import JsonValue, atomic_write_bytes
 from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.audio_finalize import (
     deferred_tail_frames,
@@ -45,7 +45,6 @@ from voyage.director import (
     REVISITS_ALLOWED_SENTINEL,
     DeterministicDirector,
     director_input_from_state,
-    format_measured_context,
 )
 from voyage.errors import (
     DiskSpaceError,
@@ -65,9 +64,7 @@ from voyage.media import (
     assemble_segment_audio,
     check_av_alignment,
     check_free_space,
-    probe,
     probed_take_seconds,
-    run_capture,
     slice_take,
     validate_audio,
 )
@@ -86,14 +83,12 @@ from voyage.prompts import (
     apply_feedback_amendments,
     build_staged_prompt_plan,
     check_prompt_against_style,
-    feedback_amendments,
 )
 from voyage.rpc import SubprocessWorker
 from voyage.seeds import audio_seed, video_seed
 from voyage.segment_manifest import (
     build_segment_manifest,
     load_segment_manifest,
-    update_manifest_metrics,
     write_segment_manifest,
 )
 from voyage.supervisor_commit_types import (
@@ -143,12 +138,6 @@ from voyage.supervisor_routing import (
 )
 from voyage.supervisor_tape import (
     tape_tail_sha_matches as tape_tail_sha_matches,
-)
-from voyage.vision.metrics import (
-    Histogram,
-    frame_histogram,
-    sample_frames,
-    summarize_segment,
 )
 
 # Backend routing lives in `voyage.supervisor_routing`
@@ -576,7 +565,7 @@ class Supervisor:
         return self._progress.stage(label, detail)
 
     def _log_metric(self, event: dict[str, object]) -> None:
-        line = json.dumps({"ts": time.time(), "run_id": self._config.run_id, **event})
+        line = json.dumps({"ts": time.time(), "run_id": self._config.name, **event})
         append_line(self._logs / "metrics.jsonl", line)
 
     def _rotate_worker_logs(self) -> None:
@@ -962,7 +951,6 @@ class Supervisor:
                     segment_id = self.commit_one_segment()
                 except VoyageError as exc:
                     failed = read_state(self._run_dir)
-                    failed.last_error = str(exc)
                     if isinstance(exc, DiskSpaceError):
                         # Free the operator to clear space and `run` again:
                         # the next commit precheck re-pauses if still full.
@@ -994,7 +982,6 @@ class Supervisor:
                             f"segment commit failed with {type(exc).__name__}: {exc} "
                             "(state.json unreadable)"
                         ) from exc
-                    failed.last_error = f"{type(exc).__name__}: {exc}"
                     failed.status = "FAILED"
                     write_state(self._run_dir, failed)
                     self._log_metric(
@@ -1117,13 +1104,12 @@ class Supervisor:
         the next commit decides synchronously. Stale targets are dropped.
 
         `invalidated` is the third outcome (issues 136 + 168): the caller
-        knows the proposal cannot be used — fresh inspect amendments
-        postdate the prefetch payload, or the drift-cadence hold returns
+        knows the proposal cannot be used — the drift-cadence hold returns
         before the accept loop — so a ready future logs
         `director_prefetch_invalidated` (with `reason`) instead of `hit`
         and is dropped. Without it the soak hit-rate measures "prefetch
         was ready", not "prefetch was used", diverging exactly when the
-        inspector or the cadence is doing work.
+        cadence is doing work.
         """
         future, target = self._prefetch_future, self._prefetch_target
         self._prefetch_future = None
@@ -1339,10 +1325,7 @@ class Supervisor:
         toward unvisited worlds, every generation is scored and recorded,
         and the first schema/style-valid generation renders — revisits
         carry novelty_accepted=False. Every rejection is recorded in
-        the immutable concept history. When the experimental visual
-        inspector measured the previous segment, its §43 amendments are
-        applied to each stage post-validation, pre-style-check — amended
-        text still passes ProposalRejected, so the charter always wins.
+        the immutable concept history.
 
         Drift cadence: only every Nth segment (config
         drift_every_n_segments, 1 = drift each segment) consults the LLM;
@@ -1659,9 +1642,9 @@ class Supervisor:
         """Render takes when coverage runs low, then slice/assemble (§35).
 
         Returns the segment's AudioPlan, the seconds of music coverage
-        remaining ahead of the new segment end (drives
-        audio_buffer_seconds), plus the planner action/reason
-        (render/repaint/keep — surfaced in console summaries). Take files
+        remaining ahead of the new segment end, plus the planner
+        action/reason (render/repaint/keep — surfaced in console
+        summaries). Take files
         are immutable and versioned under `<run>/audio/`; the ledger
         (`takes.jsonl`) is the truth the next commit plans against.
         """
@@ -1872,121 +1855,6 @@ class Supervisor:
         )
         return audio_plan, max(ahead, 0.0), plan.action, plan.reason
 
-    def _inspect_previous_segment(
-        self, config: ProjectConfig, number: int, style_spec: StyleSpec
-    ) -> tuple[str, list[str]]:
-        """Piggyback inspect of the previous segment (DESIGN §44, experimental).
-
-        Ordered and synchronous at the next commit — no threads: the
-        inspector samples the previous segment's committed video, merges a
-        `visual` section into its metrics.json, and returns the MEASURED
-        director context plus any §43 prompt amendments. Disabled by
-        default; any failure degrades to ('', []) with an inspect_skipped
-        metric so a slow or missing inspector never stops a healthy voyage.
-        """
-        if not config.experimental.visual_inspector or number == 0:
-            return "", []
-        try:
-            return self._run_previous_inspect(number, style_spec)
-        except Exception as exc:  # noqa: BLE001 — inspector never breaks a commit
-            self._log_metric({"event": "inspect_skipped", "error": str(exc)})
-            return "", []
-
-    def _run_previous_inspect(self, number: int, style_spec: StyleSpec) -> tuple[str, list[str]]:
-        """Inspect helper; raises on any failure (caller converts to skip)."""
-        prev_id = paths.format_segment_id(number - 1)
-        prev_dir = paths.segment_dir(self._run_dir, prev_id)
-        prev_video = prev_dir / "video.mp4"
-        frames = sample_frames(prev_video, 5)
-        reference: Histogram | None
-        if number == 1:
-            reference = frame_histogram(frames[len(frames) // 2])
-        else:
-            seg0_video = paths.segment_dir(self._run_dir, paths.format_segment_id(0)) / "video.mp4"
-            reference = frame_histogram(sample_frames(seg0_video, 1)[0])
-        summary = summarize_segment(frames, reference)
-        scene_summary = self._inspect_frame_view(prev_dir, prev_video)
-        amendments = feedback_amendments(summary, style_spec)
-        visual = {
-            "metrics": summary,
-            "scene_summary": scene_summary,
-            "inspected": bool(scene_summary),
-            "amendments": amendments,
-        }
-        try:
-            manifest_file = prev_dir / paths.SEGMENT_MANIFEST_FILENAME
-            if manifest_file.exists():
-                current = load_segment_manifest(prev_dir)
-                existing_metrics = current.get("metrics")
-                merged = dict(existing_metrics) if isinstance(existing_metrics, dict) else {}
-                merged["visual"] = visual
-                update_manifest_metrics(prev_dir, merged)
-            else:
-                existing: JsonValue = json.loads(
-                    (prev_dir / "metrics.json").read_text(encoding="utf-8")
-                )
-                if isinstance(existing, dict):
-                    atomic_write_json(prev_dir / "metrics.json", {**existing, "visual": visual})
-                    try:
-                        legacy = prev_dir / "sha256.json"
-                        recorded: JsonValue = json.loads(legacy.read_text(encoding="utf-8"))
-                        if isinstance(recorded, dict) and "metrics.json" in recorded:
-                            recorded["metrics.json"] = sha256_file(prev_dir / "metrics.json")
-                            atomic_write_json(legacy, recorded)
-                    except (OSError, ValueError):
-                        pass
-        except OSError:
-            pass
-        self._log_metric({"event": "segment_inspected", "segment_id": prev_id, **summary})
-        return format_measured_context(style_spec, summary), amendments
-
-    def _inspect_frame_view(self, prev_dir: Path, prev_video: Path) -> str:
-        """Single middle-frame VLM read; '' when the inspector is unavailable.
-
-        The frame is a transient VLM view, not a committed artifact (issue
-        140): it lives under `logs/inspect/<segment>.png` so segment dirs
-        stay exactly the checksummed artifacts.
-        """
-        try:
-            info = probe(prev_video).get("format", {})
-            duration = float(info.get("duration", 0.0) or 0.0) if isinstance(info, dict) else 0.0
-            try:
-                inspect_dir = self._run_dir / paths.LOGS_DIRNAME / "inspect"
-                inspect_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                return ""
-            frame_path = inspect_dir / f"{prev_dir.name}.png"
-            proc = run_capture(
-                [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-nostdin",
-                    "-y",
-                    "-ss",
-                    f"{max(duration / 2.0, 0.0):.6f}",
-                    "-i",
-                    str(prev_video),
-                    "-frames:v",
-                    "1",
-                    str(frame_path),
-                ]
-            )
-            if proc.returncode != 0:
-                return ""
-            result = self._director.call(
-                "inspect",
-                {
-                    "frame_path": str(frame_path),
-                    "model_id": self._config.director.inspector_model_id,
-                },
-            )
-        except VoyageError:
-            return ""
-        if not isinstance(result, dict) or not result.get("inspected"):
-            return ""
-        scene = result.get("scene_summary")
-        return str(scene) if isinstance(scene, str) else ""
-
     def _segment_plan_info(
         self,
         config: ProjectConfig,
@@ -2024,10 +1892,9 @@ class Supervisor:
         """Director proposal + staged prompt plan for one commit (issue 020).
 
         Accepts the next EvolutionDecision (§74 transaction: validate →
-        novelty → style → accept), folds in the previous segment's visual
-        inspect, and maps the accepted stages onto per-block prompts
-        (§18.2). Records the `inspect` + `director` stage timings. Pure
-        proposal: no media rendered, no state advanced.
+        novelty → style → accept) and maps the accepted stages onto
+        per-block prompts (§18.2). Records the `director` stage timing.
+        Pure proposal: no media rendered, no state advanced.
         """
         concept_store_started = time.monotonic()
         try:
@@ -2042,26 +1909,13 @@ class Supervisor:
             # commit boundary and strands the run at RUNNING.
             raise StateError(f"segment {segment_id}: corrupt concept history: {exc}") from exc
         self._gap_ms["concept_store_ms"] += (time.monotonic() - concept_store_started) * 1000.0
-        # 1b. Piggyback inspect of the previous segment (§44, experimental):
-        # ordered, synchronous, never blocking the commit on failure.
-        inspect_started = time.monotonic()
-        with self._stage("inspect", "previous segment"):
-            measured_context, amendments = self._inspect_previous_segment(
-                config, number, style_spec
-            )
-        stage_seconds["inspect"] = round(time.monotonic() - inspect_started, 3)
-        # Both discard conditions are known before consumption (issues
-        # 136 + 168): fresh inspect amendments postdate the prefetch
-        # payload, and the drift-cadence hold returns before the accept
-        # loop — so a ready-but-unusable proposal logs `invalidated`
-        # instead of `hit`, and the soak rate measures use, not readiness.
+        # The drift-cadence hold is known before consumption (issues
+        # 136 + 168): it returns before the accept loop — so a ready
+        # proposal logs `invalidated` instead of `hit`, and the soak rate
+        # measures use, not readiness.
         drift_every = max(1, config.voyage.drift_every_n_segments)
         drift_hold = number % drift_every != 0
-        invalidation_reasons = [
-            reason
-            for reason, dead in (("amendments", bool(amendments)), ("drift_hold", drift_hold))
-            if dead
-        ]
+        invalidation_reasons = ["drift_hold"] if drift_hold else []
         prefetched_raw = self._take_prefetch(
             number,
             segment_id,
@@ -2077,8 +1931,6 @@ class Supervisor:
                 store,
                 style_spec,
                 segment_id,
-                measured_context,
-                amendments,
                 prefetched_raw=prefetched_raw,
             )
         stage_seconds["director"] = round(time.monotonic() - director_started, 3)
@@ -2469,9 +2321,8 @@ class Supervisor:
         )
         check_av_alignment(float(video_info["duration"]), float(audio_info["duration"]), segment_id)
         # The takes ledger stays the truth for audio planning (see
-        # `_ensure_audio_coverage`); the buffer gauge keeps its pre-crash
-        # value — the next commit plans from the ledger, so worst case is
-        # an extra take render, never silence.
+        # `_ensure_audio_coverage`); the next commit plans from the
+        # ledger, so worst case is an extra take render, never silence.
         fresh = read_state(self._run_dir)
         fresh.next_segment_number = number + 1
         fresh.committed_segments += 1
@@ -2480,7 +2331,6 @@ class Supervisor:
         fresh.destination_concept = world_state.destination_concept
         fresh.phase = world_state.phase
         fresh.decision_index = state.decision_index + 1
-        fresh.last_error = None
         self._write_state_preserving_control_plane(fresh)
         self._log_metric(
             {
@@ -2598,8 +2448,6 @@ class Supervisor:
         fresh.destination_concept = decision.destination_concept
         fresh.phase = decision.phase
         fresh.decision_index = state.decision_index + 1
-        fresh.audio_buffer_seconds = covered.audio_ahead
-        fresh.last_error = None
         # Control-plane compare-and-swap (issue 099) lives in the shared
         # helper so the orphan adoption path (issue 013) honors stop/pause
         # identically — see `_write_state_preserving_control_plane`.
@@ -2730,7 +2578,7 @@ class Supervisor:
             rendered.recovery_tape,
             stage_seconds,
         )
-        return self._commit_segment(
+        committed_id = self._commit_segment(
             config,
             state,
             number,

@@ -66,7 +66,7 @@ def test_resolve_config_applies_presentation_fps(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="pres", style="s")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert config.augment.presentation_fps is None
     resolved = resolve_config(config, presentation_fps=32)
     assert resolved.augment.presentation_fps == 32

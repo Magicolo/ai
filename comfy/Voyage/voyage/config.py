@@ -461,24 +461,24 @@ class AugmentConfig(BaseModel):
     cuda:1), ffmpeg floors only when off or when the legs are absent.
 
     `interp_multiplier` (DESIGN §56) is the FILM frame multiplier for
-    the model pass (default 4, matching the validated Comfy
-    `video_export.json` recipe); 1 keeps the frame count
-    (`(n-1)*1+1 = n`, the interp worker passes frames through), so the
-    pass upscales without interpolating.
+    the model pass (default 2, matching the poulah-proven recipe);
+    1 keeps the frame count (`(n-1)*1+1 = n`, the interp worker
+    passes frames through), so the pass upscales without interpolating.
 
     `presentation_fps` (slow-mo finalize) pins the shipped frame rate
     instead of the floors rule: with `interp_multiplier=2` on 24fps
     content presented at 32fps, the timeline stretches 1.5x (slow
-    motion) instead of lifting fps with minterpolate. `None` (default)
-    keeps the floors behavior; TOML `0` also means unset.
+    motion) instead of lifting fps with minterpolate. `32` (default)
+    is the poulah-proven value; TOML `0` means unset (`None`, the
+    floors behavior).
     """
 
     min_fps: int = 24
     min_width: int = 1216
     min_height: int = 704
     use_model_pass: bool = True
-    interp_multiplier: int = 4
-    presentation_fps: int | None = Field(default=None, ge=1)
+    interp_multiplier: int = 2
+    presentation_fps: int | None = Field(default=32, ge=1)
 
     @field_validator("presentation_fps", mode="before")
     @classmethod
@@ -600,15 +600,9 @@ class VoyageConfig(BaseModel):
     """Evolution policy (DESIGN §14 [voyage] table, §§21.2-21.3)."""
 
     allow_concept_revisit: bool = False
-    major_transition_min_seconds: float = 30.0
-    major_transition_max_seconds: float = 120.0
-    world_decision_interval_seconds: float = 16.0
     blocks_per_prompt_stage: int = 3
     novelty_threshold: float = 0.85
     novelty_max_attempts: int = 3
-    # Deprecated (item 1): novelty never rejects, so no cap is read —
-    # kept (with validator and TOML line) so older run dirs still load.
-    novelty_max_rejections: int = 2
     max_worker_restarts: int = 3
     rpc_timeout_seconds: float = 600.0
     # Thematic drift cadence: the director must propose a novel destination
@@ -630,13 +624,6 @@ class VoyageConfig(BaseModel):
     def positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("must be positive")
-        return value
-
-    @field_validator("novelty_max_rejections")
-    @classmethod
-    def non_negative_rejections(cls, value: int) -> int:
-        if value < 0:
-            raise ValueError("novelty_max_rejections must be non-negative")
         return value
 
     @field_validator("max_worker_restarts")
@@ -661,51 +648,6 @@ class VoyageConfig(BaseModel):
         return value
 
 
-class ExperimentalConfig(BaseModel):
-    """Explicit feature flags for experimental behavior (DESIGN §132)."""
-
-    visual_inspector: bool = False
-
-
-class DraftConfig(BaseModel):
-    """Cheap iteration profile (fast loop): quarter-res spatial latents.
-
-    This model IS the named draft overlay (issue 025): the stored [draft]
-    TOML table rides ProjectConfig, and resolve_config applies it on top
-    of the backend preset. Kept as a model (not a bare dict) because
-    stored configs and existing callers read config.draft with validation;
-    the canonical default values are pinned by tests/test_draft.py.
-    Applied only when the run requests it (`voyage run --draft`); the
-    stored TOML keeps full-quality values. Spatial dims are halved
-    (640x352, latent [1,8,48,22,40]); the temporal dim is untouched.
-    Draft renders are for iteration, never for finals.
-    """
-
-    width: int = 640
-    height: int = 352
-    latent_shape: list[int] = Field(default_factory=lambda: [1, 8, 48, 22, 40])
-    blocks_per_segment: int = 1
-    # Same take length as full quality: a take shorter than the audio-ahead
-    # window forces a render + full GPU swap on EVERY segment (draft E2E:
-    # take 15 < ahead 20 → swap every segment, ~85s audio stage). At 45s the
-    # swap happens ~every 21 segments and amortizes to ~7s/segment.
-    take_seconds: float = 45.0
-
-    @field_validator("width", "height", "blocks_per_segment")
-    @classmethod
-    def positive(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("must be positive")
-        return value
-
-    @field_validator("take_seconds")
-    @classmethod
-    def non_negative(cls, value: float) -> float:
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("must be a finite non-negative number")
-        return value
-
-
 SPEC_MIN_FREE_SPACE_GIB = 20.0
 """Spec default reserve (DESIGN §70/§140): hand-written TOML omitting the key gets this."""
 
@@ -714,8 +656,7 @@ DEV_MIN_FREE_SPACE_GIB = 5.0
 
 
 class ProjectConfig(BaseModel):
-    schema_version: int = 1
-    run_id: str = "voyage"
+    name: str = "voyage"
     style: str = ""
     seed: int = 0
     min_free_space_gib: float = SPEC_MIN_FREE_SPACE_GIB
@@ -725,8 +666,6 @@ class ProjectConfig(BaseModel):
     augment: AugmentConfig = Field(default_factory=AugmentConfig)
     director: DirectorConfig = Field(default_factory=DirectorConfig)
     voyage: VoyageConfig = Field(default_factory=VoyageConfig)
-    experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)
-    draft: DraftConfig = Field(default_factory=DraftConfig)
 
     @field_validator("style")
     @classmethod
@@ -745,7 +684,7 @@ def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int
 
 
 def preset_config(
-    run_id: str,
+    name: str,
     style: str,
     seed: int,
     video_backend: VideoBackendName = "ltx25",
@@ -764,7 +703,7 @@ def preset_config(
     style / unknown backend, exactly like the old file round-trip did.
     """
     base = ProjectConfig(
-        run_id=run_id,
+        name=name,
         style=style,
         seed=seed,
         min_free_space_gib=DEV_MIN_FREE_SPACE_GIB,
@@ -781,7 +720,6 @@ def resolve_config(
     config: ProjectConfig,
     *,
     backend: VideoBackendName | None | UnsetType = Unset,
-    draft: bool = False,
     director: str | None | UnsetType = Unset,
     director_device: str | None | UnsetType = Unset,
     blocks: int | None | UnsetType = Unset,
@@ -797,16 +735,16 @@ def resolve_config(
     interp_multiplier: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
 ) -> ProjectConfig:
-    """Single configuration resolver (issues 022 + 025): backend preset,
-    then the stored [draft] overlay, then targeted overrides — in that
-    order, so explicit flags always win over profiles.
+    """Single configuration resolver (issue 022): backend preset,
+    then targeted overrides — in that order, so explicit flags always
+    win over profiles.
 
     Pure: returns a new config, never mutates. Rebuilds submodels through
     their constructors so invalid overrides (blocks=0, negative takes)
     raise ValidationError instead of silently corrupting the run. Unknown
     backends raise ValueError (same message as the old preset lookup).
-    This replaces the apply_draft_overrides + with_video_backend pair —
-    both survive below as thin wrappers for their existing callers.
+    `with_video_backend` survives below as a thin wrapper for its
+    existing callers.
 
     Absent-encoding (issue 045): defaults are `Unset`; `None` (argparse
     legacy) is tolerated as absent too — every branch below goes through
@@ -824,18 +762,6 @@ def resolve_config(
             **{**audio.model_dump(), **_audio_preset(backend), "models_dir": "/models"}
         )
         sfx = SfxConfig(**{**sfx.model_dump(), **_sfx_preset(backend), "models_dir": "/models"})
-    if draft:
-        profile = config.draft
-        video = VideoConfig(
-            **{
-                **video.model_dump(),
-                "width": profile.width,
-                "height": profile.height,
-                "latent_shape": list(profile.latent_shape),
-                "blocks_per_segment": profile.blocks_per_segment,
-            }
-        )
-        audio = AudioConfig(**{**audio.model_dump(), "take_seconds": profile.take_seconds})
     if is_provided(director):
         director_config = DirectorConfig(**{**director_config.model_dump(), "backend": director})
     if is_provided(director_device):
@@ -899,51 +825,6 @@ def resolve_config(
             "director": director_config,
             "voyage": voyage_config,
         }
-    )
-
-
-def apply_draft_overrides(
-    config: ProjectConfig,
-    *,
-    draft: bool = False,
-    director: str | None | UnsetType = Unset,
-    director_device: str | None | UnsetType = Unset,
-    blocks: int | None | UnsetType = Unset,
-    take_seconds: float | None | UnsetType = Unset,
-    quantization: str | None | UnsetType = Unset,
-    beats_per_segment: int | None | UnsetType = Unset,
-    drift_every_n_segments: int | None | UnsetType = Unset,
-    music_caption: str | None | UnsetType = Unset,
-    video_caption: str | None | UnsetType = Unset,
-    min_fps: int | None | UnsetType = Unset,
-    min_resolution: str | None | UnsetType = Unset,
-    use_model_pass: bool | None | UnsetType = Unset,
-    interp_multiplier: int | None | UnsetType = Unset,
-    presentation_fps: int | None | UnsetType = Unset,
-) -> ProjectConfig:
-    """Apply the draft profile + targeted run overrides (fast loop).
-
-    Thin wrapper over resolve_config (issue 025) — kept for the CLI and
-    existing tests. New code should call resolve_config directly.
-    Absent-encoding (issue 045): defaults are `Unset`, `None` tolerated.
-    """
-    return resolve_config(
-        config,
-        draft=draft,
-        director=director,
-        director_device=director_device,
-        blocks=blocks,
-        take_seconds=take_seconds,
-        quantization=quantization,
-        beats_per_segment=beats_per_segment,
-        drift_every_n_segments=drift_every_n_segments,
-        music_caption=music_caption,
-        video_caption=video_caption,
-        min_fps=min_fps,
-        min_resolution=min_resolution,
-        use_model_pass=use_model_pass,
-        interp_multiplier=interp_multiplier,
-        presentation_fps=presentation_fps,
     )
 
 

@@ -30,7 +30,7 @@ def _config_with_style() -> ProjectConfig:
 def _commit_two(run_dir: Path) -> None:
     from voyage.config import resolve_config
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     # Pin the deterministic director: finalize-path coverage must not
     # depend on whichever decider backend is the tree default today.
     config = resolve_config(config, director="deterministic")

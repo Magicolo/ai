@@ -62,8 +62,10 @@ if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
   requested_backend="ltx25"
 fi
 # Manifest sniff via the stdlib JSON parser: reads the video/audio/sfx
-# backends from the manifest's effective config, so [director] backends
-# (or layout changes) can never select the wrong image.
+# backends from the flat manifest root (the effective config IS the
+# manifest root — segments/finalize policy ride alongside and are
+# ignored here), so [director] backends (or layout changes) can never
+# select the wrong image.
 # Unparseable/missing key -> empty (slim default), never a launcher
 # failure. Any CUDA backend in any of the three sections selects the
 # video image (issue 090: [audio].backend=acestep + video=fake used to
@@ -72,7 +74,7 @@ fi
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/manifest.json" ]; then
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import json, os; cfg = json.load(open(os.path.join(os.environ["RUN_DIR"], "manifest.json")))["effective_config"]; bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
+    'import json, os; cfg = json.load(open(os.path.join(os.environ["RUN_DIR"], "manifest.json"))); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
 fi
 needs_cuda=0

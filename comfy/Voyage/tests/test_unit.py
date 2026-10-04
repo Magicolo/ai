@@ -54,13 +54,9 @@ def test_derive_seed_stable_and_separated() -> None:
 
 
 def test_config_roundtrip(tmp_path: Path) -> None:
-    from voyage.persistence import effective_config_digest
-
     config = preset_config("demo", "pastel neon line-art, peaceful", 42)
-    digest = effective_config_digest(config)
-    assert config.run_id == "demo"
+    assert config.name == "demo"
     assert config.seed == 42
-    assert len(digest) == 64
 
 
 def test_config_rejects_empty_style(tmp_path: Path) -> None:
@@ -82,7 +78,7 @@ def test_config_toml_escapes_style_injection(tmp_path: Path) -> None:
     hostile_run_id = 'run"x\n[evil]'
     config = preset_config(hostile_run_id, hostile_style, 0)
     assert config.style == hostile_style
-    assert config.run_id == hostile_run_id
+    assert config.name == hostile_run_id
 
 
 def test_config_toml_escapes_quotes_and_newlines(tmp_path: Path) -> None:

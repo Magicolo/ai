@@ -30,7 +30,7 @@ def _base_config() -> ProjectConfig:
 
 
 def _commit(run_dir: Path, count: int) -> None:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

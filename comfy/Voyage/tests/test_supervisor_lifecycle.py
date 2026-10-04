@@ -67,7 +67,7 @@ def test_start_workers_failure_stops_already_started(tmp_path: Path) -> None:
     """012: a failing second start must unwind the first (no orphan worker)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     started, stopped = _stub_worker_calls(supervisor)
 
@@ -87,7 +87,7 @@ def test_run_segments_partial_start_stops_workers(tmp_path: Path) -> None:
     """012: `run_segments` cleans up even when `start_workers()` raises."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     started, stopped = _stub_worker_calls(supervisor)
 
@@ -123,7 +123,7 @@ def _commit_with_operator_write(
     """
     run_dir = tmp_path / "run"
     _init_run(run_dir, run_id=run_id)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     reads: list[str] = []

@@ -544,11 +544,6 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help="fail instead of downloading missing models (verify only)",
     )
     conf.add_argument(
-        "--draft",
-        action="store_true",
-        help="apply the [draft] profile (fast low-res iteration settings)",
-    )
-    conf.add_argument(
         "--director",
         default=None,
         choices=("qwen", "deterministic", "llama"),
@@ -581,11 +576,6 @@ def _add_run_parser(sub: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="finalize past corrupt segments instead of aborting "
         "(forwarded to the re-finalize step)",
-    )
-    run.add_argument(
-        "--draft",
-        action="store_true",
-        help="apply the [draft] profile (fast low-res iteration settings)",
     )
     run.add_argument(
         "--director",

@@ -43,7 +43,7 @@ def test_restart_budget_exhaustion_opens_circuit_breaker(tmp_path: Path) -> None
     """Beyond max_worker_restarts the breaker opens: Fatal, no more restarts."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 2
     supervisor = Supervisor(run_dir, config)
 
@@ -68,7 +68,7 @@ def test_zero_budget_fails_fast_without_restart(tmp_path: Path) -> None:
     """max_worker_restarts=0: first recoverable failure trips the breaker."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 0
     supervisor = Supervisor(run_dir, config)
 
@@ -84,7 +84,7 @@ def test_repeated_failure_aborts_failed_not_running(tmp_path: Path) -> None:
     """A run killed by repeated worker failure rests at FAILED (never RUNNING)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 0
     supervisor = Supervisor(run_dir, config)
     supervisor._video.call = _always_fail  # type: ignore[assignment]
@@ -94,21 +94,26 @@ def test_repeated_failure_aborts_failed_not_running(tmp_path: Path) -> None:
         supervisor.run_segments(1)
     state = read_state(run_dir)
     assert state.status == "FAILED"
-    assert state.last_error
-    assert "circuit breaker" in state.last_error
+    breaker = [
+        line
+        for line in (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if "circuit_breaker_open" in line
+    ]
+    assert breaker, "circuit-breaker trip must stay visible in the metrics log"
 
 
 def test_disk_full_pauses_run_and_resumes(tmp_path: Path) -> None:
     """DiskSpaceError rests the run at PAUSED_DISK_FULL; freeing space resumes."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.min_free_space_gib = 1e12
     with pytest.raises(DiskSpaceError):
         Supervisor(run_dir, config).run_segments(1)
     paused = read_state(run_dir)
     assert paused.status == "PAUSED_DISK_FULL"
-    assert paused.last_error
 
     config.min_free_space_gib = 5.0
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
@@ -147,7 +152,7 @@ def test_resume_failure_gets_second_chance(tmp_path: Path) -> None:
     segment.mkdir(parents=True, exist_ok=True)
     (segment / paths.DONE_MARKER).write_bytes(b"done")
     (segment / "recovery.pt").write_bytes(b"tape")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
 
     calls: list[str] = []
@@ -175,7 +180,7 @@ def test_resume_failures_consume_the_same_budget(tmp_path: Path) -> None:
     segment.mkdir(parents=True, exist_ok=True)
     (segment / paths.DONE_MARKER).write_bytes(b"done")
     (segment / "recovery.pt").write_bytes(b"tape")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 2
     supervisor = Supervisor(run_dir, config)
 
@@ -198,7 +203,7 @@ def test_finalize_space_preflight(tmp_path: Path) -> None:
     """finalize_run refuses to start when the free-space reserve is crossed."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     output = tmp_path / "final.mp4"
     with pytest.raises(DiskSpaceError):
@@ -211,7 +216,7 @@ def test_failure_policy_config_plumbing(tmp_path: Path) -> None:
     """TOML carries the new knobs; Supervisor hands the timeout to workers."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert config.voyage.max_worker_restarts == 3
     assert config.voyage.rpc_timeout_seconds == 600.0
     supervisor = Supervisor(run_dir, config)

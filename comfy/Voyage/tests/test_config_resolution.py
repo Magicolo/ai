@@ -1,9 +1,9 @@
-"""Single config resolver: preset → draft overlay → overrides (issue 025).
+"""Single config resolver: preset → overrides (issue 025).
 
 CPU-only: pure config transforms — no workers, no ffmpeg, no GPU. Pins
-the resolution order (backend preset, then the stored [draft] overlay,
-then targeted overrides), the wrapper parities (resolve_config vs
-apply_draft_overrides/with_video_backend), and the rejection behavior.
+the resolution order (backend preset, then targeted overrides), the
+wrapper parity (resolve_config vs with_video_backend), and the rejection
+behavior.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from voyage.config import (
     SPEC_MIN_FREE_SPACE_GIB,
     AudioConfig,
     ProjectConfig,
-    apply_draft_overrides,
+    VideoConfig,
     preset_config,
     resolve_config,
     with_video_backend,
@@ -46,38 +46,18 @@ def test_backend_branch_matches_with_video_backend() -> None:
         )
 
 
-def test_draft_and_override_branches_match_apply_draft_overrides() -> None:
+def test_resolution_order_preset_then_overrides() -> None:
     base = _base_config()
-    assert resolve_config(base, draft=True).model_dump() == (
-        apply_draft_overrides(base, draft=True).model_dump()
-    )
-    assert resolve_config(
-        base, director="qwen", blocks=2, take_seconds=30.0, quantization="bf16"
-    ).model_dump() == (
-        apply_draft_overrides(
-            base, director="qwen", blocks=2, take_seconds=30.0, quantization="bf16"
-        ).model_dump()
-    )
-
-
-def test_resolution_order_preset_then_draft_then_overrides() -> None:
-    base = _base_config()
-    overlay = base.draft
-    # Draft overlay wins over the backend row …
-    drafted = resolve_config(base, backend="ltxv", draft=True)
-    assert (drafted.video.width, drafted.video.height) == (overlay.width, overlay.height)
-    assert drafted.video.latent_shape == list(overlay.latent_shape)
-    assert drafted.audio.take_seconds == overlay.take_seconds
-    # … and explicit overrides win over the overlay.
-    assert resolve_config(base, backend="ltxv", draft=True, blocks=3).video.blocks_per_segment == 3
-    assert resolve_config(base, draft=True, take_seconds=31.0).audio.take_seconds == 31.0
-    # Without draft the backend row rules the geometry.
+    # Explicit overrides win over the backend row …
+    assert resolve_config(base, backend="ltxv", blocks=3).video.blocks_per_segment == 3
+    assert resolve_config(base, take_seconds=31.0).audio.take_seconds == 31.0
+    # … and without overrides the backend row rules the geometry.
     plain = resolve_config(base, backend="ltxv")
     row = BACKEND_REGISTRY["ltxv"]
     assert (plain.video.width, plain.video.height) == (row.width, row.height)
 
 
-def test_full_matrix_backend_by_draft() -> None:
+def test_full_matrix_backend_geometry() -> None:
     for name, row in BACKEND_REGISTRY.items():
         plain = resolve_config(_base_config(), backend=name)
         assert (plain.video.width, plain.video.height) == (row.width, row.height)
@@ -85,16 +65,9 @@ def test_full_matrix_backend_by_draft() -> None:
         assert plain.video.latent_shape == list(row.latent_shape)
         assert plain.audio.backend == row.audio_backend
         assert plain.audio.device == row.audio_device
-        # The 30 s base take (not the 45 s default) survives without draft …
+        # The 30 s base take (not the 45 s default) survives resolution …
         assert plain.audio.take_seconds == 30.0
-        drafted = resolve_config(_base_config(), backend=name, draft=True)
-        # … and the overlay replaces geometry + take while the audio
-        # pairing still rides the backend row.
-        assert (drafted.video.width, drafted.video.height) == (640, 352)
-        assert drafted.video.latent_shape == [1, 8, 48, 22, 40]
-        assert drafted.audio.take_seconds == 45.0
-        assert drafted.audio.take_seconds > drafted.audio.ahead_seconds
-        assert drafted.audio.backend == row.audio_backend
+        assert plain.audio.backend == row.audio_backend
 
 
 def test_targeted_overrides() -> None:
@@ -136,3 +109,19 @@ def test_free_space_reserve_defaults_are_named_constants() -> None:
     assert ProjectConfig(style="reserve-probe").min_free_space_gib == SPEC_MIN_FREE_SPACE_GIB
     generated = preset_config("reserve-probe", "line art", 7)
     assert generated.min_free_space_gib == DEV_MIN_FREE_SPACE_GIB
+
+
+def test_local_attn_size_defaults_to_continuity_capacity() -> None:
+    # 16 = sink 8 + one 8-frame block: the minimum KV capacity at which
+    # every chunk attends to real history (smaller caches evict the sink
+    # and each chunk denoises from noise+text alone — a fresh scene per
+    # chunk, measured ~6x boundary jumps). Rescued from the deleted
+    # draft-mode tests: the default is backend-independent.
+    assert VideoConfig().local_attn_size == 16
+
+
+def test_local_attn_size_survives_resolution() -> None:
+    out = resolve_config(_base_config(), backend="ltxv", blocks=3)
+    assert out.video.local_attn_size == 16
+    with pytest.raises(ValidationError):
+        VideoConfig(local_attn_size=0)

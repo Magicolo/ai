@@ -297,26 +297,19 @@ class AudioPlan(BaseModel):
 
 
 class RunState(BaseModel):
-    schema_version: int = 1
-    run_id: str
+    name: str
     status: LifecycleStatus = "CREATED"
     # Counters only ever advance from zero (validate_run relies on the
     # contiguous/non-negative invariant), so negatives are corrupt state,
     # not data — fail loud at the read_state boundary instead of letting
-    # a torn write strand the run. fps is deliberately unguarded: the CLI
-    # tolerates legacy fps=0 states, and audio_buffer_seconds takes
-    # planner-computed floats whose sign this layer cannot judge.
+    # a torn write strand the run.
     next_segment_number: int = Field(default=0, ge=0)
     committed_segments: int = Field(default=0, ge=0)
     timeline_frames: int = Field(default=0, ge=0)
-    fps: int = 24
     current_concept: str = ""
     destination_concept: str = ""
     phase: TransitionPhase = "ESTABLISH"
     decision_index: int = Field(default=0, ge=0)
-    video_checkpoint: dict[str, Any] = Field(default_factory=dict)
-    audio_buffer_seconds: float = 0.0
-    last_error: str | None = None
 
 
 class WorkerRequest(BaseModel):

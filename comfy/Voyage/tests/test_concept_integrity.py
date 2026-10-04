@@ -90,7 +90,7 @@ def test_validate_run_flags_lost_vectors(tmp_path: Path) -> None:
     """A run whose vectors vanished must not validate clean."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="concepts")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     Supervisor(run_dir, config).run_segments(1)
     novelty_dir = run_dir / "novelty"
     novelty_dir.mkdir(exist_ok=True)

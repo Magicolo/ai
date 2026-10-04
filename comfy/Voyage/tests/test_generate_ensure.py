@@ -3,8 +3,9 @@
 TDD contract for `voyage.models_ensure` + `VoyageConsole.parallel_downloads`:
 only the stacks the effective generate config needs are verified/downloaded
 (video backend's own spec, ACE-Step audio when paired, qwen director unless
-deterministic, MMAudio SFX only when the finalize pass runs, the VLM
-inspector only when enabled). Fake backends need nothing.
+deterministic, MMAudio SFX only when the finalize pass runs). The VLM
+inspector weights stay pinned in the registry but are never an ensure
+gate (the supervisor piggyback was removed). Fake backends need nothing.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def test_deterministic_director_needs_no_director_models() -> None:
     assert specs == {"ltxv-2b", "audio-acestep", "film", "realesrgan-anime"}
 
 
-def test_sfx_and_inspector_are_opt_in_only() -> None:
+def test_sfx_is_opt_in_and_inspector_is_never_required() -> None:
     from voyage.models_ensure import required_specs
 
     config = with_video_backend(_config_with_style(), "ltxv")
@@ -97,11 +98,10 @@ def test_sfx_and_inspector_are_opt_in_only() -> None:
     sfx_config = with_video_backend(_config_with_style(), "ltxv")
     sfx_config.sfx.backend = "mmaudio"
     assert "sfx-mmaudio" in {item.spec for item in required_specs(sfx_config, sfx_enabled=True)}
-
-    inspect_config = with_video_backend(_config_with_style(), "ltxv")
-    inspect_config.experimental.visual_inspector = True
-    assert "inspector-qwen35" in {
-        item.spec for item in required_specs(inspect_config, sfx_enabled=False)
+    # The inspector weights stay provisionable but no config requests them:
+    # the supervisor piggyback that consumed them was removed.
+    assert "inspector-qwen35" not in {
+        item.spec for item in required_specs(sfx_config, sfx_enabled=True)
     }
 
 

@@ -21,7 +21,7 @@ from voyage.concepts import ConceptStore
 from voyage.doctor import probe
 from voyage.errors import StateError, VoyageError
 from voyage.logrotate import iter_metric_files
-from voyage.persistence import read_manifest, read_state, write_state
+from voyage.persistence import read_effective_config, read_manifest, read_state, write_state
 
 
 def _format_uptime(manifest: dict[str, object]) -> str:
@@ -166,13 +166,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"status: BROKEN ({exc})", file=sys.stderr)
         return 1
     try:
-        from voyage.persistence import read_effective_config
-
-        config, _ = read_effective_config(run_dir)
+        config = read_effective_config(run_dir)
     except VoyageError:
         config = None
-    seconds = state.timeline_frames / state.fps if state.fps else 0
-    print(f"Voyage: {state.run_id}")
+    fps = config.video.fps if config else 0
+    seconds = state.timeline_frames / fps if fps else 0
+    print(f"Voyage: {state.name}")
     print(f"Status: {state.status}")
     age = _format_uptime(manifest)
     if state.status == "RUNNING":
@@ -184,9 +183,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Backend: {config.video.backend if config else 'unknown'}")
     if config:
         print(f"  Render: {config.video.width}×{config.video.height} @ {config.video.fps}fps")
-    print(f"  Timeline: {seconds:.2f}s ({state.timeline_frames} frames @ {state.fps}fps)")
-    if not isinstance(state.fps, int) or state.fps <= 0:
-        print("  WARN: state fps is corrupt (expected a positive integer; see `voyage validate`)")
+    print(f"  Timeline: {seconds:.2f}s ({state.timeline_frames} frames @ {fps}fps)")
     print(f"  Segments: {state.committed_segments}")
     if config:
         print(f"  Blocks per segment: {config.video.blocks_per_segment}")
@@ -200,13 +197,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"       {extra}")
     else:
         print("  GPU (live probe): unavailable (no nvidia-smi)")
-    hardware = manifest.get("hardware")
-    if isinstance(hardware, dict) and hardware:
-        print("  Hardware (recorded at init):")
-        for key, value in hardware.items():
-            print(f"    {key}: {value}")
-    else:
-        print("  Hardware (recorded at init): none recorded")
     print()
     print("World")
     print(f"  Current: {state.current_concept[:100]}")
@@ -219,7 +209,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     if config:
         print(f"  Music: {config.audio.music_style}")
         print(f"  Energy: {config.audio.energy}")
-    print(f"  Buffered audio: {state.audio_buffer_seconds:.2f}s")
     if config:
         print()
         print("Config")
@@ -236,8 +225,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             )
         else:
             print("  Augment resolution floor: disabled")
-        inspector_state = "on" if config.experimental.visual_inspector else "off"
-        print(f"  Inspector: {inspector_state} ({config.director.inspector_model_id})")
         print(
             f"  Beats: {config.audio.beats_per_segment}/segment "
             f"(take_seconds={config.audio.take_seconds}, "
@@ -303,8 +290,6 @@ def cmd_status(args: argparse.Namespace) -> int:
                 print(f"  WARN: free {free_gib:.1f} GiB below reserve {reserve:.1f} GiB")
     except OSError:
         print("  Free: unknown")
-    if state.last_error:
-        print(f"Last error: {state.last_error}")
     return 0
 
 

@@ -12,16 +12,16 @@ from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.logrotate import append_line
 from voyage.persistence import read_effective_config
-from voyage.scoreboard import METRIC_KEYS, scoreboard_rows
+from voyage.scoreboard import scoreboard_rows
 from voyage.supervisor import Supervisor
 
 
-def _init_run(run_dir: Path, *, inspector: bool, run_id: str = "score") -> None:
-    initialize_run_directory(run_dir, run_id=run_id, seed=7, visual_inspector=inspector)
+def _init_run(run_dir: Path, run_id: str = "score") -> None:
+    initialize_run_directory(run_dir, run_id=run_id)
 
 
 def _commit(run_dir: Path, count: int) -> None:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -30,24 +30,19 @@ def _commit(run_dir: Path, count: int) -> None:
         supervisor.stop_workers()
 
 
-def test_scoreboard_two_segments_with_deltas(tmp_path: Path) -> None:
+def test_scoreboard_two_segments_without_visual(tmp_path: Path) -> None:
+    """No piggyback inspector: rows carry frames/stages/plan, metrics None."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=True)
-    # Three commits: the piggyback inspector always covers the PREVIOUS
-    # segment, so seg0/seg1 carry visual metrics and seg2 does not yet.
-    _commit(run_dir, 3)
+    _init_run(run_dir)
+    _commit(run_dir, 2)
     rows = scoreboard_rows(run_dir)
-    assert [row["segment_id"] for row in rows] == ["000000", "000001", "000002"]
+    assert [row["segment_id"] for row in rows] == ["000000", "000001"]
     assert all(row["done"] for row in rows)
     assert all(row["frames"] == 48 for row in rows)
     stages = cast(dict[str, object], rows[0]["stages"])
-    assert set(stages) == {"inspect", "director", "video", "audio", "validate", "commit"}
-    assert set(cast(dict[str, object], rows[0]["metrics"])) == set(METRIC_KEYS)
-    assert rows[0]["deltas"] == dict.fromkeys(METRIC_KEYS, 0.0)
-    metrics1 = cast(dict[str, float], rows[1]["metrics"])
-    metrics0 = cast(dict[str, float], rows[0]["metrics"])
-    expected = {key: round(float(metrics1[key]) - float(metrics0[key]), 3) for key in METRIC_KEYS}
-    assert rows[1]["deltas"] == expected
+    assert set(stages) == {"director", "video", "audio", "validate", "commit"}
+    assert rows[0]["metrics"] is None
+    assert rows[0]["deltas"] is None
     assert rows[0]["destination"]
     assert rows[0]["phase"]
     assert rows[0]["take_ids"]
@@ -57,7 +52,7 @@ def test_scoreboard_two_segments_with_deltas(tmp_path: Path) -> None:
 
 def test_scoreboard_missing_visual(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=False)
+    _init_run(run_dir)
     _commit(run_dir, 1)
     (rows,) = scoreboard_rows(run_dir)
     assert rows["metrics"] is None
@@ -67,7 +62,7 @@ def test_scoreboard_missing_visual(tmp_path: Path) -> None:
 
 def test_scoreboard_skips_partial(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=True)
+    _init_run(run_dir)
     _commit(run_dir, 2)
     (run_dir / "segments" / "000002").mkdir(parents=True)
     rows = scoreboard_rows(run_dir)
@@ -99,7 +94,7 @@ def _write_committed_segment(run_dir: Path, segment_id: str) -> None:
 def test_scoreboard_reads_stages_past_rotation(tmp_path: Path) -> None:
     """Rotate-then-read: stages committed before rotation still score."""
     run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=False)
+    _init_run(run_dir)
     _write_committed_segment(run_dir, "000000")
     logs_dir = run_dir / paths.LOGS_DIRNAME
     live = logs_dir / "metrics.jsonl"

@@ -24,7 +24,7 @@ def _commit_fake_run(tmp_path: Path, run_id: str) -> Path:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id=run_id, style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

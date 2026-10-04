@@ -197,7 +197,7 @@ def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
     """One commit → one start/plan/done with non-empty prompts."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     progress = _RecordingProgress()
     supervisor = Supervisor(run_dir, config, progress=progress)
     assert supervisor.run_segments(1) == ["000000"]
@@ -216,7 +216,7 @@ def test_supervisor_silent_by_default(tmp_path: Path, capsys: pytest.CaptureFixt
     """No progress sink → no console output (tests stay quiet)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     assert capsys.readouterr().out == ""
 

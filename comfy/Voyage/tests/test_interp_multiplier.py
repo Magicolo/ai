@@ -42,7 +42,7 @@ def test_resolve_config_applies_interp_multiplier(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="mult", style="s")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert config.augment.interp_multiplier == 4
     resolved = resolve_config(config, interp_multiplier=1)
     assert resolved.augment.interp_multiplier == 1
@@ -92,7 +92,7 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="multfwd", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

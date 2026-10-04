@@ -110,8 +110,6 @@ FIELD_HELP = {
     "Off by default — checked runs never touch the network for weights.",
     "no_sfx": "Skip the finalize-time SFX pass even when [sfx] is configured. "
     "Off by default — SFX backend/device overrides stay CLI-only.",
-    "draft": "Draft profile (fast low-res iteration): renders at 640x352 "
-    "with 45s takes — iteration only, never finals.",
     "force": "Force: allow init into a non-empty directory (risks overwriting existing run files).",
     "skip_bad": "Skip bad: salvage a finalize around corrupt segments with "
     "warnings instead of aborting.",
@@ -149,7 +147,6 @@ class GenerateFormState:
     seed: str = ""
     force: bool = False
     skip_bad: bool = False
-    draft: bool = False
     director: str = "llama"
     blocks: str = ""
     take_seconds: str = ""
@@ -318,7 +315,7 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         # Absent-encoding (issue 045): blank form fields emit Unset — the
         # single "not provided" value — instead of a second encoding
         # (None) that config consumers would also have to agree on.
-        # `apply_draft_overrides`/`resolve_config` tolerate both.
+        # `resolve_config` tolerates both.
         return int(raw.strip()) if raw.strip() else Unset
 
     take_raw = state.take_seconds.strip()
@@ -345,7 +342,6 @@ def to_generate_namespace(state: GenerateFormState) -> argparse.Namespace:
         force=state.force,
         final_video=str(Path(output) / "final.mp4"),
         skip_bad=state.skip_bad,
-        draft=state.draft,
         director=state.director,
         blocks=optional_int(state.blocks),
         take_seconds=float(take_raw) if take_raw else Unset,
@@ -549,7 +545,6 @@ def save_last_settings(state: GenerateFormState, path: Path | None = None) -> No
             f"seed = {_toml_string(state.seed)}",
             f"force = {'true' if state.force else 'false'}",
             f"skip_bad = {'true' if state.skip_bad else 'false'}",
-            f"draft = {'true' if state.draft else 'false'}",
             f"director = {_toml_string(state.director)}",
             f"blocks = {_toml_string(state.blocks)}",
             f"take_seconds = {_toml_string(state.take_seconds)}",
@@ -615,7 +610,6 @@ def load_last_settings(path: Path | None = None) -> GenerateFormState:
         seed=_string_field(parsed, "seed", defaults.seed),
         force=_boolean_field(parsed, "force", defaults.force),
         skip_bad=_boolean_field(parsed, "skip_bad", defaults.skip_bad),
-        draft=_boolean_field(parsed, "draft", defaults.draft),
         director=_choice_field(parsed, "director", defaults.director, DIRECTORS),
         blocks=_string_field(parsed, "blocks", defaults.blocks),
         take_seconds=_string_field(parsed, "take_seconds", defaults.take_seconds),

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from voyage.config import AudioConfig
 
 from voyage import paths
-from voyage.atomic import atomic_copy, atomic_write_json, read_json
+from voyage.atomic import atomic_copy
 from voyage.augment import CRF_MAXIMUM as _AUGMENT_CRF_MAXIMUM
 from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
 from voyage.augment import interpolated_frame_count as interpolated_frame_count
@@ -669,29 +669,15 @@ def _record_final_geometry(
     min_width: int,
     min_height: int,
 ) -> bool:
-    """Best-effort provenance write-back (issue 141): stamp the shipped box.
+    """Provenance no-op: the flat manifest carries no geometry keys.
 
-    `build_manifest` records the run's `[augment]` floors plus a null
-    `final_geometry` at init; the first finalize overwrites both with the
-    effective floors and the validated output box, so the manifest never
-    claims the stale 768x432 source hint as shipped geometry. Returns False
-    (never raises — a provenance write must not fail a finalize) when the
-    run has no manifest, e.g. throwaway/legacy dirs.
+    Historically (issue 141) this stamped the shipped box back into the
+    manifest's `presentation`/`final_geometry` keys; the flat manifest
+    is the effective config plus plan/policy only, so there is nothing
+    to stamp. Kept as a no-op so the finalize call site stays untouched.
+    Returns True.
     """
-    try:
-        manifest_path = run_dir / paths.MANIFEST_FILENAME
-        manifest = read_json(manifest_path)
-        if not isinstance(manifest, dict):
-            return False
-        manifest["presentation"] = {
-            "min_fps": min_fps,
-            "min_width": min_width,
-            "min_height": min_height,
-        }
-        manifest["final_geometry"] = {"width": width, "height": height, "fps": fps}
-        atomic_write_json(manifest_path, manifest)
-    except (OSError, ValueError):
-        return False
+    del run_dir, width, height, fps, min_fps, min_width, min_height
     return True
 
 

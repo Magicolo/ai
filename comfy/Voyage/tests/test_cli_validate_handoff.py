@@ -35,7 +35,7 @@ _SURROGATE_CATEGORY: tuple[Literal["Cs"], ...] = ("Cs",)
 def _commit_one(run_dir: Path) -> list[str]:
     from voyage.supervisor import Supervisor
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config).run_segments(1)
 
 

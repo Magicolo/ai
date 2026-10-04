@@ -56,7 +56,7 @@ def test_inspect_frame_view_writes_logs_not_segment_dir(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="frameview", seed=7)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor._director = _StubDirector()  # type: ignore[assignment]
     prev_dir = paths.segment_dir(run_dir, "000000")
@@ -79,7 +79,7 @@ def test_inspect_frame_view_failure_stays_silent(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="frameview-fail", seed=7)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor._director = _StubDirector()  # type: ignore[assignment]
     prev_dir = paths.segment_dir(run_dir, "000001")

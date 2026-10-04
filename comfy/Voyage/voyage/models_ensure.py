@@ -163,13 +163,6 @@ def required_specs(
                 models_dir=_resolve_dir(models_root, config.sfx.models_dir),
             )
         )
-    if config.experimental.visual_inspector:
-        required.append(
-            RequiredModel(
-                spec="inspector-qwen35",
-                models_dir=_resolve_dir(models_root, config.video.models_dir),
-            )
-        )
     return required
 
 

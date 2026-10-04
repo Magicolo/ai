@@ -31,7 +31,7 @@ from typing import Literal
 
 import pytest
 
-from voyage.config import ExperimentalConfig, VideoBackendName, preset_config
+from voyage.config import VideoBackendName, preset_config
 from voyage.persistence import create_run_dir
 
 if importlib.util.find_spec("hypothesis") is not None:
@@ -96,7 +96,6 @@ def initialize_run_directory(
     run_id: str = DEFAULT_RUN_ID,
     style: str = DEFAULT_STYLE,
     seed: int = DEFAULT_RUN_SEED,
-    visual_inspector: bool = False,
     video_backend: VideoBackendName = "fake",
 ) -> None:
     """Create a minimal valid run directory: manifest + state.
@@ -105,17 +104,12 @@ def initialize_run_directory(
     order) so converted call sites keep passing unchanged — except the
     config now resolves CLI-style (preset + overrides, no TOML file).
     No root concepts file is scaffolded (2026-09-30 pruning: new runs
-    start without the legacy dup; readers tolerate its absence). The
-    `visual_inspector` flag applies the same enablement the inspector
-    test modules use. `video_backend` pins the CPU fake pipeline
+    start without the legacy dup; readers tolerate its absence).
+    `video_backend` pins the CPU fake pipeline
     (2026-09-29 ltxv decision: product defaults are ltxv/CUDA, but the
     suite runs CPU-only on fake workers — no GPU, no model weights).
     """
     config = preset_config(run_id, style, seed, video_backend=video_backend)
-    if visual_inspector:
-        config = config.model_copy(
-            update={"experimental": ExperimentalConfig(visual_inspector=True)}
-        )
     create_run_dir(run_dir, config)
 
 

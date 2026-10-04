@@ -27,7 +27,7 @@ def get_console(args: argparse.Namespace) -> VoyageConsole:
     )
 
 
-def _load_run(run: Path) -> tuple[ProjectConfig, str]:
+def _load_run(run: Path) -> ProjectConfig:
     """Load the run's effective config from its manifest (CLI-is-config)."""
     return read_effective_config(run)
 

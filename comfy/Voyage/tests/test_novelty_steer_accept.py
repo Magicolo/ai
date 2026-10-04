@@ -20,7 +20,6 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.concepts import ConceptStore
-from voyage.config import VoyageConfig
 from voyage.director import DIRECTOR_SYSTEM_PROMPT, build_director_user_message
 from voyage.models import DirectorDestination, DirectorVideoPlan, EvolutionDecision
 from voyage.persistence import read_effective_config
@@ -55,7 +54,7 @@ def _stubbed_supervisor(
     raws: list[dict[str, Any]],
 ) -> Supervisor:
     initialize_run_directory(run_dir, run_id="steer-accept")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     queue = list(raws)
 
@@ -164,8 +163,3 @@ def test_no_steering_section_when_revisits_allowed() -> None:
 def test_system_prompt_steers_to_novelty() -> None:
     """The charter-level prompt tells the director to differ, not just avoid."""
     assert "slightly different" in DIRECTOR_SYSTEM_PROMPT
-
-
-def test_legacy_rejections_cap_still_loads() -> None:
-    """novelty_max_rejections is deprecated-unused but still parses (old TOMLs)."""
-    assert VoyageConfig(novelty_max_rejections=5).novelty_max_rejections == 5

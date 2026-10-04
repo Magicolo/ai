@@ -27,7 +27,7 @@ def _init_run(run_dir: Path, run_id: str = "relocatable") -> None:
 
 
 def _commit(run_dir: Path, count: int) -> list[str]:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config).run_segments(count)
 
 

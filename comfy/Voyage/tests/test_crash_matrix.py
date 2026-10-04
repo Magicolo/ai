@@ -36,7 +36,7 @@ def test_killed_audio_worker_recovers(tmp_path: Path) -> None:
     """SIGKILLed audio worker restarts and the segment still commits."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -54,7 +54,7 @@ def test_killed_director_worker_recovers(tmp_path: Path) -> None:
     """SIGKILLed director worker restarts and the segment still commits."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -72,7 +72,7 @@ def test_crash_during_video_generate_recovers(tmp_path: Path) -> None:
     """A SIGKILL landing mid-`generate_blocks` restarts and retries the op."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -100,7 +100,7 @@ def test_repeated_crashes_recover_without_state_leak(tmp_path: Path) -> None:
     """Two straight SIGKILLs recover; every segment stays valid."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -121,7 +121,7 @@ def test_partial_segment_without_done_is_reused(tmp_path: Path) -> None:
     segment = paths.segment_dir(run_dir, "000000")
     segment.mkdir(parents=True, exist_ok=True)
     (segment / "video.mp4").write_bytes(b"truncated mid-ffmpeg")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     assert (segment / paths.DONE_MARKER).exists()
     assert validate_run(run_dir) == []
@@ -134,7 +134,7 @@ def test_done_without_state_advance_heals_on_retry(tmp_path: Path) -> None:
     segment = paths.segment_dir(run_dir, "000000")
     segment.mkdir(parents=True, exist_ok=True)
     (segment / paths.DONE_MARKER).write_bytes(b"")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     state = read_state(run_dir)
     assert state.committed_segments == 1
@@ -146,7 +146,7 @@ def test_director_embed_degrades_after_crash(tmp_path: Path) -> None:
     """A dead director worker makes novelty embedding fall back, never raise."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

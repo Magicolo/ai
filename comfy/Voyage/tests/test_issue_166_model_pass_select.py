@@ -85,7 +85,7 @@ def test_finalize_present_legs_selects_tensor_path(
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="select166", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -157,7 +157,7 @@ def test_finalize_absent_legs_never_enhances(
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="select166", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

@@ -37,7 +37,7 @@ def _gauge_events(run_dir: Path) -> list[dict[str, Any]]:
 def test_fake_video_benchmark_op_reports_math(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -59,7 +59,7 @@ def test_fake_video_benchmark_op_reports_math(tmp_path: Path) -> None:
 def test_fake_audio_benchmark_op_reports_math(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -78,7 +78,7 @@ def test_fake_audio_benchmark_op_reports_math(tmp_path: Path) -> None:
 def test_director_benchmark_op_times_decisions(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -121,7 +121,7 @@ def test_benchmark_cli_end_to_end_uses_temp_dir(tmp_path: Path, capsys: object) 
 def test_per_segment_gauges_logged(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(2) == ["000000", "000001"]
     events = _gauge_events(run_dir)
     assert len(events) == 2
@@ -155,7 +155,7 @@ def test_endurance_segments_stay_flat(tmp_path: Path) -> None:
     """Small always-on soak: gauges every segment, bounded RSS, valid run."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(3) == ["000000", "000001", "000002"]
     events = _gauge_events(run_dir)
     assert len(events) == 3
@@ -183,7 +183,7 @@ def test_segment_committed_carries_stage_breakdown(tmp_path: Path) -> None:
     """segment_committed includes per-stage seconds that add up to elapsed."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="timings")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

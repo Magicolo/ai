@@ -36,7 +36,7 @@ def _init_run(run_dir: Path, style: str = "pastel neon line-art, peaceful") -> N
 
 
 def _commit_two(run_dir: Path) -> None:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

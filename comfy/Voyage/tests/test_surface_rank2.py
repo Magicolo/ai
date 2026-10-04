@@ -146,7 +146,7 @@ def test_finite_metrics_still_label_and_steer() -> None:
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 

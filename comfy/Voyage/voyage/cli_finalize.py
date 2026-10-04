@@ -27,7 +27,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
     if run_dir is None:
         return 2
-    config, _digest = _load_run(run_dir)
+    config = _load_run(run_dir)
     try:
         # CLI floors ride the stored [augment] section: explicit flags win,
         # otherwise the run TOML rules. Invalid floors fail here (exit 2),
@@ -171,7 +171,7 @@ def cmd_sfx(args: argparse.Namespace) -> int:
     run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
     if run_dir is None:
         return 2
-    config, _digest = _load_run(run_dir)
+    config = _load_run(run_dir)
     video = Path(args.video).resolve() if args.video else run_dir / "final.mp4"
     if not video.exists():
         print(f"sfx failed: no such video {video}", file=sys.stderr)

@@ -34,7 +34,7 @@ def _commit_single_segment(run_dir: Path) -> None:
     from voyage.supervisor import Supervisor
 
     initialize_run_directory(run_dir, run_id="rank2", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -275,7 +275,7 @@ def _embed_with_vectors(tmp_path: Path, vectors: Any) -> list[list[float]] | Non
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="rank2embed", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
 
     def _hostile(op: str, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:

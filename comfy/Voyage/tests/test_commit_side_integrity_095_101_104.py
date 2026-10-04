@@ -94,7 +94,7 @@ def test_commit_writes_full_checksum_manifest(tmp_path: Path) -> None:
     initialize_run_directory(run_dir, run_id="checksum")
     from voyage.supervisor import Supervisor
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     segment = run_dir / "segments" / "000000"
     manifest = json.loads((segment / "manifest.json").read_text(encoding="utf-8"))
@@ -114,7 +114,7 @@ def test_commit_detects_post_commit_metrics_tamper(tmp_path: Path) -> None:
     from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
     from voyage.supervisor import Supervisor
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     segment = run_dir / "segments" / "000000"
     manifest = load_segment_manifest(segment)
@@ -134,7 +134,7 @@ def test_verify_segment_ignores_metadata_tamper(tmp_path: Path) -> None:
     from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
     from voyage.supervisor import Supervisor
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     segment = run_dir / "segments" / "000000"
     manifest = load_segment_manifest(segment)
@@ -266,7 +266,7 @@ def test_commit_slice_walk_bounds_tiny_takes(
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="walk")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     ledger = run_dir / "audio" / "takes.jsonl"
     tiny_takes = [
         AudioTake(

@@ -14,8 +14,8 @@ from pydantic import ValidationError
 from voyage.config import (
     ProjectConfig,
     VideoConfig,
-    apply_draft_overrides,
     preset_config,
+    resolve_config,
 )
 
 
@@ -40,15 +40,15 @@ def test_toml_carries_fp8_default() -> None:
     assert preset_config("x", "pastel", 1).video.quantization == "fp8"
 
 
-def test_draft_preserves_quantization(tmp_path: Path) -> None:
+def test_resolve_preserves_quantization(tmp_path: Path) -> None:
     config = _base_config(tmp_path)
     config.video = VideoConfig(**{**config.video.model_dump(), "quantization": "bf16"})
-    out = apply_draft_overrides(config, draft=True)
+    out = resolve_config(config)
     assert out.video.quantization == "bf16"
 
 
 def test_quantization_override(tmp_path: Path) -> None:
-    out = apply_draft_overrides(_base_config(tmp_path), quantization="bf16")
+    out = resolve_config(_base_config(tmp_path), quantization="bf16")
     assert out.video.quantization == "bf16"
     with pytest.raises(ValidationError):
-        apply_draft_overrides(_base_config(tmp_path), quantization="int4")
+        resolve_config(_base_config(tmp_path), quantization="int4")

@@ -1,12 +1,13 @@
-"""Issues 136 + 168: prefetch `hit` logged before the discard.
+"""Prefetch `hit` logged before the discard (issue 168; 136 retired).
 
 `_take_prefetch` emitted `director_prefetch_hit` at consumption time, but
-the proposal was then discarded — by fresh inspect amendments (136) or by
-the drift-cadence hold (168, one call deeper) — so the soak hit-rate
-counted proposals that never entered the accept loop. Shared fix: an
-`invalidated` third outcome (`director_prefetch_invalidated`), covering
-both discard sites; the hit-rate stays `hit / (hit + miss)` by
-construction. Real fake-backend commits (real ffmpeg media), CPU-only.
+the proposal was then discarded by the drift-cadence hold — so the soak
+hit-rate counted proposals that never entered the accept loop. Fix: an
+`invalidated` third outcome (`director_prefetch_invalidated`); the
+hit-rate stays `hit / (hit + miss)` by construction. (Issue 136's
+amendment-discard site is gone with the piggyback inspector; the
+`invalidated` unit path below keeps covering the logging shape.) Real
+fake-backend commits (real ffmpeg media), CPU-only.
 """
 
 from __future__ import annotations
@@ -19,12 +20,11 @@ from typing import Any
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.persistence import read_effective_config
-from voyage.segment_manifest import load_metrics
 from voyage.supervisor import Supervisor
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 
@@ -77,10 +77,10 @@ def test_drift_hold_logs_invalidated_not_hit(tmp_path: Path) -> None:
     """168 e2e: every held segment with a ready prefetch used to count a hit."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="hold168")
-    config, _ = read_effective_config(run_dir)
-    from voyage.config import apply_draft_overrides
+    config = read_effective_config(run_dir)
+    from voyage.config import resolve_config
 
-    config = apply_draft_overrides(config, drift_every_n_segments=2)
+    config = resolve_config(config, drift_every_n_segments=2)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -94,26 +94,3 @@ def test_drift_hold_logs_invalidated_not_hit(tmp_path: Path) -> None:
     invalidated = [line for line in seg1 if "director_prefetch_invalidated" in line]
     assert len(invalidated) == 1
     assert "drift_hold" in invalidated[0]
-
-
-def test_amended_prefetch_logs_invalidated_not_hit(tmp_path: Path) -> None:
-    """136 e2e: fake testsrc deterministically yields amendments, so the
-    segment-1 prefetch is discarded — it must not count as a hit."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="amend136", seed=7, visual_inspector=True)
-    config, _ = read_effective_config(run_dir)
-    supervisor = Supervisor(run_dir, config)
-    supervisor.start_workers()
-    try:
-        assert supervisor.commit_one_segment() == "000000"
-        assert supervisor.commit_one_segment() == "000001"
-    finally:
-        supervisor.stop_workers()
-    amendments = load_metrics(paths.segment_dir(run_dir, "000000"))["visual"]["amendments"]
-    assert amendments != []
-    events = _prefetch_events(run_dir)
-    seg1 = [line for line in events if '"segment_id": "000001"' in line]
-    assert not any("director_prefetch_hit" in line for line in seg1)
-    invalidated = [line for line in seg1 if "director_prefetch_invalidated" in line]
-    assert len(invalidated) == 1
-    assert "amendments" in invalidated[0]

@@ -259,7 +259,7 @@ def _benchmark_sfx(args: argparse.Namespace, warmup: int, measured: int) -> int:
         run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
         if run_dir is None:
             return 2
-        config, _digest = _load_run(run_dir)
+        config = _load_run(run_dir)
         if not _require_cuda_stack(config):
             return 1
         return _sfx_probe(
@@ -420,7 +420,7 @@ def _benchmark_augment(args: argparse.Namespace, warmup: int, measured: int) -> 
         run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
         if run_dir is None:
             return 2
-        config, _digest = _load_run(run_dir)
+        config = _load_run(run_dir)
         persist_dir: Path | None = run_dir
     else:
         config = ProjectConfig()
@@ -553,7 +553,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         run_dir = resolve_run_ref(run=args.run or None, name=getattr(args, "name", None))
         if run_dir is None:
             return 2
-        config, _digest = _load_run(run_dir)
+        config = _load_run(run_dir)
         # Same fast-fail run/generate gate (issue 115): a CUDA backend
         # without torch dies late at worker init otherwise — for soak,
         # after the rule header, looking healthy until the first crash.
@@ -598,7 +598,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
             run_dir,
             preset_config("benchmark", "pastel neon line-art, peaceful", 11, video_backend="fake"),
         )
-        config, _digest = _load_run(run_dir)
+        config = _load_run(run_dir)
         committed = Supervisor(run_dir, config).run_segments(segments)
         events = _read_all_metric_events(run_dir)
         e2e_setup: dict[str, object] = {
@@ -654,7 +654,7 @@ def cmd_soak(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    config, _digest = _load_run(run_dir)
+    config = _load_run(run_dir)
     # Same fast-fail run/generate gate (issue 115): checked before the
     # rule line so a doomed run never prints a healthy-looking header.
     if not _require_cuda_stack(config):

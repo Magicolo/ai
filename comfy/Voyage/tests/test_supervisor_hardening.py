@@ -32,7 +32,7 @@ def _init_run(run_dir: Path, run_id: str = "supervisor-hardening") -> None:
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 
@@ -59,7 +59,7 @@ def test_failed_restart_consumes_budget_and_trips_breaker(tmp_path: Path) -> Non
     """A restart whose init replay fails counts against the budget (014)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 3
     supervisor = Supervisor(run_dir, config)
     supervisor._video.call = _always_failing_call  # type: ignore[assignment]
@@ -79,7 +79,7 @@ def test_failed_restart_then_success_recovers(tmp_path: Path) -> None:
     """One failed restart followed by a healthy call returns normally (014)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 3
     supervisor = Supervisor(run_dir, config)
     calls: list[str] = []
@@ -108,7 +108,7 @@ def test_failed_restart_hook_routes_through_budget(tmp_path: Path) -> None:
     """A Recoverable failure from restart_hook consumes budget too (014)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     config.voyage.max_worker_restarts = 2
     supervisor = Supervisor(run_dir, config)
     supervisor._video.call = _always_failing_call  # type: ignore[assignment]
@@ -268,7 +268,7 @@ def test_lock_file_kept_when_successor_waiting(tmp_path: Path) -> None:
 
 
 def _commit_first_segment(run_dir: Path) -> Path:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     committed = supervisor.run_segments(1)
     assert committed == ["000000"]
@@ -292,7 +292,7 @@ def test_bare_done_dir_reclaimed_without_error(tmp_path: Path) -> None:
     segment = paths.segment_dir(run_dir, "000000")
     segment.mkdir(parents=True, exist_ok=True)
     (segment / paths.DONE_MARKER).write_bytes(b"")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     state = read_state(run_dir)
     assert (state.next_segment_number, state.committed_segments) == (1, 1)
@@ -308,7 +308,7 @@ def test_done_orphan_adopted_without_rerender(tmp_path: Path) -> None:
     before_bytes = video_out.read_bytes()
     before_mtime = video_out.stat().st_mtime_ns
     _rewind_state_to_uncommitted(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -335,7 +335,7 @@ def test_corrupt_orphan_refuses_without_overwrite(tmp_path: Path) -> None:
         handle.write(b"\x00" * 64)
     corrupted_bytes = video_out.read_bytes()
     _rewind_state_to_uncommitted(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

@@ -21,7 +21,7 @@ from voyage.supervisor import Supervisor
 
 def _committed_run(run_dir: Path, count: int) -> None:
     initialize_run_directory(run_dir, run_id="e1")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

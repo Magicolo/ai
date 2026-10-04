@@ -1,10 +1,11 @@
-"""Inspector wiring tests: flag default, piggyback merge, amendment safety.
+"""Inspector wiring tests: amendment safety + no supervisor piggyback.
 
-The enabled-path tests run real fake-backend commits (real ffmpeg media),
-so sample → summarize → merge is genuine. The `inspected` VALUE is
-intentionally not asserted: the slim gates image has no torch (VLM leg
-skips), while the director image may load the real inspector — the merge
-shape holds in both. The inspected-True leg is covered in test_inspector.py.
+The supervisor-side visual-inspector piggyback was removed: commits never
+gain a `visual` metrics section, so `inspect scoreboard` rows carry
+`metrics=None`. The worker `inspect` op, the registry weight pins, and the
+prompt amendment helpers stay (the scoreboard standalone tooling reads
+whatever `visual.metrics` a segment carries). The enabled-path merge test
+is gone with the piggyback; the amendment-markers property survives.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from pathlib import Path
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import ExperimentalConfig, preset_config
 from voyage.errors import ProposalRejected
 from voyage.models import StyleSpec
 from voyage.persistence import read_effective_config, read_state
@@ -34,8 +34,8 @@ VISUAL_METRIC_KEYS = (
 )
 
 
-def _init_run(run_dir: Path, *, inspector: bool) -> None:
-    initialize_run_directory(run_dir, run_id="iwire", seed=7, visual_inspector=inspector)
+def _init_run(run_dir: Path) -> None:
+    initialize_run_directory(run_dir, run_id="iwire", seed=7)
 
 
 def _read_metrics(run_dir: Path, segment_id: str) -> dict[str, object]:
@@ -46,15 +46,10 @@ def _read_metrics(run_dir: Path, segment_id: str) -> dict[str, object]:
     return raw
 
 
-def test_experimental_flag_defaults_off() -> None:
-    assert ExperimentalConfig().visual_inspector is False
-    assert preset_config("x", "pastel", 1).experimental.visual_inspector is False
-
-
-def test_disabled_run_writes_no_visual_key(tmp_path: Path) -> None:
+def test_committed_run_writes_no_visual_key(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=False)
-    config, _ = read_effective_config(run_dir)
+    _init_run(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -63,34 +58,6 @@ def test_disabled_run_writes_no_visual_key(tmp_path: Path) -> None:
         supervisor.stop_workers()
     assert "visual" not in _read_metrics(run_dir, "000000")
     assert read_state(run_dir).committed_segments == 1
-
-
-def test_enabled_run_merges_visual_section(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    _init_run(run_dir, inspector=True)
-    config, _ = read_effective_config(run_dir)
-    assert config.experimental.visual_inspector is True
-    supervisor = Supervisor(run_dir, config)
-    supervisor.start_workers()
-    try:
-        assert supervisor.commit_one_segment() == "000000"
-        assert supervisor.commit_one_segment() == "000001"
-    finally:
-        supervisor.stop_workers()
-    merged = _read_metrics(run_dir, "000000")
-    # Original keys survive the read-modify-write merge.
-    for key in ("video", "audio", "frames"):
-        assert key in merged, key
-    visual = merged["visual"]
-    assert isinstance(visual, dict)
-    assert isinstance(visual.get("inspected"), bool)
-    assert isinstance(visual.get("scene_summary"), str)
-    assert isinstance(visual.get("amendments"), list)
-    summary = visual["metrics"]
-    assert isinstance(summary, dict)
-    for key in VISUAL_METRIC_KEYS:
-        assert key in summary, key
-    assert read_state(run_dir).committed_segments == 2
 
 
 def test_amendments_never_trip_style_markers() -> None:

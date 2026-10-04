@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from voyage.cli_core import _augment_overrides, _load_run, get_console
 from voyage.cli_paths import resolve_run_ref
 from voyage.cli_planning import _require_cuda_stack
-from voyage.config import apply_draft_overrides, is_provided
+from voyage.config import is_provided, resolve_config
 from voyage.console import RichSegmentProgress
 from voyage.supervisor import Supervisor
 
@@ -70,13 +70,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
     if run_dir is None:
         return 2
-    config, _digest = _load_run(run_dir)
+    config = _load_run(run_dir)
     # Absent-encoding (issue 045): TUI namespaces carry Unset, argparse
     # carries None — branch on the predicate so an unset TUI field is
     # never mistaken for an explicit override.
     if (
-        args.draft
-        or is_provided(args.director)
+        is_provided(args.director)
         or is_provided(getattr(args, "director_device", None))
         or is_provided(args.blocks)
         or is_provided(args.take_seconds)
@@ -88,9 +87,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         or bool(_augment_overrides(args))
     ):
         try:
-            config = apply_draft_overrides(
+            config = resolve_config(
                 config,
-                draft=args.draft,
                 director=args.director,
                 director_device=getattr(args, "director_device", None),
                 blocks=args.blocks,

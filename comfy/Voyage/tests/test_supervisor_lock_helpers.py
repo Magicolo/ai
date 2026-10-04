@@ -32,7 +32,7 @@ def test_method_agrees_with_moved_function(tmp_path: Path) -> None:
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="supervisor-lock")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     instance = Supervisor(run_dir, config)
     lock_path = tmp_path / "no-such-file.lock"
     assert instance._read_lock_holder(lock_path) == "unknown"

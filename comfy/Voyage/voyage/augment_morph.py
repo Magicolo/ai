@@ -101,7 +101,7 @@ def morph_backend_for_run(run_dir: Path) -> str | None:
     except ImportError:
         return None
     try:
-        config, _ = read_effective_config(run_dir)
+        config = read_effective_config(run_dir)
     except StateError:
         return None
     backend = config.video.backend

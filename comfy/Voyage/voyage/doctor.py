@@ -61,10 +61,10 @@ _MIB_PER_GIB = 1024.0
 _OPTIONAL_MODEL_STACKS = frozenset({"inspector-qwen35"})
 """Model stacks that never flip the required flag (issue 066).
 
-The VLM inspector is opt-in (`[experimental] visual_inspector`); a run
-that never enables it must not read red just because its snapshot is
-absent. Every other `check_models` entry is load-bearing for some
-backend and stays required.
+The VLM inspector stack is standalone tooling (the supervisor
+piggyback was removed); a run must not read red just because its
+snapshot is absent. Every other `check_models` entry is load-bearing
+for some backend and stays required.
 """
 
 _DISK_WARN_USED_FRACTION = 0.85

@@ -32,7 +32,7 @@ from voyage.workers.video_common import (
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 

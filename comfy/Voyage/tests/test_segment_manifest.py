@@ -18,7 +18,7 @@ from voyage.persistence import read_effective_config
 def _commit_one(run_dir: Path) -> Path:
     from voyage.supervisor import Supervisor
 
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     return run_dir / "segments" / "000000"
 

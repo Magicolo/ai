@@ -36,7 +36,7 @@ def _init_run(run_dir: Path, run_id: str = "integrity") -> None:
 
 
 def _commit(run_dir: Path, count: int) -> list[str]:
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     return Supervisor(run_dir, config).run_segments(count)
 
 
@@ -383,7 +383,7 @@ def test_director_worker_decides(tmp_path: Path) -> None:
 def test_commit_one_segment_end_to_end(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="itest", seed=7)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -413,7 +413,7 @@ def _committed_run(tmp_path: Path, segment_count: int) -> Path:
     """Commit `segment_count` fake segments; caller owns no workers after return."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="itest", seed=7)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

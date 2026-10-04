@@ -124,7 +124,7 @@ def _commit_two_segments(run_dir: Path) -> None:
     from voyage.supervisor import Supervisor
 
     initialize_run_directory(run_dir, run_id="mem043", style="pastel neon line-art, peaceful")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

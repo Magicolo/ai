@@ -130,7 +130,7 @@ def test_metric_events_carry_run_id(tmp_path: Path) -> None:
     """Every metric event names its run (multi-run log spelunking)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir, run_id="run-id-probe")
-    assert Supervisor(run_dir, read_effective_config(run_dir)[0]).run_segments(1) == ["000000"]
+    assert Supervisor(run_dir, read_effective_config(run_dir)).run_segments(1) == ["000000"]
     metrics_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
     lines = metrics_path.read_text(encoding="utf-8").splitlines()
     assert lines
@@ -142,7 +142,7 @@ def test_status_shows_section_layout(tmp_path: Path, capsys: pytest.CaptureFixtu
     """`voyage status` renders the §59 sections plus last-commit stages."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    assert Supervisor(run_dir, read_effective_config(run_dir)[0]).run_segments(1) == ["000000"]
+    assert Supervisor(run_dir, read_effective_config(run_dir)).run_segments(1) == ["000000"]
     args = type("Args", (), {"run": str(run_dir)})()
     assert cmd_status(args) == 0
     out = capsys.readouterr().out

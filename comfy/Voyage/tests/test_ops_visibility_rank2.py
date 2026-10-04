@@ -79,7 +79,7 @@ def _status_output(run_dir: Path, capsys: object) -> str:
 
 
 def test_status_shows_config_section(tmp_path: Path, capsys: object) -> None:
-    """061: status echoes quantization/SFX/floors/inspector/beats/drift/takes."""
+    """061: status echoes quantization/SFX/floors/beats/drift/takes."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
     out = _status_output(run_dir, capsys).lower()
@@ -87,22 +87,12 @@ def test_status_shows_config_section(tmp_path: Path, capsys: object) -> None:
         "quantization",
         "sfx",
         "augment",
-        "inspector",
         "beats",
         "drift",
         "take_seconds",
         "ahead_seconds",
     ):
         assert needle in out, needle
-
-
-def test_status_labels_manifest_hardware_vs_live_probe(tmp_path: Path, capsys: object) -> None:
-    """061: recorded-at-init hardware is labeled; the live probe says live."""
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir)
-    out = _status_output(run_dir, capsys)
-    assert "recorded" in out.lower()
-    assert "live" in out.lower()
 
 
 def test_status_warns_below_reserve(tmp_path: Path, capsys: object) -> None:
@@ -113,12 +103,9 @@ def test_status_warns_below_reserve(tmp_path: Path, capsys: object) -> None:
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
     manifest = read_manifest(run_dir)
-    effective = manifest.get("effective_config")
-    assert isinstance(effective, dict)
-    assert "min_free_space_gib" in effective
+    assert "min_free_space_gib" in manifest
     # A reserve no disk can meet forces the WARN path deterministically.
-    effective["min_free_space_gib"] = 999999.0
-    manifest["effective_config"] = effective
+    manifest["min_free_space_gib"] = 999999.0
     write_manifest(run_dir, manifest)
     out = _status_output(run_dir, capsys)
     assert "WARN" in out
@@ -129,7 +116,7 @@ def test_status_shows_gauges_and_restart_counts(tmp_path: Path, capsys: object) 
     """061: committed runs show the gauges trend + restart/circuit counts."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     from voyage.supervisor import Supervisor
 
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]

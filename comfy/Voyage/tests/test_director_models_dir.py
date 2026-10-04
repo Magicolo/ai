@@ -343,7 +343,7 @@ def test_supervisor_passes_models_dir_to_director_worker(tmp_path: Path) -> None
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="director-models", style="probe", seed=11)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     assert supervisor._director._init_payload == {
         "models_dir": config.video.models_dir,

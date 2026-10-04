@@ -18,7 +18,7 @@ from voyage.concepts import validate_concepts
 from voyage.errors import MediaError, StateError
 from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS
 from voyage.media import av_drift_seconds as _av_drift_seconds
-from voyage.persistence import read_manifest, read_state
+from voyage.persistence import read_effective_config, read_manifest, read_state
 from voyage.segment_manifest import load_segment_manifest
 from voyage.supervisor import sha256_file
 
@@ -249,13 +249,15 @@ def validate_run(run_dir: Path) -> list[str]:
     novelty_dir = run_dir / "novelty"
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))
-    if not isinstance(state.fps, int) or state.fps <= 0:
-        errors.append(
-            f"state fps is corrupt: {state.fps!r} (expected a positive integer; "
-            "repair with the run config's video fps)"
-        )
-    fps = state.fps if isinstance(state.fps, int) and state.fps > 0 else 24
-    timeline = state.timeline_frames / fps
+    try:
+        fps = read_effective_config(run_dir).video.fps
+    except StateError as exc:
+        errors.append(str(exc))
+        fps = 0
+    if not isinstance(fps, int) or fps <= 0:
+        errors.append(f"config video fps is corrupt: {fps!r} (expected a positive integer)")
+        fps = 0
+    timeline = state.timeline_frames / fps if fps else 0
     if timeline > 0.0:
         from voyage.sfx_finalize import validate_sfx_ledger
 

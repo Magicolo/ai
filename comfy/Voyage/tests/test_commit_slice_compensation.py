@@ -95,7 +95,7 @@ def _run_with_old_take(
     """Ledger holds one take ending mid-window; the planner chains the next."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="joint")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     _sine_wav(run_dir / "audio" / "take_a.wav", 8.0)
     append_take(
         run_dir / "audio" / "takes.jsonl",

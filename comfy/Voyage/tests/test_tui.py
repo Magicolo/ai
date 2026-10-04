@@ -379,7 +379,7 @@ def test_blank_tui_floors_still_emit_unset() -> None:
 # --- 088 fold: tests/test_tui_checkbox_help_114.py (3 tests) ---
 # """TUI checkbox help coverage (issue 114, TDD red-first).
 #
-# Why this file exists: the five flag checkboxes (draft/force/skip-bad/
+# Why this file exists: the four flag checkboxes (force/skip-bad/
 # verbose/no-color) have no tooltip, no FIELD_HELP entry, and no widget-id
 # mapping, so the focus-driven help panel falls back to the overview on
 # exactly the flags that need one sentence each. The batch-8 boxes
@@ -400,7 +400,6 @@ def _require_app() -> Any:
 
 
 _EXPECTED_HELP_KEYWORDS = {
-    "draft": "640",
     "force": "non-empty",
     "skip_bad": "salvage",
     "verbose": "verbose",
@@ -408,7 +407,6 @@ _EXPECTED_HELP_KEYWORDS = {
 }
 
 _FLAG_WIDGET_IDS = {
-    "draft": "flag-draft",
     "force": "flag-force",
     "skip_bad": "flag-skip-bad",
     "verbose": "flag-verbose",
@@ -489,7 +487,6 @@ def test_help_panel_describes_focused_checkbox() -> None:
 
 
 _FLAG_FIELDS = (
-    ("flag-draft", "draft"),
     ("flag-force", "force"),
     ("flag-skip-bad", "skip_bad"),
     ("flag-use-model-pass", "use_model_pass"),
@@ -499,7 +496,6 @@ _FLAG_FIELDS = (
 
 _EXPECTED_FLAG_IDS = frozenset(
     [
-        "flag-draft",
         "flag-force",
         "flag-skip-bad",
         "flag-no-download",
@@ -760,7 +756,6 @@ def _filled_state() -> GenerateFormState:
         seed="42",
         force=True,
         skip_bad=True,
-        draft=True,
         director="deterministic",
         blocks="3",
         take_seconds="30",

@@ -1,4 +1,4 @@
-"""`configure` verb: init or update a run manifest (two-verb CLI).
+"""`configure` verb: init or update a run manifest (DESIGN §58, two-verb CLI).
 
 All run options live here. `configure <NAME>` creates `output/<NAME>/`
 with `manifest.json` (full effective config + planned segment count),
@@ -31,7 +31,6 @@ from voyage.config import (
 from voyage.errors import DiskSpaceError, MediaError, StateError
 from voyage.persistence import (
     build_manifest,
-    effective_config_digest,
     read_effective_config,
     read_manifest,
     read_state,
@@ -147,7 +146,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
     stored_config = None
     if manifest_path.is_file():
         try:
-            stored_config, _digest = read_effective_config(run_dir)
+            stored_config = read_effective_config(run_dir)
         except StateError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -192,7 +191,6 @@ def cmd_configure(args: argparse.Namespace) -> int:
             )
             effective = resolve_config(
                 effective,
-                draft=bool(getattr(args, "draft", False)),
                 director=getattr(args, "director", None),
                 director_device=getattr(args, "director_device", None),
                 blocks=getattr(args, "blocks", None),
@@ -232,7 +230,6 @@ def cmd_configure(args: argparse.Namespace) -> int:
             effective = resolve_config(
                 stored_config,
                 backend=getattr(args, "backend", None),
-                draft=bool(getattr(args, "draft", False)),
                 director=getattr(args, "director", None),
                 director_device=getattr(args, "director_device", None),
                 blocks=getattr(args, "blocks", None),
@@ -323,7 +320,6 @@ def _commit_manifest(
         create_run_dir(
             run_dir,
             effective,
-            argv=sys.argv[1:],
             segments=planned,
             final_video=getattr(args, "final_video", None),
             skip_bad=bool(getattr(args, "skip_bad", False)),
@@ -344,24 +340,14 @@ def _commit_manifest(
             print(f"error: cannot trim to {planned} segments: {exc}", file=sys.stderr)
             return 1
         print(f"trimmed overflow segments to {planned} (state.json ruled)")
-    digest = effective_config_digest(effective)
-    hardware: dict[str, str] = dict(previous.get("hardware", {}))  # type: ignore[arg-type]
-    software: dict[str, str] = dict(previous.get("software", {}))  # type: ignore[arg-type]
     final_video_value = getattr(args, "final_video", None) or previous.get("final_video")
     manifest = build_manifest(
         effective,
-        digest,
-        hardware,
-        software,
-        argv=sys.argv[1:],
         segments=planned,
         final_video=final_video_value if isinstance(final_video_value, str) else None,
         skip_bad=bool(getattr(args, "skip_bad", False)),
         no_sfx=bool(getattr(args, "no_sfx", False)),
     )
-    manifest["created_at"] = previous.get("created_at", manifest["created_at"])
-    if previous.get("final_geometry") is not None:
-        manifest["final_geometry"] = previous["final_geometry"]
 
     write_manifest(run_dir, manifest)
     _ = paths.SEGMENTS_DIRNAME

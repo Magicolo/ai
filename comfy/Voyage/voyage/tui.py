@@ -110,7 +110,6 @@ WIDGET_FIELD_NAMES = {widget_id: field for field, widget_id in FIELD_WIDGET_IDS.
 # boxes (flag-no-download/flag-no-sfx) already carry tooltips — they are
 # mapped too so focusing them shows the same text.
 FLAG_HELP_FIELDS = {
-    "flag-draft": "draft",
     "flag-force": "force",
     "flag-skip-bad": "skip_bad",
     "flag-no-download": "no_download",
@@ -707,12 +706,6 @@ class VoyageApp(App[None]):
             ),
         )
         yield Checkbox(
-            "Draft profile (fast low-res iteration)",
-            value=self.initial_state.draft,
-            id="flag-draft",
-            tooltip=FIELD_HELP["draft"],
-        )
-        yield Checkbox(
             "Force (init into a non-empty directory)",
             value=self.initial_state.force,
             id="flag-force",
@@ -831,7 +824,6 @@ class VoyageApp(App[None]):
             seed=_read_text_field(self, "#field-seed"),
             force=_read_flag_field(self, "#flag-force"),
             skip_bad=_read_flag_field(self, "#flag-skip-bad"),
-            draft=_read_flag_field(self, "#flag-draft"),
             director=_read_choice_field(self, "#field-director"),
             blocks=_read_text_field(self, "#field-blocks"),
             take_seconds=_read_text_field(self, "#field-take-seconds"),

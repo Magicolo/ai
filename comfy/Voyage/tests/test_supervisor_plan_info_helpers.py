@@ -29,7 +29,7 @@ def _harness(tmp_path: Path) -> tuple[Supervisor, ProjectConfig, EvolutionDecisi
     """Initialized run + config + deterministic decision (fake, no GPU)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="supervisor-plan-info")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     instance = Supervisor(run_dir, config)
     decision = DeterministicDirector("test style").propose(
         decision_index=0,

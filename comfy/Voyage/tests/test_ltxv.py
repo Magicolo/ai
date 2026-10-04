@@ -126,7 +126,7 @@ def _ltxv_config(tmp_path: Path):  # type: ignore[no-untyped-def]
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="ltxv-route", style="probe", seed=11)
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     video = VideoConfig(
         **{
             **config.video.model_dump(),

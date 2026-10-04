@@ -61,7 +61,7 @@ def _stubbed_supervisor(
 ) -> Supervisor:
     """Unstarted supervisor whose director answers queued raws, no embeddings."""
     initialize_run_directory(run_dir, run_id="stage-a")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     queue = list(raws)
 
@@ -239,7 +239,7 @@ def test_committed_carries_director_tokens_and_video_stage(
     """segment_committed gains additive director_tokens + video_stage_ms keys."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -262,7 +262,7 @@ def test_audio_assemble_emits_timing_metric(
     """Slice + assemble windows are timed even when no take renders (keep path)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     ledger = run_dir / "audio" / "takes.jsonl"
     append_take(
         ledger,
@@ -312,7 +312,7 @@ def test_no_swap_breakdown_without_gpu_swap(
     """Fake backends never swap, so no audio_swap_breakdown event is emitted."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     assert config.audio.backend != "acestep" or config.video.backend not in (
         "ltxv",
         "causvid",
@@ -330,7 +330,7 @@ def test_gauges_skip_director_while_prefetch_in_flight(tmp_path: Path) -> None:
     """A running prefetch decide blocks the director RPC queue — skip, don't stall."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
-    config, _ = read_effective_config(run_dir)
+    config = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     calls: list[str] = []
 
