@@ -22,8 +22,7 @@ import numpy as np
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 
 
 def _make_clip(dest: Path, size: str = "320x240", rate: int = 8, duration: float = 4.0) -> Path:
@@ -125,7 +124,7 @@ def _commit_two_segments(run_dir: Path) -> None:
     from voyage.supervisor import Supervisor
 
     initialize_run_directory(run_dir, run_id="mem043", style="pastel neon line-art, peaceful")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

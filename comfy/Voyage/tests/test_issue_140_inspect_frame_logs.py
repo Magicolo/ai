@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from voyage.persistence import read_effective_config
+
 
 class _StubDirector:
     def call(self, op: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -50,12 +52,11 @@ def test_inspect_frame_view_writes_logs_not_segment_dir(tmp_path: Path) -> None:
     """The VLM view lands in logs/inspect/; the segment dir stays clean."""
     from tests.conftest import initialize_run_directory
     from voyage import paths
-    from voyage.config import load_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="frameview", seed=7)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor._director = _StubDirector()  # type: ignore[assignment]
     prev_dir = paths.segment_dir(run_dir, "000000")
@@ -74,12 +75,11 @@ def test_inspect_frame_view_failure_stays_silent(tmp_path: Path) -> None:
 
     from tests.conftest import initialize_run_directory
     from voyage import paths
-    from voyage.config import load_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="frameview-fail", seed=7)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor._director = _StubDirector()  # type: ignore[assignment]
     prev_dir = paths.segment_dir(run_dir, "000001")

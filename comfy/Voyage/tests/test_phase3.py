@@ -84,15 +84,10 @@ def test_deterministic_decision_is_full_schema() -> None:
 
 
 def test_director_input_has_no_transcript(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
     from voyage.persistence import initial_state
 
-    config_path = tmp_path / "voyage.toml"
-    config_path.write_text(
-        default_config_toml("demo", "pastel neon line-art, peaceful", 1),
-        encoding="utf-8",
-    )
-    config, _ = load_config(config_path)
+    config = preset_config("demo", "pastel neon line-art, peaceful", 1)
     state = initial_state(config)
     payload = director_input_from_state(
         state,

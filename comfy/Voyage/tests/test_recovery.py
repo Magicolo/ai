@@ -12,8 +12,8 @@ from pathlib import Path
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import main
-from voyage.config import load_config
 from voyage.persistence import (
+    read_effective_config,
     read_state,
     write_state,
 )
@@ -28,7 +28,7 @@ def test_supervisor_restart_continues(tmp_path: Path) -> None:
     """A new Supervisor picks up where the old one stopped (Phase 1 exit)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     assert Supervisor(run_dir, config).run_segments(1) == ["000001"]
     state = read_state(run_dir)
@@ -40,7 +40,7 @@ def test_supervisor_restart_continues(tmp_path: Path) -> None:
 def test_killed_video_worker_recovers(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -58,7 +58,7 @@ def test_killed_video_worker_recovers(tmp_path: Path) -> None:
 def test_pause_before_start_exits_cleanly(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     state = read_state(run_dir)
     state.status = "PAUSE_REQUESTED"
     write_state(run_dir, state)
@@ -69,7 +69,7 @@ def test_pause_before_start_exits_cleanly(tmp_path: Path) -> None:
 def test_pause_mid_run_stops_at_boundary(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
 
     def _ask_pause() -> None:
         # Event poll with a hard deadline (issue 089): the DONE marker is
@@ -102,7 +102,7 @@ def test_pause_mid_run_stops_at_boundary(tmp_path: Path) -> None:
 
 def _tape_run(run_dir: Path) -> Supervisor:
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 

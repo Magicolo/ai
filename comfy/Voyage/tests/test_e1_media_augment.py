@@ -14,15 +14,14 @@ from typing import Any
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
-from voyage.config import load_config
 from voyage.errors import MediaError
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
 def _committed_run(run_dir: Path, count: int) -> None:
     initialize_run_directory(run_dir, run_id="e1")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

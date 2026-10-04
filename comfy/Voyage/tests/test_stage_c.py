@@ -24,7 +24,8 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import VoyageConfig, default_config_toml, load_config
+from voyage.config import VoyageConfig, preset_config
+from voyage.persistence import read_effective_config
 from voyage.rpc import SubprocessWorker, _spawn_env
 from voyage.supervisor import Supervisor
 
@@ -93,7 +94,7 @@ def test_start_passes_spawn_env_to_popen(tmp_path: Path, monkeypatch: pytest.Mon
 
 def _stubbed_supervisor(run_dir: Path) -> Supervisor:
     initialize_run_directory(run_dir, run_id="stage-c")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 
@@ -148,7 +149,7 @@ def test_gauge_interval_honored_by_sampler(tmp_path: Path) -> None:
     """Interval 2 samples even segments only (additive cadence knob)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-c")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     config = config.model_copy(
         update={"voyage": config.voyage.model_copy(update={"resource_gauge_interval_segments": 2})}
     )
@@ -163,13 +164,10 @@ def test_gauge_interval_honored_by_sampler(tmp_path: Path) -> None:
 
 
 def test_gauge_interval_in_default_toml(tmp_path: Path) -> None:
-    """The knob ships in fresh run configs (TOML-only, no CLI flag)."""
-    toml_text = default_config_toml(
-        run_id="stage-c",
-        style="pastel",
-        seed=0,
-    )
-    assert "resource_gauge_interval_segments = 1" in toml_text
+    """The knob ships in fresh run configs (preset default, no CLI flag)."""
+
+    config = preset_config(run_id="stage-c", style="pastel", seed=0)
+    assert config.voyage.resource_gauge_interval_segments == 1
 
 
 def test_audio_health_reports_vram_when_available(

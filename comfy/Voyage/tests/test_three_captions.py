@@ -104,28 +104,20 @@ def test_format_previous_captions_is_stable_text() -> None:
 
 
 def test_director_input_carries_previous_captions() -> None:
-    import tempfile
-
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
     from voyage.persistence import initial_state
 
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = Path(tmp) / "voyage.toml"
-        config_path.write_text(
-            default_config_toml("demo", "pastel neon line-art, peaceful", 1),
-            encoding="utf-8",
-        )
-        config, _ = load_config(config_path)
-        state = initial_state(config)
-        payload = director_input_from_state(
-            state,
-            style_charter=config.style,
-            recent_summary="(no concepts yet)",
-            forbidden_summary="(revisits allowed)",
-            audio_state="style=ambient energy=0.5",
-            previous_captions="PREVIOUS CAPTIONS\nvideo: reef",
-        )
-        assert payload["previous_captions"] == "PREVIOUS CAPTIONS\nvideo: reef"
+    config = preset_config("demo", "pastel neon line-art, peaceful", 1)
+    state = initial_state(config)
+    payload = director_input_from_state(
+        state,
+        style_charter=config.style,
+        recent_summary="(no concepts yet)",
+        forbidden_summary="(revisits allowed)",
+        audio_state="style=ambient energy=0.5",
+        previous_captions="PREVIOUS CAPTIONS\nvideo: reef",
+    )
+    assert payload["previous_captions"] == "PREVIOUS CAPTIONS\nvideo: reef"
 
 
 def test_previous_transition_captions_load_best_effort(tmp_path: Path) -> None:

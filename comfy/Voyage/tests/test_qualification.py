@@ -31,7 +31,7 @@ from numpy.typing import NDArray
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import validate_run
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 from voyage.vision.metrics import sample_frames
 
@@ -293,7 +293,7 @@ def test_fake_single_segment_summarize_reports_no_boundary(tmp_path: Path) -> No
     """Smoke-leg runs summarize with boundary_* None, never ZeroDivisionError (issue 132)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="qualification")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     assert validate_run(run_dir) == []
     summary = summarize_run(run_dir)
@@ -311,7 +311,7 @@ def test_fake_three_segment_dry_run(tmp_path: Path) -> None:
     """Protocol dry-run on the fake backend: commit 3, summarize, stay honest."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(3) == ["000000", "000001", "000002"]
     assert validate_run(run_dir) == []
     summary = summarize_run(run_dir)
@@ -330,7 +330,7 @@ def test_fake_kill_recovery_dry_run(tmp_path: Path) -> None:
     """Protocol dry-run for crash recovery: killed video worker still commits."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

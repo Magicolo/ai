@@ -26,7 +26,7 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -35,7 +35,7 @@ def _init_run(run_dir: Path) -> None:
 
 
 def _commit(run_dir: Path, count: int) -> None:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

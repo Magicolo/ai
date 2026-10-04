@@ -9,7 +9,6 @@ first finalize with the validated output box.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 
@@ -35,21 +34,16 @@ def test_manifest_records_presentation_floors(tmp_path: Path) -> None:
 def test_manifest_floors_match_media_defaults() -> None:
     """No independent literals: the manifest floors track the finalizer's."""
     from tests.conftest import DEFAULT_RUN_ID, DEFAULT_RUN_SEED, DEFAULT_STYLE
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
     from voyage.media import (
         AUGMENT_DEFAULT_MIN_FPS,
         AUGMENT_DEFAULT_MIN_HEIGHT,
         AUGMENT_DEFAULT_MIN_WIDTH,
     )
-    from voyage.persistence import build_manifest
+    from voyage.persistence import build_manifest, effective_config_digest
 
-    with tempfile.TemporaryDirectory() as tmp:
-        config_path = Path(tmp) / "voyage.toml"
-        config_path.write_text(
-            default_config_toml(DEFAULT_RUN_ID, DEFAULT_STYLE, DEFAULT_RUN_SEED),
-            encoding="utf-8",
-        )
-        config, digest = load_config(config_path)
+    config = preset_config(DEFAULT_RUN_ID, DEFAULT_STYLE, DEFAULT_RUN_SEED)
+    digest = effective_config_digest(config)
     manifest = build_manifest(config, digest, {}, {})
     presentation = manifest["presentation"]
     assert isinstance(presentation, dict)
@@ -61,14 +55,13 @@ def test_manifest_floors_match_media_defaults() -> None:
 def test_finalize_records_final_geometry(tmp_path: Path) -> None:
     """First finalize writes the validated output box back to the manifest."""
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.media import finalize_run
+    from voyage.persistence import read_effective_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="geom", seed=7)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

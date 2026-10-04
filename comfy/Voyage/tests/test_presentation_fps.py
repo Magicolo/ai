@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from voyage.config import AugmentConfig, default_config_toml, resolve_config
+from voyage.config import AugmentConfig, preset_config, resolve_config
 from voyage.media import plan_augmentation, slowmo_factor
+from voyage.persistence import read_effective_config
 
 
 def test_presentation_fps_defaults_to_none() -> None:
@@ -62,12 +63,10 @@ def test_slowmo_factor_values() -> None:
 
 def test_resolve_config_applies_presentation_fps(tmp_path: Path) -> None:
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="pres", style="s")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.augment.presentation_fps is None
     resolved = resolve_config(config, presentation_fps=32)
     assert resolved.augment.presentation_fps == 32
@@ -97,12 +96,6 @@ def test_augment_overrides_passes_presentation_fps() -> None:
 
 
 def test_default_toml_parses_without_presentation_key(tmp_path: Path) -> None:
-    import tomllib
 
-    from voyage.config import ProjectConfig
-
-    toml_text = default_config_toml("pres", "s", 0)
-    assert "presentation_fps" not in toml_text
-    data = tomllib.loads(toml_text)
-    config = ProjectConfig(**data)
+    config = preset_config("pres", "s", 0)
     assert config.augment.presentation_fps is None

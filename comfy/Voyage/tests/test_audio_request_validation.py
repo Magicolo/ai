@@ -18,7 +18,7 @@ from voyage.audio.acestep import (
     validate_reference_audio,
     validate_task_type,
 )
-from voyage.config import AudioConfig, default_config_toml, load_config, resolve_config
+from voyage.config import AudioConfig, preset_config, resolve_config
 from voyage.workers import audio_acestep
 
 
@@ -172,10 +172,5 @@ def test_resolve_config_take_override_below_ahead_fails() -> None:
 
 
 def test_default_toml_still_loads_under_the_rule(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(
-        default_config_toml("take-ahead", "pastel neon line-art, peaceful", 7),
-        encoding="utf-8",
-    )
-    config, _digest = load_config(path)
+    config = preset_config("take-ahead", "pastel neon line-art, peaceful", 7)
     assert config.audio.take_seconds > config.audio.ahead_seconds

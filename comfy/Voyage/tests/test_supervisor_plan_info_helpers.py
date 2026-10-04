@@ -17,10 +17,10 @@ from pathlib import Path
 import voyage.supervisor as supervisor
 import voyage.supervisor_plan_info as supervisor_plan_info
 from tests.conftest import initialize_run_directory
-from voyage import paths
-from voyage.config import ProjectConfig, load_config
+from voyage.config import ProjectConfig
 from voyage.director import PHASE_ORDER, DeterministicDirector
 from voyage.models import EvolutionDecision
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 from voyage.supervisor_plan_info import segment_plan_info
 
@@ -29,7 +29,7 @@ def _harness(tmp_path: Path) -> tuple[Supervisor, ProjectConfig, EvolutionDecisi
     """Initialized run + config + deterministic decision (fake, no GPU)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="supervisor-plan-info")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     instance = Supervisor(run_dir, config)
     decision = DeterministicDirector("test style").propose(
         decision_index=0,

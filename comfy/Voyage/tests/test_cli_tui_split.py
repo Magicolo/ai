@@ -27,13 +27,6 @@ def _parse(verb_args: list[str]) -> argparse.Namespace:
     return cli.build_parser().parse_args(verb_args)
 
 
-def test_init_parser_defaults() -> None:
-    args = _parse(["init", "--output", "out", "--style", "calm"])
-    assert args.func is cli.cmd_init
-    assert args.backend == "ltx25"
-    assert args.seed is None
-
-
 def test_doctor_parser() -> None:
     assert _parse(["doctor"]).func is cli.cmd_doctor
 

@@ -33,7 +33,6 @@ from voyage.config import (
     BACKEND_REGISTRY,
     ProjectConfig,
     VideoConfig,
-    load_config,
     with_video_backend,
 )
 from voyage.errors import (
@@ -44,7 +43,7 @@ from voyage.errors import (
 )
 from voyage.hashing import sha256_file as hashing_sha256_file
 from voyage.models import StyleSpec
-from voyage.persistence import read_state
+from voyage.persistence import read_effective_config, read_state
 from voyage.seeds import video_seed
 from voyage.supervisor import CoveredAudio, ProposedSegment, RenderedVideo, Supervisor
 from voyage.supervisor import VideoBackendAdapter as SupervisorAdapter  # type: ignore[attr-defined]
@@ -552,7 +551,7 @@ def test_causvid_reported_novel_and_conditioning_win() -> None:
 
 
 def _started_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     return supervisor
@@ -574,7 +573,7 @@ def test_propose_segment_returns_staged_plan(tmp_path: Path) -> None:
     initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         state = read_state(run_dir)
         stage_seconds: dict[str, float] = {}
         proposed = supervisor._propose_segment(
@@ -597,7 +596,7 @@ def test_render_video_goes_through_adapter(tmp_path: Path) -> None:
     initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         state = read_state(run_dir)
         stage_seconds: dict[str, float] = {}
         proposed = supervisor._propose_segment(
@@ -665,7 +664,7 @@ def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
     initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         state = read_state(run_dir)
         stage_seconds: dict[str, float] = {}
         proposed = supervisor._propose_segment(
@@ -712,7 +711,7 @@ def _streaming_supervisor(run_dir: Path) -> Supervisor:
     Workers never start: `_call_with_restart` is stubbed per test, so no
     GPU, no subprocess, no ffmpeg — only the adapter + overlay wiring.
     """
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     config.video.backend = "causvid"
     config.video.blocks_per_segment = 3
     return Supervisor(run_dir, config)
@@ -766,7 +765,12 @@ def _stub_video_call(
 
 
 def test_render_video_streaming_overlay_uses_staged_prompts(tmp_path: Path) -> None:
-    """Streaming payloads carry the staged plan, not one prompt tripled (023)."""
+    """Streaming payloads carry the staged plan, not one prompt tripled (023).
+
+    Always-continue (ltx25-compare fix): drift never cuts — scene_cuts
+    stays all-False even when destination != current. Fresh happens only
+    when the worker has no tail.
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _streaming_supervisor(run_dir)
@@ -779,7 +783,7 @@ def test_render_video_streaming_overlay_uses_staged_prompts(tmp_path: Path) -> N
         hooks,
     )
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         config.video.backend = "causvid"
         config.video.blocks_per_segment = 3
         state = SimpleNamespace(
@@ -801,7 +805,7 @@ def test_render_video_streaming_overlay_uses_staged_prompts(tmp_path: Path) -> N
         payload = seen[0]["payload"]
         assert payload["prompts"] == ["mist over water", "gulls aloft", "harbor lights"]
         assert payload["seeds"] == [video_seed(11, 0, block) for block in range(3)]
-        assert payload["scene_cuts"] == [True, False, False]
+        assert payload["scene_cuts"] == [False, False, False]
         assert hooks[0] is not None
         assert rendered.frames == 81
         assert rendered.recovery_tape is None
@@ -818,7 +822,7 @@ def test_render_video_rejects_implausible_report(tmp_path: Path) -> None:
     hooks: list[Any] = []
     original = _stub_video_call(supervisor, {"video": {"frames": 10**9}}, seen, hooks)
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         state = SimpleNamespace(
             destination_concept="harbor at dawn", current_concept="open sea", timeline_frames=0
         )
@@ -849,7 +853,7 @@ def test_render_video_rejects_foreign_tape(tmp_path: Path) -> None:
         supervisor, {"video": {"frames": 48, "recovery_path": "/etc/passwd"}}, seen, hooks
     )
     try:
-        config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+        config, _ = read_effective_config(run_dir)
         state = SimpleNamespace(
             destination_concept="harbor at dawn", current_concept="open sea", timeline_frames=0
         )

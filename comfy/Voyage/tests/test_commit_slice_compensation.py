@@ -20,10 +20,10 @@ from typing import Any
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.audio.planner import AudioTake, append_take
-from voyage.config import ProjectConfig, load_config
+from voyage.config import ProjectConfig
 from voyage.models import DirectorDestination, EvolutionDecision
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 _CAPTION = "slow ambient electronic composition"
@@ -95,7 +95,7 @@ def _run_with_old_take(
     """Ledger holds one take ending mid-window; the planner chains the next."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="joint")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     _sine_wav(run_dir / "audio" / "take_a.wav", 8.0)
     append_take(
         run_dir / "audio" / "takes.jsonl",

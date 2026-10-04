@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from voyage.augment import AugmentWeights
+from voyage.persistence import read_effective_config
 
 
 def _torch_available() -> bool:
@@ -79,14 +80,12 @@ def test_finalize_present_legs_selects_tensor_path(
     import voyage.augment as augment_module
     import voyage.augment_finalize as finalize_module
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.media import finalize_run
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="select166", style="pastel neon line-art, peaceful")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -153,14 +152,12 @@ def test_finalize_absent_legs_never_enhances(
     """Knob-on but absent legs never touches the tensor model pass (fallback)."""
     import voyage.augment as augment_module
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.media import finalize_run
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="select166", style="pastel neon line-art, peaceful")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

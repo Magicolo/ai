@@ -16,6 +16,7 @@ from pathlib import Path
 
 import voyage.supervisor as supervisor
 import voyage.supervisor_lock as supervisor_lock
+from voyage.persistence import read_effective_config
 from voyage.supervisor_lock import read_lock_holder
 
 
@@ -27,13 +28,11 @@ def test_facade_reexport_is_single_sourced() -> None:
 def test_method_agrees_with_moved_function(tmp_path: Path) -> None:
     """The retained `Supervisor` method delegates (no fork)."""
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="supervisor-lock")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     instance = Supervisor(run_dir, config)
     lock_path = tmp_path / "no-such-file.lock"
     assert instance._read_lock_holder(lock_path) == "unknown"

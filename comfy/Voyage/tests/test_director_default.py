@@ -14,8 +14,8 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
-from voyage.cli import _add_generate_parser, _add_init_parser, _add_run_parser
-from voyage.config import DirectorConfig, default_config_toml, load_config
+from voyage.cli import _add_generate_parser, _add_run_parser
+from voyage.config import DirectorConfig, preset_config
 from voyage.workers import director as director_worker
 
 
@@ -24,29 +24,17 @@ def test_director_config_defaults_to_llama() -> None:
 
 
 def test_default_toml_writes_llama_director(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(default_config_toml("llama-default", "pastel neon", 7), encoding="utf-8")
-    config, _ = load_config(path)
+    config = preset_config("llama-default", "pastel neon", 7)
     assert config.director.backend == "llama"
 
 
 def test_default_toml_allows_explicit_qwen_opt_in(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(
-        default_config_toml("llama-default", "pastel neon", 7, director_backend="qwen"),
-        encoding="utf-8",
-    )
-    config, _ = load_config(path)
+    config = preset_config("llama-default", "pastel neon", 7, director_backend="qwen")
     assert config.director.backend == "qwen"
 
 
 def test_default_toml_allows_explicit_deterministic_opt_out(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(
-        default_config_toml("qwen-default", "pastel neon", 7, director_backend="deterministic"),
-        encoding="utf-8",
-    )
-    config, _ = load_config(path)
+    config = preset_config("qwen-default", "pastel neon", 7, director_backend="deterministic")
     assert config.director.backend == "deterministic"
 
 
@@ -59,11 +47,6 @@ def _parse(parser_adder: Callable[..., None], args: list[str]) -> argparse.Names
     sub = parser.add_subparsers()
     parser_adder(sub)
     return parser.parse_args(args)
-
-
-def test_init_parser_defaults_to_llama() -> None:
-    args = _parse(_add_init_parser, ["init", "--output", "out", "--style", "calm"])
-    assert args.director == "llama"
 
 
 def test_generate_parser_defaults_to_llama() -> None:

@@ -57,20 +57,10 @@ def test_video_worker_module_longlive2_hint() -> None:
 
 
 def test_stored_longlive2_toml_fails_with_migration_hint(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    from pathlib import Path
-
     from voyage import config
-    from voyage.errors import ConfigurationError
 
-    toml_path = Path(str(tmp_path)) / "voyage.toml"
-    toml_path.write_text(
-        config.default_config_toml("voyage", "test style", 0).replace(
-            'backend = "ltx25"', 'backend = "longlive2"', 1
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigurationError) as excinfo:
-        config.load_config(toml_path)
+    with pytest.raises(ValueError) as excinfo:
+        config.preset_config("voyage", "test style", 0, video_backend="longlive2")  # type: ignore[arg-type]
     message = str(excinfo.value).lower()
     assert "longlive2" in message
     assert "ltxv" in message

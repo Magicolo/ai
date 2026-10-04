@@ -20,9 +20,10 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.concepts import ConceptStore
-from voyage.config import VoyageConfig, load_config
+from voyage.config import VoyageConfig
 from voyage.director import DIRECTOR_SYSTEM_PROMPT, build_director_user_message
 from voyage.models import DirectorDestination, DirectorVideoPlan, EvolutionDecision
+from voyage.persistence import read_effective_config
 from voyage.prompts import StyleSpec
 from voyage.supervisor import Supervisor
 
@@ -54,7 +55,7 @@ def _stubbed_supervisor(
     raws: list[dict[str, Any]],
 ) -> Supervisor:
     initialize_run_directory(run_dir, run_id="steer-accept")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     queue = list(raws)
 

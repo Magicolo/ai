@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from voyage import model_registry
-from voyage.config import default_config_toml, load_config
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 from voyage.workers import director as director_worker
 
@@ -339,14 +339,11 @@ def test_load_inspector_loads_from_resolved_snapshot_path(
 
 
 def test_supervisor_passes_models_dir_to_director_worker(tmp_path: Path) -> None:
-    from voyage import paths
+    from tests.conftest import initialize_run_directory
 
     run_dir = tmp_path / "run"
-    (run_dir / paths.LOGS_DIRNAME).mkdir(parents=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml("director-models", "probe", 11), encoding="utf-8"
-    )
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    initialize_run_directory(run_dir, run_id="director-models", style="probe", seed=11)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     assert supervisor._director._init_payload == {
         "models_dir": config.video.models_dir,

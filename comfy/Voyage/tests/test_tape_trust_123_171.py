@@ -21,8 +21,8 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
 from voyage.errors import MediaError
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 from voyage.workers.video_common import (
     MAX_RECOVERY_TAPE_BYTES,
@@ -32,7 +32,7 @@ from voyage.workers.video_common import (
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 

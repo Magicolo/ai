@@ -13,10 +13,10 @@ from pathlib import Path
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import ExperimentalConfig, default_config_toml, load_config
+from voyage.config import ExperimentalConfig, preset_config
 from voyage.errors import ProposalRejected
 from voyage.models import StyleSpec
-from voyage.persistence import read_state
+from voyage.persistence import read_effective_config, read_state
 from voyage.prompts import (
     apply_feedback_amendments,
     check_prompt_against_style,
@@ -48,13 +48,13 @@ def _read_metrics(run_dir: Path, segment_id: str) -> dict[str, object]:
 
 def test_experimental_flag_defaults_off() -> None:
     assert ExperimentalConfig().visual_inspector is False
-    assert "visual_inspector = false" in default_config_toml("x", "pastel", 1)
+    assert preset_config("x", "pastel", 1).experimental.visual_inspector is False
 
 
 def test_disabled_run_writes_no_visual_key(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir, inspector=False)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -68,7 +68,7 @@ def test_disabled_run_writes_no_visual_key(tmp_path: Path) -> None:
 def test_enabled_run_merges_visual_section(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir, inspector=True)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.experimental.visual_inspector is True
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()

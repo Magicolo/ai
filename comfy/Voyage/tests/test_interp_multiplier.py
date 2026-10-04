@@ -20,6 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from voyage.augment import AugmentWeights
+from voyage.persistence import read_effective_config
 
 
 def test_augment_config_interp_multiplier_default_and_validation() -> None:
@@ -37,12 +38,11 @@ def test_augment_config_interp_multiplier_default_and_validation() -> None:
 def test_resolve_config_applies_interp_multiplier(tmp_path: Path) -> None:
     """CLI/TOML override lands on the effective config (DESIGN §56)."""
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config, resolve_config
+    from voyage.config import resolve_config
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="mult", style="s")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.augment.interp_multiplier == 4
     resolved = resolve_config(config, interp_multiplier=1)
     assert resolved.augment.interp_multiplier == 1
@@ -87,14 +87,12 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
     import voyage.augment as augment_module
     import voyage.augment_finalize as finalize_module
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.media import finalize_run
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="multfwd", style="pastel neon line-art, peaceful")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

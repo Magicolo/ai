@@ -18,7 +18,7 @@ from voyage.config import (
     AudioConfig,
     ProjectConfig,
     apply_draft_overrides,
-    default_config_toml,
+    preset_config,
     resolve_config,
     with_video_backend,
 )
@@ -134,5 +134,5 @@ def test_free_space_reserve_defaults_are_named_constants() -> None:
     assert SPEC_MIN_FREE_SPACE_GIB == 20.0
     assert DEV_MIN_FREE_SPACE_GIB == 5.0
     assert ProjectConfig(style="reserve-probe").min_free_space_gib == SPEC_MIN_FREE_SPACE_GIB
-    generated = default_config_toml("reserve-probe", "line art", 7)
-    assert f"min_free_space_gib = {DEV_MIN_FREE_SPACE_GIB}" in generated
+    generated = preset_config("reserve-probe", "line art", 7)
+    assert generated.min_free_space_gib == DEV_MIN_FREE_SPACE_GIB

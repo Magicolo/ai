@@ -17,8 +17,8 @@ import pytest
 import voyage
 from tests.conftest import initialize_run_directory
 from voyage import cli, paths
-from voyage.config import load_config
 from voyage.models import StyleSpec
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -146,7 +146,7 @@ def test_finite_metrics_still_label_and_steer() -> None:
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 

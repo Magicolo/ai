@@ -21,9 +21,8 @@ from voyage.config import (
     AugmentConfig,
     ProjectConfig,
     Unset,
-    default_config_toml,
-    load_config,
     parse_min_resolution,
+    preset_config,
     resolve_config,
 )
 from voyage.tui_state import (
@@ -91,24 +90,13 @@ def test_parse_min_resolution_rejects_half_disable(raw: str) -> None:
 
 
 def test_default_toml_carries_augment_section(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    config_path = run_dir / "voyage.toml"
-    config_path.write_text(default_config_toml("augment-run", "line art", 7), encoding="utf-8")
-    assert "[augment]" in config_path.read_text(encoding="utf-8")
-    config, _digest = load_config(config_path)
+    config = preset_config("augment-run", "line art", 7)
     assert config.augment == AugmentConfig()
 
 
 def test_toml_round_trip_custom_floors(tmp_path: Path) -> None:
-    config_path = tmp_path / "voyage.toml"
-    config_path.write_text(default_config_toml("augment-run", "line art", 7), encoding="utf-8")
-    text = config_path.read_text(encoding="utf-8")
-    text = text.replace("min_fps = 24", "min_fps = 60")
-    text = text.replace("min_width = 1216", "min_width = 1920")
-    text = text.replace("min_height = 704", "min_height = 1080")
-    config_path.write_text(text, encoding="utf-8")
-    config, _digest = load_config(config_path)
+    config = preset_config("augment-run", "line art", 7)
+    config = resolve_config(config, min_fps=60, min_resolution="1920x1080")
     assert (config.augment.min_fps, config.augment.min_width, config.augment.min_height) == (
         60,
         1920,
@@ -117,15 +105,9 @@ def test_toml_round_trip_custom_floors(tmp_path: Path) -> None:
 
 
 def test_toml_rejects_half_geometry(tmp_path: Path) -> None:
-    from voyage.errors import ConfigurationError
-
-    config_path = tmp_path / "voyage.toml"
-    config_path.write_text(default_config_toml("augment-run", "line art", 7), encoding="utf-8")
-    text = config_path.read_text(encoding="utf-8")
-    text = text.replace("min_width = 1216", "min_width = 0")
-    config_path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigurationError):
-        load_config(config_path)
+    base = preset_config("augment-run", "line art", 7)
+    with pytest.raises(ValueError):
+        resolve_config(base, min_resolution="0x1080")
 
 
 def test_resolve_without_augment_options_is_pure_noop() -> None:
@@ -243,9 +225,9 @@ def test_augment_overrides_mapping() -> None:
 
 
 def test_cmd_finalize_rejects_invalid_augment(tmp_path: Path) -> None:
-    (tmp_path / "voyage.toml").write_text(
-        'schema_version = 1\nrun_id = "x"\nstyle = "y"\nseed = 0\n', encoding="utf-8"
-    )
+    from tests.conftest import initialize_run_directory
+
+    initialize_run_directory(tmp_path, run_id="x", style="y", seed=0)
     code = cmd_finalize(
         argparse.Namespace(
             run=str(tmp_path),

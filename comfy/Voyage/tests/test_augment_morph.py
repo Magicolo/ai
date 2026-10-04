@@ -128,11 +128,12 @@ def test_morph_backend_gate() -> None:
 
 
 def test_morph_backend_for_run_reads_voyage_toml(tmp_path: Path) -> None:
+    from tests.conftest import initialize_run_directory
+
     run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "voyage.toml").write_text('[video]\nbackend = "ltx25"\n', encoding="utf-8")
+    initialize_run_directory(run_dir, run_id="morph", style="probe", seed=11, video_backend="ltx25")
     assert augment_morph.morph_backend_for_run(run_dir) == "ltx25"
-    (run_dir / "voyage.toml").write_text('[video]\nbackend = "fake"\n', encoding="utf-8")
+    initialize_run_directory(run_dir, run_id="morph", style="probe", seed=11, video_backend="fake")
     assert augment_morph.morph_backend_for_run(run_dir) is None
     assert augment_morph.morph_backend_for_run(tmp_path / "missing") is None
 

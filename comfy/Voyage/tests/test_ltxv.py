@@ -17,8 +17,9 @@ from typing import Any
 import pytest
 
 from voyage import model_registry
-from voyage.config import VideoConfig, default_config_toml, load_config
+from voyage.config import VideoConfig
 from voyage.model_registry import verify_ltxv_models
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor, video_worker_module
 from voyage.workers import video_ltxv
 from voyage.workers.loop import serve
@@ -121,14 +122,11 @@ def test_layout_includes_ltxv_dir(tmp_path: Path) -> None:
 
 
 def _ltxv_config(tmp_path: Path):  # type: ignore[no-untyped-def]
-    from voyage import paths
+    from tests.conftest import initialize_run_directory
 
     run_dir = tmp_path / "run"
-    (run_dir / paths.LOGS_DIRNAME).mkdir(parents=True)
-    (run_dir / paths.CONFIG_FILENAME).write_text(
-        default_config_toml("ltxv-route", "probe", 11), encoding="utf-8"
-    )
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    initialize_run_directory(run_dir, run_id="ltxv-route", style="probe", seed=11)
+    config, _ = read_effective_config(run_dir)
     video = VideoConfig(
         **{
             **config.video.model_dump(),

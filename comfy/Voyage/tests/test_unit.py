@@ -12,8 +12,8 @@ from voyage import hashing, media, paths
 from voyage.atomic import atomic_write_bytes, atomic_write_json, read_json
 from voyage.bench import summarize_gauges, timing_stats
 from voyage.concepts import ConceptStore, token_set_similarity
-from voyage.config import AudioConfig, default_config_toml, load_config
-from voyage.errors import ConfigurationError, MediaError
+from voyage.config import AudioConfig, preset_config
+from voyage.errors import MediaError
 from voyage.hashing import sha256_file, sha256_text
 from voyage.models import PromptStage, WorkerRequest, WorkerResponse
 from voyage.paths import (
@@ -23,6 +23,7 @@ from voyage.paths import (
     resolve_stored_path,
     segment_dir,
 )
+from voyage.persistence import read_effective_config
 from voyage.prompts import build_prompt_plan, compose_prompt
 from voyage.rpc import decode_request, decode_response, encode_request, encode_response
 from voyage.seeds import audio_seed, derive_seed, director_seed, video_seed
@@ -53,47 +54,40 @@ def test_derive_seed_stable_and_separated() -> None:
 
 
 def test_config_roundtrip(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(
-        default_config_toml("demo", "pastel neon line-art, peaceful", 42),
-        encoding="utf-8",
-    )
-    config, digest = load_config(path)
+    from voyage.persistence import effective_config_digest
+
+    config = preset_config("demo", "pastel neon line-art, peaceful", 42)
+    digest = effective_config_digest(config)
     assert config.run_id == "demo"
     assert config.seed == 42
     assert len(digest) == 64
 
 
 def test_config_rejects_empty_style(tmp_path: Path) -> None:
-    path = tmp_path / "voyage.toml"
-    path.write_text(default_config_toml("demo", "   ", 0), encoding="utf-8")
-    with pytest.raises(ConfigurationError):
-        load_config(path)
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        preset_config("demo", "   ", 0)
 
 
 def test_config_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(ConfigurationError):
-        load_config(tmp_path / "nope.toml")
+    from voyage.errors import StateError
+
+    with pytest.raises(StateError):
+        read_effective_config(tmp_path / "nope")
 
 
 def test_config_toml_escapes_style_injection(tmp_path: Path) -> None:
     hostile_style = 'x"\n[video]\nbackend="ltxv'
     hostile_run_id = 'run"x\n[evil]'
-    path = tmp_path / "voyage.toml"
-    path.write_text(
-        default_config_toml(hostile_run_id, hostile_style, 0),
-        encoding="utf-8",
-    )
-    config, _digest = load_config(path)
+    config = preset_config(hostile_run_id, hostile_style, 0)
     assert config.style == hostile_style
     assert config.run_id == hostile_run_id
 
 
 def test_config_toml_escapes_quotes_and_newlines(tmp_path: Path) -> None:
     tricky_style = 'neon "city"\nline2\ttab\\backslash\rcarriage'
-    path = tmp_path / "voyage.toml"
-    path.write_text(default_config_toml("demo", tricky_style, 1), encoding="utf-8")
-    config, _digest = load_config(path)
+    config = preset_config("demo", tricky_style, 1)
     assert config.style == tricky_style
 
 

@@ -22,28 +22,15 @@ from voyage.cli import (
     parse_duration,
     resolve_run_dir,
 )
-from voyage.config import default_config_toml, load_config
+from voyage.config import preset_config
 
 _STYLE = "pastel neon line-art, peaceful"
 
 
 def _init_fake_run(run_dir: Path, run_id: str = "hardening") -> None:
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                str(run_dir),
-                "--run-id",
-                run_id,
-                "--style",
-                _STYLE,
-                "--backend",
-                "fake",
-            ]
-        )
-        == 0
-    )
+    from tests.conftest import initialize_run_directory
+
+    initialize_run_directory(run_dir, run_id=run_id, style=_STYLE, seed=11)
 
 
 @pytest.mark.parametrize(
@@ -77,13 +64,17 @@ def test_init_rejects_traversal_run_id(tmp_path: Path, capsys: pytest.CaptureFix
     assert (
         main(
             [
-                "init",
+                "generate",
                 "--output",
                 str(target),
-                "--run-id",
+                "--name",
                 "../../tmp/evil-run",
                 "--style",
                 _STYLE,
+                "--backend",
+                "fake",
+                "--duration",
+                "2s",
                 "--force",
             ]
         )
@@ -120,24 +111,11 @@ def test_generate_rejects_traversal_run_id(
 
 def test_init_accepts_absolute_output(tmp_path: Path) -> None:
     """An explicit absolute --output inside the tree works (008)."""
+    from tests.conftest import initialize_run_directory
+
     target = tmp_path / "sub" / "run"
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                str(target),
-                "--run-id",
-                "rel",
-                "--style",
-                _STYLE,
-                "--backend",
-                "fake",
-            ]
-        )
-        == 0
-    )
-    assert (target / paths.CONFIG_FILENAME).exists()
+    initialize_run_directory(target, run_id="rel", style=_STYLE, seed=11)
+    assert (target / paths.MANIFEST_FILENAME).exists()
 
 
 def test_resolve_run_dir_returns_absolute() -> None:
@@ -148,24 +126,11 @@ def test_resolve_run_dir_returns_absolute() -> None:
 
 def test_init_then_run_with_relative_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Relative init + relative run commits (057 doubling regression)."""
+    from tests.conftest import initialize_run_directory
+
     monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                "rel-run",
-                "--run-id",
-                "rel",
-                "--style",
-                _STYLE,
-                "--backend",
-                "fake",
-            ]
-        )
-        == 0
-    )
-    assert (tmp_path / "rel-run" / paths.CONFIG_FILENAME).exists()
+    initialize_run_directory(tmp_path / "rel-run", run_id="rel", style=_STYLE, seed=11)
+    assert (tmp_path / "rel-run" / paths.MANIFEST_FILENAME).exists()
     assert main(["run", "--run", "rel-run", "--segments", "1"]) == 0
     segment = tmp_path / "rel-run" / paths.SEGMENTS_DIRNAME / "000000"
     assert (segment / paths.DONE_MARKER).exists()
@@ -335,22 +300,10 @@ def test_stop_finalize_uses_resolved_run_dir(
 ) -> None:
     """Relative `stop --run` must not double the finalize path (051)."""
     import voyage.cli as cli_module
+    from tests.conftest import initialize_run_directory
 
     monkeypatch.chdir(tmp_path)
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                "rel-run",
-                "--run-id",
-                "rel",
-                "--style",
-                _STYLE,
-            ]
-        )
-        == 0
-    )
+    initialize_run_directory(tmp_path / "rel-run", run_id="rel", style=_STYLE, seed=11)
     captured: dict[str, str] = {}
 
     def fake_finalize(args: argparse.Namespace) -> int:
@@ -373,10 +326,7 @@ def test_cuda_blame_names_audio_backend(
     from voyage.cli import _require_cuda_stack
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    (tmp_path / "voyage.toml").write_text(
-        default_config_toml("blame", _STYLE, 11, video_backend="fake"), encoding="utf-8"
-    )
-    config, _digest = load_config(tmp_path / "voyage.toml")
+    config = preset_config("blame", _STYLE, 11, video_backend="fake")
     config.audio.backend = "acestep"
     assert _require_cuda_stack(config) is False
     err = capsys.readouterr().err

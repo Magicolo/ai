@@ -17,8 +17,7 @@ from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.bench import format_report, summarize_gauges, timing_stats
 from voyage.cli import main
-from voyage.config import load_config
-from voyage.persistence import read_state
+from voyage.persistence import read_effective_config, read_state
 from voyage.supervisor import Supervisor
 
 
@@ -38,7 +37,7 @@ def _gauge_events(run_dir: Path) -> list[dict[str, Any]]:
 def test_fake_video_benchmark_op_reports_math(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -60,7 +59,7 @@ def test_fake_video_benchmark_op_reports_math(tmp_path: Path) -> None:
 def test_fake_audio_benchmark_op_reports_math(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -79,11 +78,13 @@ def test_fake_audio_benchmark_op_reports_math(tmp_path: Path) -> None:
 def test_director_benchmark_op_times_decisions(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
-        result: dict[str, Any] = supervisor._director.call("benchmark", {"warmup": 1, "measured": 2})
+        result: dict[str, Any] = supervisor._director.call(
+            "benchmark", {"warmup": 1, "measured": 2}
+        )
     finally:
         supervisor.stop_workers()
     assert result["backend"] == "deterministic"
@@ -120,7 +121,7 @@ def test_benchmark_cli_end_to_end_uses_temp_dir(tmp_path: Path, capsys: object) 
 def test_per_segment_gauges_logged(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(2) == ["000000", "000001"]
     events = _gauge_events(run_dir)
     assert len(events) == 2
@@ -154,7 +155,7 @@ def test_endurance_segments_stay_flat(tmp_path: Path) -> None:
     """Small always-on soak: gauges every segment, bounded RSS, valid run."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(3) == ["000000", "000001", "000002"]
     events = _gauge_events(run_dir)
     assert len(events) == 3
@@ -182,7 +183,7 @@ def test_segment_committed_carries_stage_breakdown(tmp_path: Path) -> None:
     """segment_committed includes per-stage seconds that add up to elapsed."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="timings")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

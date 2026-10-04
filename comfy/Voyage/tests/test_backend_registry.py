@@ -21,8 +21,7 @@ from voyage.config import (
     ProjectConfig,
     VideoBackendName,
     VideoConfig,
-    default_config_toml,
-    load_config,
+    preset_config,
     resolve_config,
     with_video_backend,
 )
@@ -142,12 +141,7 @@ def test_state_mode_mismatch_rejected_before_transport() -> None:
 def test_default_toml_carries_registry_geometry_per_backend(tmp_path: Path) -> None:
     for name in get_args(VideoBackendName):
         row = BACKEND_REGISTRY[name]
-        toml_path = tmp_path / f"voyage-{name}.toml"
-        toml_path.write_text(
-            default_config_toml("registry", "pastel neon line-art, peaceful", 3, name),
-            encoding="utf-8",
-        )
-        config, _digest = load_config(toml_path)
+        config = preset_config("registry", "pastel neon line-art, peaceful", 3, name)
         assert config.video.backend == name
         assert (config.video.width, config.video.height) == (row.width, row.height)
         assert config.video.fps == row.fps

@@ -19,8 +19,8 @@ import pytest
 RUN_SH = Path(__file__).resolve().parent.parent / "scripts" / "run.sh"
 # run.sh resolves --user from `id -u`/`id -g` on every path (including the
 # dry-run seam), so the isolated PATH must provide it alongside coreutils.
-# python3 is needed for the stored-config TOML sniff (run.sh parses
-# DIR/voyage.toml with the stdlib parser when --backend is absent).
+# python3 is needed for the stored-config manifest sniff (run.sh parses
+# DIR/run_manifest.json with the stdlib parser when --backend is absent).
 _CORE_TOOLS = ("mkdir", "grep", "sed", "head", "dirname", "id", "python3")
 _SMI_MODE = Literal["present-ok", "present-fail", "absent"]
 
@@ -184,12 +184,14 @@ def test_explicit_ltxv_backend_stays_video_image_despite_gpu(tmp_path: Path) -> 
 
 
 @needs_bash
-def test_run_dir_with_ltx_toml_selects_ltx_image(tmp_path: Path) -> None:
-    """Stored-config runs sniff [video].backend for the ltx image."""
+def test_run_dir_with_ltx_manifest_selects_ltx_image(tmp_path: Path) -> None:
+    """Stored-config runs sniff effective_config.video.backend for ltx."""
+    import json
+
     run_dir = tmp_path / "rundir"
     run_dir.mkdir()
-    run_dir.joinpath("voyage.toml").write_text(
-        '[video]\nbackend = "ltx25"\n',
+    run_dir.joinpath("run_manifest.json").write_text(
+        json.dumps({"effective_config": {"video": {"backend": "ltx25"}}}),
         encoding="utf-8",
     )
     selection = _dry_run(tmp_path, ["run", "--run", str(run_dir)], "absent")

@@ -24,10 +24,10 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.atomic import JsonValue
-from voyage.config import load_config
 from voyage.errors import MediaError
 from voyage.hashing import sha256_file
 from voyage.media import validate_audio
+from voyage.persistence import read_effective_config
 from voyage.rpc import RpcPayload, RpcResult
 from voyage.supervisor import Supervisor
 
@@ -37,12 +37,12 @@ def _init_run(run_dir: Path, run_id: str = "av-align") -> None:
 
 
 def _commit(run_dir: Path, count: int) -> list[str]:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config).run_segments(count)
 
 
 def _started_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     return supervisor
@@ -116,7 +116,7 @@ def test_adopt_rejects_av_drifted_orphan(tmp_path: Path) -> None:
     _init_run(run_dir)
     assert _commit(run_dir, 1) == ["000000"]
     orphan = _build_orphan_from_committed(run_dir, 1)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     FakeAudioBackend().generate_segment(
         orphan / "audio.wav",
         style="test",

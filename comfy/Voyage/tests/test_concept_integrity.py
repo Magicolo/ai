@@ -14,11 +14,10 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.cli import validate_run
 from voyage.concepts import ConceptStore, validate_concepts
-from voyage.config import load_config
 from voyage.errors import StateError
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -91,7 +90,7 @@ def test_validate_run_flags_lost_vectors(tmp_path: Path) -> None:
     """A run whose vectors vanished must not validate clean."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="concepts")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     Supervisor(run_dir, config).run_segments(1)
     novelty_dir = run_dir / "novelty"
     novelty_dir.mkdir(exist_ok=True)

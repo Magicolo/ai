@@ -14,18 +14,17 @@ from typing import Any
 import pytest
 
 from voyage.augment import AugmentWeights
+from voyage.persistence import read_effective_config
 
 
 def _commit_fake_run(tmp_path: Path, run_id: str) -> Path:
     """Commit one fake-backend segment; returns the run dir."""
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id=run_id, style="pastel neon line-art, peaceful")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

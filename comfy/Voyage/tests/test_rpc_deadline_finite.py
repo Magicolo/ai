@@ -22,10 +22,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from tests.conftest import initialize_run_directory
-from voyage import paths
-from voyage.config import DraftConfig, VoyageConfig, load_config
-from voyage.errors import ConfigurationError, RecoverableWorkerError, VoyageError
+from voyage.config import DraftConfig, VoyageConfig
+from voyage.errors import RecoverableWorkerError, VoyageError
 from voyage.rpc import SubprocessWorker
 
 
@@ -131,16 +129,7 @@ def test_read_response_line_rejects_non_finite_directly(hostile_value: float) ->
             os.close(read_end)
 
 
-def test_toml_nan_rpc_timeout_fails_load_config(tmp_path: Path) -> None:
-    """TOML admits `nan` as a float — `load_config` must refuse it here."""
-    run_directory = tmp_path / "run"
-    initialize_run_directory(run_directory)
-    config_path = run_directory / paths.CONFIG_FILENAME
-    text = config_path.read_text(encoding="utf-8")
-    assert "rpc_timeout_seconds = 600.0" in text
-    config_path.write_text(
-        text.replace("rpc_timeout_seconds = 600.0", "rpc_timeout_seconds = nan"),
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigurationError):
-        load_config(config_path)
+def test_nan_rpc_timeout_rejected_by_validator(tmp_path: Path) -> None:
+    """Non-finite `rpc_timeout_seconds` is rejected by the validator."""
+    with pytest.raises(ValidationError):
+        VoyageConfig(rpc_timeout_seconds=float("nan"))

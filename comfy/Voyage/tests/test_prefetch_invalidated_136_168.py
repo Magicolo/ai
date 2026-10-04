@@ -18,13 +18,13 @@ from typing import Any
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 from voyage.segment_manifest import load_metrics
 from voyage.supervisor import Supervisor
 
 
 def _unstarted_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config)
 
 
@@ -77,7 +77,7 @@ def test_drift_hold_logs_invalidated_not_hit(tmp_path: Path) -> None:
     """168 e2e: every held segment with a ready prefetch used to count a hit."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="hold168")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     from voyage.config import apply_draft_overrides
 
     config = apply_draft_overrides(config, drift_every_n_segments=2)
@@ -101,7 +101,7 @@ def test_amended_prefetch_logs_invalidated_not_hit(tmp_path: Path) -> None:
     segment-1 prefetch is discarded — it must not count as a hit."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="amend136", seed=7, visual_inspector=True)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

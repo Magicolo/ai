@@ -59,23 +59,13 @@ def test_director_config_rejects_garbage_device() -> None:
 
 
 def test_default_toml_round_trips_director_device(tmp_path: Path) -> None:
-    from voyage.config import default_config_toml, load_config
+    from voyage.config import preset_config
 
-    toml_path = tmp_path / "voyage.toml"
-    toml_path.write_text(
-        default_config_toml("device-probe", "pastel neon line-art", 7),
-        encoding="utf-8",
-    )
-    config, _digest = load_config(Path(toml_path))
+    config = preset_config("device-probe", "pastel neon line-art", 7)
     assert config.director.device == "cuda:1"
     assert config.director.model_id == "Qwen/Qwen3-8B"
 
-    cpu_path = tmp_path / "voyage-cpu.toml"
-    cpu_path.write_text(
-        default_config_toml("device-probe", "pastel neon line-art", 7, director_device="cpu"),
-        encoding="utf-8",
-    )
-    cpu_config, _digest = load_config(Path(cpu_path))
+    cpu_config = preset_config("device-probe", "pastel neon line-art", 7, director_device="cpu")
     assert cpu_config.director.device == "cpu"
 
 

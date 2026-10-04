@@ -18,7 +18,6 @@ import pytest
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
 from voyage.media import (
     _cached_slice_take,
     _segment_video_matches_target,
@@ -28,6 +27,7 @@ from voyage.media import (
     probe,
     validate_video,
 )
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -36,7 +36,7 @@ def _init_run(run_dir: Path, style: str = "pastel neon line-art, peaceful") -> N
 
 
 def _commit_two(run_dir: Path) -> None:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

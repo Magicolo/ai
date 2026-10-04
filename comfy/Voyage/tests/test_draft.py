@@ -12,16 +12,12 @@ from voyage.config import (
     ProjectConfig,
     VideoConfig,
     apply_draft_overrides,
-    default_config_toml,
-    load_config,
+    preset_config,
 )
 
 
 def _base_config(tmp_path: Path) -> ProjectConfig:
-    toml_path = tmp_path / "voyage.toml"
-    toml_path.write_text(default_config_toml("draft-test", "line art", 7), encoding="utf-8")
-    config, _ = load_config(toml_path)
-    return config
+    return preset_config("draft-test", "line art", 7)
 
 
 def test_draft_profile_defaults() -> None:

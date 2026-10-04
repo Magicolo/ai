@@ -58,47 +58,69 @@ def test_warn_reports_flag_once(
 def test_init_outside_output_warns_but_proceeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Warn-only: outside-tree init still exits 0 (documented /tmp flows) (024)."""
+    """Warn-only: outside-tree generate still exits 0 (documented /tmp flows) (024)."""
+    import voyage.cli as cli_module
+    import voyage.models_ensure as ensure_module
+
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
+    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
     target = tmp_path / "run"
     assert (
         main(
             [
-                "init",
+                "generate",
                 "--output",
                 str(target),
-                "--run-id",
+                "--name",
                 "warned",
                 "--style",
                 _STYLE,
                 "--backend",
                 "fake",
+                "--duration",
+                "2s",
+                "--seed",
+                "11",
             ]
         )
         == 0
     )
     assert "outside" in capsys.readouterr().err
-    assert (target / "voyage.toml").exists()
+    assert (target / "run_manifest.json").exists()
 
 
 def test_init_inside_output_is_quiet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Contained init prints no containment warning (024)."""
+    """Contained generate prints no containment warning (024)."""
+    import voyage.cli as cli_module
+    import voyage.models_ensure as ensure_module
+
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
+    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
     target = tmp_path / "output" / "run"
     assert (
         main(
             [
-                "init",
+                "generate",
                 "--output",
                 str(target),
-                "--run-id",
+                "--name",
                 "quiet",
                 "--style",
                 _STYLE,
                 "--backend",
                 "fake",
+                "--duration",
+                "2s",
+                "--seed",
+                "11",
             ]
         )
         == 0

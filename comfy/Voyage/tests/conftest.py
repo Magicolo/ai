@@ -1,7 +1,7 @@
 """Shared pytest fixtures: canonical run-directory scaffold (DESIGN §21).
 
 Why this file exists: over a dozen test modules each carry a private
-`_init_run` copy (mkdir segments/logs, write voyage.toml, manifest,
+`_init_run` copy (mkdir segments/logs, write manifest,
 state, empty concepts). The bodies drifted apart cosmetically
 (top-level versus function-level persistence imports, seed 7 versus
 11) while staying semantically identical, so a layout change would
@@ -31,14 +31,8 @@ from typing import Literal
 
 import pytest
 
-from voyage import paths
-from voyage.config import VideoBackendName, default_config_toml, load_config
-from voyage.persistence import (
-    build_manifest,
-    initial_state,
-    write_manifest,
-    write_state,
-)
+from voyage.config import ExperimentalConfig, VideoBackendName, preset_config
+from voyage.persistence import create_run_dir
 
 if importlib.util.find_spec("hypothesis") is not None:
     from hypothesis import settings
@@ -105,28 +99,24 @@ def initialize_run_directory(
     visual_inspector: bool = False,
     video_backend: VideoBackendName = "fake",
 ) -> None:
-    """Create a minimal valid run directory: config, manifest, state.
+    """Create a minimal valid run directory: manifest + state.
 
     Mirrors the legacy `_init_run` bodies exactly (same files, same
-    order) so converted call sites keep passing unchanged. No root
-    concepts file is scaffolded (2026-09-30 pruning: new runs start
-    without the legacy dup; readers tolerate its absence). The
-    `visual_inspector` flag applies the same
-    TOML string replacement the inspector test modules use.
-    `video_backend` pins the CPU fake pipeline (2026-09-29 ltxv
-    decision: product defaults are ltxv/CUDA, but the suite runs
-    CPU-only on fake workers — no GPU, no model weights).
+    order) so converted call sites keep passing unchanged — except the
+    config now resolves CLI-style (preset + overrides, no TOML file).
+    No root concepts file is scaffolded (2026-09-30 pruning: new runs
+    start without the legacy dup; readers tolerate its absence). The
+    `visual_inspector` flag applies the same enablement the inspector
+    test modules use. `video_backend` pins the CPU fake pipeline
+    (2026-09-29 ltxv decision: product defaults are ltxv/CUDA, but the
+    suite runs CPU-only on fake workers — no GPU, no model weights).
     """
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / paths.SEGMENTS_DIRNAME).mkdir(exist_ok=True)
-    (run_dir / paths.LOGS_DIRNAME).mkdir(exist_ok=True)
-    toml_text = default_config_toml(run_id, style, seed, video_backend=video_backend)
+    config = preset_config(run_id, style, seed, video_backend=video_backend)
     if visual_inspector:
-        toml_text = toml_text.replace("visual_inspector = false", "visual_inspector = true")
-    (run_dir / paths.CONFIG_FILENAME).write_text(toml_text, encoding="utf-8")
-    config, digest = load_config(run_dir / paths.CONFIG_FILENAME)
-    write_manifest(run_dir, build_manifest(config, digest, {}, {}))
-    write_state(run_dir, initial_state(config))
+        config = config.model_copy(
+            update={"experimental": ExperimentalConfig(visual_inspector=True)}
+        )
+    create_run_dir(run_dir, config)
 
 
 @pytest.fixture
@@ -150,7 +140,9 @@ def run_directory_factory(tmp_path: Path) -> Callable[..., Path]:
 
 
 @pytest.fixture(autouse=True)
-def _never_spawn_llama_sidecar(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+def _never_spawn_llama_sidecar(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Never spawn the real llama-server sidecar in the suite.
 
     The default director backend is llama, but the slim test image

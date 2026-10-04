@@ -27,8 +27,7 @@ from voyage.config import (
     ProjectConfig,
     VoyageConfig,
     apply_draft_overrides,
-    default_config_toml,
-    load_config,
+    preset_config,
 )
 from voyage.media import (
     _probe_video_fps,
@@ -38,15 +37,12 @@ from voyage.media import (
 )
 from voyage.media import probe as media_probe
 from voyage.models import DirectorDestination, EvolutionDecision, StyleSpec
-from voyage.persistence import read_state
+from voyage.persistence import read_effective_config, read_state
 from voyage.supervisor import PREFETCH_TIMEOUT_SECONDS, Supervisor, summarize_prefetch_outcome
 
 
-def _write_toml(tmp_path: Path) -> Path:
-    path = tmp_path / "voyage.toml"
-    text = default_config_toml("stack", "pastel neon line-art, peaceful", 7)
-    path.write_text(text, encoding="utf-8")
-    return path
+def _base_config() -> ProjectConfig:
+    return preset_config("stack", "pastel neon line-art, peaceful", 7)
 
 
 def test_audio_config_rhythm_defaults() -> None:
@@ -74,7 +70,7 @@ def test_voyage_config_drift_default_and_validator() -> None:
 
 
 def test_toml_roundtrip_carries_new_fields(tmp_path: Path) -> None:
-    config, _ = load_config(_write_toml(tmp_path))
+    config = _base_config()
     assert config.audio.beats_per_segment == 4
     assert config.audio.final_overlap_fraction == pytest.approx(0.10)
     assert config.audio.final_overlap_cap_seconds == pytest.approx(0.5)
@@ -82,7 +78,7 @@ def test_toml_roundtrip_carries_new_fields(tmp_path: Path) -> None:
 
 
 def test_overrides_plumb_beats_and_drift(tmp_path: Path) -> None:
-    config, _ = load_config(_write_toml(tmp_path))
+    config = _base_config()
     out = apply_draft_overrides(config, beats_per_segment=8, drift_every_n_segments=3)
     assert out.audio.beats_per_segment == 8
     assert out.voyage.drift_every_n_segments == 3
@@ -111,7 +107,7 @@ def _metric_events(run_dir: Path, event: str) -> list[dict[str, object]]:
 def test_drift_cadence_holds_non_drift_segments(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     config = apply_draft_overrides(config, drift_every_n_segments=2)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
@@ -130,7 +126,7 @@ def test_drift_cadence_holds_non_drift_segments(tmp_path: Path) -> None:
 def test_director_prefetch_hits_next_commit(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -147,7 +143,7 @@ def test_director_prefetch_hits_next_commit(tmp_path: Path) -> None:
 
 
 def _commit_two(run_dir: Path) -> None:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -199,7 +195,7 @@ def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
     motion-interpolated resampling, not frame duplication."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     config.video.fps = 16
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
@@ -262,9 +258,7 @@ def test_generate_defaults_to_llama_director_with_offline_fallback(tmp_path: Pat
     )
     assert code == 0
     assert (run_dir / "final.mp4").exists()
-    from voyage.config import load_config as _load
-
-    config, _ = _load(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.director.backend == "llama"  # stored config matches the llama default
     state = read_state(run_dir)
     assert state.committed_segments == 1
@@ -395,7 +389,7 @@ def _stubbed_supervisor(
 ) -> tuple[Supervisor, ProjectConfig]:
     """Supervisor with stubbed payload builder and director (no subprocess)."""
     initialize_run_directory(run_directory)
-    config, _digest = load_config(run_directory / paths.CONFIG_FILENAME)
+    config, _digest = read_effective_config(run_directory)
     supervisor = Supervisor(run_directory, config)
     monkeypatch.setattr(Supervisor, "_decide_payload", lambda self, *args, **kwargs: {})
     supervisor._director = director  # type: ignore[assignment]

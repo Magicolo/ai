@@ -20,24 +20,9 @@ from pathlib import Path
 import pytest
 
 from voyage.cli import build_parser, main, parse_duration
-from voyage.cli_run_ops import cmd_init
 from voyage.tui_state import GenerateFormState, field_errors, to_generate_namespace
 
 _STYLE = "pastel neon line-art, peaceful"
-
-
-def _init_args(output: Path, style: str = _STYLE) -> argparse.Namespace:
-    return argparse.Namespace(
-        output=str(output),
-        run_id="group-a",
-        name="group-a",
-        style=style,
-        seed=11,
-        force=False,
-        backend="fake",
-        director="deterministic",
-        director_device="cpu",
-    )
 
 
 def test_stop_finalize_end_to_end_without_crash(
@@ -45,24 +30,10 @@ def test_stop_finalize_end_to_end_without_crash(
 ) -> None:
     """`stop --finalize` finalizes instead of AttributeError (109)."""
     import voyage.cli_finalize as finalize_module
+    from tests.conftest import initialize_run_directory
 
     run_dir = tmp_path / "run"
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                str(run_dir),
-                "--run-id",
-                "group-a",
-                "--style",
-                _STYLE,
-                "--backend",
-                "fake",
-            ]
-        )
-        == 0
-    )
+    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11)
 
     def _fake_finalize_run(run: Path, output: Path, **kwargs: object) -> None:
         del run, kwargs
@@ -159,30 +130,68 @@ def test_generate_rejects_bad_take_seconds_before_init(
     assert not (tmp_path / "output" / "orphan-probe").exists()
 
 
-def test_cmd_init_rejects_blank_style_without_litter(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_cmd_generate_rejects_blank_style_without_litter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Blank style exits 2 before the first mkdir (143)."""
-    run_dir = tmp_path / "run"
-    assert cmd_init(_init_args(run_dir, style="   ")) == 2
+    monkeypatch.chdir(tmp_path)
+    assert (
+        main(
+            [
+                "generate",
+                "--backend",
+                "fake",
+                "--style",
+                "   ",
+                "--name",
+                "blank-probe",
+                "--duration",
+                "2s",
+            ]
+        )
+        == 2
+    )
     assert "style" in capsys.readouterr().err
-    assert not run_dir.exists()
+    assert not (tmp_path / "output" / "blank-probe").exists()
 
 
-def test_cmd_init_missing_attributes_exit_without_litter(tmp_path: Path) -> None:
+def test_cmd_generate_missing_attributes_exit_without_litter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Hand-built namespaces get exit 2, not AttributeError + partial dir (185)."""
+    from voyage.cli_generate import cmd_generate
+
+    monkeypatch.chdir(tmp_path)
     base = {
         "output": str(tmp_path / "run"),
         "run_id": "group-a",
         "name": "group-a",
         "force": True,
         "backend": "fake",
+        "director": "deterministic",
+        "director_device": "cpu",
+        "draft": False,
+        "blocks": None,
+        "take_seconds": None,
+        "quantization": None,
+        "beats_per_segment": None,
+        "drift_every_n": None,
+        "music_caption": None,
+        "video_caption": None,
+        "duration": None,
     }
     run_dir = tmp_path / "run"
-    assert cmd_init(argparse.Namespace(**{**base, "seed": 11})) == 2  # missing style
+    assert cmd_generate(argparse.Namespace(**{**base, "seed": 11})) == 2  # missing style
     assert not run_dir.exists()
-    # Missing seed now randomizes (omitted --seed means a fresh random seed).
-    assert cmd_init(argparse.Namespace(**{**base, "style": _STYLE})) == 0
+    # Missing seed randomizes instead of exiting 2 (mock downstream past creation).
+    import voyage.cli as cli_module
+    import voyage.models_ensure as ensure_module
+
+    monkeypatch.setattr(ensure_module, "ensure_models", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "cmd_run", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_module, "validate_run", lambda *a, **k: [])
+    monkeypatch.setattr(cli_module, "cmd_finalize", lambda *a, **k: 0)
+    assert cmd_generate(argparse.Namespace(**{**base, "style": _STYLE, "seed": None})) == 0
     assert run_dir.exists()
 
 
@@ -233,24 +242,10 @@ def test_benchmark_video_fast_fails_without_cuda_stack(
     """Benchmark video preflights torch like run/generate do (115)."""
     import voyage.cli as cli_module
     import voyage.cli_observe as observe_module
+    from tests.conftest import initialize_run_directory
 
     run_dir = tmp_path / "run"
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                str(run_dir),
-                "--run-id",
-                "group-a",
-                "--style",
-                _STYLE,
-                "--backend",
-                "ltxv",
-            ]
-        )
-        == 0
-    )
+    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11, video_backend="ltxv")
     monkeypatch.setattr(cli_module, "_torch_available", lambda: False)
 
     def _no_workers(*args: object, **kwargs: object) -> object:
@@ -267,24 +262,10 @@ def test_soak_fast_fails_without_cuda_stack(
     """Soak preflights torch before printing its rule line (115)."""
     import voyage.cli as cli_module
     import voyage.cli_observe as observe_module
+    from tests.conftest import initialize_run_directory
 
     run_dir = tmp_path / "run"
-    assert (
-        main(
-            [
-                "init",
-                "--output",
-                str(run_dir),
-                "--run-id",
-                "group-a",
-                "--style",
-                _STYLE,
-                "--backend",
-                "ltxv",
-            ]
-        )
-        == 0
-    )
+    initialize_run_directory(run_dir, run_id="group-a", style=_STYLE, seed=11, video_backend="ltxv")
     monkeypatch.setattr(cli_module, "_torch_available", lambda: False)
 
     def _no_workers(*args: object, **kwargs: object) -> object:

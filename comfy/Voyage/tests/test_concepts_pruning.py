@@ -1,6 +1,6 @@
 """Run-file pruning: legacy `legacy_path` readers tolerate a missing file (DESIGN §21).
 
-`cmd_init` no longer writes the root `concepts.jsonl` duplicate, so fresh
+`generate` no longer writes the root `concepts.jsonl` duplicate, so fresh
 runs have no legacy file at all. The deprecated `ConceptStore(legacy_path=...)`
 migration path must keep working when the legacy file is absent — it simply
 starts empty with no migration and no warning.

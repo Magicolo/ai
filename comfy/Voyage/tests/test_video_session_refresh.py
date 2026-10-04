@@ -16,7 +16,7 @@ from typing import Any
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 from voyage.supervisor import VIDEO_BACKENDS_NEEDING_FRESH_SESSION, Supervisor
 
 
@@ -45,7 +45,7 @@ def test_should_refresh_only_when_more_remain(tmp_path: Path) -> None:
     """Finished batches never pay a pointless reload (no workers needed)."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.video.backend == "fake"
     supervisor = Supervisor(run_dir, config)
     assert supervisor._should_refresh_video_session(None, 2) is False
@@ -57,7 +57,7 @@ def test_should_refresh_true_path_for_ltx25(tmp_path: Path) -> None:
     """ltx25 refreshes mid-batch, never after the final commit."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, video_backend="ltx25")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert config.video.backend == "ltx25"
     supervisor = Supervisor(run_dir, config)
     assert supervisor._should_refresh_video_session(None, 0) is True
@@ -69,7 +69,7 @@ def test_refresh_replaces_video_process_and_commits_after(tmp_path: Path) -> Non
     """Restart + resume leaves a live worker; the next commit renders."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

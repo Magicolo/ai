@@ -14,12 +14,11 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.audio.planner import AudioTake
 from voyage.cli import validate_run
-from voyage.config import load_config
 from voyage.errors import MediaError
 from voyage.paths import resolve_stored_path
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -28,7 +27,7 @@ def _init_run(run_dir: Path, run_id: str = "relocatable") -> None:
 
 
 def _commit(run_dir: Path, count: int) -> list[str]:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     return Supervisor(run_dir, config).run_segments(count)
 
 

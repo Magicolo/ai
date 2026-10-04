@@ -12,13 +12,13 @@ from pathlib import Path
 
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.config import load_config
+from voyage.persistence import read_effective_config
 
 
 def _commit_one(run_dir: Path) -> Path:
     from voyage.supervisor import Supervisor
 
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     return run_dir / "segments" / "000000"
 

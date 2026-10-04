@@ -27,7 +27,6 @@ import voyage.cli_validate as cli_validate
 from voyage.config import BACKEND_REGISTRY, VideoBackendName
 
 EXPECTED_VERBS = (
-    "init",
     "doctor",
     "models",
     "run",
@@ -69,7 +68,6 @@ def test_planning_helpers_are_single_sourced() -> None:
 
 def test_verb_commands_are_single_sourced() -> None:
     """Every cmd_* re-export is the verb-module object (issue 080)."""
-    assert cli.cmd_init is cli_run_ops.cmd_init
     assert cli.cmd_run is cli_run_ops.cmd_run
     assert cli.cmd_generate is cli_generate.cmd_generate
     assert cli.cmd_status is cli_status.cmd_status
@@ -113,7 +111,7 @@ def test_build_parser_is_repeatable() -> None:
 
 @pytest.mark.parametrize(
     "backend",
-    ["fake", "ltxv", "causvid"],
+    ["fake", "ltxv", "causvid", "ltx25"],
 )
 def test_frames_per_segment_matches_registry_at_single_block(backend: str) -> None:
     """Steady-state planning equals the registry row at blocks=1 (085)."""
@@ -164,7 +162,6 @@ def test_cli_all_covers_surface() -> None:
     assert set(cli.__all__) <= surface
     for name in (
         "cmd_generate",
-        "cmd_init",
         "cmd_run",
         "build_parser",
         "main",

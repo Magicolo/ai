@@ -28,8 +28,7 @@ from voyage.config import (
     DEFAULT_LLAMA_ENDPOINT,
     DirectorConfig,
     ProjectConfig,
-    default_config_toml,
-    load_config,
+    preset_config,
     resolve_config,
 )
 from voyage.model_registry import (
@@ -464,13 +463,9 @@ def test_director_config_rejects_unknown_backend_and_bad_endpoint() -> None:
         DirectorConfig(llama_endpoint="not-a-url")
 
 
-def test_default_config_toml_carries_llama_endpoint(tmp_path: Path) -> None:
-    """Generated TOML pins the sidecar endpoint under [director]."""
-    raw = default_config_toml("llama-toml", "pastel neon", 7)
-    assert 'llama_endpoint = "http://127.0.0.1:8080"' in raw
-    config_path = tmp_path / "voyage.toml"
-    config_path.write_text(raw, encoding="utf-8")
-    config, _digest = load_config(config_path)
+def test_preset_carries_llama_endpoint(tmp_path: Path) -> None:
+    """Generated preset pins the sidecar endpoint."""
+    config = preset_config("llama-toml", "pastel neon", 7)
     assert config.director.llama_endpoint == DEFAULT_LLAMA_ENDPOINT
 
 
@@ -668,10 +663,8 @@ def test_models_download_target_for_gguf(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_init_parser_accepts_llama_director() -> None:
-    """`init --director llama` parses (backend threaded through the CLI)."""
+    """`generate --director llama` parses (backend threaded through the CLI)."""
     from voyage.cli import build_parser
 
-    args = build_parser().parse_args(
-        ["init", "--output", "out", "--style", "s", "--director", "llama"]
-    )
+    args = build_parser().parse_args(["generate", "--style", "s", "--director", "llama"])
     assert args.director == "llama"

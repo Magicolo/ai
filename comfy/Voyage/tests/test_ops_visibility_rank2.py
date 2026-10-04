@@ -15,8 +15,8 @@ from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.bench import report_document
 from voyage.cli import _benchmark_env, cmd_status, main
-from voyage.config import load_config
 from voyage.doctor import health_alerts, meets_reserve, probe
+from voyage.persistence import read_effective_config
 
 
 def test_benchmark_env_carries_driver_revision_keys() -> None:
@@ -107,16 +107,19 @@ def test_status_labels_manifest_hardware_vs_live_probe(tmp_path: Path, capsys: o
 
 def test_status_warns_below_reserve(tmp_path: Path, capsys: object) -> None:
     """061: free space below min_free_space_gib warns instead of printing bare."""
+
+    from voyage.persistence import read_manifest, write_manifest
+
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
-    config_path = run_dir / paths.CONFIG_FILENAME
-    text = config_path.read_text(encoding="utf-8")
-    assert "min_free_space_gib" in text
+    manifest = read_manifest(run_dir)
+    effective = manifest.get("effective_config")
+    assert isinstance(effective, dict)
+    assert "min_free_space_gib" in effective
     # A reserve no disk can meet forces the WARN path deterministically.
-    config_path.write_text(
-        text.replace("min_free_space_gib = 5.0", "min_free_space_gib = 999999.0"),
-        encoding="utf-8",
-    )
+    effective["min_free_space_gib"] = 999999.0
+    manifest["effective_config"] = effective
+    write_manifest(run_dir, manifest)
     out = _status_output(run_dir, capsys)
     assert "WARN" in out
     assert "reserve" in out.lower()
@@ -126,7 +129,7 @@ def test_status_shows_gauges_and_restart_counts(tmp_path: Path, capsys: object) 
     """061: committed runs show the gauges trend + restart/circuit counts."""
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     from voyage.supervisor import Supervisor
 
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
@@ -256,12 +259,12 @@ def test_qualify_sh_rejects_relative_run_dir(tmp_path: Path) -> None:
     assert "absolute" in completed.stderr.lower()
 
 
-def test_qualify_sh_missing_run_dir_reaches_init_hint(tmp_path: Path) -> None:
-    """064: a missing absolute run dir exits 2 with the init hint (no silent 1).
+def test_qualify_sh_missing_run_dir_reaches_generate_hint(tmp_path: Path) -> None:
+    """064: a missing absolute run dir exits 2 with the generate hint (no silent 1).
 
     Regression: the `df` preflight on a nonexistent dir once tripped
     `set -e` (pipefail) inside the command substitution, so the script
-    died rc=1 before the voyage.toml check. `|| true` keeps the gate
+    died rc=1 before the run_manifest.json check. `|| true` keeps the gate
     total — unknown space skips the preflight, it never aborts it.
     """
     import shutil
@@ -287,4 +290,4 @@ def test_qualify_sh_missing_run_dir_reaches_init_hint(tmp_path: Path) -> None:
         env=env,
     )
     assert completed.returncode == 2
-    assert "voyage.toml" in completed.stderr
+    assert "run_manifest.json" in completed.stderr

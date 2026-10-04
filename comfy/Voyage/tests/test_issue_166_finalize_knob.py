@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import initialize_run_directory
-from voyage import paths
 from voyage.augment import AugmentWeights
-from voyage.config import AugmentConfig, ProjectConfig, Unset, load_config
+from voyage.config import AugmentConfig, ProjectConfig, Unset
+from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
@@ -30,7 +30,7 @@ def _base_config() -> ProjectConfig:
 
 
 def _commit(run_dir: Path, count: int) -> None:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -73,12 +73,10 @@ def test_knob_defaults_on_everywhere() -> None:
 
 
 def test_default_toml_leaves_knob_on(tmp_path: Path) -> None:
-    """The generated `[augment]` section parses with the knob on."""
-    from voyage.config import default_config_toml
+    """The preset ships with the knob on."""
+    from voyage.config import preset_config
 
-    config_path = tmp_path / "voyage.toml"
-    config_path.write_text(default_config_toml("knob166", "line art", 7), encoding="utf-8")
-    config, _ = load_config(config_path)
+    config = preset_config("knob166", "line art", 7)
     assert config.augment.use_model_pass is True
 
 

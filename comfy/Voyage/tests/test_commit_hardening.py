@@ -23,7 +23,6 @@ import pytest
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.cli import validate_run
-from voyage.config import load_config
 from voyage.errors import (
     ConfigurationError,
     FatalWorkerError,
@@ -31,7 +30,7 @@ from voyage.errors import (
     RecoverableWorkerError,
     VoyageError,
 )
-from voyage.persistence import read_state
+from voyage.persistence import read_effective_config, read_state
 from voyage.rpc import SubprocessWorker
 from voyage.supervisor import (
     EMBED_TIMEOUT_SECONDS,
@@ -129,7 +128,7 @@ def test_torn_takes_ledger_rests_failed(tmp_path: Path) -> None:
     audio_dir = run_dir / "audio"
     audio_dir.mkdir(exist_ok=True)
     (audio_dir / "takes.jsonl").write_text("TRUNCATED\n", encoding="utf-8")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     with pytest.raises(VoyageError, match="[Ll]edger"):
         Supervisor(run_dir, config).run_segments(1)
     failed = read_state(run_dir)
@@ -144,7 +143,7 @@ def test_corrupt_concept_history_rests_failed(tmp_path: Path) -> None:
     novelty_dir = run_dir / "novelty"
     novelty_dir.mkdir(exist_ok=True)
     (novelty_dir / "concepts.jsonl").write_text("NOT_JSON\n", encoding="utf-8")
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     with pytest.raises(VoyageError, match="[Cc]oncept"):
         Supervisor(run_dir, config).run_segments(1)
     failed = read_state(run_dir)
@@ -156,7 +155,7 @@ def test_unexpected_exception_backstops_to_failed(tmp_path: Path) -> None:
     """A non-VoyageError on the commit path still rests FAILED (002)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:
@@ -184,7 +183,7 @@ def test_second_writer_fails_fast_when_locked(tmp_path: Path) -> None:
     """A second supervisor on one run dir exits loudly, never interleaves (004)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     first = Supervisor(run_dir, config)
     second = Supervisor(run_dir, config)
     second._workers_running = True
@@ -198,7 +197,7 @@ def test_second_writer_fails_fast_when_locked(tmp_path: Path) -> None:
 
 
 def _started_supervisor(run_dir: Path) -> Supervisor:
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     return supervisor
@@ -303,7 +302,7 @@ def test_malformed_line_answers_malformed_fast(monkeypatch: pytest.MonkeyPatch) 
 
 def _swap_supervisor(run_dir: Path) -> Supervisor:
     """Supervisor with the acestep+streaming swap armed, workers stubbed (010)."""
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     config.audio.backend = "acestep"
     config.video.backend = "ltxv"
     return Supervisor(run_dir, config)
@@ -408,7 +407,7 @@ def test_gauge_probes_carry_short_timeouts(tmp_path: Path) -> None:
     """Optional gauges wait seconds per worker, never the RPC default (017)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     seen: list[float | None] = []
 
@@ -433,7 +432,7 @@ def test_embed_call_carries_bounded_timeout(tmp_path: Path) -> None:
     """Novelty embedding degrades to fallback on a bounded wait, not 600 s (017)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     seen: list[float | None] = []
 
@@ -451,7 +450,7 @@ def test_relocated_run_continues_from_relative_paths(tmp_path: Path) -> None:
     """Commit, move the run dir, commit again: relative paths survive (016-S)."""
     first_dir = tmp_path / "run-a"
     _init_run(first_dir, "relocation")
-    config, _ = load_config(first_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(first_dir)
     assert Supervisor(first_dir, config).run_segments(1) == ["000000"]
     ledger_lines = (first_dir / "audio" / "takes.jsonl").read_text(encoding="utf-8").splitlines()
     assert ledger_lines
@@ -459,7 +458,7 @@ def test_relocated_run_continues_from_relative_paths(tmp_path: Path) -> None:
     assert not Path(stored_path).is_absolute()
     second_dir = tmp_path / "run-b"
     first_dir.rename(second_dir)
-    config, _ = load_config(second_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(second_dir)
     assert Supervisor(second_dir, config).run_segments(1) == ["000001"]
     assert validate_run(second_dir) == []
 
@@ -468,7 +467,7 @@ def test_done_written_without_partial_remnant(tmp_path: Path) -> None:
     """DONE lands atomically with no visible DONE.partial window (058-S)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     assert Supervisor(run_dir, config).run_segments(1) == ["000000"]
     segment = paths.segment_dir(run_dir, "000000")
     assert (segment / paths.DONE_MARKER).exists()
@@ -480,7 +479,7 @@ def test_worker_stop_closes_log_and_reaps(tmp_path: Path) -> None:
     """Restarts never leak log fds; kills never leave zombies (058-S)."""
     run_dir = tmp_path / "run"
     _init_run(run_dir)
-    config, _ = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _ = read_effective_config(run_dir)
     supervisor = Supervisor(run_dir, config)
     supervisor.start_workers()
     try:

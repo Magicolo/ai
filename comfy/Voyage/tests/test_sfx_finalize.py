@@ -174,11 +174,10 @@ def test_caption_override_replaces_segment_captions(tmp_path: Path) -> None:
 def test_cmd_sfx_rejects_missing_video(tmp_path: Path) -> None:
     import argparse
 
+    from tests.conftest import initialize_run_directory
     from voyage.cli import cmd_sfx
 
-    (tmp_path / "voyage.toml").write_text(
-        'schema_version = 1\nrun_id = "x"\nstyle = "y"\nseed = 0\n', encoding="utf-8"
-    )
+    initialize_run_directory(tmp_path, run_id="x", style="y", seed=0)
     code = cmd_sfx(
         argparse.Namespace(
             run=str(tmp_path),

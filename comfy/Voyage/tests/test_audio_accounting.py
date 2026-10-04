@@ -23,6 +23,7 @@ from voyage.media import (
     build_final_audio,
     probed_take_seconds,
 )
+from voyage.persistence import read_effective_config
 
 
 def _sine_wav(path: Path, seconds: float) -> Path:
@@ -195,8 +196,6 @@ def test_commit_clamps_short_take_to_file(tmp_path: Path, monkeypatch: pytest.Mo
     """Issue 094: a short render clamps the ledger + records the metric."""
     import voyage.supervisor as supervisor_module
     from tests.conftest import initialize_run_directory
-    from voyage import paths
-    from voyage.config import load_config
     from voyage.supervisor import Supervisor
 
     run_dir = tmp_path / "run"
@@ -209,7 +208,7 @@ def test_commit_clamps_short_take_to_file(tmp_path: Path, monkeypatch: pytest.Mo
         return _probe_seconds(short)
 
     monkeypatch.setattr(supervisor_module, "probed_take_seconds", _probed_short)
-    config, _digest = load_config(run_dir / paths.CONFIG_FILENAME)
+    config, _digest = read_effective_config(run_dir)
     committed = Supervisor(run_dir, config).run_segments(1)
     assert committed == ["000000"]
     ledger = [

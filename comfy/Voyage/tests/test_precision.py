@@ -15,16 +15,12 @@ from voyage.config import (
     ProjectConfig,
     VideoConfig,
     apply_draft_overrides,
-    default_config_toml,
-    load_config,
+    preset_config,
 )
 
 
 def _base_config(tmp_path: Path) -> ProjectConfig:
-    toml_path = tmp_path / "voyage.toml"
-    toml_path.write_text(default_config_toml("precision-test", "line art", 7), encoding="utf-8")
-    config, _ = load_config(toml_path)
-    return config
+    return preset_config("precision-test", "line art", 7)
 
 
 def test_default_is_fp8() -> None:
@@ -41,7 +37,7 @@ def test_rejects_unknown_quantization() -> None:
 
 
 def test_toml_carries_fp8_default() -> None:
-    assert 'quantization = "fp8"' in default_config_toml("x", "pastel", 1)
+    assert preset_config("x", "pastel", 1).video.quantization == "fp8"
 
 
 def test_draft_preserves_quantization(tmp_path: Path) -> None:
