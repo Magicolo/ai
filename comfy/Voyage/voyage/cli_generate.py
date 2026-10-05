@@ -164,6 +164,76 @@ def _finalize_run_dir(
     )
 
 
+def _heal_safe_transients(run_dir: Path) -> int:
+    """Remove orphan transient files/dirs generate may safely delete (DESIGN §56).
+
+    Mirrors `validate_run`'s orphan scan exactly: `*.partial` /
+    `*.partial.*` / `*.tmp.npy` / `*.tmp*` files under `segments/`,
+    `novelty/`, `audio/`, `augment/` (recursive), `*.partial` files at the
+    run root, plus `voyage-final-*` staging dirs (via
+    `media.prune_stale_finalize_tmpdirs`). All are crash-torn staging the
+    next pass re-creates (atomic-write partials, poller/SFX/ACE staging,
+    finalize window wavs re-rendered from the takes ledger) — never
+    DONE/video.mp4/manifests/state/takes. Best-effort, files-only, never
+    follows or removes symlinks. Returns the removed count.
+    """
+    from voyage import paths
+    from voyage.cli_validate import _ORPHAN_PATTERNS
+    from voyage.media import prune_stale_finalize_tmpdirs
+
+    healed = prune_stale_finalize_tmpdirs(run_dir)
+    roots = (
+        run_dir / paths.SEGMENTS_DIRNAME,
+        run_dir / "novelty",
+        run_dir / "audio",
+        run_dir / "augment",
+    )
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            if root.is_symlink() or not root.is_dir():
+                continue
+        except OSError:
+            continue
+        for pattern in _ORPHAN_PATTERNS:
+            try:
+                candidates = sorted(root.rglob(pattern))
+            except OSError:
+                continue
+            for candidate in candidates:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                try:
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    candidate.unlink()
+                    healed += 1
+                except OSError:
+                    continue
+    try:
+        strays = sorted(run_dir.glob("*.partial"))
+    except OSError:
+        strays = []
+    for stray in strays:
+        try:
+            if stray.is_symlink() or not stray.is_file():
+                continue
+            stray.unlink()
+            healed += 1
+        except OSError:
+            continue
+    return healed
+
+
+def _heal_and_report(run_dir: Path) -> int:
+    """Heal safe transients, printing the user-visible count when nonzero."""
+    healed = _heal_safe_transients(run_dir)
+    if healed:
+        print(f"healed: removed {healed} transient file(s)/dir(s)")
+    return healed
+
+
 def _pre_finalize_errors(
     run_dir: Path,
     manifest: dict[str, Any],
@@ -178,9 +248,16 @@ def _pre_finalize_errors(
     The filter applies only when the SFX pass will actually run; with
     `no_sfx` (manifest policy or the generate-only --no-sfx/--no-audio
     skip) or a fake sfx backend nothing heals it, so it stays hard.
+
+    Safe transients heal first: `validate_run` is read-only, so a crashed
+    finalize's `voyage-final-*` staging (or any `*.partial` / `*.tmp*`
+    staging) would otherwise abort generate before finalize's own prune
+    ever runs. `_heal_safe_transients` removes exactly that set here, so
+    both pre-finalize gates are self-healing without `--skip-bad`.
     """
     from voyage.sfx_finalize import is_healable_sfx_shortfall
 
+    _heal_safe_transients(run_dir)
     errors = validate_run(run_dir)
     generate_skip_sfx = bool(args is not None and resolve_generate_skips(args)["skip_sfx"])
     sfx_enabled = (
@@ -301,6 +378,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if removed:
         plural = "y" if removed == 1 else "ies"
         print(f"reconcile: removed {removed} uncommitted segment entr{plural}")
+    _heal_and_report(run_dir)
     remaining = planned - state.committed_segments
     console = get_console(args)
     sink = getattr(args, "progress_sink", None)
@@ -395,6 +473,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     committed = supervisor.run_segments(remaining)
     if sink is None:
         console.ok(f"run finished · {len(committed)} segment(s) committed")
+    _heal_and_report(run_dir)
     errors = _pre_finalize_errors(run_dir, manifest, effective, args)
     if errors:
         print("INVALID:")
