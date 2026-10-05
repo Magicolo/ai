@@ -1419,6 +1419,10 @@ def finalize_run(
                 if cached_music is not None:
                     final_audio = tmpdir / "final_audio.wav"
                     shutil.copyfile(cached_music, final_audio)
+                    if progress is not None:
+                        progress.info(
+                            f"music: cache hit — reusing last mix ({len(usable)} segments)"
+                        )
                 else:
                     final_audio = build_final_audio(
                         run_dir,
@@ -1504,6 +1508,10 @@ def finalize_run(
                         shutil.copyfile(cached_wav, bed)
                         bed_outcome["bed"] = bed
                         bed_outcome["source_seconds"] = cached_seconds
+                        if bed_view is not None:
+                            bed_view.info(
+                                f"sfx: cache hit — reusing last bed ({len(usable)} segments)"
+                            )
                         return
                     proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
                     bounds = segment_sfx_bounds(

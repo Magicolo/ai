@@ -226,6 +226,48 @@ def _heal_safe_transients(run_dir: Path) -> int:
     return healed
 
 
+def _finalize_feature_text(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    effective: Any,
+) -> str:
+    """One-line summary of what this finalize will (and will not) render."""
+    skips = resolve_generate_skips(args)
+    parts = ["silent" if skips["skip_music"] else "music"]
+    sfx_off = (
+        bool(manifest.get("no_sfx", False))
+        or skips["skip_sfx"]
+        or getattr(getattr(effective, "sfx", None), "backend", "fake") == "fake"
+    )
+    parts.append("no sfx" if sfx_off else "sfx")
+    upscale = 1 if skips["force_upscale_1"] else effective.augment.upscale
+    interpolate = 1 if skips["force_interpolate_1"] else effective.augment.interpolate
+    parts.append(f"upscale x{upscale}" if upscale > 1 else "native size")
+    parts.append(f"interp x{interpolate}" if interpolate > 1 else "no interp")
+    return " + ".join(parts)
+
+
+def _announce_finalize(
+    console: Any,
+    *,
+    backend: str,
+    width: int,
+    height: int,
+    fps: float,
+    committed: int,
+    frames: int,
+    final_name: str,
+    feature_text: str,
+) -> None:
+    """Print the finalize-branch header (generate verb only)."""
+    console.rule(f"voyage finalize · {backend} {width}x{height} @{fps}fps")
+    seconds = frames / fps if fps else 0.0
+    console.info(
+        f"finalizing {committed} segment(s) "
+        f"({frames} frames, ~{seconds:.1f}s) -> {final_name} · {feature_text}"
+    )
+
+
 def _heal_and_report(run_dir: Path, console: Any | None = None) -> int:
     """Heal safe transients, reporting the count (console when present).
 
@@ -424,6 +466,18 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 f"{final.name} is current"
             )
             return 0
+        if sink is None:
+            _announce_finalize(
+                console,
+                backend=effective.video.backend,
+                width=effective.video.width,
+                height=effective.video.height,
+                fps=effective.video.fps,
+                committed=state.committed_segments,
+                frames=state.timeline_frames,
+                final_name=final.name,
+                feature_text=_finalize_feature_text(args, manifest, effective),
+            )
         return _finalize_run_dir(run_dir, manifest, args, console)
     if not _require_cuda_stack(effective):
         return 1
@@ -478,8 +532,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
         console.info(
             f"generating {remaining} segment(s) "
-            f"(segments {state.committed_segments}..{planned - 1} of {planned} planned) "
-            f"with {effective.video.backend} (resuming at segment {state.committed_segments}) ..."
+            f"· segments {state.committed_segments}..{planned - 1} of {planned} "
+            f"· {effective.video.backend} ..."
         )
     progress = sink if sink is not None else RichSegmentProgress(console)
     supervisor = Supervisor(run_dir, effective, progress=progress)
@@ -499,6 +553,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
             return 1
         print("continuing with --skip-bad ...", file=sys.stderr)
+    fresh = read_state(run_dir)
+    if sink is None:
+        final_value = manifest.get("final_video")
+        final_name = Path(final_value).name if isinstance(final_value, str) else "final.mp4"
+        _announce_finalize(
+            console,
+            backend=effective.video.backend,
+            width=effective.video.width,
+            height=effective.video.height,
+            fps=effective.video.fps,
+            committed=fresh.committed_segments,
+            frames=fresh.timeline_frames,
+            final_name=final_name,
+            feature_text=_finalize_feature_text(args, manifest, effective),
+        )
     final_code = _finalize_run_dir(run_dir, manifest, args, console)
     if final_code != 0:
         return final_code
