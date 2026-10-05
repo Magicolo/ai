@@ -118,8 +118,8 @@ class VoyageConsole:
     """Single styling touchpoint for all ``voyage`` console output.
 
     ``verbose=False`` prints the compact default (segment header with
-    full video + audio prompts, spinners, timing summary).
-    ``verbose=True`` adds retry feedback, beat math, take decisions,
+    destinations, geometry, beat grid and timings — no per-segment prompts).
+    ``verbose=True`` adds the full video + audio prompts per segment plus
     prefetch reasons and payload minutiae. Colors/animation engage only
     on a real TTY with ``rich`` installed and color allowed.
     ``quiet=True`` silences everything except failures (``error()`` and
@@ -301,7 +301,7 @@ class VoyageConsole:
         self.styled("▶", f"SEGMENT {segment_id} (#{number})", "bold cyan")
 
     def segment_plan(self, info: dict[str, Any]) -> None:
-        """Decision detail: destination, full video + audio prompts."""
+        """Decision detail: compact header by default, full prompts verbose."""
         destination = str(info.get("destination", ""))
         phase = str(info.get("phase", ""))
         novel = "novel ✓" if info.get("novelty_accepted") else "hold"
@@ -323,7 +323,7 @@ class VoyageConsole:
             "blue",
         )
         prompts = info.get("video_prompts", [])
-        if isinstance(prompts, list):
+        if self._verbose and isinstance(prompts, list):
             for index, prompt in enumerate(prompts):
                 tag = f"prompt [{index + 1}/{len(prompts)}]" if len(prompts) > 1 else "prompt"
                 self.line(f"     {tag}: {prompt}")
@@ -344,13 +344,16 @@ class VoyageConsole:
             f"energy {energy:.2f}",
             "yellow",
         )
-        self.line(f"     music: {caption}")
+        if self._verbose:
+            self.line(f"     music: {caption}")
         # Third caption family (issue 161): the SFX caption the director
         # computed is the only pre-finalize signal for what the MMAudio
-        # pass will condition on. Always printed (non-verbose) so a
-        # missing caption on pre-SFX runs is itself visible as "-".
-        sfx_caption = str(info.get("audio_sfx_caption", "") or "-")
-        self.line(f"     sfx: {sfx_caption}")
+        # pass will condition on. Verbose-gated with the other prompts so
+        # the default generate output stays a compact header; a missing
+        # caption on pre-SFX runs is itself visible as "-".
+        if self._verbose:
+            sfx_caption = str(info.get("audio_sfx_caption", "") or "-")
+            self.line(f"     sfx: {sfx_caption}")
         if self._verbose:
             texture = str(info.get("audio_texture", ""))
             environment = info.get("audio_environment", [])

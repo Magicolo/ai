@@ -3,8 +3,9 @@
 Why this file exists: the supervisor ships ``audio_sfx_caption`` in the
 plan dict, and ``console.segment_plan`` must surface it — the third
 caption family's drift is invisible until the finalize pass dubs stems.
-These tests pin one non-verbose SFX line (present/absent/empty),
-mirroring ``tests/test_console.py`` style. The ``video_caption`` CLI
+These tests pin the verbose SFX line (present/absent/empty) plus its
+absence from the compact default, mirroring ``tests/test_console.py`` style.
+The ``video_caption`` CLI
 pin is not in the plan dict (supervisor-owned, out of scope) and stays
 a logged residual.
 """
@@ -50,18 +51,21 @@ def _plan_info(sfx_caption: Any) -> dict[str, Any]:
 
 
 def test_console_plan_renders_sfx_caption() -> None:
-    """Console prints the SFX caption alongside the music caption."""
+    """Verbose console prints the SFX caption alongside the music caption."""
     from voyage.console import VoyageConsole
 
     stream = io.StringIO()
-    VoyageConsole(stream=stream).segment_plan(_plan_info("rain on canvas"))
+    VoyageConsole(verbose=True, stream=stream).segment_plan(_plan_info("rain on canvas"))
     out = stream.getvalue()
     assert "rain on canvas" in out
     assert "slow ambient electronic composition" in out
+    default_stream = io.StringIO()
+    VoyageConsole(stream=default_stream).segment_plan(_plan_info("rain on canvas"))
+    assert "rain on canvas" not in default_stream.getvalue()
 
 
 def test_console_plan_marks_missing_sfx_caption() -> None:
-    """Empty/missing SFX caption is itself visible (always-print rule)."""
+    """Empty/missing SFX caption is itself visible in verbose mode ("-")."""
     from voyage.console import VoyageConsole
 
     for missing in ("", None):
@@ -69,5 +73,5 @@ def test_console_plan_marks_missing_sfx_caption() -> None:
         if missing is None:
             del plan["audio_sfx_caption"]
         stream = io.StringIO()
-        VoyageConsole(stream=stream).segment_plan(plan)
+        VoyageConsole(verbose=True, stream=stream).segment_plan(plan)
         assert "sfx" in stream.getvalue().lower()
