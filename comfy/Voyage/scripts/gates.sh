@@ -8,7 +8,8 @@
 # missing from the image. scripts/test.sh is pytest-only by design (fast
 # iteration); the video image gets its smoke gate in build-video.sh.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 # DESIGN-ref ratchet (issue 037): every top-level voyage/*.py docstring
 # carries its DESIGN section (host-side check — no container needed, fail
 # fast before the build). Subpackages (workers/, audio/) belong to issue
@@ -80,5 +81,5 @@ docker run --rm --user="$(id -u):$(id -g)" \
 # bind-mounted tree. Sourced from lib/common.sh (owned) so the check and
 # the VOYAGE_CACHE_ENV contract cannot drift apart.
 # shellcheck disable=SC1091
-source "$(dirname "$0")/lib/common.sh"
-voyage_assert_no_cache_residue "$(dirname "$0")/.."
+source "$SCRIPT_DIR/lib/common.sh"
+voyage_assert_no_cache_residue "$SCRIPT_DIR/.."
