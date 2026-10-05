@@ -28,7 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from voyage import llama_server, paths
+from voyage import llama_server, paths, prompt_enhancer
 from voyage.atomic import JsonValue, atomic_write_bytes
 from voyage.audio_finalize import (
     deferred_tail_frames,
@@ -1791,6 +1791,45 @@ class Supervisor:
         """
         streaming = config.video.backend in STREAMING_VIDEO_BACKENDS
         video_started = time.monotonic()
+        # Track B enhancer (DESIGN §140, default ON): expand the staged
+        # §18.2 prompts through the llama-server sidecar here — main commit
+        # thread, BEFORE the `generate_blocks` worker RPC below — so
+        # enhancement never overlaps the video forward (cuda:0 peak
+        # 14.6 GiB) or any ACE residency (all-deferred audio commits
+        # video-only; the sidecar holds ~5 GiB on cuda:1). When the knob
+        # is off (`--no-prompt-enhance`) or the backend is not LTX, the
+        # helper returns the inputs untouched and the payload below is
+        # byte-identical.
+        staged_prompt = proposed.prompt_plan.stages[0].prompt
+        staged_blocks = list(proposed.block_prompts) if streaming else None
+        if staged_blocks is not None:
+            staged_blocks, enhance_summary = prompt_enhancer.enhance_many(
+                staged_blocks,
+                enabled=config.video.prompt_enhance,
+                backend=config.video.backend,
+                endpoint=config.director.llama_endpoint,
+            )
+            if staged_blocks:
+                staged_prompt = staged_blocks[0]
+        else:
+            [staged_prompt], enhance_summary = prompt_enhancer.enhance_many(
+                [staged_prompt],
+                enabled=config.video.prompt_enhance,
+                backend=config.video.backend,
+                endpoint=config.director.llama_endpoint,
+            )
+        if config.video.prompt_enhance:
+            # Track C observable: prove sidecar engagement per segment
+            # (an ON run whose expansion never changes text — or never
+            # reaches the server — is uninterpretable without this).
+            self._log_metric(
+                {
+                    "event": "prompt_enhanced",
+                    "segment": segment_id,
+                    "backend": config.video.backend,
+                    **enhance_summary,
+                }
+            )
         # LTX always-continue (ltx25-compare fix, 2026-10-01): drift never
         # forces a fresh segment — the worker continues from its tail
         # whenever one exists and goes fresh only when it has none (first
@@ -1799,10 +1838,10 @@ class Supervisor:
         request = VideoBackendAdapter.request_from_config(
             config.video,
             segment_id=segment_id,
-            prompt=proposed.prompt_plan.stages[0].prompt,
+            prompt=staged_prompt,
             seed=video_seed(config.seed, number, 0),
             scene_cut=False,
-            block_prompts=list(proposed.block_prompts) if streaming else None,
+            block_prompts=list(staged_blocks) if staged_blocks is not None else None,
             block_seeds=(
                 [video_seed(config.seed, number, block) for block in range(proposed.num_blocks)]
                 if streaming

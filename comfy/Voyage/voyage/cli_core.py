@@ -1,9 +1,9 @@
-"""Shared CLI core: console factory, run loading, augment overrides.
+"""Shared CLI core: console factory, run loading, augment + enhancer overrides.
 
 DESIGN §58 — leaf module: the small helpers both verbs need
-(`get_console`, `_load_run`, `_augment_overrides`) without any
-verb-to-verb edge, so `cli_configure`/`cli_generate`/`cli_finalize`
-import them at top level.
+(`get_console`, `_load_run`, `_augment_overrides`,
+`_prompt_enhance_overrides`) without any verb-to-verb edge, so
+`cli_configure`/`cli_generate`/`cli_finalize` import them at top level.
 """
 
 from __future__ import annotations
@@ -29,6 +29,28 @@ def get_console(args: argparse.Namespace) -> VoyageConsole:
 def _load_run(run: Path) -> ProjectConfig:
     """Load the run's effective config from its manifest (CLI-is-config)."""
     return read_effective_config(run)
+
+
+def _prompt_enhance_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """CLI enhancer flags → resolve_config kwargs (Track B prototype).
+
+    Tri-state like the definition-tier pair: absent (None) means inherit
+    the stored manifest value (fresh creates default to True via
+    `VideoConfig`); exactly one of --prompt-enhance / --no-prompt-enhance
+    wins. Both set raises ValueError — `cmd_configure` pre-checks the
+    same conflict with a dedicated message, so this is belt-and-braces
+    for direct callers. Every read goes through getattr + `is_provided`
+    so hand-built namespaces resolve to absent, never to a value.
+    """
+    enabled = getattr(args, "prompt_enhance", None)
+    disabled = getattr(args, "no_prompt_enhance", None)
+    if is_provided(enabled) and is_provided(disabled):
+        raise ValueError("pass only one of --prompt-enhance or --no-prompt-enhance")
+    if is_provided(enabled):
+        return {"prompt_enhance": True}
+    if is_provided(disabled):
+        return {"prompt_enhance": False}
+    return {}
 
 
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:

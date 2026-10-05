@@ -356,6 +356,16 @@ class VideoConfig(BaseModel):
     # for this family, still style-checked against the charter); when
     # None the director drives (stages evolve with the general prompt).
     video_caption: str | None = None
+    # Track B enhancer (DESIGN §140, default ON since 2026-10-05: seams
+    # stay invisible and adherence is no worse with expansion): when True,
+    # the supervisor expands the staged prompts through the llama-server
+    # sidecar (`voyage.prompt_enhancer`, free-form text, no
+    # response_format) at the top of `_render_video` — main commit thread,
+    # before the worker RPC, never overlapping the video forward. False
+    # keeps payloads byte-identical (`--no-prompt-enhance` opt-out).
+    # Needs the sidecar: deterministic-director runs degrade to input
+    # text (fail-soft, zero tokens, recorded in `prompt_enhanced`).
+    prompt_enhance: bool = True
 
     @field_validator(
         "width", "height", "fps", "segment_frames", "blocks_per_segment", "local_attn_size"
@@ -732,6 +742,7 @@ def resolve_config(
     drift_every_n_segments: int | None | UnsetType = Unset,
     music_caption: str | None | UnsetType = Unset,
     video_caption: str | None | UnsetType = Unset,
+    prompt_enhance: bool | None | UnsetType = Unset,
     upscale: int | None | UnsetType = Unset,
     interpolate: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
@@ -792,6 +803,8 @@ def resolve_config(
         audio = AudioConfig(**{**audio.model_dump(), "music_caption": music_caption})
     if is_provided(video_caption):
         video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
+    if is_provided(prompt_enhance):
+        video = VideoConfig(**{**video.model_dump(), "prompt_enhance": prompt_enhance})
     augment = config.augment
     if is_provided(upscale) or is_provided(interpolate) or is_provided(presentation_fps):
         resolved_upscale = augment.upscale

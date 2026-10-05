@@ -109,6 +109,21 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         help="pin the video caption family (default: director drives + evolves it)",
     )
     parser.add_argument(
+        "--prompt-enhance",
+        action="store_true",
+        default=None,
+        help="expand staged prompts through the llama-server sidecar before "
+        "the LTX video render (default on; "
+        "stored in the manifest, so generate honors it)",
+    )
+    parser.add_argument(
+        "--no-prompt-enhance",
+        action="store_true",
+        default=None,
+        help="disable the prompt-expansion stage (default on; "
+        "mutually exclusive with --prompt-enhance)",
+    )
+    parser.add_argument(
         "--director-device",
         default=None,
         help="director decider placement (default cuda:1 = second GPU via 4-bit AWQ; "
