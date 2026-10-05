@@ -341,16 +341,26 @@ def append_sfx_window(
 
 
 def load_sfx_ledger(ledger: Path) -> list[dict[str, Any]]:
-    """Read the persisted SFX ledger (missing file → empty)."""
+    """Read the persisted SFX ledger (missing file → empty).
+
+    Torn trailing lines (a crash mid-append between `write` and the
+    newline+fsync) are skipped, not fatal — mirroring the sidecar
+    `load_chunk_ledger` contract: the interrupted window simply has no
+    record and is re-rendered on the next pass.
+    """
     if not ledger.exists():
         return []
     records: list[dict[str, Any]] = []
     for line in ledger.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        try:
             parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                records.append(parsed)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
     return records
 
 
@@ -373,9 +383,17 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
     Duplicate `window_id` lines (re-render appends) dedupe last-wins and
     the walk sorts by start, so ledger order can never false-positive
     coverage (153, mirroring the `existing` dict in `render_sfx_bed`).
-    Records group by conditioning identity: proxy-conditioned stems tile
-    their source timeline, shipped-conditioned stems (and legacy lines,
-    which read as shipped) tile the passed timeline.
+    Records group by conditioning source only (proxy vs shipped; legacy
+    lines read as shipped): `conditioning_timeline` is provenance, not
+    identity — `_stem_cache_hit` deliberately ignores it, so a timeline
+    extension reuses head stems (append-only proxy: head pixels unchanged)
+    and appends only the new tail. Splitting the walk per timeline would
+    then demand the tail group tile from zero, which it never can (kaolin:
+    fatal `w0117 starts at 819.00s, expected ~0.00s` on a complete bed).
+    The union per source must tile from zero (gaps stay fatal) and reach
+    the passed source timeline (shortfall stays healable via
+    `is_healable_sfx_shortfall`). Production always passes the source
+    timeline, which every conditioning timeline meets or precedes.
     """
     ledger = run_dir / "audio" / SFX_STEMS_DIRNAME / SFX_LEDGER_NAME
     if not ledger.exists():
@@ -392,12 +410,10 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
             str(record.get("window_id", "")),
         )
         deduped[key] = record
-    grouped: dict[tuple[str, float], list[dict[str, Any]]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for (_source, _window_id), record in deduped.items():
-        raw_timeline = record.get("conditioning_timeline", None)
-        group_timeline = float(raw_timeline) if raw_timeline is not None else timeline_seconds
-        grouped.setdefault((_source, group_timeline), []).append(record)
-    for (_source, group_timeline), group in sorted(grouped.items()):
+        grouped.setdefault(_source, []).append(record)
+    for _source, group in sorted(grouped.items()):
         ordered = sorted(group, key=lambda record: float(record.get("start", 0.0)))
         cursor = 0.0
         covered_until = 0.0
@@ -417,9 +433,9 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
                 )
             covered_until = start + _record_covered_duration(record)
             cursor = covered_until - SFX_WINDOW_OVERLAP
-        if covered_until < group_timeline - AV_ALIGNMENT_TOLERANCE_SECONDS:
+        if covered_until < timeline_seconds - AV_ALIGNMENT_TOLERANCE_SECONDS:
             errors.append(
-                f"sfx coverage {covered_until:.2f}s short of timeline {group_timeline:.2f}s"
+                f"sfx coverage {covered_until:.2f}s short of timeline {timeline_seconds:.2f}s"
             )
     return errors
 

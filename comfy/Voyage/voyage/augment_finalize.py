@@ -102,6 +102,31 @@ def _require_text(name: str, value: str) -> str:
     return value
 
 
+def _expected_frame_totals(run_dir: Path, *, chunk_frames: int, multiplier: int) -> tuple[int, int]:
+    """Upfront (source_frames, output_frames) totals over committed segments.
+
+    Best-effort: any failure (no segments yet, unreadable manifest) yields
+    `(0, 0)` and the bars fall back to end-of-pass accounting. Source
+    frames tile via `chunk_windows`; output frames apply the unchunked
+    per-window `(n-1)*m+1` recipe, so the finish line can show both units.
+    """
+    try:
+        from voyage.augment import chunk_windows, interpolated_frame_count
+        from voyage.augment_upscale_poller import committed_segment_sources
+
+        sources, _skipped = committed_segment_sources(run_dir)
+        source_total = 0
+        output_total = 0
+        for source in sources:
+            for _start, count in chunk_windows(source.total_frames, chunk_frames):
+                source_total += count
+                output_total += interpolated_frame_count(count, multiplier)
+    except (OSError, ValueError, TypeError):
+        return (0, 0)
+    else:
+        return (source_total, output_total)
+
+
 def _poll_to_completion(
     run_dir: Path,
     *,
@@ -142,10 +167,12 @@ def _poll_to_completion(
     `progress` renders one leg bar per sweep (`upscale frames`, then
     `interp frames` — sequential, never two concurrent Live displays).
     Bars count source frames, so both legs share one comparable unit
-    (not the multiplied interp output); totals come from each sweep's
-    result (done + skipped, plus waiting for interp) and rendered chunks
-    advance live via the pollers' `on_chunk_frames` callbacks. Counts
-    still accumulate into `timings` for the elapsed-time report.
+    (not the multiplied interp output); totals are set upfront from the
+    committed segments (elapsed + ETA from the first second) and
+    reconciled at pass end, rendered chunks advance live via the
+    pollers' `on_chunk_frames` callbacks, and interp chunks additionally
+    advance per finished FILM pair via `on_pair_frames`. Counts still
+    accumulate into `timings` for the elapsed-time report.
     """
     if upscale_poll_fn is None:
         from voyage.augment_upscale_poller import upscale_poll_once
@@ -159,12 +186,17 @@ def _poll_to_completion(
     up_dev = upscale_device or device
     ip_dev = interp_device or device
     verbose = bool(progress is not None and progress.verbose)
+    expected_source, expected_output = _expected_frame_totals(
+        run_dir, chunk_frames=chunk_frames, multiplier=multiplier
+    )
     for _ in range(_MAX_POLL_PASSES):
         up_done = 0
         up_per_segment: dict[str, list[int]] = {}
         if include_upscale:
             upscale_start = time.monotonic()
             with optional_bar(progress, "upscale frames") as up_tracker:
+                if up_tracker is not None and expected_source > 0:
+                    up_tracker.set_total(expected_source)
 
                 def _up_chunk(
                     segment_id: str,
@@ -224,6 +256,9 @@ def _poll_to_completion(
             interp_start = time.monotonic()
             ip_per_segment: dict[str, list[int]] = {}
             with optional_bar(progress, "interp frames") as ip_tracker:
+                if ip_tracker is not None and expected_source > 0:
+                    ip_tracker.set_total(expected_source)
+                _ip_carry: list[float] = [0.0]
 
                 def _ip_chunk(
                     segment_id: str,
@@ -233,10 +268,18 @@ def _poll_to_completion(
                 ) -> None:
                     _into.setdefault(segment_id, []).append(index)
 
-                def _ip_frames(segment_id: str, frames: int) -> None:
+                def _ip_pair(
+                    segment_id: str, frames: float, _carry: list[float] = _ip_carry
+                ) -> None:
                     del segment_id
                     if ip_tracker is not None:
-                        ip_tracker.update(frames)
+                        # Fractional pair advances accumulate until a
+                        # whole frame is earned (the bar counts ints).
+                        _carry[0] += frames
+                        whole = int(_carry[0])
+                        if whole > 0:
+                            _carry[0] -= whole
+                            ip_tracker.update(whole)
 
                 interp_result = interp_poll_fn(
                     run_dir,
@@ -252,7 +295,7 @@ def _poll_to_completion(
                     crf=crf,
                     preset=preset,
                     on_chunk=_ip_chunk,
-                    on_chunk_frames=_ip_frames,
+                    on_pair_frames=_ip_pair,
                 )
                 interp_seconds = time.monotonic() - interp_start
                 ip_done = int(getattr(interp_result, "chunks_done", 0) or 0)
@@ -266,7 +309,12 @@ def _poll_to_completion(
                     if ip_frames_skipped > 0:
                         ip_tracker.update(ip_frames_skipped)
                     if ip_frames_done > 0 and interp_seconds > 0:
-                        ip_tracker.set_extra(f"{ip_frames_done / interp_seconds:.1f} frames/s")
+                        ip_tracker.set_extra(
+                            f"{ip_frames_done / interp_seconds:.1f} frames/s "
+                            f"({expected_output} out frames)"
+                        )
+                    elif expected_output > 0:
+                        ip_tracker.set_extra(f"{expected_output} out frames")
             if timings is not None:
                 timings["interp_poll_s"] = timings.get("interp_poll_s", 0.0) + interp_seconds
                 timings["interp_chunks_done"] = timings.get("interp_chunks_done", 0.0) + float(

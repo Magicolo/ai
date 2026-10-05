@@ -41,7 +41,15 @@ _KNOWN_STAGES = frozenset({STAGE_UPSCALED, STAGE_INTERPOLATED})
 
 @dataclass(frozen=True)
 class ChunkKey:
-    """Identity of one sidecar chunk (all must match for a ledger hit)."""
+    """Identity of one sidecar chunk (all must match for a ledger hit).
+
+    `chunk_frames` is the configured window size: the same plan dir with
+    a different chunking would otherwise tile different `(start, count)`
+    windows onto the same indexes, and the index-only skip would reuse
+    wrong outputs. Records written before the field existed carry the
+    default and are additionally guarded by the pollers' exact-window
+    check (`stage_indexes_matching`), so they re-render at most once.
+    """
 
     chunk_index: int
     start_frame: int
@@ -56,6 +64,7 @@ class ChunkKey:
     out_width: int
     out_height: int
     out_fps: int
+    chunk_frames: int = 32
 
 
 def plan_hash_for(
@@ -209,6 +218,46 @@ def missing_chunk_indexes(
     resolved_stage = _require_stage(stage)
     done = completed_stages(records)
     return [index for index in indexes if resolved_stage not in done.get(index, set())]
+
+
+def stage_indexes_matching(
+    records: list[dict[str, Any]],
+    windows: list[tuple[int, int]],
+    *,
+    stage: str,
+    chunk_frames: int,
+) -> list[int]:
+    """Ordered chunk indexes whose ledger record exactly matches its window.
+
+    Index-only matching (`missing_chunk_indexes` over `completed_stages`)
+    trusts that the recorded chunk covers the same `(start, count)` window
+    the current `chunk_frames` setting tiles. A settings change that
+    re-tiles the same plan dir (or a pre-`chunk_frames` record) would
+    otherwise skip wrong outputs. An index counts as done only when a
+    record for `stage` carries the same `start_frame`, `source_frames`,
+    and `chunk_frames` (records predating the field match on the window
+    alone, grandfathering the pinned default-32 ledgers).
+    """
+    resolved_stage = _require_stage(stage)
+    if isinstance(chunk_frames, bool) or not isinstance(chunk_frames, int) or chunk_frames < 1:
+        raise ValueError(f"chunk_frames must be an int >= 1 (got {chunk_frames!r})")
+    matching: list[int] = []
+    for index, (start, count) in enumerate(windows):
+        for record in records:
+            if record.get("stage") != resolved_stage:
+                continue
+            if record.get("chunk_index") != index:
+                continue
+            if record.get("start_frame") != start:
+                continue
+            if record.get("source_frames") != count:
+                continue
+            recorded_frames = record.get("chunk_frames")
+            if recorded_frames is not None and recorded_frames != chunk_frames:
+                continue
+            matching.append(index)
+            break
+    return matching
 
 
 def chunk_output_complete(output_dir: Path, expected: int) -> bool:

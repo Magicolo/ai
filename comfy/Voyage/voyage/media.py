@@ -8,6 +8,7 @@ atomically.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -772,6 +773,45 @@ def _model_pass_stage_rows(
     return {"model pass": time.monotonic() - model_start}
 
 
+FINALIZE_TMPDIR_PREFIX = "voyage-final-"
+"""Staging tmpdir prefix for `finalize_run` (DESIGN §56).
+
+`TemporaryDirectory(prefix=...)` appends random characters to this prefix
+inside the run dir. A SIGKILL between staging and cleanup orphans the whole
+directory (the validate orphan scan only covers `*.partial`/`*.tmp*`
+files, never directories), so finalize prunes stale siblings on entry.
+"""
+
+
+def prune_stale_finalize_tmpdirs(run_dir: Path) -> int:
+    """Remove orphaned `voyage-final-*` staging dirs under `run_dir` (DESIGN §56).
+
+    Why this exists: finalize stages everything in
+    `TemporaryDirectory(prefix="voyage-final-", dir=run_dir)` — a SIGKILL
+    leaves `run/voyage-final-*` forever and the next finalize would
+    accumulate another one. Best-effort and narrow: only directories whose
+    name starts with the exact prefix are removed (never files, never
+    symlinks, never anything else); any error is swallowed and the dir is
+    left for the operator. Returns the number of removed directories.
+    """
+    removed = 0
+    try:
+        children = sorted(run_dir.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        try:
+            if not child.name.startswith(FINALIZE_TMPDIR_PREFIX):
+                continue
+            if not child.is_dir() or child.is_symlink():
+                continue
+            shutil.rmtree(child)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -948,7 +988,11 @@ def finalize_run(
             lift = f"minterpolate=fps={out_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,"
     final_stages["triage"] = time.monotonic() - triage_start
 
-    with tempfile.TemporaryDirectory(prefix="voyage-final-", dir=run_dir) as tmp:
+    # SIGKILL orphans the staging dir (never covered by the orphan scan),
+    # so prune stale siblings before creating the new tmpdir — best-effort,
+    # never fails finalize when the run dir is unreadable.
+    prune_stale_finalize_tmpdirs(run_dir)
+    with tempfile.TemporaryDirectory(prefix=FINALIZE_TMPDIR_PREFIX, dir=run_dir) as tmp:
         tmpdir = Path(tmp)
         # Single-pass shape (issues 050): no intermediate per-segment
         # libx264 parts — the concat demuxer feeds one vf encode over the

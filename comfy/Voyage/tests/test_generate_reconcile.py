@@ -173,7 +173,9 @@ def test_generate_removes_extra_segments_then_resumes(
     monkeypatch.setattr("voyage.cli_finalize.cmd_finalize", lambda ns: 0)
     monkeypatch.setattr(gen_ops, "validate_run", lambda run_dir: [])
     assert gen_ops.cmd_generate(_generate_namespace("messy")) == 0
-    assert not (run_dir / "segments" / "000002").exists()
+    # DONE-bearing dirs survive reconcile: the locked commit adopts or
+    # refuses them (deleting them here would discard committable work).
+    assert (run_dir / "segments" / "000002").exists()
     assert calls["segments"] == 1
 
 

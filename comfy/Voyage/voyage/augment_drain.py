@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,3 +187,146 @@ def drain_interpolated_plan(
         intermediate_mp4=intermediate,
         chunks_drained=len(chunk_mp4s),
     )
+
+
+_PLAN_HASH_LENGTH = 16
+"""Expected plan-dir name length (mirrors `plan_hash_for`, 16 hex chars)."""
+
+_PLAN_HASH_DIGITS = frozenset("0123456789abcdef")
+"""Lowercase hexadecimal alphabet for plan-dir name recognition."""
+
+_SECONDS_PER_DAY = 86400.0
+"""Grace-period unit (parameter is days, comparison is seconds)."""
+
+
+def _is_plan_hash_name(name: str) -> bool:
+    """Whether a dir name looks like a sidecar plan hash (16 lowercase hex)."""
+    return len(name) == _PLAN_HASH_LENGTH and all(
+        character in _PLAN_HASH_DIGITS for character in name
+    )
+
+
+def _newest_modification_time(plan_dir: Path) -> float | None:
+    """Newest modification time under a plan dir (None when unreadable/empty).
+
+    Why recursive: creating PNGs inside `interpolated_00/` bumps that
+    subdir, not the parent plan dir — the parent mtime alone would call
+    an actively-written plan old. Best-effort: any unreadable entry is
+    skipped, never fail-loud (GC must never break finalize).
+    """
+    newest: float | None = None
+    try:
+        candidates = [plan_dir, *plan_dir.rglob("*")]
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            stamp = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or stamp > newest:
+            newest = stamp
+    return newest
+
+
+def prune_orphan_plan_dirs(
+    run_dir: Path,
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    crf: int,
+    preset: str,
+    grace_days: float = 7.0,
+    now_seconds: float | None = None,
+) -> int:
+    """Delete stale unreferenced sidecar plan dirs (DESIGN §§56-57, orphan GC).
+
+    Why this exists: any settings/weights/segment re-render forks
+    `<plan-hash>/` via `plan_dir_for_segment` (old hash never reused),
+    so `run/augment/` accumulates orphans with no eviction. Live dirs are
+    recomputed from the current committed segments (`plan_dir_for_segment`
+    per source plus `seam_plan_dir` per adjacent pair, same derivation as
+    the pollers/drain) and always kept; `morph_joints` is kept wholesale
+    (record.json ledger, not sidecar — different GC). Only 16-hex plan
+    dirs older than `grace_days` (default 7, by newest modification time
+    under the dir) are deleted; anything live, young, non-hash-named, or
+    unreadable is kept. Returns the pruned count. NOT wired into finalize
+    (explicit later decision) — callers invoke it deliberately.
+
+    Stdlib-only like the rest of this module (supervisor §12 GPU ban):
+    segment sources and plan derivations import locally to avoid cycles.
+    """
+    from voyage.augment_seam import seam_plan_dir
+    from voyage.augment_sidecar import AUGMENT_DIRNAME, plan_dir_for_segment
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    if not isinstance(run_dir, Path):
+        raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
+    if isinstance(grace_days, bool) or not isinstance(grace_days, (int, float)):
+        raise TypeError(f"grace_days must be a number (got {type(grace_days).__name__})")
+    if not math.isfinite(float(grace_days)) or float(grace_days) < 0:
+        raise ValueError(f"grace_days must be finite and >= 0 (got {grace_days!r})")
+    if now_seconds is not None and (
+        isinstance(now_seconds, bool)
+        or not isinstance(now_seconds, (int, float))
+        or not math.isfinite(float(now_seconds))
+    ):
+        raise ValueError(f"now_seconds must be finite or None (got {now_seconds!r})")
+    current_time = float(now_seconds) if now_seconds is not None else time.time()
+    cutoff_time = current_time - float(grace_days) * _SECONDS_PER_DAY
+    augment_root = run_dir / AUGMENT_DIRNAME
+    if not augment_root.is_dir():
+        return 0
+    sources, _skipped = committed_segment_sources(run_dir)
+    live_dirs: set[Path] = set()
+    for source in sources:
+        live_dirs.add(
+            plan_dir_for_segment(
+                run_dir,
+                source_key=source.source_key,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=out_fps,
+                upscale_factor=upscale_factor,
+                crf=crf,
+                preset=preset,
+            )
+        )
+    for first, second in zip(sources, sources[1:], strict=False):
+        live_dirs.add(
+            seam_plan_dir(
+                run_dir,
+                key_a=first.source_key,
+                key_b=second.source_key,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=out_fps,
+                upscale_factor=upscale_factor,
+                crf=crf,
+                preset=preset,
+            )
+        )
+    pruned = 0
+    for child in sorted(augment_root.iterdir()):
+        if not child.is_dir() or child.is_symlink():
+            continue
+        if child.name == "morph_joints":
+            continue
+        if child in live_dirs:
+            continue
+        if not _is_plan_hash_name(child.name):
+            continue
+        newest = _newest_modification_time(child)
+        if newest is None or newest > cutoff_time:
+            continue
+        try:
+            shutil.rmtree(child)
+        except OSError:
+            continue
+        pruned += 1
+    return pruned

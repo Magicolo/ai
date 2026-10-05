@@ -30,13 +30,22 @@ from voyage.supervisor import Supervisor
 
 
 def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
-    """Delete segment folders at/after the committed count + transient partials.
+    """Delete DONE-less segment folders at/after the committed count + transients.
 
-    `state.json` rules: folders beyond it are incomplete/corrupt work by
-    definition (e.g. a crash between DONE and the state advance). Only
-    six-digit numeric segment dirs are touched, plus `*.partial`/`*.tmp*`
-    transients; everything else is left for `validate_run` to report.
-    Returns the number of removed entries.
+    `state.json` rules with a crash-window exception (DESIGN §58, issue 013):
+    folders beyond the committed count are uncommitted work by definition —
+    EXCEPT a folder already carrying a DONE marker. DONE is written
+    atomically before the state advance, so a DONE-bearing dir is a
+    crash-window orphan the locked commit must adopt (checksum-verify) or
+    refuse loudly via `Supervisor._adopt_unaccounted_segment` — deleting it
+    here would silently destroy the first render and its provenance. Such
+    dirs are skipped (not counted). Only DONE-less numeric segment dirs are
+    removed, plus `*.partial`/`*.tmp*` transients; everything else is left
+    for `validate_run` to report. Returns the number of removed entries.
+
+    Why existence, not size: DONE is empty-by-design (`b""` in
+    `_commit_segment`), so the adoptable signal is the file's presence,
+    not a non-zero size.
     """
     from voyage import paths
 
@@ -46,6 +55,8 @@ def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
         for child in sorted(segments_dir.iterdir()):
             if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= committed:
                 if child.is_dir() and not child.is_symlink():
+                    if (child / paths.DONE_MARKER).exists():
+                        continue
                     shutil.rmtree(child)
                     removed += 1
                 elif child.is_file():

@@ -32,6 +32,7 @@ from voyage.augment_sidecar import (
     missing_chunk_indexes,
     plan_dir_for_segment,
     prune_stale_partials,
+    stage_indexes_matching,
 )
 from voyage.errors import MediaError
 from voyage.segment_manifest import load_segment_manifest
@@ -200,6 +201,7 @@ def upscale_poll_once(
     decode_fn: Callable[[Path, Path, int, int], list[Path]] | None = None,
     upscale_fn: Callable[..., list[Path]] | None = None,
     on_chunk: Callable[[str, int, int], None] | None = None,
+    on_chunk_frames: Callable[[str, int], None] | None = None,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -210,7 +212,9 @@ def upscale_poll_once(
     re-runs only the missing chunks). `on_chunk`, when given, fires
     after each rendered chunk with `(segment_id, chunk_index,
     chunk_count)` — the finalize model-pass bar advances on it (main
-    thread only; the background pre-warm passes None).
+    thread only; the background pre-warm passes None). `on_chunk_frames`,
+    when given, fires alongside with `(segment_id, source_frames)` so
+    progress bars can count frames instead of chunks.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -239,17 +243,29 @@ def upscale_poll_once(
         windows = list(chunk_windows(source.total_frames, chunk_frames))
         indexes = list(range(len(windows)))
         ledger_missing = missing_chunk_indexes(records, indexes, stage=UPSCALE_STAGE)
-        ledger_missing_set = set(ledger_missing)
+        # Exact-window guard (see interp poller): a re-tiled plan dir
+        # must re-render, never skip wrong outputs.
+        ledger_done = set(
+            stage_indexes_matching(
+                records,
+                windows,
+                stage=UPSCALE_STAGE,
+                chunk_frames=chunk_frames,
+            )
+        )
+        ledger_missing_set = set(ledger_missing) | (set(indexes) - ledger_done)
         # Ledger-truth plus output-truth: a ledgered chunk whose output
         # is gone or short (deletion, corruption, crash after prune)
         # rejoins the missing set instead of deadlocking the skip.
-        missing = list(ledger_missing)
+        missing = sorted(ledger_missing_set)
+        missing_set = set(missing)
         for index in indexes:
-            if index in ledger_missing_set:
+            if index in missing_set:
                 continue
             _start, count = windows[index]
             if not chunk_output_complete(_chunk_output_dir(plan_dir, index), count):
                 missing.append(index)
+                missing_set.add(index)
         missing.sort()
         chunks_skipped += len(indexes) - len(missing)
         for index in missing:
@@ -308,6 +324,7 @@ def upscale_poll_once(
                 out_width=out_width,
                 out_height=out_height,
                 out_fps=out_fps,
+                chunk_frames=chunk_frames,
             )
             relative = os.path.relpath(output_dir, run_dir).replace(os.sep, "/")
             append_chunk_record(ledger_path, key, stage=UPSCALE_STAGE, path=relative)

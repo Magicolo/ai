@@ -159,13 +159,16 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
     return errors, frames
 
 
-_ORPHAN_PATTERNS = ("*.partial", "*.tmp.npy", "*.tmp*")
+_ORPHAN_PATTERNS = ("*.partial", "*.partial.*", "*.tmp.npy", "*.tmp*")
 """Transient-file globs for the validate orphan scan (issue 058).
 
-`*.partial` covers atomic-write staging; `*.tmp*` (which subsumes the
-explicit `*.tmp.npy`) covers concept-vector temps
-(`concept_vectors.npy.<pid>.tmp.npy`) and any future pid-suffixed
-staging. Legit artifacts never use these suffixes.
+`*.partial` covers atomic-write staging (`state.json.*.partial`,
+`record.json.partial`); `*.partial.*` covers suffixed temps that keep
+their real extension for format inference (SFX `<name>.partial.wav`,
+drain `<name>.partial.mp4` — same convention as `prune_stale_partials`);
+`*.tmp*` (which subsumes the explicit `*.tmp.npy`) covers
+concept-vector temps (`concept_vectors.npy.<pid>.tmp.npy`) and any future
+pid-suffixed staging. Legit artifacts never use these suffixes.
 """
 
 
@@ -178,6 +181,78 @@ def _collect_transient_orphans(root: Path, base: Path) -> list[str]:
                 if candidate.is_file():
                     found.add(str(candidate.relative_to(base)))
     return sorted(found)
+
+
+def _collect_final_tmpdirs(run_dir: Path) -> list[str]:
+    """Sorted run-relative `voyage-final-*` leftovers (crashed finalize staging).
+
+    Why a separate helper: `TemporaryDirectory(prefix="voyage-final-",
+    dir=run_dir)` cleans up on success, but a kill/crash strands the dir —
+    it holds chunk intermediates, never final artifacts, so flagging it as
+    an orphan is read-only hygiene (validate never deletes). Only direct
+    children match (the staging call always uses `dir=run_dir`).
+    """
+    found: list[str] = []
+    for candidate in sorted(run_dir.glob("voyage-final-*")):
+        if candidate.is_dir():
+            found.append(str(candidate.relative_to(run_dir)))
+    return found
+
+
+def _check_sidecar_plan_consistency(run_dir: Path) -> list[str]:
+    """Read-only ledger-vs-output notice for durable augment plan dirs.
+
+    Why read-only: a ledgered stage whose PNG dir is gone or short means
+    the next poller pass will heal it (ledger-truth + output-truth rejoin)
+    — finalize has not run yet, so validate reports instead of healing.
+    Skips `morph_joints` (record.json ledger, not sidecar) and plan dirs
+    with no ledger (empty/forked dirs are GC's concern, not corruption).
+    Torn ledger tails are already skipped by the sidecar loader.
+    """
+    from voyage import augment_sidecar as sidecar
+
+    errors: list[str] = []
+    augment_root = run_dir / sidecar.AUGMENT_DIRNAME
+    if not augment_root.is_dir():
+        return []
+    for plan_dir in sorted(augment_root.iterdir()):
+        if not plan_dir.is_dir():
+            continue
+        if plan_dir.name == "morph_joints":
+            continue
+        ledger = plan_dir / sidecar.CHUNKS_LEDGER_FILENAME
+        if not ledger.is_file():
+            continue
+        records = sidecar.load_chunk_ledger(ledger)
+        latest: dict[tuple[int, str], dict[str, object]] = {}
+        for record in records:
+            stage = record.get("stage")
+            index = record.get("chunk_index")
+            if stage not in (sidecar.STAGE_UPSCALED, sidecar.STAGE_INTERPOLATED):
+                continue
+            if isinstance(index, bool) or not isinstance(index, int):
+                continue
+            latest[(index, str(stage))] = record
+        for (index, stage), record in sorted(latest.items()):
+            expected = record.get("expected_frames")
+            if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
+                continue
+            png_dir = plan_dir / f"{stage}_{index:02d}"
+            try:
+                found = sorted(png_dir.glob("frame_*.png")) if png_dir.is_dir() else []
+                complete = len(found) == expected and all(
+                    frame.is_file() and frame.stat().st_size > 0 for frame in found
+                )
+            except OSError:
+                complete = False
+                found = []
+            if not complete:
+                errors.append(
+                    f"augment plan {plan_dir.name} chunk {index} stage {stage} "
+                    f"ledgered but output missing or short "
+                    f"(expected {expected}, found {len(found)})"
+                )
+    return errors
 
 
 def validate_run(run_dir: Path) -> list[str]:
@@ -228,6 +303,8 @@ def validate_run(run_dir: Path) -> list[str]:
     orphans = _collect_transient_orphans(segments_root, segments_root)
     orphans.extend(_collect_transient_orphans(run_dir / "novelty", run_dir))
     orphans.extend(_collect_transient_orphans(run_dir / "audio", run_dir))
+    orphans.extend(_collect_transient_orphans(run_dir / "augment", run_dir))
+    orphans.extend(_collect_final_tmpdirs(run_dir))
     orphans.extend(
         sorted(
             str(path.relative_to(run_dir)) for path in run_dir.glob("*.partial") if path.is_file()
@@ -236,6 +313,7 @@ def validate_run(run_dir: Path) -> list[str]:
     orphans = sorted(set(orphans))
     if orphans:
         errors.append(f"orphan transient files: {orphans}")
+    errors.extend(_check_sidecar_plan_consistency(run_dir))
     novelty_dir = run_dir / "novelty"
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))

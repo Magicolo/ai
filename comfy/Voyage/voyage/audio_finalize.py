@@ -10,6 +10,12 @@ Ledger contract mirrors `audio/planner.py` (`flush+fsync+fsync_dir`,
 issue 101): a take is appended only after its file renders, so a
 failed render raises `MediaError` with nothing appended.
 
+Resume hardening (DESIGN §140, SFX + sidecar twins): the ledger alone never
+satisfies a `keep` (output-truth — the take file must exist and be
+non-empty); a crash between render and append leaves an adoptable orphan
+file (probe-matched, loudly logged); stale continuation sources prune at
+entry; `planner.load_takes` skips only the torn tail line.
+
 Continuity preservation (same module, second job): the commit path holds
 no audio worker whose rebuild derived `video_tail.mp4` as a side effect,
 so `derive_conditioning_tail` derives it at commit instead — otherwise
@@ -20,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -66,6 +73,13 @@ _BEATS_PER_SEGMENT = 4
 #: listener hears is a same-material continuation, not a crossfade between
 #: two different generations.
 _CHAIN_OVERLAP_SECONDS = 6.0
+
+#: Max |probed - planned| seconds for adopting a ledger-less take file
+#: (DESIGN §140 resume hardening, SFX `SFX_ORPHAN_ADOPT_TOLERANCE` twin).
+#: A crash between render and `append_take` leaves a valid file with no
+#: ledger line — adopt when its probed duration matches the plan this
+#: closely; anything further off re-renders instead.
+_ORPHAN_ADOPT_TOLERANCE_SECONDS = 0.05
 
 
 def deferred_tail_frames(
@@ -132,6 +146,65 @@ def _take_path(audio_dir: Path, run_dir: Path, take_id: str) -> tuple[Path, str]
     """Take file location + run-relative stored form (issue 016)."""
     take_file = audio_dir / f"{take_id}.wav"
     return take_file, take_file.relative_to(run_dir).as_posix()
+
+
+def _take_output_complete(run_dir: Path, take: AudioTake) -> bool:
+    """Whether a ledgered take's audio file exists and is non-empty.
+
+    Output-truth companion to the ledger (DESIGN §140 resume hardening,
+    sidecar `chunk_output_complete` + SFX `_stem_cache_hit` twins): the
+    ledger alone never satisfies a `keep` — only a present file with
+    non-zero bytes counts. A crash, cleanup, or disk corruption can remove
+    output after its record was appended; anything incomplete re-renders
+    instead of stranding the finalize mix on a missing file.
+    """
+    try:
+        take_file: Path = take.resolved_path(run_dir)
+        return take_file.is_file() and take_file.stat().st_size > 0
+    except (OSError, MediaError):
+        return False
+
+
+def _prune_stale_continuation_sources(audio_dir: Path) -> int:
+    """Remove crashed-render continuation sources (best-effort).
+
+    Continuation sources live in `audio/` and are unlinked best-effort only
+    on success — a kill between source build and cleanup orphans them.
+    Prune at ensure entry so a stale source is never mistaken for a take
+    and disk does not leak across retries. Returns the pruned count.
+    Mirrors SFX `_prune_stale_partials` (DESIGN §140 resume hardening).
+    """
+    pruned_count: int = 0
+    if audio_dir.is_dir():
+        for source_file in sorted(audio_dir.glob("*_src*.wav")):
+            with contextlib.suppress(OSError):
+                source_file.unlink()
+                pruned_count += 1
+    return pruned_count
+
+
+def _orphan_take_matches_plan(take_file: Path, planned_duration: float) -> bool:
+    """Whether an existing take file matches the planned take (orphan adoption).
+
+    Probe-based identity (DESIGN §140 resume hardening, SFX orphan-adoption
+    twin): a crash between render and `append_take` leaves a valid file with
+    no ledger line — adopt when its probed duration matches the plan within
+    `_ORPHAN_ADOPT_TOLERANCE_SECONDS`, else re-render. Unprobable/empty
+    files never match (they render through the normal path); adoption never
+    fails finalize.
+    """
+    if not take_file.is_file():
+        return False
+    try:
+        if take_file.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    try:
+        probed_duration: float = probed_take_seconds(take_file)
+    except (OSError, ValueError, MediaError):
+        return False
+    return abs(probed_duration - planned_duration) <= _ORPHAN_ADOPT_TOLERANCE_SECONDS
 
 
 def _build_continuation_src(
@@ -339,7 +412,9 @@ def deferred_render_pending(
     (re-finalize). `sample_rate`/`channels` ride the shared sizing dict
     but never affect coverage (format, not timeline). Reads the same
     replay rows as `ensure_deferred_takes`, so the gate and the render
-    can never disagree on video time or captions.
+    can never disagree on video time or captions. A `keep` verdict still
+    requires output-truth (the take file exists and is non-empty) — a
+    ledger-hit-but-file-deleted timeline re-renders instead of nooping.
     """
     takes = _load_existing_takes(run_dir)
     replay = _replay_segments(usable, source_fps, stretch, music_style, explicit_caption)
@@ -355,6 +430,9 @@ def deferred_render_pending(
             seed = audio_seed(run_seed, number, len(takes))
             plan = planner.plan(start, caption, seed, number)
             if plan.action == "keep":
+                keeping_take: AudioTake | None = plan.current
+                if keeping_take is not None and not _take_output_complete(run_dir, keeping_take):
+                    return True
                 break
             return True
     return False
@@ -392,10 +470,17 @@ def ensure_deferred_takes(
     music caption of the segment where its coverage begins (repaints keep
     the current segment's caption — the new caption is their purpose).
     Chained takes overlap the previous take by `chain_overlap_seconds`
-    and render as ACE repaints continuing its tail (not restarts).
+    and render as ACE repaints continuing its tail (not restarts). Resume
+    hardening (DESIGN §140): a `keep` still requires output-truth (the take
+    file exists and is non-empty — a ledger-hit-but-file-deleted timeline
+    re-renders the missing file instead of nooping); a planned take whose
+    file already matches the plan is adopted without rendering (crash
+    between render and `append_take`); stale continuation sources are
+    pruned at entry.
     """
     audio_dir = run_dir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    _prune_stale_continuation_sources(audio_dir)
     ledger = audio_dir / TAKES_FILENAME
     takes: list[AudioTake] = _load_existing_takes(run_dir)
     rendered: list[dict[str, Any]] = []
@@ -418,6 +503,38 @@ def ensure_deferred_takes(
                 seed = audio_seed(run_seed, number, len(takes))
                 plan = planner.plan(start, caption, seed, number)
                 if plan.action == "keep":
+                    keeping_take: AudioTake | None = plan.current
+                    if keeping_take is not None and not _take_output_complete(
+                        run_dir, keeping_take
+                    ):
+                        missing_file: Path = keeping_take.resolved_path(run_dir)
+                        rerender_payload: dict[str, Any] = {
+                            "segment_id": segment.name,
+                            "style": keeping_take.caption,
+                            "energy": energy,
+                            "seed": keeping_take.seed,
+                            "output_path": str(missing_file),
+                            "sample_rate": sample_rate,
+                            "channels": channels,
+                            "duration_seconds": keeping_take.duration,
+                            "bpm": keeping_take.bpm
+                            if keeping_take.bpm is not None
+                            else float(take_bpm),
+                        }
+                        try:
+                            render_take_fn(rerender_payload, missing_file)
+                        except Exception as exc:
+                            raise MediaError(
+                                f"deferred take {keeping_take.take_id} re-render failed: {exc}"
+                            ) from exc
+                        if not _take_output_complete(run_dir, keeping_take):
+                            raise MediaError(
+                                f"deferred take {keeping_take.take_id} re-render "
+                                "produced empty output"
+                            )
+                        rendered.append(keeping_take.to_dict())
+                        if tracker is not None:
+                            tracker.update()
                     break
                 take = plan.take
                 if take is None:
@@ -430,6 +547,21 @@ def ensure_deferred_takes(
                     )
                 take.bpm = float(take_bpm)
                 take_file, stored = _take_path(audio_dir, run_dir, take.take_id)
+                if _orphan_take_matches_plan(take_file, take.duration):
+                    take.path = stored
+                    planner.record(take)
+                    takes.append(take)
+                    append_take(ledger, take)
+                    rendered.append(take.to_dict())
+                    sys.stderr.write(
+                        f"deferred orphan adopted: {take.take_id} "
+                        "(no ledger line, take file matches plan)\n"
+                    )
+                    if tracker is not None:
+                        tracker.update()
+                    if planner.coverage_until() >= end - 1e-6:
+                        break
+                    continue
                 payload: dict[str, Any] = {
                     "segment_id": segment.name,
                     "style": take.caption,

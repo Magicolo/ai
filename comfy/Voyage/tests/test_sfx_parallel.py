@@ -108,7 +108,14 @@ def test_cache_hit_requires_conditioning_source() -> None:
     assert _stem_cache_hit(legacy, _window(), "small_44k", SFX_CONDITIONING_PROXY) is False
 
 
-def test_proxy_group_validates_against_its_own_timeline(tmp_path: Path) -> None:
+def test_proxy_short_bed_reports_healable_shortfall(tmp_path: Path) -> None:
+    # Kaolin fix (DESIGN §140): `conditioning_timeline` is provenance, not
+    # identity — the coverage union is per source and the shortfall target
+    # is the passed source timeline. An 8s bed against a 12s timeline is
+    # genuinely short, and the generate gate already filters exactly this
+    # line (`is_healable_sfx_shortfall`) so finalization still proceeds.
+    from voyage.sfx_finalize import is_healable_sfx_shortfall
+
     run_dir = tmp_path / "run"
     ledger = run_dir / "audio" / "sfx" / "sfx.jsonl"
     append_sfx_window(
@@ -120,9 +127,9 @@ def test_proxy_group_validates_against_its_own_timeline(tmp_path: Path) -> None:
         conditioning_timeline=8.0,
     )
     (run_dir / "audio" / "sfx" / "w0000.wav").write_bytes(b"RIFF" + b"\0" * 100)
-    # The proxy group tiles its source timeline: validating a longer
-    # shipped timeline must not false-positive a shortfall on it.
-    assert validate_sfx_ledger(run_dir, 12.0) == []
+    errors = validate_sfx_ledger(run_dir, 12.0)
+    assert len(errors) == 1
+    assert is_healable_sfx_shortfall(errors[0])
 
 
 def test_proxy_and_shipped_records_coexist(tmp_path: Path) -> None:

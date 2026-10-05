@@ -20,8 +20,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from voyage import augment_morph
 from voyage.augment_finalize import run_durable_model_pass
 
@@ -178,16 +176,20 @@ def test_render_morph_once_writes_four_bridges_and_ledger(tmp_path: Path) -> Non
         device="cpu",
     )
     assert again.frames == result.frames
-    with pytest.raises(ValueError, match="ledger has"):
-        augment_morph.render_morph_once(
-            joint_dir=joint_dir,
-            a_anchor=anchor_a,
-            b_anchor=anchor_b,
-            source_key=key + "x",
-            interp_fn=_stub_interp,
-            weights=None,
-            device="cpu",
-        )
+    # Key clash auto-heals last-wins (seam/morph resume hardening): a new key
+    # drops the stale bridges and re-renders instead of raising.
+    healed = augment_morph.render_morph_once(
+        joint_dir=joint_dir,
+        a_anchor=anchor_a,
+        b_anchor=anchor_b,
+        source_key=key + "x",
+        interp_fn=_stub_interp,
+        weights=None,
+        device="cpu",
+    )
+    assert len(healed.frames) == 4
+    record = json.loads((joint_dir / "record.json").read_text(encoding="utf-8"))
+    assert record["source_key"] == key + "x"
 
 
 def test_assemble_morphed_timeline_real_ffmpeg(tmp_path: Path) -> None:

@@ -80,6 +80,27 @@ def test_ledger_round_trip_and_validate(tmp_path: Path) -> None:
     assert validate_sfx_ledger(tmp_path, 8.0) == []
 
 
+def test_ledger_skips_torn_trailing_line(tmp_path: Path) -> None:
+    """A crash mid-append leaves a torn tail — the loader skips it, never raises.
+
+    Mirrors the sidecar `load_chunk_ledger` contract: the interrupted window
+    simply has no record and is re-rendered on the next pass.
+    """
+    from voyage.sfx_finalize import append_sfx_window
+
+    ledger = tmp_path / "audio" / "sfx" / "sfx.jsonl"
+    append_sfx_window(
+        ledger,
+        SfxWindow("w0000", 0.0, 8.0, "rain", 7),
+        path="audio/sfx/w0000.wav",
+        model_size="small_44k",
+    )
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write('{"window_id": "w0001", "torn tail without close')
+    records = load_sfx_ledger(ledger)
+    assert [record["window_id"] for record in records] == ["w0000"]
+
+
 def test_validate_missing_ledger_is_clean_for_old_runs(tmp_path: Path) -> None:
     assert validate_sfx_ledger(tmp_path, 10.0) == []
 

@@ -316,16 +316,35 @@ class AudioPlanner:
 
 
 def load_takes(ledger: Path) -> list[AudioTake]:
-    """Read the persisted takes ledger (missing file → empty)."""
+    """Read the persisted takes ledger (missing file → empty).
+
+    Torn-tail tolerance (DESIGN §140 resume hardening, sidecar
+    `load_chunk_ledger` twin): a kill mid-append leaves a truncated last
+    line with no newline — skip only that tail line, then re-render on the
+    next ensure. Any other JSON failure (middle line, structurally invalid
+    object) fails loud via the original error or `StateError`, and
+    `AudioTake.from_dict` validation still rejects corrupt geometry.
+    """
     import json
 
     if not ledger.exists():
         return []
-    takes = []
-    for line in ledger.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            takes.append(AudioTake.from_dict(json.loads(line)))
+    stripped_lines: list[str] = [
+        line.strip() for line in ledger.read_text(encoding="utf-8").splitlines()
+    ]
+    non_empty_lines: list[str] = [line for line in stripped_lines if line]
+    takes: list[AudioTake] = []
+    for position, line in enumerate(non_empty_lines):
+        is_last_line: bool = position == len(non_empty_lines) - 1
+        try:
+            parsed_line: Any = json.loads(line)
+        except ValueError:
+            if is_last_line:
+                continue
+            raise
+        if not isinstance(parsed_line, dict):
+            raise StateError(f"corrupt audio take record (not an object): {line!r}")
+        takes.append(AudioTake.from_dict(parsed_line))
     return takes
 
 
