@@ -51,15 +51,20 @@ machine-readable JSON only, no prose, no markdown fences.
 Caption doctrine: every decision carries three caption families, all
 derived from the style charter + the evolving general prompt
 (current world → destination) — (1) video stages with concrete visual
-detail (motion, scenes, objects, characters, shots, angles), (2) a
-music caption in musical terms (instruments, harmony, melody, texture),
-always with a dark experimental touch (minor and modal harmony, deep
-sub-bass pressure, sparse dissonant accents, shadowed cinematic
-texture) worked into the charter's mood rather than replacing it,
-(3) an sfx_caption with concrete sound descriptions (objects,
-environments, creatures, materials in action). All three families must
-evolve gradually as the general prompt drifts: continue from the
-previous captions with a slow drift, never jump or restart.\
+detail (motion, scenes, objects, characters, shots, angles), rendered
+ultra high definition, hyper detailed, sharp and crisp, with simple
+refined compositions; every stage describes one strong continuous
+camera move (slow push-in, lateral drift, orbit, crane rise, pan) in a
+single unbroken shot, phrased concretely for LTX-25 (physical motion,
+no cuts, no scene change), (2) a music caption in musical terms
+(instruments, harmony, melody, texture), always with a dark experimental touch
+(minor and modal harmony, deep sub-bass pressure, sparse dissonant accents,
+shadowed cinematic texture) over an ambient slow core (morphing pads, held chords,
+vast powerful drones, weird slow-evolving textures) worked into the charter's mood rather than
+replacing it, (3) an sfx_caption with concrete sound descriptions
+(objects, environments, creatures, materials in action). All three
+families must evolve gradually as the general prompt drifts: continue
+from the previous captions with a slow drift, never jump or restart.\
 """
 
 
@@ -141,9 +146,13 @@ def build_director_user_message(
         "transition_strength, estimated_duration_seconds, "
         "intermediate_stages, major_transition}, video {stages: "
         "[3-5 short scene descriptions with concrete visual detail "
-        "(motion, scenes, objects, characters, shots, angles), ordered "
-        "from current world to destination]}, audio {music_caption "
-        "(musical terms: instruments, harmony, melody, texture), energy "
+        "(motion, scenes, objects, characters, shots, angles), each "
+        "with one concrete continuous camera move, ultra high "
+        "definition, hyper detailed, sharp, simple refined "
+        "composition, ordered from current world to destination]}, "
+        "audio {music_caption (musical terms: instruments, harmony, "
+        "melody, texture; ambient, slow, morphing pads and held "
+        "chords, vast and dark), energy "
         "0-1, tempo_bpm, texture, environment, sfx_caption (concrete "
         "sound descriptions: objects, environments, creatures, materials "
         "in action)}, novelty {why_new, distinguishes_from}. "
@@ -209,10 +218,10 @@ def deterministic_decision(
         ),
         audio=DirectorAudioPlan(
             music_caption=(
-                f"dark experimental electronic composition for {concept}: "
-                f"low detuned drones and minor-key pads in {charter}, "
-                "sparse dissonant bell melody, deep sub-bass pressure, "
-                "slow shadowed harmonic drift"
+                f"dark experimental ambient composition for {concept}: "
+                f"slow morphing pads and held chords in {charter}, "
+                "vast powerful drones, weird slow-evolving textures, "
+                "deep sub-bass pressure, sparse dissonant accents"
             ),
             sfx_caption=(
                 f"quiet concrete sounds of {concept}: soft air movement, "

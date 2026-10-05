@@ -11,11 +11,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-#: Default music steering (§35): atonal experimental music in Messiaen modes
-#: with post-romantic harmony and dark progressive psychedelic fusion rock jazz.
+#: Default music steering (§35): ambient dark experimental music — slow
+#: morphing pads and held chords, vast powerful drones, weird textures.
 DEFAULT_MUSIC_STYLE = (
-    "atonal experimental music in Messiaen modes, "
-    "post-romantic harmony, dark progressive psychedelic fusion rock jazz"
+    "ambient dark experimental music, slow morphing pads and held chords, "
+    "vast powerful drones, weird slow-evolving textures, deep sub-bass"
 )
 
 LifecycleStatus = Literal[

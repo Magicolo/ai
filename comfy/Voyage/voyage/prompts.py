@@ -135,8 +135,9 @@ def motion_constraints(style: StyleSpec, middle: str = "") -> str:
     else:
         pace = "moderate"
     return (
-        f"{pace} continuous camera movement, gentle organic motion, "
-        "no abrupt cuts, no scene change within the shot"
+        f"{pace} continuous camera movement, strong fluid motion throughout, "
+        "ultra high definition, hyper detailed, sharp crisp image, simple "
+        "refined composition, no abrupt cuts, no scene change within the shot"
     )
 
 

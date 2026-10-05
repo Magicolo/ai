@@ -31,6 +31,8 @@ def test_enforce_style_injects_charter_and_motion() -> None:
     assert rendered.startswith("pastel neon line-art, peaceful")
     assert "a crystal reef" in rendered
     assert "no abrupt cuts" in rendered
+    assert "ultra high definition" in rendered
+    assert "strong fluid motion throughout" in rendered
 
 
 def test_motion_follows_general_prompt_not_just_charter() -> None:
