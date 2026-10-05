@@ -100,28 +100,19 @@ def _default_interp_pngs(
     long chunks instead of jumping once per chunk at the end.
     """
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_pair
+    from voyage.workers.augment_worker import interpolate_mids
 
     frames = load_png_frames_as_tensors(frame_paths)
     if len(frames) <= 1 or multiplier <= 1:
         return write_tensors_as_png_frames(frames, dest_dir)
     moments = [(position + 1) / multiplier for position in range(multiplier - 1)]
     pair_count = len(frames) - 1
+    mids = interpolate_mids(frames, weights_path, moments=moments, device=device, on_pair=on_pair)
+    step = len(moments)
     blended: list[object] = []
     for position in range(pair_count):
         blended.append(frames[position])
-        for moment in moments:
-            blended.append(
-                interpolate_pair(
-                    frames[position],
-                    frames[position + 1],
-                    weights_path,
-                    moment=moment,
-                    device=device,
-                )
-            )
-        if on_pair is not None:
-            on_pair(position, pair_count)
+        blended.extend(mids[position * step : (position + 1) * step])
     blended.append(frames[-1])
     return write_tensors_as_png_frames(blended, dest_dir)
 
