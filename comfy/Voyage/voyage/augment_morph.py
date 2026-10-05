@@ -54,7 +54,7 @@ MORPH_BRIDGE = 4
 """FILM bridge frames per joint (moments 1/5..4/5 between the anchors)."""
 
 MORPH_RECORD_FILENAME = "record.json"
-"""Ledger beside the bridge PNGs (source-keyed resume, clash fails loud)."""
+"""Ledger beside the bridge PNGs (source-keyed resume, clash auto-heals)."""
 
 MORPH_JOINT_TEMPLATE = "morph_{left:06d}_{right:06d}"
 """Joint dir per adjacent segment position (content-keyed record inside)."""
@@ -400,13 +400,10 @@ def _default_morph_pngs(
 ) -> list[Path]:
     """Render the 4 bridge PNGs via the resident FILM leg (lazy torch import)."""
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_pair
+    from voyage.workers.augment_worker import interpolate_mids
 
     frames = load_png_frames_as_tensors([a_anchor, b_anchor])
-    tensors = [
-        interpolate_pair(frames[0], frames[1], weights_path, moment=moment, device=device)
-        for moment in MORPH_MOMENTS
-    ]
+    tensors = interpolate_mids(frames, weights_path, moments=MORPH_MOMENTS, device=device)
     written = write_tensors_as_png_frames(tensors, joint_dir / "tensors")
     renamed = []
     for position, tensor_png in enumerate(written):
@@ -420,6 +417,92 @@ def _default_morph_pngs(
     return renamed
 
 
+MORPH_TRIM_RECORD_SUFFIX = ".json"
+"""Trim sidecar suffix: `seg_000000_trim` + `.json` beside the extensionless TS.
+
+Why a per-trim JSON (not a shared `chunks.jsonl`): trims are single-file
+TS pieces, not chunk PNG dirs — forcing the `ChunkKey` ledger shape would
+bury a one-file identity under chunk/window fields it never uses. A
+lightweight JSON beside each trim mirrors the joint `record.json` pattern
+(source-keyed, atomic partial+replace, fsynced) and keeps the trim dir
+human-inspectable (`seg_000000_trim` + `seg_000000_trim.json`).
+"""
+
+
+def morph_trim_key(
+    *,
+    video_sha: str,
+    start_frame: int,
+    end_frame: int,
+    width: int,
+    height: int,
+    fps_key: int,
+    crf: int,
+    preset: str,
+    pixel_format: str,
+) -> str:
+    """Content-addressed trim key (segment content + keep range + recipe, fork-proof).
+
+    Same-index/different-content reuses (re-rendered segment, retuned
+    recipe) must never serve a stale trim: the key binds the source video
+    checksum, the exact `[start, end)` keep, the probed geometry, and the
+    full encode recipe (fps, crf, preset, pixel format), so any of them
+    changing forks the key and forces a fresh `_trim_keep`.
+    """
+    return (
+        f"trim|{video_sha}|{start_frame}-{end_frame}|"
+        f"{width}x{height}@{fps_key}|crf{crf}|{preset}|{pixel_format}"
+    )
+
+
+def _trim_record_path(trim_path: Path) -> Path:
+    """Sidecar JSON path for one trim (same dir, trim name + `.json`)."""
+    return trim_path.parent / (trim_path.name + MORPH_TRIM_RECORD_SUFFIX)
+
+
+def _read_trim_record(record_path: Path) -> dict[str, object]:
+    """Best-effort trim record read (torn/missing/non-dict → empty, heal below).
+
+    Why lenient: a crash between trim write and record write leaves a
+    valid trim with no record, and a crash mid-record-write leaves a torn
+    JSON — both are healable by re-rendering, never fail-loud here.
+    """
+    try:
+        parsed = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _write_trim_record(record_path: Path, source_key: str, trim_frames: int) -> None:
+    """Atomically write one trim record (partial + replace + fsync, joint pattern)."""
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = record_path.with_name(f"{record_path.name}.partial")
+    partial.write_text(
+        json.dumps({"source_key": source_key, "trim_frames": trim_frames}, indent=1),
+        encoding="utf-8",
+    )
+    os.replace(partial, record_path)
+    fsync_dir(record_path.parent)
+
+
+def _drop_morph_outputs(joint_dir: Path) -> None:
+    """Remove stale bridge PNGs plus the ledger so a heal re-renders clean.
+
+    Why a helper: both heal paths (key clash, hit-but-short output) need
+    the same drop — bridges for the wrong pair must never survive beside
+    a fresh record, and anchor PNGs are deliberately kept (the caller
+    re-extracts them only on a key change; on a same-key heal they are
+    still valid inputs for the re-render).
+    """
+    for stale_bridge in sorted(joint_dir.glob("bridge_*.png")):
+        with contextlib.suppress(OSError):
+            if stale_bridge.is_file() or stale_bridge.is_symlink():
+                stale_bridge.unlink()
+    with contextlib.suppress(OSError):
+        (joint_dir / MORPH_RECORD_FILENAME).unlink()
+
+
 def render_morph_once(
     *,
     joint_dir: Path,
@@ -430,11 +513,19 @@ def render_morph_once(
     weights: Any = None,
     device: str = "cpu",
 ) -> MorphRender:
-    """Render one joint's 4 bridge PNGs (True work) or resume the ledger hit.
+    """Render one joint's 4 bridge PNGs (fresh work) or resume the ledger hit.
 
-    Ledger-truth resume: an exact-key record plus its 4 bridge PNGs on disk
-    is complete work and is never re-rendered; a key clash fails loud (stale
-    bridge must never morph the wrong pair).
+    Ledger-truth plus output-truth resume (DESIGN §§56-57, chunk-poller
+    parity): an exact-key record plus its 4 complete bridge PNGs on disk
+    is finished work and is never re-rendered. A ledger hit whose output
+    is gone, short, or empty — and a key clash from a re-rendered side —
+    drops the stale bridges plus the ledger and re-renders instead of
+    failing loud (last-wins: the fresh record overwrites the stale one,
+    so a wrong-pair bridge can never survive beside a new key). A torn
+    or unreadable ledger heals the same way — the interrupted joint has
+    no valid record and is simply redone. Never raises for a healable
+    mismatch; only genuine render failures (wrong bridge count, empty
+    output, missing FILM weights) fail loud.
     """
     if not isinstance(joint_dir, Path):
         raise TypeError(f"joint_dir must be a Path (got {type(joint_dir).__name__})")
@@ -444,20 +535,17 @@ def render_morph_once(
     if ledger_path.is_file():
         try:
             record = json.loads(ledger_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise MediaError(f"morph ledger unreadable in {joint_dir}: {exc}") from exc
-        if record.get("source_key") != source_key:
-            raise ValueError(
-                f"morph ledger has {record.get('source_key')!r} for {joint_dir.name} "
-                f"(expected {source_key!r}; clear the joint dir and retry)"
-            )
-        found = [path for path in expected if path.is_file() and path.stat().st_size > 0]
-        if len(found) == MORPH_BRIDGE and record.get("bridge_count") == MORPH_BRIDGE:
-            return MorphRender(frames=tuple(expected))
-        raise MediaError(
-            f"morph ledger hit but {joint_dir.name} holds {len(found)} bridge PNGs "
-            f"(ledger expects {MORPH_BRIDGE}; clear the joint dir and retry)"
-        )
+        except (OSError, ValueError):
+            record = {}
+        if not isinstance(record, dict):
+            record = {}
+        if record.get("source_key") == source_key:
+            found = [path for path in expected if path.is_file() and path.stat().st_size > 0]
+            if len(found) == MORPH_BRIDGE and record.get("bridge_count") == MORPH_BRIDGE:
+                return MorphRender(frames=tuple(expected))
+        # Auto-heal: key clash, hit-but-short output, or torn ledger —
+        # drop stale bridges plus the record and fall through to re-render.
+        _drop_morph_outputs(joint_dir)
     if interp_fn is None:
         if weights is None:
             raise ValueError("morph default render needs weights (FILM leg)")
@@ -500,10 +588,13 @@ def assemble_morphed_timeline(
 
     Per joint: anchors `A[-3]`/`B[+2]` morph into 4 bridge frames (ledgered
     under `joint_root/morph_II_JJ/`); trims keep `A[:-2]`/`B[2:]` (middle
-    segments lose both ends). Pieces join as
-    `[trim_0, bridge_0, trim_1, ...]` via `concat_fn` (default: stream-copy
-    concat). Frame total is unchanged, so audio needs no work. A lone
-    segment concats through untouched (no joints, no interp calls).
+    segments lose both ends), each trim keyed on its source content plus
+    keep range plus recipe (`morph_trim_key` beside the TS piece) so a
+    re-rendered segment or retuned recipe never reuses a stale trim.
+    Pieces join as `[trim_0, bridge_0, trim_1, ...]` via `concat_fn`
+    (default: stream-copy concat). Frame total is unchanged, so audio
+    needs no work. A lone segment concats through untouched (no joints,
+    no interp calls).
     """
     if not isinstance(segment_mp4s, list) or not segment_mp4s:
         raise ValueError(f"morph needs at least one segment mp4 (got {segment_mp4s!r})")
@@ -525,24 +616,62 @@ def assemble_morphed_timeline(
     trim_dir = joint_root / "trims"
     trim_dir.mkdir(parents=True, exist_ok=True)
     pieces: list[Path] = []
+    checksum_by_path: dict[str, str] = {}
+    dimensions_by_path: dict[str, tuple[int, int]] = {}
+
+    def _cached_checksum(video_path: Path) -> str:
+        cache_key = str(video_path)
+        if cache_key not in checksum_by_path:
+            checksum_by_path[cache_key] = _sha_file(video_path)
+        return checksum_by_path[cache_key]
+
+    def _cached_dimensions(video_path: Path) -> tuple[int, int]:
+        cache_key = str(video_path)
+        if cache_key not in dimensions_by_path:
+            dimensions_by_path[cache_key] = _probe_size(video_path)
+        return dimensions_by_path[cache_key]
+
     for index, (video, count) in enumerate(zip(segment_mp4s, counts, strict=True)):
         start = 0 if index == 0 else MORPH_DROP_B
         end = count if index == len(segment_mp4s) - 1 else count - MORPH_DROP_A
         if end - start <= 0:
             raise MediaError(f"morph trim of {video.name} keeps no frames ({count}f)")
         trim = trim_dir / (MORPH_TRIM_TEMPLATE.format(index=index))
-        if not (trim.exists() and trim.stat().st_size > 0):
+        trim_width, trim_height = _cached_dimensions(video)
+        trim_key = morph_trim_key(
+            video_sha=_cached_checksum(video),
+            start_frame=start,
+            end_frame=end,
+            width=trim_width,
+            height=trim_height,
+            fps_key=rate,
+            crf=crf,
+            preset=preset,
+            pixel_format=pix_fmt,
+        )
+        trim_record = _trim_record_path(trim)
+        stored_trim = _read_trim_record(trim_record)
+        if not (
+            trim.exists() and trim.stat().st_size > 0 and stored_trim.get("source_key") == trim_key
+        ):
+            # Stale or legacy trim (missing/torn/mismatched record) — drop
+            # the record first so a crash during `_trim_keep` leaves no
+            # record (next run heals by re-rendering), then re-encode and
+            # publish the fresh key.
+            with contextlib.suppress(OSError):
+                trim_record.unlink()
             _trim_keep(video, start, end, trim, rate, crf, preset, pix_fmt)
+            _write_trim_record(trim_record, trim_key, end - start)
         pieces.append(trim)
         if index < len(segment_mp4s) - 1:
             other = segment_mp4s[index + 1]
             other_count = counts[index + 1]
             anchor_a, anchor_b = morph_anchors(count, other_count)
             joint_dir = joint_root / MORPH_JOINT_TEMPLATE.format(left=index, right=index + 1)
-            width, height = _probe_size(video)
+            width, height = _cached_dimensions(video)
             key = morph_joint_key(
-                a_sha=_sha_file(video),
-                b_sha=_sha_file(other),
+                a_sha=_cached_checksum(video),
+                b_sha=_cached_checksum(other),
                 width=width,
                 height=height,
                 fps_key=rate,

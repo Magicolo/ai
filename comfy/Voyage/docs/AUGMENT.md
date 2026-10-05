@@ -104,20 +104,26 @@ them side by side and a 1-GPU box runs chunks serially on cuda:0.
 `--sfx-workers 2` shards `small_44k` across both GPUs instead (needs
 2 visible GPUs, fails fast otherwise).
 
-## FILM stand-in caveat and weight-port follow-up
+## FILM port and weight contract
 
-`voyage/workers/augment_worker.py:15-19` (spike, not the full port):
+`voyage/workers/augment_worker.py` carries the full upstream FILM port:
 
+- `_FilmNet` (7 flow-predictor levels, shared pyramid extractor, style
+  curve + fuse decoder) strict-loads the 82 pinned keys from
+  `film_net_fp16.safetensors` (`ModelCompatibilityError` on shape
+  mismatch); there is no stand-in blender anymore.
+- `interpolate_mids` evaluates every adjacent pair at all blend moments
+  with one flow computation per pair (via `forward_multi_timestep`) in
+  pair-major order, batching `FILM_PAIR_BATCH` (2) pairs per forward
+  with whole-pair OOM halving down to single pairs. Results match the
+  old per-pair `interpolate_pair` loop exactly on deterministic devices
+  (every FILM op is per-sample — no batchnorm; GPU cudnn may differ by
+  ulps across batch sizes, which the uint8 PNG encode absorbs).
+  `interpolate_pair` / `interpolate_triplet` stay for single-pair use.
 - The anime upscaler leg loads `realesr-animevideov3.pth` (native 4x
   SRVGGNetCompact XS) strict via its own key-sniffed builder
   (`_is_srvgg_compact_state` / `_build_srvgg_net`); RRDB-shaped
   state goes to the classic 23-block builder instead.
-- `FilmNetMini` is a spike stand-in flow blender with FILM's semantic
-  contract (two frames + time give the mid frame), batched as
-  `(B, 2, C, H, W)` so OOM-halving applies. Official `film_net`
-  weights will NOT load here — shape mismatch raises
-  `ModelCompatibilityError` (`augment_worker.py:471-484`); the full
-  upstream FILM port is follow-up.
 
 Torch loads only inside functions behind a `find_spec` guard (never at
 module scope); weight checks run before any torch import, so missing

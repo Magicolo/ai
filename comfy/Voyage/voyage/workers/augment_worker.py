@@ -114,6 +114,12 @@ FILM_STATE_KEYS = 82
 FILM_MIN_SIDE = 8
 """Smallest frame side the FILM pyramid supports (4 levels down to 1px)."""
 
+FILM_PAIR_BATCH = 2
+"""Frame pairs per FILM forward in `interpolate_mids` (batching win over the
+old per-pair loop: kernel launches amortize and the GPU saturates; matches
+the `interpolate_triplet` 2-pair precedent, and `_run_stacked`-style
+halving bottoms out at one pair on OOM, so larger values stay safe)."""
+
 FILM_CLASSIC_ORDER_MIN_FREE_BYTES = 8 * 1024**3
 """Chunk devices reporting less free VRAM than this interpolate at 1x first
 (measured 2026-10-01 on the 6 GB 2060: FILM pairs at 2432x1408 need
@@ -231,6 +237,15 @@ def validate_blend_time(moment: float) -> float:
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"blend moment must be within [0, 1] (got {moment!r})")
     return value
+
+
+def validate_pair_batch(pair_batch: int) -> int:
+    """Accept only positive pair counts for `interpolate_mids` windows."""
+    if isinstance(pair_batch, bool) or not isinstance(pair_batch, int):
+        raise TypeError(f"pair batch must be an int (got {type(pair_batch).__name__})")
+    if pair_batch < 1:
+        raise ValueError(f"pair batch must be positive (got {pair_batch})")
+    return pair_batch
 
 
 def inference_precision(device_name: str) -> str:
@@ -1505,3 +1520,130 @@ def interpolate_triplet(
         timings["load_ms"] = load_ms
         timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
     return (mids[0].float().cpu(), mids[1].float().cpu())
+
+
+def _run_pair_window(model: Any, pairs: Any, blends: list[float]) -> list[Any]:
+    """Run one pair window at every blend, halving the pair count on OOM.
+
+    Window-local `_run_stacked`: the stacked dim-0 is the pair count, so a
+    failed window splits into whole-pair halves (left-then-right,
+    order-preserving) and each half re-runs the full blend list. Returned
+    rows are pair-major — pair 0 at every blend, then pair 1, and so on —
+    so the caller can demux without tracking half boundaries. Non-OOM
+    failures and single-pair OOMs propagate unchanged.
+    """
+    import torch
+
+    try:
+        rows = model.forward_multi_timestep(pairs[:, 0], pairs[:, 1], blends)
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower() or int(pairs.shape[0]) <= 1:
+            raise
+        gc.collect()
+        # Unconditional (issue 157): `empty_cache` is a no-op without
+        # CUDA, so no availability guard — same rationale as `_run_stacked`.
+        torch.cuda.empty_cache()
+        half = int(pairs.shape[0]) // 2
+        return [
+            *_run_pair_window(model, pairs[0:half], blends),
+            *_run_pair_window(model, pairs[half:], blends),
+        ]
+    window_len = int(pairs.shape[0])
+    blend_count = len(blends)
+    return [
+        rows[blend_index * window_len + offset]
+        for offset in range(window_len)
+        for blend_index in range(blend_count)
+    ]
+
+
+def interpolate_mids(
+    frames: list[Any],
+    weights: Path | str,
+    *,
+    moments: list[float] | tuple[float, ...],
+    pair_batch: int = FILM_PAIR_BATCH,
+    device: str = "cuda:0",
+    timings: dict[str, float] | None = None,
+    on_pair: Callable[[int, int], None] | None = None,
+) -> list[Any]:
+    """Mid frames for every adjacent pair at each moment (batched FILM).
+
+    Pair-major output: for pair `i`, the mids at `moments` in order, so the
+    caller interleaves `frames[i]` + that slice exactly like the old
+    per-pair `interpolate_pair` loop — but each forward evaluates
+    `pair_batch` pairs at ALL moments with one flow computation per pair
+    (flow-once via `forward_multi_timestep`; the single-pair multi-moment
+    morph case drops from 4 extracts + 8 flows to 1 + 2). Outputs are
+    float32 CPU tensors. Results match the `interpolate_pair` loop exactly
+    on deterministic devices (every FILM op is per-sample — no batchnorm;
+    GPU cudnn may differ by ulps across batch sizes, which the uint8 PNG
+    encode absorbs). A window that OOMs halves to single pairs, so larger
+    `pair_batch` values stay safe. `on_pair`, when given, fires per
+    finished pair with `(pair_index, pair_count)`.
+
+    Validation order (before any torch import): moments, pair batch, frame
+    count (>= 2 — a bare length check, so it stays torch-free), weights,
+    then torch, then frame shapes and the `FILM_MIN_SIDE` floor.
+    """
+    if isinstance(moments, (str, bytes)) or not isinstance(moments, (list, tuple)):
+        raise TypeError(
+            f"moments must be a list or tuple of blend times (got {type(moments).__name__})"
+        )
+    if not moments:
+        raise ValueError("interpolate_mids needs at least one blend moment (got none)")
+    blends = [validate_blend_time(moment) for moment in moments]
+    batch = validate_pair_batch(pair_batch)
+    if on_pair is not None and not callable(on_pair):
+        raise TypeError(f"on_pair must be callable or None (got {type(on_pair).__name__})")
+    if not isinstance(frames, list) or len(frames) < 2:
+        count = len(frames) if isinstance(frames, list) else type(frames).__name__
+        raise ValueError(f"interpolate_mids needs at least two frames (got {count})")
+    weights_path = _require_weights(weights, "FILM")
+    _require_torch()
+    _require_frame_batch(frames)
+    for frame in frames:
+        height, width = int(frame.shape[1]), int(frame.shape[2])
+        if min(height, width) < FILM_MIN_SIDE:
+            raise ValueError(
+                f"FILM needs frame sides >= {FILM_MIN_SIDE}px (got {height}x{width}): "
+                "the fusion decoder runs 4 pyramid levels"
+            )
+    import torch
+
+    load_started = time.monotonic()
+    key = _model_cache_key(weights_path, device)
+    model = _FILM_CACHE.get(key)
+    if model is None:
+        model = _load_film_net(weights_path)
+        _FILM_CACHE[key] = model
+    load_ms = (time.monotonic() - load_started) * 1000.0
+    torch_device, dtype = _prepare_model(model, device)
+    model.eval()
+    pair_count = len(frames) - 1
+    mids: list[Any] = []
+    infer_started = time.monotonic()
+    with torch.no_grad():
+        for window_start in range(0, pair_count, batch):
+            window_end = min(window_start + batch, pair_count)
+            unique = [
+                torch.as_tensor(frames[index], dtype=torch.float32)
+                for index in range(window_start, window_end + 1)
+            ]
+            pairs = torch.stack(
+                [
+                    torch.stack([unique[offset], unique[offset + 1]])
+                    for offset in range(len(unique) - 1)
+                ]
+            ).to(torch_device, dtype=dtype)
+            try:
+                mids.extend(row.float().cpu() for row in _run_pair_window(model, pairs, blends))
+            finally:
+                del pairs, unique
+            if on_pair is not None:
+                for pair_index in range(window_start, window_end):
+                    on_pair(pair_index, pair_count)
+    if timings is not None:
+        timings["load_ms"] = load_ms
+        timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
+    return mids

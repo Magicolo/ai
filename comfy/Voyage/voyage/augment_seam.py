@@ -31,6 +31,7 @@ from voyage.augment_sidecar import (
     ChunkKey,
     append_chunk_record,
     chunk_cache_hit,
+    chunk_output_complete,
     completed_stages,
     load_chunk_ledger,
     plan_dir_for_segment,
@@ -126,14 +127,11 @@ def _default_seam_pngs(
 ) -> list[Path]:
     """Render the seam mids via the resident FILM leg (lazy torch import)."""
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_pair
+    from voyage.workers.augment_worker import interpolate_mids
 
     frames = load_png_frames_as_tensors([before_png, after_png])
     moments = [(position + 1) / multiplier for position in range(multiplier - 1)]
-    mids = [
-        interpolate_pair(frames[0], frames[1], weights_path, moment=moment, device=device)
-        for moment in moments
-    ]
+    mids = interpolate_mids(frames, weights_path, moments=moments, device=device)
     return write_tensors_as_png_frames(mids, dest_dir)
 
 
@@ -158,11 +156,16 @@ def render_seam_once(
 ) -> bool:
     """Render one seam's mids (True) or skip the ledger hit (False).
 
-    Ledger-truth resume: an exact-key `interpolated` record plus its
-    `multiplier - 1` PNGs on disk is complete work and is never
-    re-rendered; unledgered output is dropped and redone. `multiplier < 2`
-    is a caller bug (`multiplier=1` has zero mids — the finalize wiring
-    skips seams entirely instead of calling here).
+    Ledger-truth plus output-truth resume (DESIGN §§56-57, chunk-poller
+    parity): an exact-key `interpolated` record plus its `multiplier - 1`
+    complete PNGs on disk is finished work and is never re-rendered; a
+    ledger hit whose output is gone, short, or empty is stale (crashed
+    publish, manual cleanup, disk loss) and is dropped and re-rendered
+    instead of failing loud — same policy as the upscale/interp pollers,
+    which rejoin ledgered-but-incomplete chunks to missing. Unledgered
+    output is dropped and redone. `multiplier < 2` is a caller bug
+    (`multiplier=1` has zero mids — the finalize wiring skips seams
+    entirely instead of calling here).
     """
     if not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier < 2:
         raise ValueError(f"seam multiplier must be an int >= 2 (got {multiplier!r})")
@@ -191,13 +194,18 @@ def render_seam_once(
     records = load_chunk_ledger(ledger_path)
     output_dir = seam_dir / f"interpolated_{SEAM_CHUNK_INDEX:02d}"
     if chunk_cache_hit(records, key, stage=STAGE_INTERPOLATED):
-        found = sorted(output_dir.glob("frame_*.png")) if output_dir.is_dir() else []
-        if len(found) == expected and all(path.is_file() for path in found):
+        if chunk_output_complete(output_dir, expected):
             return False
-        raise MediaError(
-            f"seam ledger hit but {output_dir.name} holds {len(found)} PNGs "
-            f"(ledger expects {expected}; clear the seam dir and retry)"
-        )
+        # Auto-heal: ledger hit but output wrong (stale publish, partial
+        # cleanup) — drop the stale dir and fall through to re-render.
+        # The fresh render appends a new exact-key record (last-wins);
+        # the stale line stays harmlessly superseded, same as the
+        # chunk pollers' ledgered-but-incomplete rejoin.
+        if output_dir.exists():
+            if output_dir.is_dir() and not output_dir.is_symlink():
+                shutil.rmtree(output_dir)
+            else:
+                output_dir.unlink()
     if output_dir.exists():
         # Ledger-truth rule: unledgered output is incomplete — drop it.
         # (The `.partial` dir never survives: `prune_stale_partials` above

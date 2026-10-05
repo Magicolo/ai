@@ -2,7 +2,7 @@
 
 `resolve_augment_weights` maps a models dir to loader-ready paths; the
 chunk worker passes non-None legs to `augment_worker.upscale_frames` /
-`interpolate_pair` with `device=chunk.device` and keeps the ffmpeg encode
+`interpolate_mids` with `device=chunk.device` and keeps the ffmpeg encode
 for absent legs. Absent legs return the input frames unchanged — ffmpeg
 stays the default, so the model pass runs only when provisioned.
 
@@ -98,20 +98,21 @@ def test_chunk_worker_forwards_chunk_device(
         return list(frames)
 
     def _fake_interpolate(
-        before: Any,
-        after: Any,
+        frames: list[Any],
         weights: Path | str,
         *,
-        moment: float = 0.5,
+        moments: list[float] | tuple[float, ...] = (0.5,),
         device: str = "cpu",
         **kwargs: Any,
-    ) -> Any:
-        seen.setdefault("interp_devices", []).append(device)
-        seen.setdefault("interp_moments", []).append(moment)
-        return before
+    ) -> list[Any]:
+        for moment in moments:
+            seen.setdefault("interp_devices", []).append(device)
+            seen.setdefault("interp_moments", []).append(moment)
+        pairs = max(len(frames) - 1, 0)
+        return [frames[0]] * (pairs * len(list(moments)))
 
     monkeypatch.setattr(augment_worker, "upscale_frames", _fake_upscale)
-    monkeypatch.setattr(augment_worker, "interpolate_pair", _fake_interpolate)
+    monkeypatch.setattr(augment_worker, "interpolate_mids", _fake_interpolate)
     weights = AugmentWeights(
         film=Path("/models/frame_interpolation/film_net_fp16.safetensors"),
         realesrgan=Path("/models/realesrgan/realesr-animevideov3.pth"),

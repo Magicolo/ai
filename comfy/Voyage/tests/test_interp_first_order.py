@@ -49,12 +49,14 @@ def test_enhance_order_switches_on_probe(tmp_path: Path, monkeypatch: pytest.Mon
         calls.append("upscale")
         return list(frames)
 
-    def _fake_interp(before: Any, after: Any, weights: object, **kwargs: Any) -> Any:
-        calls.append("interp")
-        return before
+    def _fake_mids(frames: list[Any], weights: object, **kwargs: Any) -> list[Any]:
+        moments = kwargs.get("moments", [0.5])
+        calls.extend(["interp"] * len(list(moments)))
+        pairs = max(len(frames) - 1, 0)
+        return [frames[0]] * (pairs * len(list(moments)))
 
     monkeypatch.setattr(worker, "upscale_frames", _fake_upscale)
-    monkeypatch.setattr(worker, "interpolate_pair", _fake_interp)
+    monkeypatch.setattr(worker, "interpolate_mids", _fake_mids)
     legs = _dummy_legs(tmp_path)
     frames = ["frame-a", "frame-b"]
 

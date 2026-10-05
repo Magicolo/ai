@@ -490,7 +490,7 @@ def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
     section 12 GPU ban holds at module scope — the registry pins are
     stdlib-only, imported lazily so this module's top level stays so);
     never raises for absent weights. The model-pass chunk worker passes
-    these paths to `augment_worker.upscale_frames` / `interpolate_pair`;
+    these paths to `augment_worker.upscale_frames` / `interpolate_mids`;
     `finalize_run` itself is untouched (ffmpeg path stays the default —
     the inference wiring is a later slice, see the issue handoff).
     """
@@ -599,19 +599,12 @@ def enhance_frames(
         if film_weights is None or len(source) <= 1 or interp_factor <= 1:
             return source
         moments = [(position + 1) / interp_factor for position in range(interp_factor - 1)]
+        mids = augment_worker.interpolate_mids(source, film_weights, moments=moments, device=device)
         blended: list[Any] = []
+        step = len(moments)
         for position in range(len(source) - 1):
             blended.append(source[position])
-            for moment in moments:
-                blended.append(
-                    augment_worker.interpolate_pair(
-                        source[position],
-                        source[position + 1],
-                        film_weights,
-                        moment=moment,
-                        device=device,
-                    )
-                )
+            blended.extend(mids[position * step : (position + 1) * step])
         blended.append(source[-1])
         return blended
 
