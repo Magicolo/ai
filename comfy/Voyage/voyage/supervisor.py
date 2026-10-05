@@ -42,6 +42,7 @@ from voyage.director import (
     REVISITS_ALLOWED_SENTINEL,
     DeterministicDirector,
     director_input_from_state,
+    format_measured_context,
 )
 from voyage.errors import (
     DiskSpaceError,
@@ -67,11 +68,13 @@ from voyage.models import (
     SegmentWorldState,
     StyleSpec,
 )
+from voyage.motion_sense import sense_motion
 from voyage.persistence import read_state, write_state
 from voyage.prompts import (
     apply_feedback_amendments,
     build_staged_prompt_plan,
     check_prompt_against_style,
+    feedback_amendments,
 )
 from voyage.rpc import SubprocessWorker
 from voyage.seeds import video_seed
@@ -309,6 +312,14 @@ class Supervisor:
         # driver identity resets the baseline across worker restarts (a
         # fresh driver starts its totals at zero).
         self._reported_prewarm: tuple[Any, int, int] = (None, 0, 0)
+        # Post-commit motion sense (cheap tier): pixel-delta energy of the
+        # just-committed segment, steering the NEXT proposal via the
+        # measured_context/amendments path. Never gates a commit — a frozen
+        # segment still commits, the next prompt just pushes motion harder.
+        # Empty dict = unknown (first segment, sense failure), never a
+        # deviation. Written after the state advance so sensing can never
+        # strand a commit; read at the next propose.
+        self._last_motion: dict[str, float] = {}
         # Commit→propose gap ledger (Stage A telemetry): each gap-phase
         # site adds its wall ms here; `_propose_segment` emits the
         # `gap_breakdown` metric and resets. Keys are fixed so the metric
@@ -1453,6 +1464,15 @@ class Supervisor:
                 destination_concept=state.destination_concept,
                 phase=state.phase,
             )
+            if amendments:
+                # Motion steering applies to holds too: the deterministic
+                # "gentle motion, held wide shot" stage is the most
+                # freeze-prone prompt on the live path, so a low-motion
+                # reading still hardens it instead of being dropped.
+                hold.video.stages = [
+                    apply_feedback_amendments(stage_text, amendments)
+                    for stage_text in hold.video.stages
+                ]
             store.append(
                 hold.destination_concept,
                 accepted=True,
@@ -1659,12 +1679,16 @@ class Supervisor:
             self._progress.note("director prefetch hit (used as first candidate)")
         director_started = time.monotonic()
         with self._stage("director", config.director.backend):
+            measured_context = format_measured_context(style_spec, self._last_motion)
+            amendments = feedback_amendments(self._last_motion, style_spec)
             decision, director_tokens = self._accept_director_decision(
                 config,
                 state,
                 store,
                 style_spec,
                 segment_id,
+                measured_context=measured_context,
+                amendments=amendments or None,
                 prefetched_raw=prefetched_raw,
             )
         stage_seconds["director"] = round(time.monotonic() - director_started, 3)
@@ -2151,7 +2175,25 @@ class Supervisor:
         # identically — see `_write_state_preserving_control_plane`.
         self._write_state_preserving_control_plane(fresh)
         stage_seconds["commit"] = round(time.monotonic() - commit_started, 3)
+        # Post-commit motion sense (cheap tier, never fails the commit):
+        # three 160px thumbnails + pixel-delta energy, typically 100-300ms
+        # of ffmpeg decode, no GPU. Runs AFTER the state advance so sensing
+        # can never strand a commit; the reading steers the NEXT proposal
+        # via `_last_motion`. Unknown (None) reads steer nothing.
+        motion = sense_motion(video_out)
+        if motion.energy is not None:
+            self._last_motion = {"motion_energy": motion.energy}
+        else:
+            self._last_motion = {}
         elapsed = round(time.monotonic() - started, 3)
+        self._log_metric(
+            {
+                "event": "motion_sensed",
+                "segment_id": segment_id,
+                "motion_energy": motion.energy,
+                "sense_seconds": motion.seconds,
+            }
+        )
         self._log_metric(
             {
                 "event": "segment_committed",
@@ -2197,6 +2239,8 @@ class Supervisor:
                     "stage_seconds": dict(stage_seconds),
                     "elapsed": elapsed,
                     "prefetch_hit": proposed.prefetch_hit,
+                    "motion_energy": motion.energy,
+                    "motion_seconds": motion.seconds,
                 }
             )
         return segment_id

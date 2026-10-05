@@ -33,6 +33,7 @@ the same words either way.
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -40,6 +41,8 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any, Protocol, TextIO
+
+from voyage.motion_sense import LOW_MOTION_FLOOR
 
 _SPINNER_TICK_SECONDS = 0.2
 """Live-elapsed refresh interval for the rich spinner (fast enough to feel
@@ -359,6 +362,20 @@ class VoyageConsole:
             f"SEGMENT {segment_id} committed · {frames}f ≈ {duration:.2f}s · "
             f"{takes_text} ({take_action}) · {beats} beats @ {bpm:.0f} BPM"
         )
+        motion = info.get("motion_energy")
+        sense_seconds = info.get("motion_seconds")
+        if isinstance(motion, (int, float)) and not isinstance(motion, bool):
+            flag = ""
+            if math.isfinite(float(motion)) and float(motion) < LOW_MOTION_FLOOR:
+                flag = " · LOW-MOTION — next prompt steers harder"
+            seconds_text = (
+                f" ({float(sense_seconds):.2f}s sense)"
+                if isinstance(sense_seconds, (int, float)) and not isinstance(sense_seconds, bool)
+                else ""
+            )
+            self.line(f"     motion energy {float(motion):.3f}{seconds_text}{flag}")
+        elif "motion_energy" in info:
+            self.line("     motion energy unknown (sense skipped)")
         if self._verbose:
             reason = str(info.get("take_reason", ""))
             if reason:
