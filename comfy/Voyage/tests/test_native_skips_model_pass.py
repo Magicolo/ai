@@ -68,9 +68,17 @@ def test_finalize_matching_source_skips_tensor_model_pass(
     def _forbidden_durable_pass(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("durable model pass must not run when the plan flags no work")
 
+    def _forbidden_upscale_phase(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("upscale phase must not run when the plan flags no work")
+
+    def _forbidden_interp_phase(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("interp phase must not run when the plan flags no work")
+
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _stub_weights)
     monkeypatch.setattr(augment_module, "run_finalize_model_pass", _forbidden_model_pass)
     monkeypatch.setattr(finalize_module, "run_durable_model_pass", _forbidden_durable_pass)
+    monkeypatch.setattr(finalize_module, "run_upscale_phase", _forbidden_upscale_phase)
+    monkeypatch.setattr(finalize_module, "run_interp_phase", _forbidden_interp_phase)
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     out = tmp_path / "native-passthrough.mp4"
@@ -100,25 +108,49 @@ def test_finalize_lift_still_selects_tensor_model_pass(
 
     seen: dict[str, Any] = {}
 
-    def _recording_model_pass(
+    def _fake_upscale_phase(
         run_dir_arg: Path,
-        usable: list[Path],
         *,
+        weights: AugmentWeights,
         out_width: int,
         out_height: int,
         source_fps: float,
+        upscale_factor: int = 2,
+        chunk_frames: int = 32,
+        crf: int = 15,
+        preset: str = "veryfast",
+        device: str = "cuda:1",
+        upscale_poll_fn: Any = None,
+        timings: dict[str, float] | None = None,
+        progress: Any = None,
+    ) -> None:
+        seen["upscale_called"] = True
+
+    def _recording_interp_phase(
+        run_dir_arg: Path,
+        usable: list[Path],
+        *,
         weights: AugmentWeights,
+        out_width: int,
+        out_height: int,
+        source_fps: float,
         upscale_factor: int = 2,
         multiplier: int = 4,
         chunk_frames: int = 32,
         crf: int = 15,
         preset: str = "veryfast",
-        device: str = "cuda:1",
+        device: str = "cuda:0",
         work_dir: Path,
+        interp_poll_fn: Any = None,
+        drain_fn: Any = None,
+        concat_fn: Any = None,
+        seam_interp_fn: Any = None,
+        morph_joints: bool = False,
+        morph_interp_fn: Any = None,
         timings: dict[str, float] | None = None,
         progress: Any = None,
     ) -> tuple[Path, int]:
-        seen["model_pass_called"] = True
+        seen["interp_called"] = True
         seen["segments"] = len(usable)
         work_dir.mkdir(parents=True, exist_ok=True)
         intermediate = work_dir / "model_intermediate.mp4"
@@ -126,7 +158,8 @@ def test_finalize_lift_still_selects_tensor_model_pass(
         return (intermediate, int(round(source_fps)))
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _stub_weights)
-    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _recording_model_pass)
+    monkeypatch.setattr(finalize_module, "run_upscale_phase", _fake_upscale_phase)
+    monkeypatch.setattr(finalize_module, "run_interp_phase", _recording_interp_phase)
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     out = tmp_path / "lifted-tensor.mp4"
@@ -141,5 +174,6 @@ def test_finalize_lift_still_selects_tensor_model_pass(
         models_dir=models_dir,
     )
     assert out.exists() and out.stat().st_size > 0
-    assert seen.get("model_pass_called") is True
+    assert seen.get("upscale_called") is True
+    assert seen.get("interp_called") is True
     assert seen.get("segments") == 1

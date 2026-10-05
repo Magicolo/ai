@@ -400,6 +400,46 @@ def model_pass_devices(
     return visible
 
 
+def upscale_pass_devices(
+    *,
+    devices: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Devices for the finalize upscale leg: cuda:1 alone when two GPUs show.
+
+    DESIGN §140 A/V stream: the 2060 (cuda:1) owns upscaling only, so the
+    SRVGG leg never shares a card with the 4060 (cuda:0) stream
+    (music takes -> SFX bed -> FILM interp, sequential). One visible GPU
+    (or an admin-hidden GPU set) keeps the `augment_devices` selection
+    untouched (cuda:0, or empty). The `devices` seam takes an explicit
+    visibility tuple so tests pin the branch without a GPU.
+    """
+    visible = augment_devices() if devices is None else devices
+    if len(visible) >= MAX_PARALLEL_DEVICES:
+        return (AUGMENT_DEVICE_SECONDARY,)
+    return visible
+
+
+def interp_pass_devices(
+    *,
+    devices: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Devices for the finalize interp leg: cuda:0 whenever it shows.
+
+    DESIGN §140 A/V stream: FILM interpolation joins the sequential 4060
+    (cuda:0) stream after the music takes and the SFX bed, picking up the
+    ledgered upscale chunks the 2060 published. At upscaled geometry FILM
+    needs ~5.9 GiB alone, so sharing the 6 GB 2060 with the upscale leg
+    is structurally unsafe — the 16 GB 4060 is the only 2-GPU home for
+    it. One visible GPU keeps the `augment_devices` selection untouched
+    (cuda:0, or empty). The `devices` seam takes an explicit visibility
+    tuple so tests pin the branch without a GPU.
+    """
+    visible = augment_devices() if devices is None else devices
+    if AUGMENT_DEVICE_PRIMARY in visible:
+        return (AUGMENT_DEVICE_PRIMARY,)
+    return visible
+
+
 def run_augment_chunks(
     chunks: list[AugmentChunk],
     worker: Callable[[AugmentChunk, str], T],

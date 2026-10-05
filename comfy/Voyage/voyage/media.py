@@ -267,15 +267,16 @@ def model_music_parallel_armed(
     deferred_pending: bool,
     model_devices: tuple[str, ...],
 ) -> bool:
-    """Fork gate: model pass + deferred music may overlap (DESIGN §140).
+    """Fork gate: upscale phase + deferred music may overlap (DESIGN §140).
 
     Pure: the model branch must actually take the tensor path, the dry
     walk must show takes still to render, and every model device must
-    differ from `DEFERRED_MUSIC_DEVICE` (`model_pass_devices` collapses
-    to cuda:0 on a 1-GPU box, so single-GPU finalizes stay sequential).
-    One predicate in one place, mirroring `tensor_path_armed` — the
-    pre-fork ACE render must predict exactly what Thread A will decide,
-    or the takes ledger lands on the wrong timeline.
+    differ from `DEFERRED_MUSIC_DEVICE` (`upscale_pass_devices`
+    collapses to cuda:0 on a 1-GPU box, so single-GPU finalizes stay
+    sequential). One predicate in one place, mirroring
+    `tensor_path_armed` — the pre-fork ACE render must predict exactly
+    what Thread A will decide, or the takes ledger lands on the wrong
+    timeline.
     """
     return bool(
         tensor_path
@@ -290,14 +291,14 @@ def run_model_pass_and_music_parallel(
     model_work: Callable[[], None],
     music_work: Callable[[], None],
 ) -> None:
-    """Fork-join the model pass and the deferred music takes.
+    """Fork-join the upscale phase and the deferred music takes.
 
-    Thread A runs the model pass (cuda:1), thread B renders ACE takes
+    Thread A runs the upscale leg (cuda:1), thread B renders ACE takes
     (cuda:0) — distinct cards, distinct ledgers (`chunks.jsonl` vs the
     takes ledger), no shared console writes (both branches run with
     progress None under one outer stage). Both threads are always
     joined: a branch exception propagates only after the join, so a
-    music failure never orphans a running model pass and vice versa.
+    music failure never orphans a running upscale phase and vice versa.
     Fail-soft: whatever rendered stays ledgered, so retrying the
     finalize resumes instead of redoing.
     """
@@ -861,12 +862,16 @@ def finalize_run(
 
     Model pass (issue 166): present legs (via `model_pass_active` over
     `resolve_augment_weights(models_dir)`) select the tensor chunk encode
-    (`run_finalize_model_pass`: SRVGG upscale + FILM mids chunked, then
-    the presentation vf without minterpolate) only when work is demanded
-    (`upscale > 1 or interpolate > 1`) and the augment plan flags work
-    (`needs_reencode`); 1/1 sources skip it for the stream-copy fast
-    path. Absent legs (or no `models_dir`) with demanded work fall back
-    to the ffmpeg vf path (scale/minterpolate), never an error.
+    (SRVGG upscale + FILM mids chunked, then the presentation vf without
+    minterpolate) only when work is demanded (`upscale > 1 or
+    interpolate > 1`) and the augment plan flags work (`needs_reencode`);
+    1/1 sources skip it for the stream-copy fast path. Absent legs (or no
+    `models_dir`) with demanded work fall back to the ffmpeg vf path
+    (scale/minterpolate), never an error. Both legs provisioned splits
+    the pass into Phase A (upscale-only on cuda:1, overlapping the
+    deferred music takes on cuda:0) and Phase C (SFX bed, then FILM
+    interp on cuda:0, then publish) — the 4060 runs music -> SFX ->
+    interp sequentially and the 2060 never shares a card.
     """
     resolved = resolve_finalize_settings(
         options=options,
@@ -962,11 +967,24 @@ def finalize_run(
         # predicts exactly this, or the ACE takes ledger lands on the
         # wrong timeline.
         tensor_devices: tuple[str, ...] = ()
+        upscale_devices: tuple[str, ...] = ()
+        interp_devices: tuple[str, ...] = ()
         if model_selected and resolved_weights is not None:
-            from voyage.augment import augment_devices, model_pass_devices
+            from voyage.augment import (
+                augment_devices,
+                interp_pass_devices,
+                model_pass_devices,
+                upscale_pass_devices,
+            )
 
             if augment_devices():
                 tensor_devices = model_pass_devices()
+                # DESIGN §140 A/V stream: the 2060 (cuda:1) owns the
+                # upscale leg only, the 4060 (cuda:0) owns music takes ->
+                # SFX bed -> FILM interp sequentially. 1-GPU boxes
+                # collapse all three onto cuda:0 (sequential there too).
+                upscale_devices = upscale_pass_devices()
+                interp_devices = interp_pass_devices()
         model_start = time.monotonic()
         # One shared gate (parallel pre-fork contract): the model branch
         # takes the tensor path exactly when this holds, and both
@@ -1051,7 +1069,8 @@ def finalize_run(
         # actually retimes (tensor path + explicit presentation fps +
         # stretch != 1 — `slowmo_video_active`); otherwise the mix stays
         # on the source timeline. A complete ledger (re-finalize) no-ops
-        # inside the helper with no worker spawned.
+        # inside the helper with no worker spawned. Phased or legacy,
+        # the interp leg returns non-None exactly when the gate holds.
         slowmo = slowmo_video_active(tensor_path, effective_presentation_fps, stretch)
         audio_stretch = stretch if slowmo else 1.0
         # Dry walk (no worker, no writes): True when the takes ledger
@@ -1075,16 +1094,79 @@ def finalize_run(
         branch_progress: VoyageConsole | None = progress
         music_branch_progress: VoyageConsole | None = progress
 
+        # DESIGN §140 A/V stream: both legs provisioned splits the model
+        # pass into Phase A (upscale-only on the 2060, overlapping the
+        # music takes on the 4060) and Phase C (FILM interp on the 4060
+        # after the SFX bed, picking up the Phase A upscale ledger).
+        # Partial legs keep the legacy all-or-nothing flow (unchanged).
+        both_legs = (
+            resolved_weights is not None
+            and resolved_weights.film is not None
+            and resolved_weights.realesrgan is not None
+        )
+        phased = bool(tensor_path and both_legs and upscale_devices and interp_devices)
+
+        def _do_upscale_phase() -> None:
+            if not phased or resolved_weights is None or not upscale_devices:
+                return
+            # Phase A (2060, cuda:1): upscale sweep only — publishes
+            # `upscaled_NN` chunk dirs + ledger records, never
+            # interpolating (interp + seam/morph FILM work is Phase C).
+            from voyage.augment_finalize import run_upscale_phase
+
+            run_upscale_phase(
+                run_dir,
+                weights=resolved_weights,
+                out_width=out_w,
+                out_height=out_h,
+                source_fps=source_fps,
+                upscale_factor=effective_upscale,
+                crf=effective_crf,
+                preset=effective_preset,
+                device=upscale_devices[0],
+                timings=model_pass_timings,
+                progress=branch_progress,
+            )
+
+        def _do_interp_phase() -> None:
+            nonlocal tensor_intermediate
+            if not phased or resolved_weights is None or not interp_devices:
+                return
+            # Phase C (4060, cuda:0): the SFX bed finished, so FILM owns
+            # the card alone — interp sweep over the Phase A ledger, then
+            # drain (+ seam/morph joints, same device) to one intermediate.
+            from voyage.augment_finalize import run_interp_phase
+
+            model_work = tmpdir / "model_pass"
+            tensor_intermediate, _ = run_interp_phase(
+                run_dir,
+                usable,
+                weights=resolved_weights,
+                out_width=out_w,
+                out_height=out_h,
+                source_fps=source_fps,
+                upscale_factor=effective_upscale,
+                multiplier=effective_interpolate,
+                crf=effective_crf,
+                preset=effective_preset,
+                device=interp_devices[0],
+                work_dir=model_work,
+                timings=model_pass_timings,
+                # The Phase A fork display closed at the join — Phase C
+                # reports on the main progress (sequential bars, one Live).
+                progress=progress,
+            )
+            if tensor_intermediate is not None:
+                final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
+
         def _do_model_pass() -> None:
             nonlocal tensor_intermediate
+            # Legacy flow (partial legs, or tensor path without the
+            # phased split): the whole pass runs here, exactly as before.
             # The extra conjuncts repeat the `tensor_path` contract for
             # the type checker (True already implies both); they never
             # change the branch outcome.
             if tensor_path and resolved_weights is not None and tensor_devices:
-                # DESIGN §140 GPU defaults: the whole model pass is pinned
-                # to cuda:1 (the 2060) so the MMAudio SFX stack owns cuda:0
-                # (the 4060) — `model_pass_devices` collapses to cuda:0 on
-                # a 1-GPU box, so the sequential path is unchanged there.
                 model_work = tmpdir / "model_pass"
                 if resolved_weights.film is not None and resolved_weights.realesrgan is not None:
                     # Durable sidecar path (independent workers): poll the
@@ -1134,8 +1216,8 @@ def finalize_run(
 
         def _do_music_takes() -> None:
             # Always-deferred music (DESIGN §140): segments commit video
-            # only, so the takes render here — overlapping the model pass
-            # on two cards (upscale → interp on cuda:1, music on cuda:0)
+            # only, so the takes render here — overlapping the upscale
+            # Phase A on two cards (upscale on cuda:1, music on cuda:0)
             # or after it on one — and BEFORE the mix below.
             nonlocal music_rendered
             music_start = time.monotonic()
@@ -1163,15 +1245,18 @@ def finalize_run(
         if model_music_parallel_armed(
             tensor_path=tensor_path,
             deferred_pending=music_pending,
-            model_devices=tensor_devices,
+            # Phased: the overlapping branch is the upscale leg (cuda:1
+            # on 2-GPU, cuda:0 on 1-GPU so the gate disarms). Legacy:
+            # the whole model pass, exactly as before.
+            model_devices=upscale_devices if phased else tensor_devices,
         ):
-            # Two cards: the model pass owns cuda:1 while ACE renders
+            # Two cards: the upscale leg owns cuda:1 while ACE renders
             # takes on cuda:0 — one outer stage, with the two branches
-            # sharing one N-stream display so upscale/interp (model leg)
+            # sharing one N-stream display so upscale (model leg)
             # and ACE takes (music leg) report live bars concurrently
             # (DESIGN §59). The display degrades to plain lines when
             # progress is None or the console is not a TTY. The blend
-            # clock covers the whole fork-join: model and music overlap,
+            # clock covers the whole fork-join: upscale and music overlap,
             # so this is fork-to-mix, not music+mix.
             audio_start = time.monotonic()
             model_music_display: ParallelFinalizeDisplay | None = None
@@ -1187,13 +1272,17 @@ def finalize_run(
             try:
                 with optional_stage(span_progress, "model pass + music takes"):
                     run_model_pass_and_music_parallel(
-                        model_work=_do_model_pass, music_work=_do_music_takes
+                        model_work=_do_upscale_phase if phased else _do_model_pass,
+                        music_work=_do_music_takes,
                     )
             finally:
                 if model_music_display is not None:
                     model_music_display.close()
         else:
-            _do_model_pass()
+            if phased:
+                _do_upscale_phase()
+            else:
+                _do_model_pass()
             # Sequential keeps the historical music+mix meaning of
             # `audio_blend_ms` (model time excluded, as before the fork).
             audio_start = time.monotonic()
@@ -1220,7 +1309,14 @@ def finalize_run(
             )
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
-        # Two-stream SFX (DESIGN §140): the bed conditions on a
+        # DESIGN §140 A/V stream: on the phased path the 4060 runs
+        # music takes -> SFX bed -> FILM interp sequentially, while the
+        # 2060 owned Phase A upscale only. The bed therefore renders
+        # synchronously here (before Phase C interp), not overlapped
+        # with the publish below. The legacy path keeps the two-stream
+        # bed∥publish overlap exactly as before.
+        #
+        # Two-stream SFX (legacy): the bed conditions on a
         # stream-copy proxy of the committed segments, so it needs
         # nothing from the mix or the publish — start it now (cuda:0 is
         # free: the ACE worker stopped at take-render end) and let it
@@ -1233,8 +1329,13 @@ def finalize_run(
         bed_outcome: dict[str, Any] = {}
         bed_start = 0.0
         bed_thread: threading.Thread | None = None
+        bed_done_sync = False
         if sfx_armed and sfx_request is not None:
             sfx_request_snapshot = sfx_request
+            # DESIGN §140 A/V stream: the phased path reuses the same
+            # coordinator sequentially (bed first, publish lines later —
+            # never concurrent, so no Live garble) so the sync bed keeps
+            # its live BarTracker progress instead of plain lines.
             if progress is not None:
                 sfx_display = ParallelFinalizeDisplay(progress)
                 bed_view: VoyageConsole | None = sfx_display.stream_view("sfx bed")
@@ -1281,11 +1382,25 @@ def finalize_run(
                 except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
                     bed_outcome["error"] = exc
 
-            bed_start = time.monotonic()
-            bed_thread = threading.Thread(target=_do_sfx_bed, name="voyage-sfx-bed", daemon=True)
-            bed_thread.start()
+            if phased:
+                # Sequential 4060 stream: the bed owns the card alone,
+                # then Phase C interp picks it up.
+                bed_start = time.monotonic()
+                _do_sfx_bed()
+                bed_done_sync = True
+                final_stages["sfx bed"] = time.monotonic() - bed_start
+            else:
+                bed_start = time.monotonic()
+                bed_thread = threading.Thread(
+                    target=_do_sfx_bed, name="voyage-sfx-bed", daemon=True
+                )
+                bed_thread.start()
         else:
             bed_thread = None
+        if phased:
+            # Phase C runs after the mix AND the SFX bed (both 4060
+            # residents finished) — publish below consumes its output.
+            _do_interp_phase()
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
         # stream copy and mux the final audio — zero video re-encodes. The
@@ -1379,7 +1494,14 @@ def finalize_run(
                         pix_fmt="yuv420p",
                         interp_fn=None,
                         weights=resolved_weights.film,
-                        device=resolve_morph_device(tensor_devices[0] if tensor_devices else None),
+                        # DESIGN §140 A/V stream: all FILM work owns the
+                        # 4060 (cuda:0) — even the tiny native-path joints,
+                        # so the 2060 stays upscale-only.
+                        device=resolve_morph_device(
+                            interp_devices[0]
+                            if interp_devices
+                            else (tensor_devices[0] if tensor_devices else None)
+                        ),
                     )
                     model_pass_timings.setdefault("morph_s", 0.0)
                     model_pass_timings.setdefault("morphs_done", 0.0)
@@ -1478,11 +1600,14 @@ def finalize_run(
             # `output_frames` stays honest. A bed failure ships the
             # music-only staged file and reports for the legacy fallback.
             ship = staged
-            if sfx_armed and bed_thread is not None:
-                bed_thread.join()
-                if sfx_display is not None:
-                    sfx_display.close()
-                final_stages["sfx bed"] = time.monotonic() - bed_start
+            if sfx_armed and (bed_thread is not None or bed_done_sync):
+                if bed_thread is not None:
+                    bed_thread.join()
+                    if sfx_display is not None:
+                        sfx_display.close()
+                    final_stages["sfx bed"] = time.monotonic() - bed_start
+                # Phased path: the bed already rendered (and timed) before
+                # Phase C interp — join/dub only.
                 bed_error = bed_outcome.get("error")
                 if bed_error is None:
                     staged_info = probe(staged)
@@ -1519,6 +1644,12 @@ def finalize_run(
                     sfx_report.update({"sfx_status": "music-only", "sfx_error": str(bed_error)})
             elif sfx_report is not None:
                 sfx_report.update({"sfx_status": "skipped"})
+            if bed_done_sync and sfx_display is not None:
+                # Phased path: the bed already rendered synchronously, so
+                # stop the shared display before validate — the publish
+                # lines below degrade to plain lines, same as the legacy
+                # path after its join-time close.
+                sfx_display.close()
             published = validate_video(ship, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_copy(ship, output_path)

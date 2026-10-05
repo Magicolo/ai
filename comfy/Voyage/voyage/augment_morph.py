@@ -153,15 +153,15 @@ def resolve_morph_device(
 ) -> str:
     """Device for the FILM bridge render (explicit wins, else augment order, else CPU).
 
-    Mirrors the finalize model-pass pinning (cuda:1 on the 2-GPU box, leaving
-    cuda:0 to SFX) via `model_pass_devices`; a box with no CUDA falls back
-    to CPU (slow but working) instead of failing the finalize.
+    Mirrors the finalize interp pinning (cuda:0 on the 2-GPU box, leaving
+    the 2060 upscale-only) via `interp_pass_devices`; a box with no CUDA
+    falls back to CPU (slow but working) instead of failing the finalize.
     """
     if explicit:
         return explicit
-    from voyage.augment import model_pass_devices
+    from voyage.augment import interp_pass_devices
 
-    devices = model_pass_devices(devices=visible)
+    devices = interp_pass_devices(devices=visible)
     candidate = devices[0] if devices else "cpu"
     if candidate.startswith("cuda"):
         try:
