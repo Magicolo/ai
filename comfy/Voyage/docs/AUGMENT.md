@@ -114,11 +114,13 @@ them side by side and a 1-GPU box runs chunks serially on cuda:0.
   mismatch); there is no stand-in blender anymore.
 - `interpolate_mids` evaluates every adjacent pair at all blend moments
   with one flow computation per pair (via `forward_multi_timestep`) in
-  pair-major order, batching `FILM_PAIR_BATCH` (2) pairs per forward
-  with whole-pair OOM halving down to single pairs. Results match the
-  old per-pair `interpolate_pair` loop exactly on deterministic devices
-  (every FILM op is per-sample — no batchnorm; GPU cudnn may differ by
-  ulps across batch sizes, which the uint8 PNG encode absorbs).
+  pair-major order, batching `FILM_PAIR_BATCH` (1) pairs per forward
+  with whole-pair OOM halving down to single pairs. `pair_batch=1`
+  matches the old per-pair `interpolate_pair` loop bit-exactly; larger
+  batches are deterministic but shift pixels slightly (cudnn picks
+  different kernels per batch shape — measured 2026-10-05 on the 4060 Ti:
+  mean abs 1.9e-4, ~4% of pixels flip after PNG rounding — with zero
+  speedup, so the default stays 1).
   `interpolate_pair` / `interpolate_triplet` stay for single-pair use.
 - The anime upscaler leg loads `realesr-animevideov3.pth` (native 4x
   SRVGGNetCompact XS) strict via its own key-sniffed builder

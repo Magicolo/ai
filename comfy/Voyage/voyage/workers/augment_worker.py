@@ -114,11 +114,14 @@ FILM_STATE_KEYS = 82
 FILM_MIN_SIDE = 8
 """Smallest frame side the FILM pyramid supports (4 levels down to 1px)."""
 
-FILM_PAIR_BATCH = 2
-"""Frame pairs per FILM forward in `interpolate_mids` (batching win over the
-old per-pair loop: kernel launches amortize and the GPU saturates; matches
-the `interpolate_triplet` 2-pair precedent, and `_run_stacked`-style
-halving bottoms out at one pair on OOM, so larger values stay safe)."""
+FILM_PAIR_BATCH = 1
+"""Frame pairs per FILM forward in `interpolate_mids` (measured 2026-10-05 on
+the idle 4060 Ti at 1216x704: batch 1 gives the full ~1.6x over the old
+per-pair loop at base VRAM with bit-exact outputs — the win is
+extract-once/flow-once per pair, not multi-pair batching. Batches 2/4 add
+zero speed, cost 2-4x VRAM, and shift pixels deterministically (cudnn algo
+selection per batch shape: mean abs 1.9e-4, 4.3% of pixels flip after PNG
+rounding), so they stay opt-in via `pair_batch`, not the default)."""
 
 FILM_CLASSIC_ORDER_MIN_FREE_BYTES = 8 * 1024**3
 """Chunk devices reporting less free VRAM than this interpolate at 1x first
@@ -1575,10 +1578,12 @@ def interpolate_mids(
     `pair_batch` pairs at ALL moments with one flow computation per pair
     (flow-once via `forward_multi_timestep`; the single-pair multi-moment
     morph case drops from 4 extracts + 8 flows to 1 + 2). Outputs are
-    float32 CPU tensors. Results match the `interpolate_pair` loop exactly
-    on deterministic devices (every FILM op is per-sample — no batchnorm;
-    GPU cudnn may differ by ulps across batch sizes, which the uint8 PNG
-    encode absorbs). A window that OOMs halves to single pairs, so larger
+    float32 CPU tensors. `pair_batch=1` matches the `interpolate_pair`
+    loop bit-exactly (same shapes → same cudnn kernels); larger batches
+    are deterministic per config but shift pixels slightly (different
+    kernels per batch shape — measured mean abs 1.9e-4, ~4% of pixels
+    flip after PNG rounding — so only raise `pair_batch` if a future GPU
+    shows a real speedup). A window that OOMs halves to single pairs, so larger
     `pair_batch` values stay safe. `on_pair`, when given, fires per
     finished pair with `(pair_index, pair_count)`.
 
