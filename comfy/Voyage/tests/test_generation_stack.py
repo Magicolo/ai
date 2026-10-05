@@ -167,13 +167,20 @@ def test_finalize_blend_is_timeline_exact(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 def test_finalize_overlap_zero_keeps_legacy_splice(tmp_path: Path) -> None:
+    """Overlap 0 no longer keeps a legacy splice: ledger-only fail-loud.
+
+    The hard-splice/concat fallback is removed — every segment boundary
+    gets an overlap crossfade re-sliced from the takes ledger, so a zero
+    overlap raises instead of shipping unblended audio.
+    """
+    from voyage.errors import MediaError
+
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     _commit_two(run_dir)
     out = tmp_path / "final-legacy.mp4"
-    assert finalize_run(run_dir, out, overlap_fraction=0.0).exists()
-    duration = float(media_probe(out).get("format", {}).get("duration", 0.0))
-    assert duration == pytest.approx(4.0, abs=0.15)
+    with pytest.raises(MediaError, match="tiny overlap|no rendered takes"):
+        finalize_run(run_dir, out, overlap_fraction=0.0)
 
 
 def test_probe_video_fps_returns_zero_on_unparseable() -> None:
@@ -205,9 +212,8 @@ def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
     finally:
         supervisor.stop_workers()
     out = tmp_path / "final-24.mp4"
-    # Floors disabled: this pins the legacy 24fps presentation-floor path
-    # at native geometry (default floors would lift to 1216x704@24).
-    assert finalize_run(run_dir, out, fps=16, min_fps=0, min_width=0, min_height=0).exists()
+    # Explicit presentation pin lifts native 16fps geometry to 24fps.
+    assert finalize_run(run_dir, out, presentation_fps=24).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)
     # 2 fake segments x 48f @16fps = 6.0s of content; the 24fps presentation
@@ -218,17 +224,25 @@ def test_finalize_lifts_16fps_to_24fps_presentation(tmp_path: Path) -> None:
 
 
 def test_build_final_audio_falls_back_without_takes(tmp_path: Path) -> None:
+    """No takes ledger no longer falls back: ledger-only fail-loud.
+
+    The hard-splice concat fallback is removed — segments commit video
+    only, so a missing takes ledger raises instead of shipping silence.
+    Takes must have rendered via ensure_deferred_for_finalize first.
+    """
+    from voyage.errors import MediaError
+
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     _commit_two(run_dir)
-    # No takes ledger on this path only when audio/ is removed: blend must
-    # degrade to the hard-splice concat, not raise.
+    # No takes ledger on this path only when audio/ is removed: the
+    # ledger-only mix raises fail-loud, never silently concats.
     import shutil
 
     shutil.rmtree(run_dir / "audio", ignore_errors=True)
     usable = [paths.segment_dir(run_dir, "000000"), paths.segment_dir(run_dir, "000001")]
-    dest = build_final_audio(run_dir, usable, tmp_path, 24, 48000, 2)
-    assert dest.exists() and dest.stat().st_size > 0
+    with pytest.raises(MediaError, match="no rendered takes|no takes ledger"):
+        build_final_audio(run_dir, usable, tmp_path, 24, 48000, 2)
 
 
 @pytest.mark.slow

@@ -116,28 +116,40 @@ def test_096_na_frame_count_treated_as_unknown(
 # Issues 138 + 188: skip_bad triage contract (single contract, both files).
 
 
-def test_138_missing_audio_strict_raises(tmp_path: Path) -> None:
-    from voyage.media import finalize_run
+def test_138_missing_takes_ledger_strict_raises(tmp_path: Path) -> None:
+    """Ledger-only mix with no rendered takes raises fail-loud (strict).
+
+    Always-deferred finalize commits video only — there is no per-segment
+    `audio.wav` to delete anymore. `build_final_audio` without a takes
+    ledger raises `MediaError` instead of shipping silence.
+    """
+    from voyage.media_audio import build_final_audio
 
     run_dir = tmp_path / "run"
     _committed_run(run_dir, 2)
-    (run_dir / "segments" / "000001" / "audio.wav").unlink()
-    with pytest.raises(MediaError, match="missing audio.wav"):
-        finalize_run(run_dir, tmp_path / "strict.mp4")
+    usable = [run_dir / "segments" / "000000", run_dir / "segments" / "000001"]
+    with pytest.raises(MediaError, match="no rendered takes"):
+        build_final_audio(run_dir, usable, tmp_path / "tmp", 24, 48000, 2)
 
 
 @pytest.mark.slow
-def test_138_missing_audio_lenient_skips_segment(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_138_missing_takes_ledger_lenient_still_raises(
+    tmp_path: Path,
 ) -> None:
-    from voyage.media import finalize_run
+    """No `skip_bad` leniency for a missing ledger: fail-loud always.
+
+    `skip_bad` is input triage for corrupt segment artifacts (missing
+    video, checksums, numbering gaps) — the ledger-only mix has no
+    fallback to fall back to, so a missing takes ledger raises even when
+    callers pass `skip_bad=True` at the `finalize_run` layer.
+    """
+    from voyage.media_audio import build_final_audio
 
     run_dir = tmp_path / "run"
     _committed_run(run_dir, 2)
-    (run_dir / "segments" / "000001" / "audio.wav").unlink()
-    out = finalize_run(run_dir, tmp_path / "lenient.mp4", skip_bad=True)
-    assert out.exists()
-    assert "skipping 000001" in capsys.readouterr().out
+    usable = [run_dir / "segments" / "000000", run_dir / "segments" / "000001"]
+    with pytest.raises(MediaError, match="no rendered takes"):
+        build_final_audio(run_dir, usable, tmp_path / "tmp", 24, 48000, 2)
 
 
 @pytest.mark.slow
@@ -249,9 +261,9 @@ def test_190_explicit_audio_scalars_win_over_options() -> None:
         channels=1,
         overlap_fraction=0.0,
         overlap_cap_seconds=0.25,
-        min_fps=None,
-        min_width=None,
-        min_height=None,
+        upscale=None,
+        interpolate=None,
+        presentation_fps=None,
         crf=None,
         preset=None,
     )
@@ -275,9 +287,9 @@ def test_190_none_scalars_keep_options_values() -> None:
         channels=None,
         overlap_fraction=None,
         overlap_cap_seconds=None,
-        min_fps=None,
-        min_width=None,
-        min_height=None,
+        upscale=None,
+        interpolate=None,
+        presentation_fps=None,
         crf=None,
         preset=None,
     )
@@ -296,9 +308,9 @@ def test_190_skip_bad_scalar_overrides_options() -> None:
         channels=None,
         overlap_fraction=None,
         overlap_cap_seconds=None,
-        min_fps=None,
-        min_width=None,
-        min_height=None,
+        upscale=None,
+        interpolate=None,
+        presentation_fps=None,
         crf=None,
         preset=None,
     )
@@ -345,14 +357,14 @@ def test_192_decode_count_mismatch_raises(tmp_path: Path, monkeypatch: pytest.Mo
 # Issue 194: media-owned half — pure setup-facts helper for the §104 block.
 
 
-def test_194_presentation_setup_facts_records_floors_and_plan() -> None:
+def test_194_presentation_setup_facts_records_multipliers_and_plan() -> None:
     from voyage.media import plan_augmentation, presentation_setup_facts
 
-    plan = plan_augmentation(768, 512, 24.0, 768, 512, 24, 32, 1280, 720)
-    facts = presentation_setup_facts(plan, min_fps=32, min_width=1280, min_height=720)
-    assert facts["min_fps"] == 32
-    assert facts["min_width"] == 1280
-    assert facts["min_height"] == 720
+    plan = plan_augmentation(768, 512, 24.0, upscale=2, interpolate=1)
+    facts = presentation_setup_facts(plan, upscale=2, interpolate=1, presentation_fps=None)
+    assert facts["upscale"] == 2
+    assert facts["interpolate"] == 1
+    assert facts["presentation_fps"] is None
     assert facts["out_w"] == plan.out_w
     assert facts["out_h"] == plan.out_h
     assert facts["out_fps"] == plan.out_fps
@@ -360,10 +372,10 @@ def test_194_presentation_setup_facts_records_floors_and_plan() -> None:
     assert facts["needs_minterpolate"] == plan.needs_minterpolate
 
 
-def test_194_presentation_setup_facts_floors_off_round_trips() -> None:
+def test_194_presentation_setup_facts_unity_round_trips() -> None:
     from voyage.media import plan_augmentation, presentation_setup_facts
 
-    plan = plan_augmentation(768, 512, 24.0, 768, 512, 24, 0, 0, 0)
-    facts = presentation_setup_facts(plan, min_fps=0, min_width=0, min_height=0)
-    assert facts["min_fps"] == 0
+    plan = plan_augmentation(768, 512, 24.0)
+    facts = presentation_setup_facts(plan, upscale=1, interpolate=1, presentation_fps=None)
+    assert facts["upscale"] == 1
     assert facts["out_fps"] == plan.out_fps

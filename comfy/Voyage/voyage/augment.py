@@ -489,13 +489,6 @@ _MODEL_UPSCALE_FACTORS = (1, 2, 4)
 """Targets servable from one x4 Real-ESRGAN pass (mirrors the worker vocabulary torch-free)."""
 
 
-def _require_model_pass_flag(use_model_pass: bool) -> bool:
-    """Validate the opt-in knob: strict bool, ffmpeg stays the default when False."""
-    if not isinstance(use_model_pass, bool):
-        raise TypeError(f"use_model_pass must be a bool (got {type(use_model_pass).__name__})")
-    return use_model_pass
-
-
 def _require_upscale_factor(upscale_factor: int) -> int:
     """Validate the presentation upscale target torch-free (1, 2, or 4 from one x4 pass)."""
     if isinstance(upscale_factor, bool) or not isinstance(upscale_factor, int):
@@ -523,15 +516,14 @@ def enhance_frames(
     device: str,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
-    use_model_pass: bool = False,
 ) -> list[Any]:
     """Upscale then interpolate one chunk's frames via the provisioned legs (issue 166).
 
     DESIGN §§56-57: the chunk-scale inference seam — `resolve_augment_weights`
-    provides the legs, this function consumes them. `use_model_pass=False`
-    (default) returns the input frames unchanged without importing torch, so
-    ffmpeg stays the default and slim/CPU callers prove the fallback. With
-    `use_model_pass=True`, each non-None leg runs on `device` (the chunk's
+    provides the legs, this function consumes them. Callers only invoke
+    this when legs are present and work is demanded (upscale > 1 or
+    interpolate > 1); with no provisioned leg it returns the input frames
+    unchanged without importing torch. Each non-None leg runs on `device`
     device — the cuda:0/cuda:1 SFX pairing): Real-ESRGAN upscales first (the
     2x video-export recipe), then FILM interpolates `(multiplier - 1)` mids
     per adjacent pair at evenly spaced moments (`multiplier=4` gives
@@ -545,13 +537,10 @@ def enhance_frames(
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
     if not isinstance(device, str) or not device:
         raise TypeError(f"device must be a non-empty str (got {device!r})")
-    model_enabled = _require_model_pass_flag(use_model_pass)
     target_scale = _require_upscale_factor(upscale_factor)
     interp_factor = _require_interp_multiplier(multiplier)
     if not isinstance(frames, list) or not frames:
         raise ValueError(f"enhance_frames needs at least one frame (got {frames!r})")
-    if not model_enabled:
-        return list(frames)
     if weights.film is None and weights.realesrgan is None:
         return list(frames)
     from voyage.workers import augment_worker
@@ -609,7 +598,6 @@ def make_enhance_chunk_worker(
     source_frames: Mapping[int, list[Any]],
     weights: AugmentWeights,
     *,
-    use_model_pass: bool = False,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
 ) -> Callable[[AugmentChunk, str], list[Any]]:
@@ -620,14 +608,13 @@ def make_enhance_chunk_worker(
     `device=chunk.device` (never the passed-through string — they match by
     construction, but the chunk plan is the pairing contract). Missing chunk
     indices fail loud with `KeyError` so a mis-staged plan never encodes
-    silence. Torch-free until `use_model_pass=True` with a leg present (the
-    enhance path lazy-imports the worker then).
+    silence. Torch-free until a leg is present (the enhance path lazy-imports
+    the worker then).
     """
     if not isinstance(source_frames, Mapping):
         raise TypeError(f"source_frames must be a mapping (got {type(source_frames).__name__})")
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
-    model_enabled = _require_model_pass_flag(use_model_pass)
     target_scale = _require_upscale_factor(upscale_factor)
     interp_factor = _require_interp_multiplier(multiplier)
 
@@ -647,7 +634,6 @@ def make_enhance_chunk_worker(
             device=chunk.device,
             upscale_factor=target_scale,
             multiplier=interp_factor,
-            use_model_pass=model_enabled,
         )
 
     return _worker
@@ -658,23 +644,19 @@ def run_model_augment_chunks(
     weights: AugmentWeights,
     source_frames: Mapping[int, list[Any]],
     *,
-    use_model_pass: bool = False,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
 ) -> list[list[Any]]:
     """Run chunk enhancement through `run_augment_chunks`, preserving chunk order.
 
-    Opt-in knob `use_model_pass` (default False — ffmpeg stays the default):
-    False returns each chunk's source frames unchanged via the real chunk
-    runner (order + warm-first + fan-out all exercised, zero torch); True
-    runs the provisioned legs per chunk on their planned devices. Empty plans
-    return `[]` without touching the runner.
+    Runs the provisioned legs per chunk on their planned devices. Empty
+    plans return `[]` without touching the runner; callers only invoke
+    this when work is demanded (upscale > 1 or interpolate > 1).
     """
     if not isinstance(chunks, list):
         raise TypeError(f"chunks must be a list (got {type(chunks).__name__})")
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
-    model_enabled = _require_model_pass_flag(use_model_pass)
     target_scale = _require_upscale_factor(upscale_factor)
     interp_factor = _require_interp_multiplier(multiplier)
     if not chunks:
@@ -682,27 +664,24 @@ def run_model_augment_chunks(
     worker = make_enhance_chunk_worker(
         source_frames,
         weights,
-        use_model_pass=model_enabled,
         upscale_factor=target_scale,
         multiplier=interp_factor,
     )
     return run_augment_chunks(chunks, worker)
 
 
-def model_pass_active(use_model_pass: bool, weights: AugmentWeights) -> bool:
-    """Whether knob-on + provisioned legs selects the tensor chunk encode (issue 166).
+def model_pass_active(weights: AugmentWeights) -> bool:
+    """Whether provisioned legs select the tensor chunk encode (issue 166).
 
-    DESIGN §§56-57: pure torch-free selection — True only when the opt-in
-    knob is on AND at least one leg resolved (half-provisioned still runs
-    the available leg via `enhance_frames`; both absent keeps the ffmpeg
-    fallback byte-identical). `finalize_run` consults this after
-    `resolve_augment_weights`; False never touches torch.
+    DESIGN §§56-57: pure torch-free selection — True when at least one
+    leg resolved (half-provisioned still runs the available leg via
+    `enhance_frames`; both absent keeps the ffmpeg fallback byte-identical).
+    `finalize_run` consults this after `resolve_augment_weights`; False
+    never touches torch.
     """
-    if not isinstance(use_model_pass, bool):
-        raise TypeError(f"use_model_pass must be a bool (got {type(use_model_pass).__name__})")
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
-    return bool(use_model_pass and (weights.film is not None or weights.realesrgan is not None))
+    return bool(weights.film is not None or weights.realesrgan is not None)
 
 
 def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
@@ -842,8 +821,8 @@ def run_finalize_model_pass(
     concat-demuxer stream copy to one intermediate. Returns the intermediate
     video + its fps; the caller applies the presentation vf
     (scale/pad/fps, no minterpolate — FILM already interpolated) so the
-    shipped box still matches `plan_augmentation` exactly. Absent-legs and
-    knob-off callers never reach here (they keep the single vf encode).
+    shipped box still matches `plan_augmentation` exactly. Callers without
+    work or legs never reach here (they keep the single vf encode).
     """
     if not isinstance(segment_videos, list) or not segment_videos:
         raise ValueError(f"segment_videos needs at least one video (got {segment_videos!r})")
@@ -914,7 +893,6 @@ def run_finalize_model_pass(
         plan,
         weights,
         source_by_chunk,
-        use_model_pass=True,
         upscale_factor=target_scale,
         multiplier=interp_factor,
     )

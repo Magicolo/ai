@@ -46,8 +46,14 @@ def test_validate_passes_aligned_segment(tmp_path: Path) -> None:
     assert validate_run(run_dir) == []
 
 
-def test_validate_rejects_misaligned_stored_durations(tmp_path: Path) -> None:
-    """Crafted 2 s vs 10 s stored durations must fail validate (003)."""
+def test_validate_ignores_misaligned_stored_durations(tmp_path: Path) -> None:
+    """Crafted 2 s vs 10 s stored durations never fail validate (deferred).
+
+    All backends are deferred (video-only commit): cli_validate checks
+    video duration/frames only — there is no audio-duration or 0.6 s A/V
+    drift gate, and a recorded audio block is skipped. Stray or drifted
+    audio metadata must stay silent here; music finalizes from takes.
+    """
     from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
 
     run_dir = tmp_path / "run"
@@ -63,8 +69,7 @@ def test_validate_rejects_misaligned_stored_durations(tmp_path: Path) -> None:
     metrics["video"] = video_block
     metrics["audio"] = audio_block
     write_segment_manifest(segment, {**manifest, "metrics": metrics})
-    errors = validate_run(run_dir)
-    assert any("drift" in error and "000000" in error for error in errors)
+    assert validate_run(run_dir) == []
 
 
 def test_toml_escaper_survives_bel_and_esc() -> None:

@@ -34,7 +34,6 @@ from voyage.media import (
     FINALIZE_CRF_DEFAULT,
     FINALIZE_PRESET_DEFAULT,
     plan_augmentation,
-    upscale_factor_for,
 )
 
 #: Source frames per pre-warm chunk (mirrors the poller/finalize default).
@@ -150,14 +149,15 @@ def _first_committed_video(run_dir: Path) -> Path | None:
 def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None:
     """Derive the finalize-equivalent plan, or None when pre-warm is moot.
 
-    None means: knob off, models dir unset, either weight leg absent (the
-    durable finalize path needs both — partial legs keep the legacy
-    all-or-nothing flow with nothing resumable to pre-warm), no model
-    device visible, no committed segments yet, or the source unprobable.
-    Every check is fail-soft: background work is advisory, never load-bearing.
+    None means: no work demanded (upscale == 1 and interpolate == 1),
+    models dir unset, either weight leg absent (the durable finalize path
+    needs both — partial legs keep the legacy all-or-nothing flow with
+    nothing resumable to pre-warm), no model device visible, no committed
+    segments yet, or the source unprobable. Every check is fail-soft:
+    background work is advisory, never load-bearing.
     """
     augment = config.augment
-    if not augment.use_model_pass:
+    if augment.upscale <= 1 and augment.interpolate <= 1:
         return None
     models_dir = config.video.models_dir
     if models_dir is None:
@@ -181,18 +181,14 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
         source_w, source_h, source_fps = probe_segment_source(first_video)
     except Exception:  # noqa: BLE001 - unprobable source means "not yet", not error
         return None
-    multiplier = augment.interp_multiplier
+    multiplier = augment.interpolate
     plan = plan_augmentation(
         source_w,
         source_h,
         source_fps,
-        config.video.width,
-        config.video.height,
-        config.video.fps,
-        augment.min_fps,
-        augment.min_width,
-        augment.min_height,
-        interp_multiplier=multiplier,
+        upscale=augment.upscale,
+        interpolate=multiplier,
+        presentation_fps=augment.presentation_fps,
     )
     try:
         from voyage.augment_finalize import weights_key_for
@@ -206,7 +202,7 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
         out_fps=plan.out_fps,
         source_fps=source_fps,
         source_fps_key=int(round(source_fps)),
-        upscale_factor=upscale_factor_for(source_w, source_h, plan.out_w, plan.out_h),
+        upscale_factor=augment.upscale,
         multiplier=multiplier,
         crf=FINALIZE_CRF_DEFAULT,
         preset=FINALIZE_PRESET_DEFAULT,

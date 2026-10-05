@@ -59,13 +59,13 @@ def test_enhance_order_switches_on_probe(tmp_path: Path, monkeypatch: pytest.Mon
     frames = ["frame-a", "frame-b"]
 
     monkeypatch.setattr(worker, "interp_first_for_small_device", lambda _device: False)
-    enhance_frames(frames, legs, device="cpu", use_model_pass=True)
+    enhance_frames(frames, legs, device="cpu")
     # Multiplier 4 → 3 mids per pair, all after the upscale.
     assert calls == ["upscale", "interp", "interp", "interp"]
 
     calls.clear()
     monkeypatch.setattr(worker, "interp_first_for_small_device", lambda _device: True)
-    out = enhance_frames(frames, legs, device="cpu", use_model_pass=True)
+    out = enhance_frames(frames, legs, device="cpu")
     assert calls == ["interp", "interp", "interp", "upscale"]
     # Interp-first blends before upscaling: 2 frames x4 in, 5 out.
     assert len(out) == 5

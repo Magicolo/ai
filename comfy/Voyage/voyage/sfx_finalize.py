@@ -538,10 +538,11 @@ def render_sfx_bed(
             window to ledger-append (or None on a cache hit) and whose
             `probed` is the stem file's probed duration (probed on both
             paths so the join reuses it). Stems land via atomic replace in
-            the worker threads (distinct files, safe in parallel); the
-            ledger itself is appended serially in plan order after the
-            pool joins, so two workers can never interleave lines or race
-            the order. No threading.Lock needed by construction.
+            the worker threads
+            (distinct files, safe in parallel); the ledger itself is
+            appended serially in plan order after the pool joins, so two
+            workers can never interleave lines or race the order. No
+            threading.Lock needed by construction.
             """
             stem = sfx_dir / f"{window.window_id}.wav"
             stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}.wav"

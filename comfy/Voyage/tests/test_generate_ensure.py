@@ -416,5 +416,7 @@ def test_generate_ensure_receives_selective_scope(
         "video": "fake",
         "sfx_enabled": False,
         "allow_download": True,
-        "augment_enabled": True,
+        # Defaults are upscale=1/interpolate=1 (no augment work), so the
+        # selective scope correctly carries augment_enabled=False.
+        "augment_enabled": False,
     }

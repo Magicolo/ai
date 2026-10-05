@@ -1,16 +1,16 @@
-"""Finalize augmentation knobs: config + TOML + CLI + TUI (Track A).
+"""Finalize explicit-quality knobs: config + CLI + persistence (Track A).
 
-Covers the `AugmentConfig` model (defaults, 0-disables, half-geometry
-rejection), the `[augment]` TOML round-trip, `resolve_config` overrides,
-the `--min-fps/--min-resolution/--no-augment` CLI flags (parity across
-the finalizing verbs, mirroring `test_sfx_parser_parity.py`), and the
-TUI form fields (defaults, validation, namespace, persistence, planning
-purity). CPU-only: pure config transforms — no workers, no ffmpeg.
+Covers the `AugmentConfig` triple (exact dump, worker-vocab validation),
+`resolve_config` overrides, the `--upscale/--interpolate/--presentation-fps`
+CLI flags on `configure`, the removed floor flags (fail at the parser),
+and the fail-loud legacy-augment-key guard in `read_effective_config`.
+CPU-only: pure config transforms — no workers, no ffmpeg.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,6 @@ from voyage.config import (
     AugmentConfig,
     ProjectConfig,
     Unset,
-    parse_min_resolution,
     preset_config,
     resolve_config,
 )
@@ -35,73 +34,50 @@ def _base_config() -> ProjectConfig:
 
 def test_augment_defaults() -> None:
     assert AugmentConfig().model_dump() == {
-        "min_fps": 24,
-        "min_width": 1216,
-        "min_height": 704,
-        "use_model_pass": True,
-        "interp_multiplier": 2,
-        "presentation_fps": 32,
+        "upscale": 1,
+        "interpolate": 1,
+        "presentation_fps": None,
     }
     assert _base_config().augment == AugmentConfig()
 
 
-def test_zero_disables_both_floors() -> None:
-    disabled = AugmentConfig(min_fps=0, min_width=0, min_height=0)
-    assert (disabled.min_fps, disabled.min_width, disabled.min_height) == (0, 0, 0)
+@pytest.mark.parametrize("multiplier", [1, 2, 4])
+def test_upscale_accepts_worker_vocab(multiplier: int) -> None:
+    assert AugmentConfig(upscale=multiplier).upscale == multiplier
 
 
-def test_half_geometry_rejected() -> None:
+@pytest.mark.parametrize("multiplier", [0, 3, 5, -1])
+def test_upscale_rejects_outside_vocab(multiplier: int) -> None:
     with pytest.raises(ValidationError):
-        AugmentConfig(min_width=0, min_height=720)
+        AugmentConfig(upscale=multiplier)
+
+
+@pytest.mark.parametrize("multiplier", [1, 2, 4])
+def test_interpolate_accepts_worker_vocab(multiplier: int) -> None:
+    assert AugmentConfig(interpolate=multiplier).interpolate == multiplier
+
+
+@pytest.mark.parametrize("multiplier", [0, 3, 5, -1])
+def test_interpolate_rejects_outside_vocab(multiplier: int) -> None:
     with pytest.raises(ValidationError):
-        AugmentConfig(min_width=1280, min_height=0)
+        AugmentConfig(interpolate=multiplier)
 
 
-def test_negative_floors_rejected() -> None:
+def test_presentation_fps_defaults_to_unset() -> None:
+    assert AugmentConfig().presentation_fps is None
+    assert AugmentConfig(presentation_fps=32).presentation_fps == 32
+
+
+def test_presentation_fps_rejects_non_positive() -> None:
     with pytest.raises(ValidationError):
-        AugmentConfig(min_fps=-1)
+        AugmentConfig(presentation_fps=0)
     with pytest.raises(ValidationError):
-        AugmentConfig(min_width=-1280, min_height=720)
+        AugmentConfig(presentation_fps=-1)
 
 
-def test_parse_min_resolution() -> None:
-    assert parse_min_resolution("1280x720") == (1280, 720)
-    assert parse_min_resolution(" 1920X1080 ") == (1920, 1080)
-    assert parse_min_resolution("0") == (0, 0)
-    assert parse_min_resolution("0x0") == (0, 0)
-
-
-@pytest.mark.parametrize("raw", ["soon", "1280", "1280x", "x720", "-1x720", "1280x720x480"])
-def test_parse_min_resolution_rejects_shape(raw: str) -> None:
-    with pytest.raises(ValueError):
-        parse_min_resolution(raw)
-
-
-@pytest.mark.parametrize("raw", ["0x720", "1280x0"])
-def test_parse_min_resolution_rejects_half_disable(raw: str) -> None:
-    with pytest.raises(ValueError):
-        parse_min_resolution(raw)
-
-
-def test_default_toml_carries_augment_section(tmp_path: Path) -> None:
+def test_preset_carries_default_augment() -> None:
     config = preset_config("augment-run", "line art", 7)
     assert config.augment == AugmentConfig()
-
-
-def test_toml_round_trip_custom_floors(tmp_path: Path) -> None:
-    config = preset_config("augment-run", "line art", 7)
-    config = resolve_config(config, min_fps=60, min_resolution="1920x1080")
-    assert (config.augment.min_fps, config.augment.min_width, config.augment.min_height) == (
-        60,
-        1920,
-        1080,
-    )
-
-
-def test_toml_rejects_half_geometry(tmp_path: Path) -> None:
-    base = preset_config("augment-run", "line art", 7)
-    with pytest.raises(ValueError):
-        resolve_config(base, min_resolution="0x1080")
 
 
 def test_resolve_without_augment_options_is_pure_noop() -> None:
@@ -112,37 +88,43 @@ def test_resolve_without_augment_options_is_pure_noop() -> None:
     assert base.model_dump() == before
 
 
-def test_resolve_min_fps_override() -> None:
-    resolved = resolve_config(_base_config(), min_fps=60)
-    assert resolved.augment.min_fps == 60
-    assert (resolved.augment.min_width, resolved.augment.min_height) == (1216, 704)
+def test_resolve_upscale_override() -> None:
+    resolved = resolve_config(_base_config(), upscale=2)
+    assert resolved.augment.upscale == 2
+    assert resolved.augment.interpolate == 1
+    assert resolved.augment.presentation_fps is None
 
 
-def test_resolve_min_resolution_override() -> None:
-    resolved = resolve_config(_base_config(), min_resolution="1920x1080")
-    assert (resolved.augment.min_width, resolved.augment.min_height) == (1920, 1080)
-    assert resolved.augment.min_fps == 24
+def test_resolve_interpolate_override() -> None:
+    resolved = resolve_config(_base_config(), interpolate=4)
+    assert resolved.augment.interpolate == 4
+    assert resolved.augment.upscale == 1
 
 
-def test_resolve_zero_disables() -> None:
-    resolved = resolve_config(_base_config(), min_fps=0, min_resolution="0")
-    assert resolved.augment == AugmentConfig(min_fps=0, min_width=0, min_height=0)
+def test_resolve_presentation_fps_override() -> None:
+    resolved = resolve_config(_base_config(), presentation_fps=32)
+    assert resolved.augment.presentation_fps == 32
+    assert (resolved.augment.upscale, resolved.augment.interpolate) == (1, 1)
 
 
 def test_resolve_absent_encodings() -> None:
-    assert resolve_config(_base_config(), min_fps=None).augment == AugmentConfig()
-    assert resolve_config(_base_config(), min_fps=Unset).augment == AugmentConfig()
-    assert resolve_config(_base_config(), min_resolution=None).augment == AugmentConfig()
-    assert resolve_config(_base_config(), min_resolution=Unset).augment == AugmentConfig()
+    assert resolve_config(_base_config(), upscale=None).augment == AugmentConfig()
+    assert resolve_config(_base_config(), upscale=Unset).augment == AugmentConfig()
+    assert resolve_config(_base_config(), interpolate=None).augment == AugmentConfig()
+    assert resolve_config(_base_config(), interpolate=Unset).augment == AugmentConfig()
+    assert resolve_config(_base_config(), presentation_fps=None).augment == AugmentConfig()
+    assert resolve_config(_base_config(), presentation_fps=Unset).augment == AugmentConfig()
 
 
 def test_resolve_invalid_rejected() -> None:
     with pytest.raises(ValidationError):
-        resolve_config(_base_config(), min_fps=-1)
-    with pytest.raises(ValueError):
-        resolve_config(_base_config(), min_resolution="0x720")
-    with pytest.raises(ValueError):
-        resolve_config(_base_config(), min_resolution="soon")
+        resolve_config(_base_config(), upscale=0)
+    with pytest.raises(ValidationError):
+        resolve_config(_base_config(), upscale=3)
+    with pytest.raises(ValidationError):
+        resolve_config(_base_config(), interpolate=5)
+    with pytest.raises(ValidationError):
+        resolve_config(_base_config(), presentation_fps=0)
 
 
 def _parse(verb_args: list[str]) -> argparse.Namespace:
@@ -151,17 +133,17 @@ def _parse(verb_args: list[str]) -> argparse.Namespace:
 
 def _augment_defaults(args: argparse.Namespace) -> dict[str, object]:
     return {
-        "min_fps": args.min_fps,
-        "min_resolution": args.min_resolution,
-        "no_augment": args.no_augment,
+        "upscale": args.upscale,
+        "interpolate": args.interpolate,
+        "presentation_fps": args.presentation_fps,
     }
 
 
 def test_augment_parser_defaults() -> None:
     assert _augment_defaults(_parse(["configure", "calm", "--segments", "1"])) == {
-        "min_fps": None,
-        "min_resolution": None,
-        "no_augment": False,
+        "upscale": None,
+        "interpolate": None,
+        "presentation_fps": None,
     }
 
 
@@ -172,44 +154,54 @@ def test_augment_flags_parse() -> None:
             "calm",
             "--segments",
             "1",
-            "--min-fps",
-            "60",
-            "--min-resolution",
-            "1920x1080",
+            "--upscale",
+            "2",
+            "--interpolate",
+            "4",
+            "--presentation-fps",
+            "32",
         ]
     )
     assert _augment_defaults(args) == {
-        "min_fps": 60,
-        "min_resolution": "1920x1080",
-        "no_augment": False,
+        "upscale": 2,
+        "interpolate": 4,
+        "presentation_fps": 32,
     }
-    assert _parse(["configure", "calm", "--segments", "1", "--no-augment"]).no_augment is True
 
 
 def test_configure_carries_augment_flags() -> None:
     """The shared helper exposes every augment flag on `configure` (020)."""
-    flags = ["--min-fps", "60", "--min-resolution", "1920x1080", "--no-augment"]
+    flags = ["--upscale", "2", "--interpolate", "4", "--presentation-fps", "32"]
     args = _parse(["configure", "calm", "--segments", "1", *flags])
     assert _augment_defaults(args) == {
-        "min_fps": 60,
-        "min_resolution": "1920x1080",
-        "no_augment": True,
+        "upscale": 2,
+        "interpolate": 4,
+        "presentation_fps": 32,
     }
+
+
+@pytest.mark.parametrize("flag", ["--no-augment", "--min-fps", "--min-resolution"])
+def test_removed_augment_flags_no_longer_parse(flag: str) -> None:
+    """Deleted floor flags fail at the parser (never swallow into defaults)."""
+    with pytest.raises(SystemExit):
+        _parse(["configure", "calm", "--segments", "1", flag])
 
 
 def test_augment_overrides_mapping() -> None:
     base = ["configure", "calm", "--segments", "1"]
     assert _augment_overrides(_parse(base)) == {}
-    assert _augment_overrides(_parse([*base, "--min-fps", "60"])) == {"min_fps": 60}
-    assert _augment_overrides(_parse([*base, "--min-resolution", "0"])) == {"min_resolution": "0"}
-    # --no-augment wins over explicit floors (both to 0) and forces the pass off.
-    assert _augment_overrides(_parse([*base, "--min-fps", "60", "--no-augment"])) == {
-        "min_fps": 0,
-        "min_resolution": "0",
-        "use_model_pass": False,
+    assert _augment_overrides(_parse([*base, "--upscale", "2"])) == {"upscale": 2}
+    assert _augment_overrides(_parse([*base, "--interpolate", "4"])) == {"interpolate": 4}
+    assert _augment_overrides(_parse([*base, "--presentation-fps", "32"])) == {
+        "presentation_fps": 32
     }
     # TUI/hand-built namespaces: Unset blanks and missing attrs are absent.
-    assert _augment_overrides(argparse.Namespace(min_fps=Unset, min_resolution=Unset)) == {}
+    assert (
+        _augment_overrides(
+            argparse.Namespace(upscale=Unset, interpolate=Unset, presentation_fps=Unset)
+        )
+        == {}
+    )
     assert _augment_overrides(argparse.Namespace()) == {}
 
 
@@ -222,9 +214,9 @@ def test_cmd_finalize_rejects_invalid_augment(tmp_path: Path) -> None:
             run=str(tmp_path),
             output=str(tmp_path / "final.mp4"),
             skip_bad=False,
-            min_fps=-1,
-            min_resolution=None,
-            no_augment=False,
+            upscale=3,
+            interpolate=None,
+            presentation_fps=None,
         )
     )
     assert code == 2
@@ -233,12 +225,29 @@ def test_cmd_finalize_rejects_invalid_augment(tmp_path: Path) -> None:
             run=str(tmp_path),
             output=str(tmp_path / "final.mp4"),
             skip_bad=False,
-            min_fps=None,
-            min_resolution="soon",
-            no_augment=False,
+            upscale=None,
+            interpolate=None,
+            presentation_fps=0,
         )
     )
     assert code == 2
+
+
+def test_read_effective_config_rejects_legacy_augment_keys(tmp_path: Path) -> None:
+    """Pre-multiplier manifests fail loud (re-configure, never silent read)."""
+    from tests.conftest import initialize_run_directory
+    from voyage.errors import StateError
+    from voyage.persistence import read_effective_config
+
+    run_dir = tmp_path / "run"
+    initialize_run_directory(run_dir, run_id="legacy", style="s", seed=0)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest["augment"], dict)
+    manifest["augment"]["min_fps"] = 24
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(StateError, match="augment keys"):
+        read_effective_config(run_dir)
 
 
 # --- 088 fold: tests/test_sfx_parser_parity.py (2 tests, verbatim) ---

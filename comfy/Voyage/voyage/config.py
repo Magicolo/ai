@@ -10,7 +10,6 @@ runs to their exact configuration.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Literal, TypeGuard, TypeVar
 
@@ -191,7 +190,9 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     # (DESIGN §140 audio continuity), while the finalize SFX dub pairs
     # mmaudio/cuda:0 (MMAudio dubs effects under the soundtrack at
     # finalize, after the video worker has stopped — DESIGN §140 GPU
-    # defaults). The workers' own joint audio.wav files are ignored.
+    # defaults). The workers commit video only (all-deferred audio):
+    # segment audio comes from the ACE-Step music takes + finalize SFX
+    # dub, never from the worker.
     "ltx25": BackendRecord(
         profile="ltx25-704p",
         width=1216,
@@ -382,10 +383,9 @@ class AudioConfig(BaseModel):
     # ACE honors tempo as a hint, not a sample-exact grid).
     beats_per_segment: int = 4
     # Finalize-only joint blend (§56): overlap = min(fraction × shortest
-    # adjoining segment, cap). Previews (per-segment audio.wav) stay
-    # hard-cut; the blend applies at finalize from take re-slices, so no
-    # commit-format change and no A/V drift (overlap content comes from
-    # the takes, not by shortening the timeline).
+    # adjoining segment, cap). The blend applies at finalize from take
+    # re-slices, so no commit-format change and no A/V drift (overlap
+    # content comes from the takes, not by shortening the timeline).
     final_overlap_fraction: float = 0.10
     final_overlap_cap_seconds: float = 0.5
     # ACE-Step backend only: mirrors VideoConfig — host path (or /models
@@ -487,91 +487,42 @@ class SfxConfig(BaseModel):
 
 
 class AugmentConfig(BaseModel):
-    """Finalize-time augmentation floors (Track A: knobs only).
+    """Finalize-time explicit quality multipliers.
 
-    `min_fps = 0` disables the fps floor; `min_width = min_height = 0`
-    disables the resolution floor. Geometry must be both-zero or
-    both-positive — a half-disabled floor (0 wide x 704 high) is
-    meaningless, so the model rejects it. The media consumer that reads
-    these floors lands in a later slice; this track only plumbs them
-    through TOML + CLI + TUI.
+    No minimum floors: quality is specified explicitly per run.
+    `upscale` scales the shipped resolution against the probed source
+    (`2` doubles width and height); `interpolate` scales the shipped
+    frame count the same way FILM always has (`(n-1)*m+1`). Both
+    default to `1` (ship the source geometry as-is, ffmpeg only).
 
-    `use_model_pass` (issue 166) is the model pass: Real-ESRGAN
-    upscale + FILM interpolate via `resolve_augment_weights` when
-    provisioned (default on — DESIGN §140 GPU defaults pins it to
-    cuda:1), ffmpeg floors only when off or when the legs are absent.
+    The model pass (Real-ESRGAN upscale + FILM interpolate via
+    `resolve_augment_weights` when provisioned) runs exactly when the
+    multipliers demand work — `upscale > 1 or interpolate > 1` — and
+    the legs are present; otherwise finalize ships via ffmpeg. There
+    is no `use_model_pass` / `--no-augment` knob: `1/1` means no work.
 
-    `interp_multiplier` (DESIGN §56) is the FILM frame multiplier for
-    the model pass (default 2, matching the poulah-proven recipe);
-    1 keeps the frame count (`(n-1)*1+1 = n`, the interp worker
-    passes frames through), so the pass upscales without interpolating.
-
-    `presentation_fps` (slow-mo finalize) pins the shipped frame rate
-    instead of the floors rule: with `interp_multiplier=2` on 24fps
-    content presented at 32fps, the timeline stretches 1.5x (slow
-    motion) instead of lifting fps with minterpolate. `32` (default)
-    is the poulah-proven value; TOML `0` means unset (`None`, the
-    floors behavior).
+    `presentation_fps` pins the shipped frame rate: with
+    `interpolate=2` on 24fps content presented at 32fps, the timeline
+    stretches 1.5x (slow motion) instead of lifting the frame rate.
+    `None` (default, unset) ships `round(source_fps * interpolate)`.
     """
 
-    min_fps: int = 24
-    min_width: int = 1216
-    min_height: int = 704
-    use_model_pass: bool = True
-    interp_multiplier: int = 2
-    presentation_fps: int | None = Field(default=32, ge=1)
+    upscale: int = 1
+    interpolate: int = 1
+    presentation_fps: int | None = Field(default=None, ge=1)
 
-    @field_validator("presentation_fps", mode="before")
+    @field_validator("upscale", "interpolate")
     @classmethod
-    def unset_presentation_zero(cls, value: object) -> object:
-        if value == 0:
-            return None
+    def multiplier_in_worker_vocab(cls, value: int) -> int:
+        # Fail fast at configure time: the upscale worker + poller only
+        # serve (1, 2, 4) (one x4 SRVGG pass covers 4/2/1), and FILM
+        # multipliers outside small ints are never sensible. Without this,
+        # a 3 slips into TOML and dies deep in the worker.
+        if value not in (1, 2, 4):
+            raise ValueError(
+                f"upscale/interpolate must be 1, 2, or 4 (1 = no work on that axis; got {value})"
+            )
         return value
-
-    @field_validator("min_fps", "min_width", "min_height")
-    @classmethod
-    def non_negative(cls, value: int) -> int:
-        if value < 0:
-            raise ValueError("must be non-negative (0 disables the floor)")
-        return value
-
-    @field_validator("interp_multiplier")
-    @classmethod
-    def multiplier_at_least_one(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("interp_multiplier must be >= 1 (1 = upscale only, no interpolation)")
-        return value
-
-    @model_validator(mode="after")
-    def geometry_both_or_neither(self) -> AugmentConfig:
-        if (self.min_width == 0) != (self.min_height == 0):
-            raise ValueError("min_width and min_height must both be 0 or both positive")
-        return self
-
-
-def parse_min_resolution(raw: str) -> tuple[int, int]:
-    """Parse a resolution floor: WxH like "1216x704", or "0" to disable.
-
-    Returns (width, height); "0" (and the equivalent "0x0") returns
-    (0, 0). Anything else — wrong shape, non-digits, or a half-disabled
-    pair like "0x704" — raises ValueError so CLI/TUI/resolve paths share
-    one error source. The full both-or-neither invariant also lives on
-    AugmentConfig for direct construction and TOML loads.
-    """
-    text = raw.strip().lower()
-    if text == "0":
-        return (0, 0)
-    match = re.fullmatch(r"(\d+)\s*x\s*(\d+)", text)
-    if match is None:
-        raise ValueError(
-            f'invalid resolution {raw!r} (expected WxH like "1216x704" or "0" to disable)'
-        )
-    width, height = int(match.group(1)), int(match.group(2))
-    if (width == 0) != (height == 0):
-        raise ValueError(
-            f"invalid resolution {raw!r}: width and height must both be 0 or both positive"
-        )
-    return (width, height)
 
 
 DirectorBackendName = Literal["qwen", "deterministic", "llama"]
@@ -766,10 +717,8 @@ def resolve_config(
     drift_every_n_segments: int | None | UnsetType = Unset,
     music_caption: str | None | UnsetType = Unset,
     video_caption: str | None | UnsetType = Unset,
-    min_fps: int | None | UnsetType = Unset,
-    min_resolution: str | None | UnsetType = Unset,
-    use_model_pass: bool | None | UnsetType = Unset,
-    interp_multiplier: int | None | UnsetType = Unset,
+    upscale: int | None | UnsetType = Unset,
+    interpolate: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issue 022): backend preset,
@@ -829,35 +778,19 @@ def resolve_config(
     if is_provided(video_caption):
         video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
     augment = config.augment
-    if (
-        is_provided(min_fps)
-        or is_provided(min_resolution)
-        or is_provided(use_model_pass)
-        or is_provided(interp_multiplier)
-        or is_provided(presentation_fps)
-    ):
-        resolved_fps = augment.min_fps
-        resolved_width = augment.min_width
-        resolved_height = augment.min_height
-        resolved_model_pass = augment.use_model_pass
-        resolved_multiplier = augment.interp_multiplier
+    if is_provided(upscale) or is_provided(interpolate) or is_provided(presentation_fps):
+        resolved_upscale = augment.upscale
+        resolved_interpolate = augment.interpolate
         resolved_presentation = augment.presentation_fps
-        if is_provided(min_fps):
-            resolved_fps = min_fps
-        if is_provided(min_resolution):
-            resolved_width, resolved_height = parse_min_resolution(min_resolution)
-        if is_provided(use_model_pass):
-            resolved_model_pass = use_model_pass
-        if is_provided(interp_multiplier):
-            resolved_multiplier = interp_multiplier
+        if is_provided(upscale):
+            resolved_upscale = upscale
+        if is_provided(interpolate):
+            resolved_interpolate = interpolate
         if is_provided(presentation_fps):
             resolved_presentation = presentation_fps
         augment = AugmentConfig(
-            min_fps=resolved_fps,
-            min_width=resolved_width,
-            min_height=resolved_height,
-            use_model_pass=resolved_model_pass,
-            interp_multiplier=resolved_multiplier,
+            upscale=resolved_upscale,
+            interpolate=resolved_interpolate,
             presentation_fps=resolved_presentation,
         )
     return config.model_copy(

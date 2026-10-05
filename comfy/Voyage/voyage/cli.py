@@ -161,48 +161,31 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_augment_args(parser: argparse.ArgumentParser) -> None:
-    """Finalize-time augmentation floors for `configure` (Track A).
+    """Finalize-time explicit quality multipliers for `configure`.
 
-    The floors ride the run's stored `[augment]` section; `generate`'s
-    finalize step consumes them.
+    The multipliers ride the run's stored `[augment]` section; `generate`'s
+    finalize step consumes them. There are no minimum quality floors:
+    quality is specified explicitly (`1/1` ships the source as-is).
     """
     parser.add_argument(
-        "--min-fps",
+        "--upscale",
         type=int,
         default=None,
-        help="floor output fps at finalize (default: [augment] min_fps 24; 0 disables)",
+        help="resolution multiplier at finalize against the probed source "
+        "(default: [augment] upscale 1; 2 doubles width and height)",
     )
     parser.add_argument(
-        "--min-resolution",
-        default=None,
-        help='floor output resolution at finalize, WxH e.g. "1216x704" '
-        '(default: [augment] 1216x704; "0" disables)',
-    )
-    parser.add_argument(
-        "--no-augment",
-        action="store_true",
-        help="disable all finalize augmentation floors (fps + resolution floors to 0)",
-    )
-    parser.add_argument(
-        "--use-model-pass",
-        action="store_true",
-        default=None,
-        help="run the Real-ESRGAN + FILM model pass at finalize when provisioned "
-        "(default: [augment] use_model_pass on, pinned to cuda:1 when two GPUs show; "
-        "--no-augment turns it off with the floors)",
-    )
-    parser.add_argument(
-        "--interp-multiplier",
+        "--interpolate",
         type=int,
         default=None,
-        help="FILM interpolation multiplier for the model pass "
-        "(default: [augment] interp_multiplier 4; 1 = upscale only, no interpolation)",
+        help="frame-count multiplier at finalize via FILM "
+        "(default: [augment] interpolate 1; 2 doubles the frame count)",
     )
     parser.add_argument(
         "--presentation-fps",
         type=int,
         default=None,
-        help="pin the shipped frame rate instead of the floors rule "
+        help="pin the shipped frame rate instead of source x interpolate "
         "(default: unset; e.g. 24fps x2 content at 32fps stretches the "
         "timeline 1.5x slow motion)",
     )

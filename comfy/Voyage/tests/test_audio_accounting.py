@@ -1,11 +1,13 @@
 """Take/file duration accounting (issues 094, 095).
 
-094: ACE renders are not sample-exact — the ledger must be clamped to the
-probed file at commit (`take_short_seconds` metric), not the request.
+094: ACE renders are not sample-exact — the takes ledger is clamped to the
+probed file at finalize (`ensure_deferred_takes`), not the request.
 095: take-joint windows must tile their nominal range exactly (the window
 crossfade absorbs fade*(joints) of unique content otherwise, and the
 final `-shortest` mux then trims video frames). All media is real ffmpeg
-output (sine), no GPU, no mocks except where noted.
+output (sine), no GPU, no mocks except where noted. Commit is video-only
+(all backends deferred): no per-segment audio exists at commit, so the
+094 commit-clamp test no longer exists — clamping is pinned at finalize.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from voyage.media import (
     build_final_audio,
     probed_take_seconds,
 )
-from voyage.persistence import read_effective_config
 
 
 def _sine_wav(path: Path, seconds: float) -> Path:
@@ -190,29 +191,3 @@ def test_assemble_joint_fade_override_is_exact(tmp_path: Path) -> None:
     dest = tmp_path / "joint.wav"
     assemble_segment_audio([first, second], dest, 0.2, joint_fade=0.2)
     assert _probe_seconds(dest) == pytest.approx(1.1 + 1.0 - 0.2, abs=0.05)
-
-
-def test_commit_clamps_short_take_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue 094: a short render clamps the ledger + records the metric."""
-    import voyage.supervisor as supervisor_module
-    from tests.conftest import initialize_run_directory
-    from voyage.supervisor import Supervisor
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="clamp")
-    (run_dir / "audio").mkdir(exist_ok=True)
-
-    short = _sine_wav(tmp_path / "short.wav", 1.0)
-
-    def _probed_short(path: Path) -> float:
-        return _probe_seconds(short)
-
-    monkeypatch.setattr(supervisor_module, "probed_take_seconds", _probed_short)
-    config = read_effective_config(run_dir)
-    committed = Supervisor(run_dir, config).run_segments(1)
-    assert committed == ["000000"]
-    ledger = [
-        json.loads(line)
-        for line in (run_dir / "audio" / "takes.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert ledger and ledger[0]["duration"] == pytest.approx(1.0, abs=0.05)

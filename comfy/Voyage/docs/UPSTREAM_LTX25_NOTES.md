@@ -6,8 +6,7 @@ moves.
 
 Status: worker landed. `voyage/workers/video_ltx25.py` serves the
 `ltx25` backend (in-process pinned ComfyUI, Mode-A 1216x704@24 quality
-path, 121/25/96 accounting with 25-frame frozen-prefix continuation,
-joint audio.wav, `recovery.pt` §5.3 JSON tape with profile `ltxv25`
+path, 121/25/96 accounting with 25-frame frozen-prefix continuation, `recovery.pt` §5.3 JSON tape with profile `ltxv25`
 — see `recovery-profiles` line in BACKENDS.md; `generate --backend
 ltx25`, `models download/verify ltx25`).
 

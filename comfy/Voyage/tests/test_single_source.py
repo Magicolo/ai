@@ -20,12 +20,7 @@ from voyage.config import (
     _sfx_preset,
     _video_preset,
 )
-from voyage.media import (
-    AUGMENT_DEFAULT_MIN_FPS,
-    AUGMENT_DEFAULT_MIN_HEIGHT,
-    AUGMENT_DEFAULT_MIN_WIDTH,
-    FinalizeOptions,
-)
+from voyage.media import FinalizeOptions
 
 
 def test_duration_epsilon_is_single_sourced() -> None:
@@ -53,23 +48,23 @@ def test_worker_modules_cover_registry() -> None:
     assert set(supervisor.VIDEO_WORKER_MODULES) == set(BACKEND_REGISTRY)
 
 
-def test_augment_floors_agree() -> None:
-    """Config, media, and finalize defaults ship the same floors."""
+def test_augment_quality_agrees() -> None:
+    """Config, media, and finalize defaults ship the same explicit quality."""
     config_defaults = AugmentConfig()
     finalize_defaults = FinalizeOptions()
     assert (
-        config_defaults.min_fps,
-        config_defaults.min_width,
-        config_defaults.min_height,
-    ) == (AUGMENT_DEFAULT_MIN_FPS, AUGMENT_DEFAULT_MIN_WIDTH, AUGMENT_DEFAULT_MIN_HEIGHT)
+        config_defaults.upscale,
+        config_defaults.interpolate,
+        config_defaults.presentation_fps,
+    ) == (1, 1, None)
     assert (
-        finalize_defaults.min_fps,
-        finalize_defaults.min_width,
-        finalize_defaults.min_height,
+        finalize_defaults.upscale,
+        finalize_defaults.interpolate,
+        finalize_defaults.presentation_fps,
     ) == (
-        config_defaults.min_fps,
-        config_defaults.min_width,
-        config_defaults.min_height,
+        config_defaults.upscale,
+        config_defaults.interpolate,
+        config_defaults.presentation_fps,
     )
 
 

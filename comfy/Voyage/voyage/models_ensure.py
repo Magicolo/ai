@@ -91,10 +91,10 @@ def required_specs(
     `sfx_enabled` mirrors the finalize gate (`not no_sfx and backend is
     mmaudio`): the SFX stack downloads only when the pass will run. A
     fake video backend needs the empty set (weight-free offline runs).
-    `augment_enabled` gates the finalize-stage augmentation floors (FILM
+    `augment_enabled` gates the finalize-stage model pass (FILM
     interpolation + Real-ESRGAN anime upscaler): CUDA backends include
-    them by default, `False` restores the pre-augmentation set (tests,
-    weight-free probes). ACE-Step is required whenever the effective
+    them when the multipliers demand work, `False` restores the
+    pre-augmentation set (tests, weight-free probes). ACE-Step is required whenever the effective
     config pairs it (`audio.backend == "acestep"`): ltx25/ltx23 take
     their continuous music from the ACE planner's long caption-driven
     takes (DESIGN §140 audio continuity), not from the worker's joint

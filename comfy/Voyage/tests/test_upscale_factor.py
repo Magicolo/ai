@@ -1,10 +1,10 @@
-"""Native-resolution finalize: upscale factor rule + 1x passthrough (DESIGN §140).
+"""Explicit-quality upscale: config triple + torch-free 1x passthrough (DESIGN §140).
 
-By default ltx25's native output (1216x704) is considered sufficient — the
-model pass interpolates at source resolution instead of upscaling 2x and
-interpolating at 2432x1408 (which OOMs the 6 GB 2060 even solo). Covered:
-the pure factor rule (`media.upscale_factor_for`), the torch-free 1x
-passthrough in the upscale poller's default seam, and factor validation.
+By default the source geometry ships as-is (`upscale=1`); `2`/`4` lift
+the box through the model pass. Covered: the `AugmentConfig` upscale
+default + (1, 2, 4) vocab, the `resolve_config` override, the
+`FinalizeOptions` upscale gate, the pure `plan_augmentation` box rule,
+and the torch-free 1x passthrough in the upscale poller's default seam.
 CPU-only, no torch/PIL/ffmpeg: the 1x path must never import the model
 stack (the slim test image carries neither torch nor Pillow).
 """
@@ -16,31 +16,56 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from voyage import media
 from voyage.augment_upscale_poller import _default_upscale_pngs, upscale_poll_once
+from voyage.config import AugmentConfig, preset_config, resolve_config
+from voyage.media import FinalizeOptions
 
 
-def test_factor_rule_skips_upscale_when_output_fits_source() -> None:
-    """Equal or smaller output box means no genuine lift: factor 1."""
-    assert media.upscale_factor_for(1216, 704, 1216, 704) == 1
-    assert media.upscale_factor_for(1216, 704, 640, 352) == 1
-    assert media.upscale_factor_for(1216, 704, 1216, 360) == 1
+def test_augment_config_upscale_default_and_validation() -> None:
+    """Default 1 ships source geometry; only 1/2/4 reach the worker."""
+    assert AugmentConfig().upscale == 1
+    assert AugmentConfig(upscale=2).upscale == 2
+    assert AugmentConfig(upscale=4).upscale == 4
+    with pytest.raises(ValidationError):
+        AugmentConfig(upscale=0)
+    with pytest.raises(ValidationError):
+        AugmentConfig(upscale=3)
 
 
-def test_factor_rule_upscales_on_genuine_lift() -> None:
-    """Any output axis above source is a genuine lift: factor 2."""
-    assert media.upscale_factor_for(768, 512, 1216, 704) == 2
-    assert media.upscale_factor_for(1216, 704, 1216, 705) == 2
-    assert media.upscale_factor_for(1216, 704, 1217, 704) == 2
+def test_resolve_config_applies_upscale() -> None:
+    """CLI override lands on the effective config; absent stays default."""
+    resolved = resolve_config(preset_config("upscale-run", "line art", 7), upscale=2)
+    assert resolved.augment.upscale == 2
+    assert resolve_config(preset_config("upscale-run", "line art", 7)).augment == AugmentConfig()
 
 
-def test_factor_rule_rejects_bad_geometry() -> None:
-    """Zero/negative sizes fail loud, never silently pick a factor."""
+def test_finalize_options_upscale_default_and_vocab() -> None:
+    """FinalizeOptions default 1; outside (1, 2, 4) fails before media work."""
+    assert FinalizeOptions().upscale == 1
+    assert FinalizeOptions(upscale=4).upscale == 4
+    with pytest.raises(ValueError, match="upscale"):
+        FinalizeOptions(upscale=3)
+
+
+def test_plan_upscale_doubles_output_box() -> None:
+    """The pure plan multiplies the source box by the upscale factor."""
+    plan = media.plan_augmentation(768, 512, 24.0, upscale=2)
+    assert (plan.out_w, plan.out_h) == (1536, 1024)
+    assert plan.needs_reencode is True
+    native = media.plan_augmentation(768, 512, 24.0, upscale=1)
+    assert (native.out_w, native.out_h) == (768, 512)
+    assert native.needs_reencode is False
+
+
+def test_plan_upscale_rejects_outside_vocab() -> None:
+    """Factors outside (1, 2, 4) fail at the plan, never reach the model."""
     with pytest.raises(ValueError):
-        media.upscale_factor_for(0, 704, 1216, 704)
+        media.plan_augmentation(768, 512, 24.0, upscale=3)
     with pytest.raises(ValueError):
-        media.upscale_factor_for(1216, 704, 1216, -1)
+        media.plan_augmentation(768, 512, 24.0, upscale=0)
 
 
 def _block_model_stack(monkeypatch: pytest.MonkeyPatch) -> None:

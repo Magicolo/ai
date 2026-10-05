@@ -16,8 +16,6 @@ from voyage import paths
 from voyage.cli_paths import resolve_run_ref
 from voyage.concepts import validate_concepts
 from voyage.errors import MediaError, StateError
-from voyage.media import AV_ALIGNMENT_TOLERANCE_SECONDS
-from voyage.media import av_drift_seconds as _av_drift_seconds
 from voyage.persistence import read_effective_config, read_manifest, read_state
 from voyage.segment_manifest import load_segment_manifest
 from voyage.supervisor import sha256_file
@@ -28,10 +26,12 @@ _SEGMENT_ID_PATTERN = re.compile(r"^\d{6}$")
 def _check_segment_checksums(segment: Path) -> list[str]:
     """Recompute manifest checksums (DESIGN §70: checksum mismatches).
 
-    Media entries are required; any other recorded entry (recovery.pt on
-    new manifests, legacy metadata JSONs on old `sha256.json` manifests)
-    verifies when recorded and stays silent when absent, so old runs keep
-    validating (additive, never a new error on legacy runs).
+    Video-only since the all-deferred audio cleanup: only `video.mp4`
+    is required. Any other recorded entry verifies when recorded and
+    stays silent when absent — except a recorded `audio.wav` entry,
+    which is skipped silently for old runs (extra file ignored, extra
+    checksum entry ignored) — so old runs keep validating (additive,
+    never a new error on legacy runs).
     """
     errors: list[str] = []
     manifest_file = segment / paths.SEGMENT_MANIFEST_FILENAME
@@ -55,7 +55,7 @@ def _check_segment_checksums(segment: Path) -> list[str]:
             return [f"{segment.name} has malformed sha256.json"]
     else:
         return errors  # missing file already reported by the caller
-    for artifact in ("video.mp4", "audio.wav"):
+    for artifact in ("video.mp4",):
         recorded = expected.get(artifact)
         target = segment / artifact
         if not target.exists():
@@ -75,7 +75,7 @@ def _check_segment_checksums(segment: Path) -> list[str]:
             errors.append(f"{segment.name} checksum mismatch for {artifact}")
     for artifact, recorded in sorted(expected.items()):
         if artifact in ("video.mp4", "audio.wav"):
-            continue
+            continue  # video already verified; audio.wav silently skipped (old runs)
         if not isinstance(recorded, str) or not recorded:
             continue  # legacy manifest: media only means "not covered"
         target = segment / artifact
@@ -95,13 +95,14 @@ def _check_segment_checksums(segment: Path) -> list[str]:
 
 
 def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[list[str], int]:
-    """Frame ranges, durations, A/V drift, recovery tapes (DESIGN §70).
+    """Frame counts, video duration, recovery tapes (DESIGN §70).
 
-    The drift check reads the stored `metrics.video/audio.duration` —
-    no probe needed — so `validate` enforces the same 0.6 s budget the
-    finalizer does (issue 003). Recovery tapes resolve run-relative
-    (issue 016 consumer side); `run_dir=None` keeps the legacy
-    as-is check for callers without a run context.
+    Video-only since the all-deferred audio cleanup: only
+    `metrics.video.duration` / `frames` are checked (no audio duration,
+    no A/V drift gate — audio finalizes from takes at finalize time).
+    Recovery tapes resolve run-relative (issue 016 consumer side);
+    `run_dir=None` keeps the legacy as-is check for callers without a
+    run context.
 
     Returns (errors, frames).
     """
@@ -133,26 +134,14 @@ def _check_segment_metrics(segment: Path, run_dir: Path | None = None) -> tuple[
         return [f"{segment.name} has unreadable metrics.json"], 0
     if frames <= 0:
         errors.append(f"{segment.name} has non-positive frame count {frames}")
-    durations: dict[str, float] = {}
-    for key in ("video", "audio"):
-        block = metrics.get(key)
-        if isinstance(block, dict):
-            try:
-                duration = float(block.get("duration", 0.0))
-            except (TypeError, ValueError):
-                duration = 0.0
-            durations[key] = duration
-            if duration <= 0:
-                errors.append(f"{segment.name} has non-positive {key} duration")
-    video_duration = durations.get("video", 0.0)
-    audio_duration = durations.get("audio", 0.0)
-    if video_duration > 0 and audio_duration > 0:
-        drift = _av_drift_seconds(video_duration, audio_duration)
-        if drift > AV_ALIGNMENT_TOLERANCE_SECONDS:
-            errors.append(
-                f"{segment.name} A/V alignment drift {drift:.3f}s "
-                f"exceeds {AV_ALIGNMENT_TOLERANCE_SECONDS:.1f}s"
-            )
+    video_block = metrics.get("video")
+    if isinstance(video_block, dict):
+        try:
+            video_duration = float(video_block.get("duration", 0.0))
+        except (TypeError, ValueError):
+            video_duration = 0.0
+        if video_duration <= 0:
+            errors.append(f"{segment.name} has non-positive video duration")
     tape = metrics.get("recovery_tape")
     if isinstance(tape, str) and tape:
         if run_dir is None:
@@ -218,9 +207,10 @@ def validate_run(run_dir: Path) -> list[str]:
             errors.append(f"segment numbering gap: expected {position:06d}, found {segment.name}")
     expected_frames = 0
     for segment in committed:
-        for name in ("video.mp4", "audio.wav"):
-            if not (segment / name).exists():
-                errors.append(f"{segment.name} DONE but missing {name}")
+        # Video-only: a present-but-unrequired audio.wav (old runs, or a
+        # supervisor that still writes previews) is ignored, never an error.
+        if not (segment / "video.mp4").exists():
+            errors.append(f"{segment.name} DONE but missing video.mp4")
         if (segment / paths.SEGMENT_MANIFEST_FILENAME).exists():
             pass  # metadata lives inside the manifest
         else:

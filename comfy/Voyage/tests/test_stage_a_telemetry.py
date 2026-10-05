@@ -21,10 +21,8 @@ from typing import Any
 
 import pytest
 
-import voyage.supervisor as supervisor_module
 from tests.conftest import initialize_run_directory
 from voyage import paths
-from voyage.audio.planner import AudioTake, append_take
 from voyage.concepts import ConceptStore
 from voyage.models import DirectorDestination, DirectorVideoPlan, EvolutionDecision
 from voyage.persistence import read_effective_config
@@ -256,42 +254,17 @@ def test_committed_carries_director_tokens_and_video_stage(
     assert isinstance(committed[0]["video_stage_ms"], dict)
 
 
-def test_audio_assemble_emits_timing_metric(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Slice + assemble windows are timed even when no take renders (keep path)."""
+def test_cover_audio_records_audio_stage_timing(tmp_path: Path) -> None:
+    """Video-only cover records the `audio` stage timing, never `audio.wav`.
+
+    All backends are deferred: `_cover_audio` derives no takes, slices
+    nothing, and writes no segment audio — it only records the stage
+    timing and returns the deferred plan (fake backend needs no tail).
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="stage-a")
     config = read_effective_config(run_dir)
-    ledger = run_dir / "audio" / "takes.jsonl"
-    append_take(
-        ledger,
-        AudioTake(
-            take_id="take_0000",
-            path="audio/take.wav",
-            # Must equal the effective caption (the default decision's
-            # music_caption, no CLI pin) or the planner repaints.
-            caption="slow ambient electronic composition",
-            seed=0,
-            covers_from=0.0,
-            duration=45.0,
-            segment_index=0,
-        ),
-    )
-    monkeypatch.setattr(
-        supervisor_module,
-        "slice_take",
-        lambda take_path, start, duration, dest, rate, channels: (
-            dest.parent.mkdir(parents=True, exist_ok=True),
-            dest.write_bytes(b"slice"),
-            dest,
-        )[2],
-    )
-    monkeypatch.setattr(
-        supervisor_module,
-        "assemble_segment_audio",
-        lambda slices, dest, crossfade, joint_fade=None: dest,
-    )
+    assert config.video.backend == "fake"
     supervisor = Supervisor(run_dir, config)
     decision = EvolutionDecision(
         decision_index=0,
@@ -299,11 +272,15 @@ def test_audio_assemble_emits_timing_metric(
     )
     segment = run_dir / "segments" / "000000"
     segment.mkdir(parents=True, exist_ok=True)
-    supervisor._ensure_audio_coverage(config, 0, "000000", segment, 0.0, 0.4, decision, None)
-    assembled = _metric_events(run_dir, "audio_assemble")
-    assert len(assembled) == 1
-    assert set(assembled[0]["windows"]) == {"slice_ms", "assemble_ms"}
-    assert all(v >= 0.0 for v in assembled[0]["windows"].values())
+    stage_seconds: dict[str, float] = {}
+    covered = supervisor._cover_audio(
+        config, 0, "000000", segment, 0.0, 0.4, decision, None, stage_seconds
+    )
+    assert covered.take_action == "deferred"
+    assert covered.audio_ahead == 0.0
+    assert covered.audio_plan.take_ids == []
+    assert not (segment / "audio.wav").exists()
+    assert stage_seconds["audio"] >= 0.0
 
 
 def test_no_swap_breakdown_without_gpu_swap(

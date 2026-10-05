@@ -659,7 +659,12 @@ def test_render_video_goes_through_adapter(tmp_path: Path) -> None:
 
 
 def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
-    """`_cover_audio` + `_commit_segment` commit exactly one segment (020)."""
+    """`_cover_audio` + `_commit_segment` commit exactly one segment (020).
+
+    All-deferred pin: cover is always deferred (take_action "deferred",
+    empty take_ids — finalize takes live under run/audio/takes.jsonl),
+    commit is video-only with no audio.wav ever written.
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="commit-split")
     supervisor = _started_supervisor(run_dir)
@@ -687,7 +692,8 @@ def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
             stage_seconds,
         )
         assert isinstance(covered, CoveredAudio)
-        assert covered.audio_plan.take_ids
+        assert covered.take_action == "deferred"
+        assert covered.audio_plan.take_ids == []
         committed = supervisor._commit_segment(
             config, state, 0, "000000", segment, proposed, rendered, covered, stage_seconds, 0.0
         )
@@ -696,6 +702,7 @@ def test_cover_audio_and_commit_advance_state(tmp_path: Path) -> None:
         assert (segment / paths.SEGMENT_MANIFEST_FILENAME).exists()
         assert not (segment / "sha256.json").exists()
         assert not (segment / "metrics.json").exists()
+        assert not (segment / "audio.wav").exists()
         fresh = read_state(run_dir)
         assert fresh.committed_segments == 1
         assert fresh.timeline_frames == rendered.frames

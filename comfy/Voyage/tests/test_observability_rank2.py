@@ -117,7 +117,6 @@ def _write_committed_segment(
     )
     if with_media:
         (segment / "video.mp4").write_bytes(b"\x00")
-        (segment / "audio.wav").write_bytes(b"\x00")
     return segment
 
 
@@ -168,25 +167,31 @@ def test_scoreboard_rows_survives_bad_metric(tmp_path: Path) -> None:
 
 
 def test_scoreboard_rows_marks_missing_paths(tmp_path: Path) -> None:
-    """062/027: synthesized view paths carry existence flags (no dead links)."""
+    """062/027: synthesized view paths carry existence flags (no dead links).
+
+    Video-only: scoreboard dropped the audio_path/audio_exists columns
+    (no per-segment audio artifact); only video_exists is asserted.
+    """
     run_dir = tmp_path / "run"
     (run_dir / "logs").mkdir(parents=True)
     (run_dir / "logs" / "metrics.jsonl").write_text("", encoding="utf-8")
     _write_committed_segment(run_dir, "000001", _visual_metrics(), with_media=False)
     (row,) = scoreboard.scoreboard_rows(run_dir)
     assert row["video_exists"] is False
-    assert row["audio_exists"] is False
+    assert "audio_exists" not in row
+    assert "audio_path" not in row
 
 
 def test_scoreboard_rows_marks_present_paths(tmp_path: Path) -> None:
-    """Existence flags are True when the artifacts are on disk."""
+    """Existence flags are True when the artifacts are on disk (video-only)."""
     run_dir = tmp_path / "run"
     (run_dir / "logs").mkdir(parents=True)
     (run_dir / "logs" / "metrics.jsonl").write_text("", encoding="utf-8")
     _write_committed_segment(run_dir, "000001", _visual_metrics(), with_media=True)
     (row,) = scoreboard.scoreboard_rows(run_dir)
     assert row["video_exists"] is True
-    assert row["audio_exists"] is True
+    assert "audio_exists" not in row
+    assert "audio_path" not in row
 
 
 def test_scoreboard_rows_records_baseline_id(tmp_path: Path) -> None:

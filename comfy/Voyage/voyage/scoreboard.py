@@ -9,8 +9,15 @@ before a daily log rotation (DESIGN §60, via `logrotate`).
 `scoreboard_rows` reads one run directory and returns one dict per
 committed segment: frame counts, per-stage seconds, deterministic visual
 metrics (when the experimental inspector ran), deltas against the previous
-segment, the director destination/phase, take ids, and the viewable media
-paths. The CLI `inspect scoreboard` target renders the compact table.
+segment, the director destination/phase, take ids, and the viewable video
+path. The CLI `inspect scoreboard` target renders the compact table.
+
+All-deferred audio choice (documented): `audio_path`/`audio_exists`
+columns are dropped (no per-segment audio artifact anymore; old runs
+may still carry `audio.wav` on disk, ignored here) and no `audio.wav`
+path is constructed. `take_ids` is still read from `audio_state`
+(harmless): new deferred commits carry an empty list there, while the
+finalize takes themselves live under `run/audio/takes.jsonl`.
 """
 
 from __future__ import annotations
@@ -164,7 +171,6 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, JsonValue]]:
                     deltas[key] = round(current[key] - baseline, _DELTA_ROUND_DIGITS)
         destination = transition.get("destination")
         video_path = segment / "video.mp4"
-        audio_path = segment / "audio.wav"
         row: dict[str, JsonValue] = {
             "segment_id": segment.name,
             "done": True,
@@ -180,9 +186,7 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, JsonValue]]:
             "phase": transition.get("phase"),
             "take_ids": audio_state.get("take_ids"),
             "video_path": str(video_path),
-            "audio_path": str(audio_path),
             "video_exists": video_path.exists(),
-            "audio_exists": audio_path.exists(),
         }
         rows.append(row)
         if current is not None:

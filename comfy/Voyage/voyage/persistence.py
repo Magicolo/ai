@@ -100,6 +100,23 @@ def read_effective_config(run_dir: Path) -> ProjectConfig:
             f"{paths.MANIFEST_FILENAME} in {run_dir} uses the nested effective_config "
             "format (pre flat-manifest — re-generate; no legacy format is read)"
         )
+    augment_section = manifest.get("augment")
+    if isinstance(augment_section, dict):
+        legacy_keys = {
+            "min_fps",
+            "min_width",
+            "min_height",
+            "min_resolution",
+            "use_model_pass",
+            "no_augment",
+            "interp_multiplier",
+        } & set(augment_section)
+        if legacy_keys:
+            raise StateError(
+                f"{paths.MANIFEST_FILENAME} in {run_dir} carries pre-multiplier "
+                f"augment keys ({sorted(legacy_keys)}) — re-configure the run "
+                "with --upscale/--interpolate; no legacy format is read"
+            )
     try:
         return ProjectConfig.model_validate(manifest)
     except Exception as exc:

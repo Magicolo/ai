@@ -31,7 +31,12 @@ def _commit(run_dir: Path, count: int) -> None:
 
 
 def test_scoreboard_two_segments_without_visual(tmp_path: Path) -> None:
-    """No piggyback inspector: rows carry frames/stages/plan, metrics None."""
+    """No piggyback inspector: rows carry frames/stages/plan, metrics None.
+
+    Video-only commit (all backends deferred): no audio_path/audio_exists
+    columns; take_ids is [] on fresh deferred commits (finalize takes
+    live under run/audio/takes.jsonl).
+    """
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     _commit(run_dir, 2)
@@ -45,9 +50,10 @@ def test_scoreboard_two_segments_without_visual(tmp_path: Path) -> None:
     assert rows[0]["deltas"] is None
     assert rows[0]["destination"]
     assert rows[0]["phase"]
-    assert rows[0]["take_ids"]
+    assert rows[0]["take_ids"] == []
     assert cast(str, rows[0]["video_path"]).endswith("000000/video.mp4")
-    assert cast(str, rows[0]["audio_path"]).endswith("000000/audio.wav")
+    assert "audio_path" not in rows[0]
+    assert "audio_exists" not in rows[0]
 
 
 def test_scoreboard_missing_visual(tmp_path: Path) -> None:

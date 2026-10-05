@@ -50,5 +50,5 @@ ruff==0.16.9
 sortedcontainers==2.4.0
 tqdm==4.70.1
 truststore==0.10.4
-typing_extensions==4.16.0
 typing-inspection==0.4.4
+typing_extensions==4.16.0

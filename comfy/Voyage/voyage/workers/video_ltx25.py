@@ -17,10 +17,12 @@ frames — the same 25+96 accounting as `video_ltxv`.
 
 All parameterization is implicit (no user-facing quant/TE/VAE knobs):
 Q3_K_M DiT only (user decision — OOM is a clean failure, no fallback
-rung), fixed Gemma4 Q2_K encoder, fixed conv/audio VAEs. The joint
-audio is committed as the segment `audio.wav` (canonical s16le 48 kHz
-stereo); the supervisor skips ACE-Step/MMAudio for this backend
-(Phase 3) and `build_final_audio` hard-concats committed audio.
+rung), fixed Gemma4 Q2_K encoder, fixed conv/audio VAEs. Audio is
+all-deferred: the worker commits video only (the joint AV latent's
+audio branch is never decoded — the executor runs the video save node
+alone), while ACE-Step music takes carry the continuous mood across
+segments and the finalize SFX dub owns effects (DESIGN §140 audio
+continuity).
 """
 
 from __future__ import annotations
@@ -219,9 +221,6 @@ MILLISECONDS_PER_SECOND = 1000.0
 
 STAGE_MILLISECONDS_KEYS: tuple[str, ...] = ("encode_ms", "denoise_ms", "save_ms", "tape_ms")
 """Keys of the `stage_ms` mapping in every `generate_blocks` result (Stage A)."""
-
-SEGMENT_AUDIO_FILENAME = "audio.wav"
-"""Joint-audio commit name next to the segment `video.mp4` (Phase 3 adopts it)."""
 
 COMFYUI_PATH_ENV = "LTX_COMFYUI_PATH"
 COMFYUI_PATH_DEFAULT = "/opt/comfyui"
@@ -432,7 +431,12 @@ def build_mode_a_graph(
     Mirrors Spike A `s0_121_B.json` node-for-node (29 nodes): Q3 DiT +
     Gemma4 TE + conv/audio VAEs, stage-1 608x352x121 distilled 8-sigma
     euler_ancestral CFG 1.0, 2x latent upscale, stage-2 1216x704x121
-    3-step euler refine, tiled VAE decode, SaveImage + SaveAudio tails.
+    3-step euler refine, tiled VAE decode into SaveImage. The graph
+    retains the audio VAE/empty-latent/decode/SaveAudio branch (nodes
+    7/9/27/29) only because the joint AV latent is the validated denoise
+    path — the executor runs the video save node alone, so the audio
+    branch never decodes (all-deferred audio: ACE-Step takes own the
+    soundtrack).
 
     With `prefix_filenames` (input-root PNGs, Spike B convention) the graph
     gains LoadImage xN (ids 30+) + BatchImagesNode + LTXVImgToVideoInplace
@@ -681,7 +685,7 @@ def _save_mp4(frames: list[Any], path: Path, fps: int) -> None:
     """Write RGB uint8 frames as h264 mp4 via system ffmpeg.
 
     The voyage-ltx image carries no imageio (by design — system ffmpeg
-    is the guaranteed muxer, already used for every audio step), so this
+    is the guaranteed muxer, also used for tail decodes), so this
     mirrors `video_common.save_mp4` (libx264) through a temp PNG sequence
     instead of imageio.mimsave.
     """
@@ -776,10 +780,12 @@ class LTX25Session:
 
         Q3-only (user decision): no fallback rung — a second OOM raises
         cleanly so the supervisor restarts or fails the run loudly.
+        Only the video save node executes — the audio branch (27/29) is
+        pruned (all-deferred audio).
         """
         started = time.perf_counter()
         try:
-            self._executor.execute(graph, prompt_id, {}, ["28", "29"])
+            self._executor.execute(graph, prompt_id, {}, ["28"])
         except Exception as first_failure:
             # OOM check below, anything else re-raises untouched.
             if not is_oom(first_failure):
@@ -790,7 +796,7 @@ class LTX25Session:
             model_management.unload_all_models()
             gc.collect()
             self._torch.cuda.empty_cache()
-            self._executor.execute(graph, prompt_id, {}, ["28", "29"])
+            self._executor.execute(graph, prompt_id, {}, ["28"])
         return time.perf_counter() - started
 
     def _block_prefix(
@@ -838,16 +844,6 @@ class LTX25Session:
                 frames.append(np.asarray(handle.convert("RGB")))
         return frames
 
-    def _read_block_audio(self, save_prefix: str) -> Path:
-        """Locate one executed block's FLAC (fail loud when missing/empty)."""
-        block_dir = self._output_dir / save_prefix
-        paths = sorted(block_dir.glob("audio_*.flac"))
-        if not paths:
-            raise ValueError(f"LTX25 block {save_prefix} produced no audio FLAC")
-        if paths[0].stat().st_size == 0:
-            raise ValueError(f"LTX25 block {save_prefix} audio FLAC is empty")
-        return paths[0]
-
     def generate_blocks(
         self,
         *,
@@ -862,15 +858,16 @@ class LTX25Session:
         prompt_plan_digest: str | None = None,
         requested_frames: int | None = None,
     ) -> dict[str, Any]:
-        """Render one segment (one Mode A clip per block) with joint audio.
+        """Render one segment (one Mode A clip per block), video only.
 
         Block 0 uses the resident tail unless fresh/`scene_cuts[0]`/missing;
         later blocks chain the in-memory tail (no mp4 roundtrip). Fresh
         clips commit the whole window; conditioned clips drop the carry
-        prefix and commit the novel remainder + the novel audio slice.
-        Counts are measured from disk, never assumed. Geometry/accounting
-        follow the experiment profile (production 121f/25-carry unless
-        VOYAGE_LTX_FAST or VOYAGE_LTX_CARRY select Phase-1 fast values).
+        prefix and commit the novel remainder. Counts are measured from
+        disk, never assumed. Geometry/accounting follow the experiment
+        profile (production 121f/25-carry unless VOYAGE_LTX_FAST or
+        VOYAGE_LTX_CARRY select Phase-1 fast values). Audio is
+        all-deferred — no audio is rendered or committed here.
         """
         profile = resolve_experiment_profile()
         validate_spatial_size(width, height)
@@ -894,7 +891,6 @@ class LTX25Session:
         continuation_strength = continuation_strength_from_env()
 
         novel_frames_all: list[Any] = []
-        novel_audio_wavs: list[Path] = []
         generated_total = 0
         conditioning_total = 0
         fresh_blocks = 0
@@ -936,44 +932,6 @@ class LTX25Session:
             if not continued:
                 fresh_blocks += 1
 
-            block_flac = self._read_block_audio(save_prefix)
-            novel_wav = self._work_root / f"novel-{segment_id}-{block_index}.wav"
-            offset_seconds = conditioning_frames / fps
-            if continued:
-                _run_ffmpeg(
-                    [
-                        "-ss",
-                        f"{offset_seconds:.6f}",
-                        "-i",
-                        str(block_flac),
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "2",
-                        "-c:a",
-                        "pcm_s16le",
-                        str(novel_wav),
-                    ],
-                    "novel audio slice",
-                )
-            else:
-                _run_ffmpeg(
-                    [
-                        "-i",
-                        str(block_flac),
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "2",
-                        "-c:a",
-                        "pcm_s16le",
-                        str(novel_wav),
-                    ],
-                    "novel audio convert",
-                )
-            if novel_wav.stat().st_size == 0:
-                raise ValueError(f"LTX25 block {block_index} novel audio is empty")
-            novel_audio_wavs.append(novel_wav)
             self._tail_frames = extend_conditioning_tail(
                 self._tail_frames if continued else None, novel, profile.tail_frames
             )
@@ -988,22 +946,6 @@ class LTX25Session:
         # (e.g. a fresh run directory); create it before any commit write.
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _save_mp4(novel_frames_all, output_path, fps)
-        audio_path = output_path.parent / SEGMENT_AUDIO_FILENAME
-        if len(novel_audio_wavs) == 1:
-            shutil.copyfile(novel_audio_wavs[0], audio_path)
-        else:
-            list_file = self._work_root / f"concat-{segment_id}.txt"
-            list_file.write_text(
-                "".join(f"file '{wav}'\n" for wav in novel_audio_wavs), encoding="utf-8"
-            )
-            _run_ffmpeg(
-                ["-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(audio_path)],
-                "segment audio concat",
-            )
-        if audio_path.stat().st_size == 0:
-            raise ValueError("LTX25 segment audio is empty")
-        for wav in novel_audio_wavs:
-            wav.unlink(missing_ok=True)
         tail_path = output_path.parent / TAIL_FILENAME
         tail_frames = novel_frames_all[-profile.tail_frames :]
         _save_mp4(tail_frames, tail_path, fps)
@@ -1051,7 +993,6 @@ class LTX25Session:
             "resume_fallback": False,
             "conditioning_tail_path": str(tail_path),
             "recovery_path": str(tape_path),
-            "audio_path": str(audio_path),
             "quant_rung": QUANT_RUNG,
             "stage_ms": {
                 "encode_ms": 0.0,
@@ -1167,7 +1108,7 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
-    """Render one segment (Mode A clips + joint audio) and commit both."""
+    """Render one segment (Mode A clips, video only) and commit it."""
     # Reject a bad frame rate before the session check so the boundary
     # fails fast (and stays CPU-testable without a GPU session).
     validate_fps(int(payload["fps"]))
@@ -1196,7 +1137,7 @@ def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
         prompt_plan_digest=request.prompt_plan_digest,
         requested_frames=request.requested_frames,
     )
-    artifacts = [str(output), str(result["audio_path"]), str(result["conditioning_tail_path"])]
+    artifacts = [str(output), str(result["conditioning_tail_path"])]
     artifacts.append(str(result["recovery_path"]))
     return {
         "blocks_generated": len(request.prompts),
@@ -1308,7 +1249,7 @@ def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_evict_gpu(payload: dict[str, Any]) -> dict[str, Any]:
-    """Unload the video stack (joint-audio backends skip the audio swap)."""
+    """Unload the video stack so audio can own the GPU (§40 pattern)."""
     del payload
     global _SESSION
     if _SESSION is not None:

@@ -157,7 +157,7 @@ def test_finalize_fastpath_publishes_without_read_bytes(
     _commit_two_segments(run_dir)
     _guard_mp4_read_bytes(monkeypatch)
     out = tmp_path / "final-copy.mp4"
-    assert finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
+    assert finalize_run(run_dir, out).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)
     duration = float(probe(out).get("format", {}).get("duration", 0.0))
@@ -168,15 +168,15 @@ def test_finalize_fastpath_publishes_without_read_bytes(
 def test_finalize_reencode_path_publishes_without_read_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default floors force the re-encode tail — same streaming publish."""
+    """Explicit upscale forces the re-encode tail — same streaming publish."""
     from voyage.media import finalize_run, validate_video
 
     run_dir = tmp_path / "run"
     _commit_two_segments(run_dir)
     _guard_mp4_read_bytes(monkeypatch)
     out = tmp_path / "final-lift.mp4"
-    assert finalize_run(run_dir, out).exists()
-    validate_video(out, 1216, 704, 24)
+    assert finalize_run(run_dir, out, upscale=2).exists()
+    validate_video(out, 1536, 864, 24)
 
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
-"""`interp_multiplier` knob: upscale-only finalize (multiplier 1) vs 4x FILM (4).
+"""`interpolate` knob: same-frame-count finalize (1) vs FILM lift (2/4).
 
 TDD for the 5s-ltxv run: the user wants the SRVGG upscale without the
-FILM interpolation. `multiplier = 1` means each chunk keeps its frame
+FILM interpolation. `interpolate = 1` means each chunk keeps its frame
 count (`(n-1)*1+1 = n`) and the interp poller passes frames through, so
 the durable path yields an upscaled same-fps intermediate. The knob
-rides `AugmentConfig` → TOML → CLI (`generate`/`finalize`) →
-`finalize_run` → both model-pass entries, and the durable pass records
-per-phase timings into an optional out-param (the 5s run mines these
-for its elapsed-time report).
+rides `AugmentConfig` → CLI (`configure`) → `finalize_run` → both
+model-pass entries, and the durable pass records per-phase timings
+into an optional out-param (the 5s run mines these for its
+elapsed-time report).
 """
 
 from __future__ import annotations
@@ -23,60 +23,59 @@ from voyage.augment import AugmentWeights
 from voyage.persistence import read_effective_config
 
 
-def test_augment_config_interp_multiplier_default_and_validation() -> None:
-    """Default 2 is the poulah-effective value; <1 fails loud (DESIGN §56)."""
+def test_augment_config_interpolate_default_and_validation() -> None:
+    """Default 1 ships source frame count; only 1/2/4 reach FILM (DESIGN §56)."""
     from voyage.config import AugmentConfig
 
-    assert AugmentConfig().interp_multiplier == 2
-    assert AugmentConfig(interp_multiplier=1).interp_multiplier == 1
+    assert AugmentConfig().interpolate == 1
+    assert AugmentConfig(interpolate=2).interpolate == 2
+    assert AugmentConfig(interpolate=4).interpolate == 4
     with pytest.raises(ValidationError):
-        AugmentConfig(interp_multiplier=0)
+        AugmentConfig(interpolate=0)
     with pytest.raises(ValidationError):
-        AugmentConfig(interp_multiplier=-2)
+        AugmentConfig(interpolate=3)
 
 
-def test_resolve_config_applies_interp_multiplier(tmp_path: Path) -> None:
-    """CLI/TOML override lands on the effective config (DESIGN §56)."""
+def test_resolve_config_applies_interpolate(tmp_path: Path) -> None:
+    """CLI override lands on the effective config (DESIGN §56)."""
     from tests.conftest import initialize_run_directory
     from voyage.config import resolve_config
 
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="mult", style="s")
     config = read_effective_config(run_dir)
-    assert config.augment.interp_multiplier == 2
-    resolved = resolve_config(config, interp_multiplier=1)
-    assert resolved.augment.interp_multiplier == 1
+    assert config.augment.interpolate == 1
+    resolved = resolve_config(config, interpolate=2)
+    assert resolved.augment.interpolate == 2
 
 
-def test_augment_overrides_passes_interp_multiplier() -> None:
+def test_augment_overrides_passes_interpolate() -> None:
     """Flag threading: provided value passes, absent stays unset (DESIGN §56)."""
     from voyage.cli_core import _augment_overrides
 
     args = argparse.Namespace(
-        no_augment=False,
-        min_fps=None,
-        min_resolution=None,
-        use_model_pass=None,
-        interp_multiplier=1,
+        upscale=None,
+        interpolate=2,
+        presentation_fps=None,
     )
-    assert _augment_overrides(args)["interp_multiplier"] == 1
+    assert _augment_overrides(args)["interpolate"] == 2
     args_blank = argparse.Namespace()
-    assert "interp_multiplier" not in _augment_overrides(args_blank)
+    assert "interpolate" not in _augment_overrides(args_blank)
 
 
-def test_finalize_options_carries_interp_multiplier() -> None:
-    """FinalizeOptions default 4; 0 rejected before any media work (DESIGN §56)."""
+def test_finalize_options_carries_interpolate() -> None:
+    """FinalizeOptions default 1; 0 rejected before any media work (DESIGN §56)."""
     from voyage.media import FinalizeOptions
 
-    assert FinalizeOptions().interp_multiplier == 4
-    with pytest.raises(ValueError, match="interp_multiplier"):
-        FinalizeOptions(interp_multiplier=0)
+    assert FinalizeOptions().interpolate == 1
+    with pytest.raises(ValueError, match="interpolate"):
+        FinalizeOptions(interpolate=0)
 
 
 def test_finalize_run_forwards_multiplier_to_durable_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """U upscale-only finalize reaches the sidecar with multiplier 1 (DESIGN §56).
+    """Interpolate-2 finalize reaches the sidecar with multiplier 2 (DESIGN §56).
 
     Same fake-commit harness as the issue-166 selection test: one real
     fake-backend segment, both legs stubbed present, timer on the
@@ -123,6 +122,7 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
         device: str = "cuda:1",
         work_dir: Path,
         timings: dict[str, float] | None = None,
+        progress: Any = None,
     ) -> tuple[Path, int]:
         seen["multiplier"] = multiplier
         intermediate = work_dir / "model_intermediate.mp4"
@@ -141,17 +141,11 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
     finalize_run(
         run_dir,
         output,
-        width=768,
-        height=512,
-        fps=24,
-        min_fps=24,
-        min_width=1216,
-        min_height=704,
-        use_model_pass=True,
-        interp_multiplier=1,
+        upscale=1,
+        interpolate=2,
         models_dir=tmp_path,
     )
-    assert seen["multiplier"] == 1
+    assert seen["multiplier"] == 2
     assert output.exists()
 
 

@@ -234,7 +234,7 @@ def test_finalize_staging_uses_run_dir_with_prefix(
 
     monkeypatch.setattr(tempfile, "TemporaryDirectory", _recording)
     out = real_dir.parent / "final-staging-probe.mp4"
-    media_module.finalize_run(real_dir, out, min_fps=0, min_width=0, min_height=0)
+    media_module.finalize_run(real_dir, out)
     assert out.exists()
     finalize_calls = [call for call in calls if "voyage-final" in str(call.get("prefix", ""))]
     assert finalize_calls, f"no prefixed finalize staging among {calls!r}"
@@ -261,7 +261,7 @@ def test_finalize_publish_streams_without_read_bytes(
 
     monkeypatch.setattr(Path, "read_bytes", _guard)
     out = tmp_path / "final-noram.mp4"
-    assert media_module.finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
+    assert media_module.finalize_run(run_dir, out).exists()
 
 
 # ---------------------------------------------------------------------------

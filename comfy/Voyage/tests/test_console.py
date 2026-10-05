@@ -93,6 +93,53 @@ def test_default_console_shows_video_and_audio_prompts() -> None:
     assert "take_000000" in out
 
 
+def test_deferred_done_shows_no_take_with_action() -> None:
+    """All-deferred pin: empty take_ids renders as no-take + deferred action.
+
+    New deferred commits carry no per-segment takes (finalize renders
+    from `run/audio/takes.jsonl`); the console keeps showing the
+    take action/reason so the deferral itself stays visible.
+    """
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream)
+    console.segment_done(
+        {
+            "number": 3,
+            "segment_id": "000003",
+            "frames": 48,
+            "duration": 2.0,
+            "take_ids": [],
+            "take_action": "deferred",
+            "take_reason": "deferred-audio backend ltx25: silent stub committed",
+            "beats": 4,
+            "bpm": 120.0,
+            "video_backend": "ltx25",
+            "overlap_fraction": 0.1,
+            "overlap_cap_seconds": 0.5,
+            "stage_seconds": {"video": 1.2, "audio": 0.4},
+            "elapsed": 2.1,
+            "prefetch_hit": True,
+        }
+    )
+    out = stream.getvalue()
+    assert "no take" in out
+    assert "deferred" in out
+    verbose = io.StringIO()
+    VoyageConsole(verbose=True, stream=verbose).segment_done(
+        {
+            "segment_id": "000003",
+            "frames": 48,
+            "duration": 2.0,
+            "take_ids": [],
+            "take_action": "deferred",
+            "take_reason": "deferred-audio backend ltx25: silent stub committed",
+            "beats": 4,
+            "bpm": 120.0,
+        }
+    )
+    assert "deferred-audio" in verbose.getvalue()
+
+
 def test_verbose_console_adds_seeds_transitions_notes() -> None:
     """--verbose adds payload minutiae; compact mode omits them."""
     plain = io.StringIO()
@@ -209,6 +256,73 @@ def test_rich_available_returns_bool() -> None:
     assert isinstance(rich_available(), bool)
 
 
+def _stub_ace_spawn(run_dir: Path, models_dir: object, device: str = "cuda:0") -> tuple[Any, Any]:
+    """ACE spawn double: renders stdlib silence WAVs (no GPU, no models)."""
+
+    def _render(payload: dict[str, Any], output_path: Path) -> None:
+        import wave
+
+        duration = float(payload["duration_seconds"])
+        frames = max(1, int(48000 * duration))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(48000)
+            wav.writeframes(b"\0" * frames * 4)
+
+    def _shutdown() -> None:
+        return None
+
+    del run_dir, models_dir, device
+    return (_render, _shutdown)
+
+
+def test_finalize_run_reports_stages_and_timing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finalize with a console shows the checklist + the timing table."""
+    from voyage import audio_finalize
+    from voyage.media import finalize_run
+
+    monkeypatch.setattr(audio_finalize, "spawn_ace_render_fn", _stub_ace_spawn)
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    supervisor = Supervisor(run_dir, read_effective_config(run_dir))
+    supervisor.start_workers()
+    try:
+        supervisor.commit_one_segment()
+    finally:
+        supervisor.stop_workers()
+    stream = io.StringIO()
+    out = run_dir / "final.mp4"
+    assert finalize_run(run_dir, out, progress=VoyageConsole(stream=stream)).exists()
+    text = stream.getvalue()
+    assert "triage segments" in text
+    assert "mix final audio" in text
+    assert "slowest" in text and "total" in text
+
+
+def test_finalize_silent_without_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No progress sink → finalize prints nothing (library stays quiet)."""
+    from voyage import audio_finalize
+    from voyage.media import finalize_run
+
+    monkeypatch.setattr(audio_finalize, "spawn_ace_render_fn", _stub_ace_spawn)
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    supervisor = Supervisor(run_dir, read_effective_config(run_dir))
+    supervisor.start_workers()
+    try:
+        supervisor.commit_one_segment()
+    finally:
+        supervisor.stop_workers()
+    assert finalize_run(run_dir, run_dir / "final.mp4").exists()
+    assert capsys.readouterr().out == ""
+
+
 class _SilentSfxWorker:
     """SubprocessWorker double writing valid WAVs (no GPU, no models)."""
 
@@ -316,7 +430,13 @@ class _RecordingProgress:
 
 
 def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
-    """One commit → one start/plan/done with non-empty prompts."""
+    """One commit → one start/plan/done with non-empty prompts.
+
+    Fake backend is joint: it still renders per-segment takes, so
+    `take_ids` is non-empty here. Deferred backends report empty
+    `take_ids` with `take_action == "deferred"` (pinned by the display
+    test above, not by a live GPU commit here).
+    """
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     config = read_effective_config(run_dir)
@@ -324,14 +444,20 @@ def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
     supervisor = Supervisor(run_dir, config, progress=progress)
     assert supervisor.run_segments(1) == ["000000"]
     assert progress.starts == [(0, "000000")]
-    assert progress.stages == ["director", "video", "audio", "validate", "commit"]
+    # Tail match: worker-startup stages may prefix the per-commit stages
+    # (owned by the supervisor lifecycle track, not pinned here).
+    assert progress.stages[-5:] == ["director", "video", "audio", "validate", "commit"]
     assert len(progress.plans) == 1
     plan = progress.plans[0]
     assert plan["video_prompts"] and all(plan["video_prompts"])
     assert plan["audio_caption"]
     assert len(progress.dones) == 1
     assert progress.dones[0]["frames"] > 0
-    assert progress.dones[0]["take_ids"]
+    # Always-deferred: no per-segment takes — the done summary carries
+    # the deferred action/reason instead (takes render at finalize from
+    # `run/audio/takes.jsonl`).
+    assert progress.dones[0]["take_ids"] == []
+    assert progress.dones[0]["take_action"] == "deferred"
 
 
 def test_supervisor_silent_by_default(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

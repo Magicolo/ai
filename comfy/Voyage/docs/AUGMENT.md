@@ -1,67 +1,83 @@
-# AUGMENT — finalize-time presentation floors
+# AUGMENT — finalize-time explicit quality
 
-Every shipped video is ≥24 fps and ≥1216×704 by default. The floors
-lift low-native backends (CausVid 832×480 @ 16, fake testsrc) to
-presentation size at finalize; sources already above the floors pass
-through untouched ("minimal upscale"). `0` disables a floor — the 24 fps
-`PRESENTATION_MIN_FPS` shipped-video guarantee still applies.
+There are no minimum quality floors: quality is specified explicitly
+per run. The shipped box is `source × --upscale` per axis and the
+shipped rate is `--presentation-fps`, else `round(source_fps ×
+--interpolate)`. A CausVid 16fps source ships at 16fps unless pinned
+otherwise; `upscale=1/interpolate=1` (defaults) ships the source
+geometry as-is via ffmpeg.
 
-## Floors, flags, stored config
+## Multipliers, flags, stored config
 
-Defaults (`voyage/config.py`, `AugmentConfig` — they track the ltx25
-high-quality native 1216×704 @ 24, so true-native ltx25 sources pass
-through unaugmented by default):
+Defaults (`voyage/config.py`, `AugmentConfig`):
 
-- `min_fps = 24` (0 disables the fps floor);
-- `min_width = 1216`, `min_height = 704` (`0x0` disables the resolution
-  floor; a half-disabled pair like `0x704` is rejected — both-zero or
-  both-positive).
+- `upscale = 1`, `interpolate = 1` (1 = no work on that axis; both
+  accept 1, 2, or 4 — the worker/poller vocabulary, validated at
+  `configure` time so a bad value dies fast instead of deep in the
+  worker);
+- `presentation_fps = None` (unset — ships `round(source_fps ×
+  interpolate)`; pins the shipped rate when set, e.g. 24fps ×2
+  content presented at 32fps stretches the timeline 1.5× slow motion
+  instead of lifting the frame rate).
 
 Stored in the manifest's `[augment]` section at `configure` time:
 
 ```toml
 [augment]
-min_fps = 24
-min_width = 1216
-min_height = 704
+upscale = 1
+interpolate = 1
+# presentation_fps unset unless pinned
 ```
 
 Flags (shared helper `_add_augment_args` on `configure`):
 
-- `--min-fps N` (default: `[augment] min_fps 24`; 0 disables);
-- `--min-resolution WxH` e.g. `"1216x704"` (default: `[augment]`
-  1216×704; `"0"` disables);
-- `--no-augment` (wins over explicit floors — both to 0).
+- `--upscale N` (doubles width and height at 2);
+- `--interpolate N` (doubles the frame count at 2 — the same
+  `(n−1)*m+1` FILM math);
+- `--presentation-fps N` (pins the shipped rate).
 
-Carried by `configure` into the stored `[augment]` section (defaults
-ride the manifest); `generate`'s finalize step consumes them. Unset
-flags leave the stored config winning.
+Old manifests carrying `min_fps`/`min_width`/`min_height`/
+`min_resolution`/`use_model_pass`/`no_augment`/`interp_multiplier`
+fail loud with a re-configure hint (clean break, no migration).
 
 ## `plan_augmentation` contract (fast-path vs re-encode)
 
-`voyage/media.py:772`, pure (no I/O, fully unit-tested):
+`voyage/media.py`, pure (no I/O, fully unit-tested):
 
 ```text
-effective_fps = max(requested, min_fps or 0, PRESENTATION_MIN_FPS)
-out box     = max(target, min) per axis (never stretched — downstream
-              scale-to-fit + pad preserves aspect)
+out box = source × upscale per axis (exact integer multiply — the
+          model SRVGG leg upscales 2x exactly, any residual lands
+          in the vf)
+out fps = presentation_fps, else round(source_fps × interpolate)
 ```
 
-- Floors only ever upscale: a target already above them is kept as-is.
-- `needs_minterpolate` is True only for an fps lift
-  (`source + 0.5 < out` — motion interpolation); an fps drop uses the
-  plain fps filter.
+- Multipliers only ever scale up from the probed source: 1/1 ships
+  the source untouched ("native ship").
+- `needs_minterpolate` is True only for an fps lift the model pass
+  did not already produce (`model_interpolate <= 1` and source + 0.5
+  < out — ffmpeg motion interpolation); an fps drop uses the plain
+  fps filter. When the model pass interpolates, the lift is measured
+  against the interpolated rate.
 - `needs_reencode` covers any pixel/timing change (dims differ, fps
   differs past 0.5 either way, lift, or unknown source fps) and gates
-  the stream-copy fast path off. Unknown geometry (`0×0` from a failed
-  probe) forces re-encode — callers never stream-copy blind.
+  the stream-copy fast path off. Unprobable dims fail loud
+  (`MediaError`); unprobable fps fails loud unless
+  `presentation_fps` is set.
+- The model pass (Real-ESRGAN upscale + FILM interpolate via
+  `resolve_augment_weights` when provisioned) runs exactly when the
+  multipliers demand work (`upscale > 1 or interpolate > 1`) and the
+  legs are present; otherwise finalize ships via ffmpeg. Absent legs
+  with demanded work fall back to the ffmpeg vf path (scale /
+  minterpolate) — never an error.
 
 Examples (live `plan_augmentation`):
 
-- ltxv native 768×512 @ 24 → out 1216×704 @ 24
-  (`needs_reencode=True, needs_minterpolate=False`);
-- CausVid native 832×480 @ 16 → out 1216×704 @ 24 (motion-interpolation
-  lift — ~2.2× pixels plus the 16→24 fps lift, the cost note below).
+- ltx25 native 1216×704 @ 24, 1/1 → out 1216×704 @ 24
+  (`needs_reencode=False` — stream-copy fast path);
+- same source, `--upscale 2` → out 2432×1408 @ 24;
+- same source, `--interpolate 2` → 24fps ×2 content (model FILM mids),
+  shipped at 48fps unless `--presentation-fps 32` pins slow motion;
+- CausVid native 832×480 @ 16, 1/1 → out 832×480 @ 16 (ships native).
 
 ## Chunked runner and 2-GPU pairing
 
@@ -114,18 +130,15 @@ recipe).
 Weights (`models download film` ~66 MB, `realesrgan-anime` ~2.5 MB;
 `docs/MODELS.md:45-65`): FILM fp16 lands in
 `<models>/frame_interpolation/`, the anime upscaler in
-`<models>/realesrgan/`. `generate` ensures both when augmentation is
-enabled; `fake` runs still exercise the planning path (fast-path vs
-re-encode) without weights.
+`<models>/realesrgan/`. `generate` ensures both when the multipliers
+demand work; `fake` runs still exercise the planning path (fast-path
+vs re-encode) without weights.
 
 ## Cost note and benchmark effect
 
-Lifting costs pixels × fps. CausVid (832×480 @ 16) and fake testsrc
-(768×432 fake-432p) both ship as 1216×704 @ 24 — ~2.2× pixels plus the
-16→24 fps lift through minterpolate + upscale + re-encode. Expect finalize
-to dominate e2e wall time on those backends; ltxv (768×512 @ 24) pays
-a smaller lift, and ltx25 (1216×704 @ 24 native) passes through
-untouched by default. `BENCHMARKING.md` e2e numbers predate the floors —
-compare GPU runs to GPU runs at the same floor settings, and pass
-`--no-augment` (or `min_*=0`) when you need native-geometry timings.
-Soak trends stay comparable run-to-run only when the floors match.
+Lifting costs pixels × fps. `--upscale 2 --interpolate 2` on a
+1216×704 @ 24 source ships 2432×1408 @ 48 — 4× pixels plus the FILM
+mids; expect finalize to dominate e2e wall time whenever the
+multipliers are raised. Defaults (1/1) ship native, so `BENCHMARKING.md`
+e2e numbers are comparable run-to-run only when the multipliers
+match — record them in the setup block (`presentation_setup_facts`).

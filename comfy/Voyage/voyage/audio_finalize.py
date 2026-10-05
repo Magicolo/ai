@@ -1,26 +1,19 @@
-"""Finalize-time ACE music rendering for deferred backends (DESIGN §140).
+"""Finalize-time ACE music rendering for always-deferred finalize (DESIGN §140).
 
-Why: ltxv/causvid/ltx25/ltx23 commit no ACE takes (full move to finalize —
-no per-segment `_with_audio_gpu` evict/render/evict/rebuild on the 4060,
-and no joint-audio GPU contention between the resident video worker and
-the ACE-Step stack). Commit writes a timeline-exact silent stub
-(`write_deferred_stub_audio`); finalize replays the stored director
-decisions in segment order (`ensure_deferred_takes`) and renders takes
-through the injected `render_take_fn` seam (production: ACE-Step
-`SubprocessWorker`, same spawn pattern as `render_sfx_bed`; tests:
-stdlib sine). Joint (non-deferred) audio never enters this module
-(`is_deferred_backend` gate) — every streaming backend is deferred, so
-only `fake` commits real audio inline.
+Why: every backend commits video only — no per-segment audio coverage, no
+`audio.wav` previews. Finalize replays the stored director decisions in
+segment order (`ensure_deferred_takes`) and renders takes through the
+injected `render_take_fn` seam (production: ACE-Step `SubprocessWorker`
+or the fake sine worker via `audio_backend` routing; tests: stdlib sine).
 
 Ledger contract mirrors `audio/planner.py` (`flush+fsync+fsync_dir`,
 issue 101): a take is appended only after its file renders, so a
 failed render raises `MediaError` with nothing appended.
 
-Continuity preservation (same module, second job): the deferred branch
-skips the commit-time audio swap whose rebuild derived `video_tail.mp4`
-as a side effect, so `derive_conditioning_tail` derives it at commit
-instead — otherwise every segment goes fresh (121f) instead of
-continuing (96f).
+Continuity preservation (same module, second job): the commit path holds
+no audio worker whose rebuild derived `video_tail.mp4` as a side effect,
+so `derive_conditioning_tail` derives it at commit instead — otherwise
+every segment goes fresh (121f) instead of continuing (96f).
 """
 
 from __future__ import annotations
@@ -49,12 +42,6 @@ from voyage.supervisor_proposal import effective_music_caption
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
 
-#: Backends whose ACE music renders at finalize, never at commit.
-DEFERRED_AUDIO_BACKENDS = frozenset({"ltxv", "causvid", "ltx25", "ltx23"})
-
-#: Commit stub sample format (matches the take path: 48 kHz stereo s16le).
-_STUB_CODEC = "pcm_s16le"
-
 #: Causvid default overlap (`workers/video_causvid.py:93
 #: DEFAULT_OVERLAP_FRAMES`; nothing outside the worker overrides it).
 #: Resume re-encodes `4 * (overlap - 1) + 1` committed frames, so at the
@@ -71,71 +58,29 @@ _AHEAD_SECONDS = 20.0
 _BEATS_PER_SEGMENT = 4
 
 
-def is_deferred_backend(backend: str) -> bool:
-    """True for streaming CUDA backends, whose music moves to finalize."""
-    return backend in DEFERRED_AUDIO_BACKENDS
-
-
-def write_deferred_stub_audio(
-    segment: Path, duration_seconds: float, sample_rate: int, channels: int
-) -> Path:
-    """Write a timeline-exact silent `audio.wav` into a segment dir.
-
-    The stub satisfies `validate_audio` (format) + the 0.6 s A/V gate so
-    commit/validate/finalize triage pass unchanged; real music arrives at
-    finalize via `ensure_deferred_takes`. Raises `MediaError` when ffmpeg
-    fails or the stub probes empty.
-    """
-    from voyage.media_audio import run_capture
-
-    out = segment / "audio.wav"
-    layout = "stereo" if channels == 2 else "mono" if channels == 1 else None
-    if layout is None:
-        raise MediaError(f"deferred stub supports mono/stereo, got {channels}ch")
-    proc = run_capture(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"anullsrc=r={sample_rate}:cl={layout}",
-            "-t",
-            f"{duration_seconds:.6f}",
-            "-c:a",
-            _STUB_CODEC,
-            "-ar",
-            str(sample_rate),
-            "-ac",
-            str(channels),
-            str(out),
-        ]
-    )
-    if proc.returncode != 0:
-        raise MediaError(f"deferred stub render failed for {segment}: {proc.stderr[-2000:]}")
-    if not out.exists() or out.stat().st_size == 0:
-        raise MediaError(f"deferred stub render produced no audio: {out}")
-    return out
-
-
 def deferred_tail_frames(
     backend: str, *, overlap_frames: int = _CAUSVID_DEFAULT_OVERLAP_FRAMES
 ) -> int:
-    """Conditioning-tail length matching each deferred worker's resume derive.
+    """Conditioning-tail length for each streaming worker's resume derive.
 
     ltxv/ltx25/ltx23 resume onto `CONDITIONING_TAIL_FRAMES` (25); causvid
     resumes onto `max(25, reencode_window(overlap))`. The commit-time
     derive must write exactly this many frames: a short tail would be
     adopted untouched by resume (existing tail wins) and silently anchor
-    the next segment on too few frames. Raises `MediaError` for unknown
-    backends — guessing a length is worse than failing loud.
+    the next segment on too few frames. Gated on
+    `supervisor_routing.STREAMING_VIDEO_BACKENDS` (lazy import, §12 GPU
+    ban — the supervisor owns the eager import): raises `MediaError`
+    for non-streaming backends (`fake` commits no tail because its
+    worker is stateless) — guessing a length is worse than failing loud.
     """
-    # Local import (§12 GPU ban): `workers.video_common` pulls torch at
-    # module scope, which the supervisor/CLI side must never import.
+    # Local imports (§12 GPU ban): `workers.video_common` pulls torch at
+    # module scope, which the supervisor/CLI side must never import;
+    # `supervisor_routing` is stdlib-only but stays lazy for symmetry.
+    from voyage.supervisor_routing import STREAMING_VIDEO_BACKENDS
     from voyage.workers import video_common
 
+    if backend not in STREAMING_VIDEO_BACKENDS:
+        raise MediaError(f"deferred tail derive has no frame count for backend {backend!r}")
     if backend in ("ltxv", "ltx25", "ltx23"):
         return video_common.DERIVED_TAIL_FRAMES
     if backend == "causvid":
@@ -147,13 +92,13 @@ def deferred_tail_frames(
 def derive_conditioning_tail(segment: Path, tail_frames: int) -> bool:
     """Derive this segment's `video_tail.mp4` for the next segment to chain.
 
-    Why: the deferred branch skips the commit-time audio swap whose
-    rebuild derived the tail as a side effect. Without this derive the
-    next segment's resident tail path is missing and the worker goes
-    fresh (121f) instead of continuing (96f). Returns True when derived,
-    False when an existing tail is adopted untouched. Raises
-    `MediaError` when the segment video is missing or ffmpeg fails —
-    a missing tail must never pass silently.
+    Why: the commit path holds no audio worker whose rebuild derived the
+    tail as a side effect. Without this derive the next segment's
+    resident tail path is missing and the worker goes fresh (121f)
+    instead of continuing (96f). Returns True when derived, False when
+    an existing tail is adopted untouched. Raises `MediaError` when the
+    segment video is missing or ffmpeg fails — a missing tail must
+    never pass silently.
     """
     # Local import (§12 GPU ban): see `deferred_tail_frames`.
     from voyage.workers import video_common
@@ -236,10 +181,9 @@ def deferred_render_pending(
     """Pure dry walk: True when replay would render at least one take.
 
     No GPU, no filesystem writes — the finalize gate uses this to skip
-    spawning the ACE worker when the ledger already covers the timeline
-    (re-finalize), and the parallel path uses it to serialize only when
-    rendering is actually pending. `sample_rate`/`channels` ride the
-    shared sizing dict but never affect coverage (format, not timeline).
+    spawning the audio worker when the ledger already covers the timeline
+    (re-finalize). `sample_rate`/`channels` ride the shared sizing dict
+    but never affect coverage (format, not timeline).
     """
     takes = _load_existing_takes(run_dir)
     cursor = 0.0
@@ -371,6 +315,7 @@ def ensure_deferred_for_finalize(
     run_seed: int,
     models_dir: Path | str | None,
     device: str = "cuda:0",
+    audio_backend: str = "acestep",
     music_style: str = "",
     explicit_caption: str | None = None,
     take_seconds: float = _TAKE_SECONDS,
@@ -380,13 +325,16 @@ def ensure_deferred_for_finalize(
     channels: int = 2,
     progress: VoyageConsole | None = None,
 ) -> bool:
-    """Render pending deferred takes, spawning ACE only when needed.
+    """Render pending takes, spawning the audio worker only when needed.
 
     Pure `deferred_render_pending` dry walk first — a complete ledger
-    (re-finalize, or the parallel path's Thread A after the pre-fork
-    ensure) returns False with no worker spawned. Otherwise one shared
-    `SubprocessWorker` renders every pending take and shuts down
-    best-effort. Returns True when at least one take rendered.
+    (re-finalize) returns False with no worker spawned. Otherwise one
+    shared `SubprocessWorker` renders every pending take and shuts down
+    best-effort: the fake sine worker when `audio_backend == "fake"`
+    (no weights, `models_dir` ignored), else the ACE-Step worker via
+    `spawn_ace_render_fn`. Returns True when at least one take rendered.
+    Raises `MediaError` for an unknown `audio_backend` — guessing a
+    renderer is worse than failing loud.
     """
     sizing: dict[str, Any] = {
         "music_style": music_style,
@@ -406,8 +354,13 @@ def ensure_deferred_for_finalize(
         **sizing,
     ):
         return False
-    render_fn, shutdown = spawn_ace_render_fn(run_dir, models_dir, device)
-    stage_cm = optional_stage(progress, "music takes", device)
+    if audio_backend == "fake":
+        render_fn, shutdown = spawn_fake_render_fn(run_dir)
+    elif audio_backend == "acestep":
+        render_fn, shutdown = spawn_ace_render_fn(run_dir, models_dir, device)
+    else:
+        raise MediaError(f"unknown audio backend {audio_backend!r} (known: fake, acestep)")
+    stage_cm = optional_stage(progress, "music takes", audio_backend)
     try:
         with stage_cm:
             ensure_deferred_takes(
@@ -424,6 +377,45 @@ def ensure_deferred_for_finalize(
     return True
 
 
+def spawn_fake_render_fn(
+    run_dir: Path,
+) -> tuple[Callable[[dict[str, Any], Path], None], Callable[[], None]]:
+    """Start the fake sine worker and return `(render_fn, shutdown_fn)`.
+
+    Offline `render_take_fn` for `ensure_deferred_takes`: one
+    `SubprocessWorker` around `audio_worker_module("fake")` (same
+    `generate_audio` contract as the ACE worker — deterministic sine,
+    no GPU, no weights, so `models_dir` is neither taken nor needed).
+    The worker writes `payload["output_path"]`; any worker error
+    propagates and `ensure_deferred_takes` wraps it fail-loud.
+    `shutdown_fn` stops the worker best-effort (never masks the render
+    result).
+    """
+    from voyage.rpc import SubprocessWorker
+    from voyage.supervisor_routing import audio_worker_module
+
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    worker = SubprocessWorker(
+        audio_worker_module("fake"),
+        run_dir,
+        run_dir / "logs" / "fake-finalize.log",
+        init_op="init",
+        init_payload={},
+    )
+    worker.start()
+
+    def _render(payload: dict[str, Any], output_path: Path) -> None:
+        request = dict(payload)
+        request["output_path"] = str(output_path)
+        worker.call("generate_audio", request)
+
+    def _shutdown() -> None:
+        with contextlib.suppress(Exception):
+            worker.stop()
+
+    return _render, _shutdown
+
+
 def spawn_ace_render_fn(
     run_dir: Path, models_dir: Path | str | None, device: str = "cuda:0"
 ) -> tuple[Callable[[dict[str, Any], Path], None], Callable[[], None]]:
@@ -437,7 +429,7 @@ def spawn_ace_render_fn(
     worker error propagates and `ensure_deferred_takes` wraps it
     fail-loud. `shutdown_fn` stops the worker best-effort (never masks
     the render result). Raises `MediaError` when `models_dir` is
-    missing — deferred finalize cannot render without weights.
+    missing — ACE finalize cannot render without weights.
     """
     from voyage.rpc import SubprocessWorker
     from voyage.supervisor_routing import audio_worker_module

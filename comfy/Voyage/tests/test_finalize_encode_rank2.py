@@ -137,11 +137,9 @@ def test_audio_acestep_convert_uses_hygiene_flags(
 def test_reencode_is_single_pass_with_crf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-native finalize runs one libx264 encode carrying -crf/-preset.
 
-    The upscale target (1280x720 over a 768x432 fake segment, floors
-    disabled) still re-encodes exactly once; floors-as-minimum means a
-    below-spec target would preserve the source instead (see
-    test_augment_plan.py), so the single-encode path is pinned here via
-    an above-spec target.
+    Explicit upscale=2 (768x432 fake segment -> 1536x864) forces the
+    re-encode tail; the single-encode path is pinned here via an
+    above-native multiplier.
     """
     import voyage.media as media_module
 
@@ -162,12 +160,7 @@ def test_reencode_is_single_pass_with_crf(tmp_path: Path, monkeypatch: pytest.Mo
     assert media_module.finalize_run(
         run_dir,
         out,
-        width=1280,
-        height=720,
-        fps=24,
-        min_fps=0,
-        min_width=0,
-        min_height=0,
+        upscale=2,
         options=options,
     ).exists()
     video_encodes = [argv for argv in calls if "-c:v" in argv and "libx264" in argv]
@@ -189,12 +182,6 @@ def test_finalize_emits_stage_timings(tmp_path: Path) -> None:
     assert media_module.finalize_run(
         run_dir,
         out,
-        width=640,
-        height=352,
-        fps=24,
-        min_fps=0,
-        min_width=0,
-        min_height=0,
     ).exists()
     events = [e for e in _metrics_events(run_dir) if e.get("event") == "finalize_completed"]
     assert events, "finalize must emit a finalize_completed metrics event"
@@ -215,5 +202,5 @@ def test_finalize_adversarial_path_with_quote(tmp_path: Path) -> None:
     _init_run(run_dir)
     _commit(run_dir, 1)
     out = tmp_path / "o'brien run" / "final-quote.mp4"
-    assert media_module.finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
+    assert media_module.finalize_run(run_dir, out).exists()
     assert out.exists() and out.stat().st_size > 0

@@ -143,9 +143,9 @@ def test_finalize_native_geometry_validates_without_reencode(tmp_path: Path) -> 
     _init_run(run_dir)
     _commit_two(run_dir)
     out = tmp_path / "final-copy.mp4"
-    # Legacy native path: floors disabled so 768x432@24 fake segments
-    # stream-copy (default floors would lift to 1216x704@24).
-    assert finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
+    # Explicit-quality default 1/1 ships 768x432@24 fake segments natively
+    # (stream-copy fast path).
+    assert finalize_run(run_dir, out).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)
     duration = float(probe(out).get("format", {}).get("duration", 0.0))
@@ -159,6 +159,19 @@ def test_build_final_audio_slice_cache_wired(tmp_path: Path) -> None:
     _init_run(run_dir)
     _commit_two(run_dir)
     usable = [paths.segment_dir(run_dir, "000000"), paths.segment_dir(run_dir, "000001")]
+    # Always-deferred finalize is ledger-only: render the takes first via
+    # the stored (fake) audio backend — offline sine, no models — then mix.
+    from voyage.audio_finalize import ensure_deferred_for_finalize
+
+    ensure_deferred_for_finalize(
+        run_dir=run_dir,
+        usable=usable,
+        source_fps=24.0,
+        stretch=1.0,
+        run_seed=7,
+        models_dir=None,
+        audio_backend="fake",
+    )
     dest = build_final_audio(run_dir, usable, tmp_path, 24, 48000, 2)
     assert dest.exists() and dest.stat().st_size > 0
     metrics = [
@@ -190,7 +203,7 @@ def test_fastpath_skips_part_reencodes_but_keeps_audio(
 
     monkeypatch.setattr(media_module, "run_capture", _recording)
     out = tmp_path / "final-rec.mp4"
-    assert finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0).exists()
+    assert finalize_run(run_dir, out).exists()
     video_encodes = [argv for argv in calls if "-c:v" in argv and "libx264" in argv]
     assert video_encodes == []
     copy_calls = [argv for argv in calls if "-c:v" in argv and "copy" in argv]

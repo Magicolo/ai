@@ -2101,7 +2101,6 @@ Example:
 segments/
 └── 000042/
     ├── video.mp4
-    ├── audio.wav
     ├── recovery.pt
     ├── manifest.json
     └── DONE
@@ -2109,13 +2108,15 @@ segments/
 
 `manifest.json` (`format: 1`) holds the five metadata sections
 (`transition`/`prompt_plan`/`audio_state`/`world_state`/`metrics`) plus
-`checksums` (sha256 over the binary artifacts `video.mp4`/`audio.wav`/
+`checksums` (sha256 over the binary artifacts `video.mp4`/
 `recovery.pt` only — metadata rides on the atomic manifest write, no
 self-hash). Pre-prune runs (individual JSONs + `sha256.json`) still
-load via legacy fallback in `voyage/segment_manifest.py`. Audio
-coverage slices live in a tmpdir and are never persisted; the video
-conditioning tail is derived on demand at resume (see §5.3 as-built)
-and new runs start without the root `concepts.jsonl` legacy dup.
+load via legacy fallback in `voyage/segment_manifest.py`. Recorded
+`audio.wav` checksum entries from old runs are ignored. Music takes
+are rendered at finalize from the takes ledger and never persisted
+per-segment; the video conditioning tail is derived on demand at
+resume (see §5.3 as-built) and new runs start without the root
+`concepts.jsonl` legacy dup.
 
 A segment must never be modified after `DONE` is created.
 
@@ -2133,12 +2134,15 @@ If an implementation requires a replacement, create a new attempt and update the
 > As-built (§29-pruning-2026-09-30): per-segment file count 12 → 5
 > (`DONE`, `video.mp4`, `audio.wav`, `recovery.pt`, `manifest.json`);
 > ~100 fewer files on a 15-segment run. `DONE` stays a separate file
-> (kept as the commit gate); slices stay in tmpdir; `video_tail.mp4`
-> is resume-derived; root `concepts.jsonl` no longer created;
-> `.cache/acestep` upstream writes are chdir-redirected out of the run.
-> Readers (`media`, `cli_validate`, `scoreboard`, `sfx_finalize`,
-> adopt, inspect-merge) go through `segment_manifest` with legacy
-> fallback, so old runs still validate/scoreboard/resume.
+> (kept as the commit gate); `video_tail.mp4` is resume-derived; root
+> `concepts.jsonl` no longer created; `.cache/acestep` upstream writes
+> are chdir-redirected out of the run. Readers (`media`,
+> `cli_validate`, `scoreboard`, `sfx_finalize`, adopt, inspect-merge)
+> go through `segment_manifest` with legacy fallback, so old runs
+> still validate/scoreboard/resume.
+> As-built (all-deferred-2026-10-04): per-segment file count 5 → 4 —
+> `audio.wav` is gone (all backends deferred, takes render at
+> finalize), so commit-time audio slices no longer exist either.
 
 ---
 
@@ -2148,33 +2152,40 @@ A segment is committed in this order:
 
 ```text
 1. Generate video
-2. Generate audio
-3. Validate media
-4. Write metadata to .partial files
-5. fsync metadata
-6. Atomically rename metadata
-7. Write recovery checkpoint to .partial
-8. fsync checkpoint
-9. Atomically rename checkpoint
-10. Compute checksums and persist them inside the manifest
-> As-built (§30-pruning-2026-09-30): step 10 persists checksums as the
+2. Validate video
+3. Write metadata to .partial files
+4. fsync metadata
+5. Atomically rename metadata
+6. Write recovery checkpoint to .partial
+7. fsync checkpoint
+8. Atomically rename checkpoint
+9. Compute checksums and persist them inside the manifest
+> As-built (§30-pruning-2026-09-30): step 9 persists checksums as the
 > `checksums` section of the single atomic `manifest.json` write
 > (binaries only); there is no separate `sha256.json` anymore.
-11. Write DONE.partial
-12. fsync
-13. rename DONE
-14. Atomically update state.json
-15. Atomically update run manifest / committed index
+10. Write DONE.partial
+11. fsync
+12. rename DONE
+13. Atomically update state.json
+14. Atomically update run manifest / committed index
 ```
+
+Audio is not committed per-segment: every backend is deferred, so
+takes render once at finalize from the stored director decisions
+(`audio/takes.jsonl`) and the commit path never touches audio.
 
 The precise order can be simplified, but the invariant must remain:
 
 > No state file may claim a segment is committed until the segment's required artifacts are valid and durably present.
 
-> As-built (§30-av-gate-2026-09-30, issue 003): step 3/5 (validate media)
-> enforces `|video−audio| ≤ 0.6 s` via probed durations and the shared
-> `check_av_alignment` helper (`av_drift_seconds` recorded); misalignment
-> raises recoverable `MediaError`, never a silent commit.
+> As-built (§30-av-gate-2026-09-30, issue 003): step 3 (validate
+> media) enforced `|video−audio| ≤ 0.6 s` via probed durations and the
+> shared `check_av_alignment` helper (`av_drift_seconds` recorded);
+> misalignment raised recoverable `MediaError`, never a silent commit.
+> As-built (all-deferred-2026-10-04): the gate is retired with the
+> per-segment audio it policed — commit validates video only, and the
+> A/V alignment check lives at finalize, where the takes ledger meets
+> the committed video timeline.
 
 ---
 
@@ -2430,19 +2441,12 @@ Keep ACE-Step API compatibility isolated to `audio/acestep.py`.
 
 Use WAV or another lossless PCM representation for intermediate audio.
 
-A segment may contain:
-
-```text
-music.wav
-ambience.wav
-sfx.wav
-```
-
-which are mixed into:
-
-```text
-audio.wav
-```
+Music takes render once at finalize from the stored director
+decisions into `audio/takes.jsonl` (one take per plan entry, sliced
+and blended onto the committed video timeline); the SFX bed renders
+alongside from `audio/sfx/sfx.jsonl`. No per-segment audio exists —
+every backend is deferred, so there are no `music.wav`/`ambience.wav`/
+`sfx.wav` intermediates and no per-segment `audio.wav` mix target.
 
 before segment commit.
 
@@ -6000,6 +6004,11 @@ The key engineering idea is simple even though the renderer internals are sophis
 
 That separation is what allows the system to run indefinitely without requiring an indefinitely growing model context, an indefinitely growing Python process, or a single fragile output container.
 
+> As-built (all-deferred-2026-10-04): the `audio.wav` box in the
+> diagram above no longer exists at commit time — every backend is
+> deferred, so the commit persists video only and the ACE-Step music
+> takes render once at finalize from the takes ledger.
+
 ---
 
 
@@ -8522,10 +8531,32 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - User request: `voyage configure` gains `--low-definition` / `--high-definition`, configuring the lowest/highest native reasonable resolution for the currently selected backend (default backend when none configured); fresh creates without either flag implicitly use high.
 - Map (`DefinitionTier` + `DEFINITION_TIERS` in `voyage/config.py`, applied by `resolve_config(definition=...)` AFTER the backend preset so `--backend X --low-definition` always yields X's low): fake 512x288/768x432, ltxv 512x320/768x512, causvid 832x480 both tiers (fixed geometry — flags are accepted no-ops), ltx25/ltx23 768x448 (`ltx25-448p`/`ltx23-448p`, latent (1,128,16,12,7)) / 1216x704 (`ltx25-704p`/`ltx23-704p`). High tier is byte-identical to the old `BACKEND_REGISTRY` rows. Low 768x448 is /64-clean (S24 ladder: 512x320/640x384/768x448 all PASS).
 - `configure` semantics: both flags together is exit 2; create defaults to high unless `--from` without `--backend` (inherits the source geometry untouched); updates without flags keep stored geometry; a tier-driven geometry change on a committed run is refused (exit 2, same rule as backend changes — mixed-geometry sequences never commit). LTX workers accept exactly the two configured commit sizes (`COMMIT_SIZE_OPTIONS`, stage-1 halves threaded through the Mode-A graph + tail decode); anything else fails loud.
-- Tests: `tests/test_definition_tiers.py` (23). Gates: ruff + format + mypy strict clean; 127/127 related green, full suite 1835 passed + 1 xdist timing flake (`test_recovery.py` pause-at-boundary, passes alone).
+- Tests: `tests/test_definition_tiers.py` (23). Gates: ruff + format + mypy strict clean; 127/127 related green, full suite 1835 passed + 1 xdist timing flake (`test_recovery.py` pause-at-boundary, passes alone). UNCOMMITTED (per-commit approval required).
+
+## All backends deferred: per-segment audio.wav removed (2026-10-04)
+- User directive (verbatim): "All backends must be deferred. This makes audio.wav obsolete. Clean up associated files/tests/code." Q&A pinned the terms: legacy runs clean-break (old `audio.wav` entries load but are ignored, never migrated), `fake` is deferred like every other backend, commit is video-only (`_ensure_audio_coverage` deleted, not stubbed), and per-segment audio checks/columns go everywhere (no drift gates, no scoreboard audio columns).
+- Commit path (`voyage/supervisor.py`, −381 lines): deleted `_with_audio_gpu` (ACE take render with video-evict/audio-evict/rebuild GPU swap), `_best_effort_audio_teardown` (only caller was the swap), and `_ensure_audio_coverage` (planner 3-attempt loop, take ledger, tmpdir slice walk, joint-fade-compensated assembly into `segment/audio.wav`). New `_cover_audio` is always-deferred: records the `audio` stage timing, derives the conditioning tail via `deferred_tail_frames`/`derive_conditioning_tail` for streaming backends (`STREAMING_VIDEO_BACKENDS`; `fake` skips — no tail needed), returns `CoveredAudio(AudioPlan(segment_id), 0.0, "deferred", ...)` with empty `take_ids`. `_adopt_unaccounted_segment` and `_commit_segment` validate/checksum `video.mp4` (+ `recovery.pt`) only; both A/V drift gates removed; `segment_committed` keeps `"av_drift_seconds": 0.0` so log readers never see a missing field. Commit-time audio worker spawn/stop/gauges left intact (still used at finalize).
+- Finalize path: deleted `DEFERRED_AUDIO_BACKENDS` / `is_deferred_backend()` / `write_deferred_stub_audio()` (`voyage/audio_finalize.py`) — the deferred-vs-joint distinction no longer exists. `deferred_tail_frames` gates on `STREAMING_VIDEO_BACKENDS` instead (25 for ltxv/ltx25/ltx23, `max(25, reencode_window)` for causvid, `MediaError` for non-streaming incl. fake). `ensure_deferred_for_finalize` routes on the *audio* backend: `fake` spawns the fake sine worker (no models), `acestep` spawns ACE, else `MediaError`. `media_audio.build_final_audio` is ledger-only (no `deferred` flag, no single-segment shortcut, no concat/atempo fallbacks — every gap raises `MediaError`); `_verify_segment`/`_check_segment_committed` video-only. `media.py`/`cli_finalize.py` dropped the `deferred_audio` plumbing (`finalize_run` always ensures takes then mixes); deleted `voyage/finalize_parallel.py` (the parallel gate required non-deferred, so all-deferred kills it — finalize is sequential only).
+- Manifest/validate/scoreboard: `REQUIRED_CHECKSUM_ARTIFACTS = ("video.mp4",)`; `cli_validate` DONE/missing/checksum/metrics video-only (recorded `audio.wav` entries skipped silently so old runs still validate); scoreboard dropped `audio_path`/`audio_exists`, kept `take_ids` (empty on new commits — finalize takes live under `run/audio/takes.jsonl`). Segment file count 5 → 4 (`DONE`, `video.mp4`, `recovery.pt`, `manifest.json`); the §30 A/V gate retired with the audio it policed (alignment is a finalize concern now, where the ledger meets the committed timeline).
+- Workers: `video_ltx25.py`/`video_ltx23.py` dropped the joint-audio commit path (`SEGMENT_AUDIO_FILENAME`, `_read_block_audio`, the `novel_audio_wavs` FLAC pipeline, the `audio_path` result key); `_execute_graph` requests `["28"]` only — the 29-node graph keeps its audio nodes unexecuted because the joint AV latent is the validated Spike-A denoise path. `finalize_run` resolves `audio_config` from the stored run config when the caller passes none (else every test-less finalize defaulted to acestep and failed offline).
+- Tests: reworked ~25 files (deleted `_with_audio_gpu`/`_ensure_audio_coverage`/parallel/joint-fallback/atempo pins, re-pinned manifests/scoreboard/reconcile/observability to video-only, `test_recovery.py` pause test made deterministic — the old version asserted on a pre-existing read-then-write race in `_write_state_preserving_control_plane` and only passed by luck). Gates: ruff check + format + mypy strict clean; 1843 passed, 17 skipped, 1 foreign failure (concurrent agent's in-flight `sfx_finalize.py` work, untouched per §9). Normative sections updated in place (§§29/30/38/137, `docs/ARCHITECTURE.md`, `docs/UPSTREAM_LTX25_NOTES.md`, `docs/UPSTREAM_LTX23_NOTES.md`); history entries left verbatim. UNCOMMITTED (per-commit approval required).
 
 ## Ambient slow music + UHD camera-motion direction (2026-10-04)
 - User directives (verbatim): "Modify the music system prompt to be more ambient, slow, morphing, weird, experimental, dark, pads, music." + "Modify the music system prompt to be more ambient, slow, morphing, weird, experimental, dark, pads, held chords, large, vast, powerful, music. Add/modify the video system prompt to be ultra high definition, hyper detailed, sharp, crisp, simple, refined, lots of camera motion (rephrase/expand my requirements to be best suited for ltx25)."
 - No single music/video system-prompt file exists — direction lives in three places, all retuned: (1) `voyage/models.py` `DEFAULT_MUSIC_STYLE` (was atonal/Messiaen/fusion-rock-jazz, now "ambient dark experimental music, slow morphing pads and held chords, vast powerful drones, weird slow-evolving textures, deep sub-bass") — flows via `config.audio.music_style` into the director CURRENT AUDIO STATE and finalize music inputs; (2) `voyage/director.py` `DIRECTOR_SYSTEM_PROMPT` caption doctrine — item (1) now requires every video stage ultra high definition / hyper detailed / sharp-crisp / simple refined composition with one concrete continuous camera move per stage (push-in, lateral drift, orbit, crane rise, pan), phrased for LTX-25 (physical motion, no cuts, no scene change); item (2) keeps the dark experimental touch (minor/modal harmony, sub-bass pressure, dissonant accents) over a new ambient slow core (morphing pads, held chords, vast drones, weird textures); the `build_director_user_message` schema hint mirrors both (camera-move + UHD video, ambient/pads/held-chords music); (3) deterministic fallback `music_caption` rewritten to the ambient vocabulary (keeps concept + charter derivation).
 - Code-level video tail (`voyage/prompts.py` `motion_constraints`, immutable — LLM cannot drop it): was "{pace} continuous camera movement, gentle organic motion, no abrupt cuts, no scene change within the shot", now "{pace} continuous camera movement, strong fluid motion throughout, ultra high definition, hyper detailed, sharp crisp image, simple refined composition, no abrupt cuts, no scene change within the shot". Charter pace bands + middle-layer cue override untouched (the user's "lots of camera motion" arrives via the stronger tail + the doctrine's per-stage camera move, which flows through the designed cue-override channel).
 - Tests: extended `tests/test_director_dark_direction.py` (renamed module docstring, new ambient-pads/UHD-camera-move/`DEFAULT_MUSIC_STYLE` pins) + `tests/test_phase3.py` (UHD + strong-fluid-motion pins on the enforce_style test). Gotcha: `DIRECTOR_SYSTEM_PROMPT` is one triple-quoted literal, so source line-breaks are literal newlines — pinned phrases must sit on a single source line. Gates: ruff check clean; format + mypy strict clean on all touched files; full suite 1855 passed / 18 skipped. §18 MOTION example updated to the new tail.
+
+## Finalize overlap: model pass + deferred music fork-join on 2-GPU (2026-10-05)
+- User observation: audio never overlaps augmentation at finalize — the two GPU stages run back to back while the cards sit half-idle. Q&A locked the terms: ACE-music-first, finalize-only, 2-GPU parallel with 1-GPU serial fallback, fail-soft (a music failure ships nothing silently — retry resumes from ledgers).
+- `finalize_run` (`voyage/media.py`) was strictly sequential: triage → `run_durable_model_pass` (cuda:1) → `ensure_deferred_for_finalize` ACE on cuda:0 → `build_final_audio` mix → publish, then the SFX dub after. New order on 2-GPU boxes: the model pass (cuda:1) and the deferred ACE takes (cuda:0) overlap under one outer stage; mix/publish/SFX stay ordered after the join.
+- Impl: module-level `DEFERRED_MUSIC_DEVICE = "cuda:0"` + pure gate `model_music_parallel_armed(tensor_path, deferred_pending, model_devices)` (tensor path taken + dry walk shows takes pending + every model device differs from cuda:0 — `model_pass_devices` collapses to cuda:0 on 1-GPU, so single-GPU finalizes stay sequential) + `run_model_pass_and_music_parallel(model_work, music_work)` fork-join (always joins both threads; model error takes precedence, music error re-raises after the join; both ledgers make every outcome resumable). `finalize_run` extracts `_do_model_pass` / `_do_music_takes` closures so the sequential path stays byte-identical; audio-config resolution moved above the fork and `audio_stretch` is precomputed from the gate — exact because both model-pass entries return non-None, so the gate predicts `tensor_intermediate is not None`. Branch progress is None inside (one-bar rule), single outer stage outside. No concurrent metrics writes exist between the branches (only the media tail appends `finalize_completed`).
+- Tests (new `tests/test_finalize_model_music_parallel.py`, 7): gate conjunction + 1-GPU collapse, thread rendezvous proving real overlap (sequential execution would deadlock the 10 s waits), model/music error propagation with the sibling branch still joined, model-error precedence, stretch precompute/post-branch parity. `test_finalize_gpu_defaults.py` docstrings updated (sequential-only claim was stale). Gates: ruff + format + mypy strict clean; full suite 1862 passed / 17 skipped. UNCOMMITTED (per-commit approval required).
+
+## Explicit finalize quality: --upscale/--interpolate replace floors (2026-10-05)
+- User directive (verbatim): "For the configure verb, rename '--interp-multiplier' to '--interpolate', and add a '--upscale' with a multiplier ('--upscale 2' doubles the resolution, '--interpolate 2' doubles the number of frames). Also remove the minimum quality requirements, quality will be specified explicitely." Q&A locked: defaults upscale=1/interpolate=1/presentation unset (None, native ship); REMOVE `--no-augment` AND `use_model_pass` (multipliers are the only knobs; 1/1 means no work); REMOVE `PRESENTATION_MIN_FPS` too (CausVid 16fps ships 16fps unless pinned); old manifests fail loud with a re-configure hint.
+- `config.py`: `AugmentConfig` is now `upscale=1/interpolate=1/presentation_fps=None` with a (1,2,4) worker-vocab validator on both multipliers (fail fast at configure — the SRVGG worker + pollers only serve 1/2/4); `resolve_config` params swapped; `parse_min_resolution` deleted.
+- CLI: `_add_augment_args` carries only `--upscale/--interpolate/--presentation-fps`; `_augment_overrides` maps the three; `cli_configure`/`cli_generate` model-ensure gates are `upscale>1 or interpolate>1`; `persistence` fails loud on the seven legacy keys.
+- `media.py`: `plan_augmentation(source_w, source_h, source_fps, *, upscale, interpolate, presentation_fps, model_interpolate)` — out = source×upscale, out_fps = presentation or round(source×interpolate); unprobable dims → MediaError always, unprobable fps → MediaError unless pinned; `upscale_factor_for`/`PRESENTATION_MIN_FPS`/`AUGMENT_DEFAULT_*`/`_record_final_geometry` deleted; `FinalizeOptions`/`ResolvedFinalizeSettings`/`resolve_finalize_settings`/`finalize_run` all carry upscale/interpolate (finalize drops width/height/fps — out derives from the probed source; tensor gate + native fast path kept).
+- `augment.py`: `use_model_pass` thread removed everywhere (`enhance_frames`/`make_enhance_chunk_worker`/`run_model_augment_chunks` take legs as given; `model_pass_active(weights)` single-arg = any-leg-present); `augment_background` moot = 1/1, factor = config upscale.
+- Tests migrated 26 files (3 parallel tracks, all green in scope); `docs/AUGMENT.md` rewritten to the multiplier contract; README/OPERATIONS/BENCHMARKING one-liners updated. History entries left verbatim. UNCOMMITTED (per-commit approval required).

@@ -5,10 +5,12 @@ One `manifest.json` per committed segment replaces the six legacy JSONs
 `world_state.json`, `metrics.json`, `sha256.json`). Top-level keys are
 `format` (int 1), `transition`, `prompt_plan`, `audio_state`,
 `world_state`, `metrics`, and `checksums` (relative filename -> sha256
-for `video.mp4`, `audio.wav`, and `recovery.pt` when present).
+for `video.mp4` plus `recovery.pt` when present; `audio.wav` removed in
+the all-deferred audio cleanup — old runs may still record an
+`audio.wav` entry, which video-only readers ignore).
 
-Tradeoff (no self-hash): `checksums` covers the three binary artifacts
-only. The old `sha256.json` also hashed the five metadata JSONs, which
+Tradeoff (no self-hash): `checksums` covers the binary artifacts only.
+The old `sha256.json` also hashed the five metadata JSONs, which
 required a self-hash dance (the manifest cannot hash itself without a
 second write). Metadata integrity now rides on the single atomic
 `manifest.json` write (temp + fsync + rename + fsync_dir): a torn write
@@ -36,8 +38,14 @@ from voyage.hashing import sha256_file
 SEGMENT_MANIFEST_FORMAT = 1
 """Version of the per-segment manifest schema (int, top-level `format`)."""
 
-REQUIRED_CHECKSUM_ARTIFACTS = ("video.mp4", "audio.wav")
-"""Binary artifacts every manifest must checksum (DESIGN §56 step 4)."""
+REQUIRED_CHECKSUM_ARTIFACTS = ("video.mp4",)
+"""Binary artifacts every manifest must checksum (DESIGN §56 step 4).
+
+Video-only since the all-deferred audio cleanup: `audio.wav` is no
+longer required (old runs may still carry it as an extra file/entry,
+ignored by validators). `recovery.pt` is checksummed when present but
+stays optional (not every backend emits a tape).
+"""
 
 LEGACY_METADATA_FILES = (
     "transition.json",
@@ -167,7 +175,12 @@ def load_metrics(segment_dir: Path) -> dict[str, Any]:
 
 
 def load_audio_state(segment_dir: Path) -> dict[str, Any]:
-    """Best-effort audio_state section; {} when missing/torn/legacy-absent."""
+    """Best-effort audio_state section; {} when missing/torn/legacy-absent.
+
+    Kept for import compatibility (other readers may import it); no
+    video-only caller requires it. New deferred commits carry an empty
+    `take_ids` here — finalize takes live under `run/audio/takes.jsonl`.
+    """
     return load_manifest_section(segment_dir, "audio_state")
 
 

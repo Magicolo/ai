@@ -60,8 +60,8 @@ VOYAGE_GPUS=1 ./scripts/run.sh configure vdemo \
 VOYAGE_GPUS=1 ./scripts/run.sh generate vdemo
 # -> ./output/vdemo/final.mp4
 # ltx25 (the default) renders joint video+audio native 1216x704 @ 24 fps;
-# finalize lifts video to >=1216x704 @ >=24 fps via the augmentation floors
-# (see docs/AUGMENT.md; --no-augment keeps native geometry) and dubs the
+# finalize ships the source geometry by default (explicit --upscale /
+# --interpolate lift it — see docs/AUGMENT.md) and dubs the
 # MMAudio SFX bed under the native soundtrack. --backend fake needs no GPU.
 # Re-running `generate vdemo` renders more segments after `configure vdemo
 # --segments 4` grows the plan, resumes crashed runs, and re-finalizes;
@@ -74,8 +74,8 @@ VOYAGE_GPUS=1 ./scripts/run.sh generate vdemo
 count), `--seed` (omit for a fresh random seed, printed at init),
 `--director qwen|deterministic|llama`, `--blocks`, `--take-seconds`,
 `--quantization fp8|bf16`, `--beats-per-segment`, `--drift-every-n`,
-`--final-video`, `--skip-bad`, `--min-fps`/`--min-resolution`/`--no-augment`
-(finalize floors, see docs/AUGMENT.md),
+`--final-video`, `--skip-bad`, `--upscale`/`--interpolate`/
+`--presentation-fps` (explicit finalize quality, see docs/AUGMENT.md),
 `--music-caption`/`--video-caption`/`--sfx-caption` (caption pins, see
 docs/SFX.md), `--no-download`, `--verbose`/`--no-color`. `generate`
 takes the run NAME (plus `--verbose`/`--no-color`) with an optional

@@ -2,8 +2,10 @@
 
 All against fake backends or stubbed workers (real media, no GPU) in-container:
 RPC deadline reads, error-taxonomy preservation, the single-writer run lock,
-worker-report bounds, audio-swap teardown, gauge timeouts, run-relative
-paths, and single-step DONE.
+worker-report bounds, gauge timeouts, run-relative paths, and single-step
+DONE. Commit is video-only (all backends deferred): there is no commit-time
+audio, so torn takes / audio-swap teardown tests no longer exist here —
+audio renders at finalize via ensure_deferred_for_finalize.
 """
 
 from __future__ import annotations
@@ -119,20 +121,6 @@ def test_oversize_response_line_fails_fast(monkeypatch: pytest.MonkeyPatch) -> N
             os.close(read_fd)
         except OSError:
             pass
-
-
-def test_torn_takes_ledger_rests_failed(tmp_path: Path) -> None:
-    """A SIGKILL-torn takes.jsonl ends FAILED, never RUNNING (002)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    audio_dir = run_dir / "audio"
-    audio_dir.mkdir(exist_ok=True)
-    (audio_dir / "takes.jsonl").write_text("TRUNCATED\n", encoding="utf-8")
-    config = read_effective_config(run_dir)
-    with pytest.raises(VoyageError, match="[Ll]edger"):
-        Supervisor(run_dir, config).run_segments(1)
-    failed = read_state(run_dir)
-    assert failed.status == "FAILED"
 
 
 def test_corrupt_concept_history_rests_failed(tmp_path: Path) -> None:
@@ -297,109 +285,6 @@ def test_malformed_line_answers_malformed_fast(monkeypatch: pytest.MonkeyPatch) 
     assert second["error"]["code"] == "UNKNOWN_OP"
 
 
-def _swap_supervisor(run_dir: Path) -> Supervisor:
-    """Supervisor with the acestep+streaming swap armed, workers stubbed (010)."""
-    config = read_effective_config(run_dir)
-    config.audio.backend = "acestep"
-    config.video.backend = "ltxv"
-    return Supervisor(run_dir, config)
-
-
-def test_audio_failure_propagates_not_masked(tmp_path: Path) -> None:
-    """A failing take with no tape raises the audio cause, explicitly evicted (010)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    supervisor = _swap_supervisor(run_dir)
-    calls: list[tuple[str, str]] = []
-
-    def _script(
-        worker: SubprocessWorker,
-        worker_name: str,
-        segment_id: str,
-        op: str,
-        payload: dict[str, object],
-        restart_hook: Any = None,
-    ) -> dict[str, object]:
-        calls.append((worker_name, op))
-        if op == "generate_audio":
-            raise RecoverableWorkerError("ACE OOM")
-        return {}
-
-    supervisor._call_with_restart = _script  # type: ignore[method-assign]
-    with pytest.raises(RecoverableWorkerError, match="ACE OOM"):
-        supervisor._with_audio_gpu("000000", {"style": "drone"}, None)
-    assert calls == [
-        ("video", "evict_gpu"),
-        ("audio", "generate_audio"),
-        ("audio", "evict_gpu"),
-    ]
-    metrics = (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl").read_text(encoding="utf-8")
-    assert '"event": "video_left_evicted"' in metrics
-
-
-def test_audio_failure_with_tape_still_rebuilds(tmp_path: Path) -> None:
-    """A failing take with a tape rebuilds, yet the audio cause still wins (010)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    tape = run_dir / "segments" / "000000" / "recovery.pt"
-    tape.parent.mkdir(parents=True, exist_ok=True)
-    tape.write_bytes(b"tape")
-    supervisor = _swap_supervisor(run_dir)
-    calls: list[tuple[str, str]] = []
-
-    def _script(
-        worker: SubprocessWorker,
-        worker_name: str,
-        segment_id: str,
-        op: str,
-        payload: dict[str, object],
-        restart_hook: Any = None,
-    ) -> dict[str, object]:
-        calls.append((worker_name, op))
-        if op == "generate_audio":
-            raise RecoverableWorkerError("ACE OOM")
-        return {}
-
-    supervisor._call_with_restart = _script  # type: ignore[method-assign]
-    with pytest.raises(RecoverableWorkerError, match="ACE OOM"):
-        supervisor._with_audio_gpu("000000", {"style": "drone"}, str(tape))
-    assert ("video", "rebuild") in calls
-    metrics_path = run_dir / paths.LOGS_DIRNAME / "metrics.jsonl"
-    if metrics_path.exists():
-        assert '"event": "video_left_evicted"' not in metrics_path.read_text(encoding="utf-8")
-
-
-def test_success_path_teardown_failure_still_rebuilds(tmp_path: Path) -> None:
-    """A teardown failure after a rendered take rebuilds anyway, then raises (010)."""
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    tape = run_dir / "segments" / "000000" / "recovery.pt"
-    tape.parent.mkdir(parents=True, exist_ok=True)
-    tape.write_bytes(b"tape")
-    supervisor = _swap_supervisor(run_dir)
-    calls: list[tuple[str, str]] = []
-
-    def _script(
-        worker: SubprocessWorker,
-        worker_name: str,
-        segment_id: str,
-        op: str,
-        payload: dict[str, object],
-        restart_hook: Any = None,
-    ) -> dict[str, object]:
-        calls.append((worker_name, op))
-        if op == "evict_gpu" and worker_name == "audio":
-            raise RecoverableWorkerError("audio evict boom")
-        return {}
-
-    supervisor._call_with_restart = _script  # type: ignore[method-assign]
-    with pytest.raises(RecoverableWorkerError, match="audio evict boom"):
-        supervisor._with_audio_gpu("000000", {"style": "drone"}, str(tape))
-    assert ("video", "rebuild") in calls
-    metrics = (run_dir / paths.LOGS_DIRNAME / "metrics.jsonl").read_text(encoding="utf-8")
-    assert '"event": "audio_swap_teardown_error"' in metrics
-
-
 def test_gauge_probes_carry_short_timeouts(tmp_path: Path) -> None:
     """Optional gauges wait seconds per worker, never the RPC default (017)."""
     run_dir = tmp_path / "run"
@@ -444,15 +329,23 @@ def test_embed_call_carries_bounded_timeout(tmp_path: Path) -> None:
 
 
 def test_relocated_run_continues_from_relative_paths(tmp_path: Path) -> None:
-    """Commit, move the run dir, commit again: relative paths survive (016-S)."""
+    """Commit, move the run dir, commit again: video-only commit survives (016-S).
+
+    All backends are deferred, so no takes ledger exists at commit time;
+    the relocation contract is that the second commit still lands and the
+    run validates clean, with the manifest checksum covering video.mp4
+    (recovery.pt when present, audio.wav never required).
+    """
     first_dir = tmp_path / "run-a"
     _init_run(first_dir, "relocation")
     config = read_effective_config(first_dir)
     assert Supervisor(first_dir, config).run_segments(1) == ["000000"]
-    ledger_lines = (first_dir / "audio" / "takes.jsonl").read_text(encoding="utf-8").splitlines()
-    assert ledger_lines
-    stored_path = json.loads(ledger_lines[0])["path"]
-    assert not Path(stored_path).is_absolute()
+    manifest = json.loads(
+        (first_dir / "segments" / "000000" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(manifest["checksums"].get("video.mp4"), str)
+    tape = manifest.get("metrics", {}).get("recovery_tape")
+    assert tape is None or not Path(str(tape)).is_absolute()
     second_dir = tmp_path / "run-b"
     first_dir.rename(second_dir)
     config = read_effective_config(second_dir)

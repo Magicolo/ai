@@ -43,7 +43,7 @@ filenames. Skipped: Q5/Q4/Q2 DiTs and the bit-identical dev video VAE
 ## Mode-A accounting
 
 Identical to `ltx25` (121-frame Mode-A clip, 25-frame frozen-prefix
-continuation, 96 novel committed, joint audio.wav, §5.3 tape with
+continuation, 96 novel committed, §5.3 tape with
 profile `ltx23`). The 2.3 family is the only one with a viable 2-GPU
 split (Gemma3 Q2_K encodes on the 6 GB card), but the worker runs
 everything on cuda:0 by default like `ltx25`. A dedicated Mode-A 121f

@@ -1,11 +1,11 @@
-"""Supervisor commit-side gates: A/V alignment, worker-report clamps, mid-run log rotation.
+"""Supervisor commit-side gates: video continuity, worker-report clamps, log rotation.
 
-Covers the three Rank-1 issues in the supervisor's commit path (fake
-backends, real ffmpeg media, no GPU):
+Video-only since the all-deferred audio cleanup (fake backends, real
+ffmpeg media, no GPU):
 
-- 003 (commit side only): misaligned video/audio durations fail the
-  commit with MediaError (0.6 s budget); the orphan-adoption path
-  enforces the same gate.
+- Video continuity: sequential commits advance numbering and the frame
+  timeline from per-segment video frames (the old 003 A/V-drift commit
+  gate now lives at finalize-time over the takes ledger).
 - 006: absurd worker-reported frame counts (negative, zero, bool,
   non-int, over ceiling) and foreign tape paths fail fast; the
   orphan-adoption path enforces the frame ceiling too.
@@ -26,7 +26,6 @@ from voyage import paths
 from voyage.atomic import JsonValue
 from voyage.errors import MediaError
 from voyage.hashing import sha256_file
-from voyage.media import validate_audio
 from voyage.persistence import read_effective_config
 from voyage.rpc import RpcPayload, RpcResult
 from voyage.supervisor import Supervisor
@@ -63,12 +62,19 @@ def _lie_about_video(supervisor: Supervisor, video_block: dict[str, object]) -> 
 
 
 def _build_orphan_from_committed(run_dir: Path, next_number: int) -> Path:
-    """Copy segment 000000's media/manifest into the next segment dir.
+    """Copy segment 000000's video/manifest into the next segment dir.
+
+    Video-only since the all-deferred audio cleanup: only `video.mp4`
+    is copied with a matching checksum entry (plus `recovery.pt` when
+    the source carries one). A legacy `audio.wav` is copied along when
+    the source still has one (current joint supervisor) so the orphan
+    reaches the gate under test instead of failing on a missing preview;
+    new deferred commits carry no audio and the orphan carries none.
 
     Returns the orphan segment dir (with DONE, matching checksums).
-    The caller tampers afterwards (drift audio / absurd frames) and
-    rewrites the manifest checksums so checksums still pass — the
-    adoption gate under test is the only thing that may refuse.
+    The caller tampers afterwards (absurd frames) and rewrites the
+    manifest checksums so checksums still pass — the adoption gate
+    under test is the only thing that may refuse.
     """
     from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
 
@@ -77,67 +83,53 @@ def _build_orphan_from_committed(run_dir: Path, next_number: int) -> Path:
     dst = run_dir / paths.SEGMENTS_DIRNAME / segment_id
     dst.mkdir(parents=True, exist_ok=True)
     shutil.copy(src / "video.mp4", dst / "video.mp4")
-    shutil.copy(src / "audio.wav", dst / "audio.wav")
+    if (src / "audio.wav").exists():
+        shutil.copy(src / "audio.wav", dst / "audio.wav")
     manifest = load_segment_manifest(src)
     world_state = dict(manifest.get("world_state", {}))
     world_state["segment_id"] = segment_id
     manifest["world_state"] = world_state
-    manifest["checksums"] = {
-        "video.mp4": sha256_file(dst / "video.mp4"),
-        "audio.wav": sha256_file(dst / "audio.wav"),
-    }
+    checksums: dict[str, str] = {"video.mp4": sha256_file(dst / "video.mp4")}
+    if (dst / "audio.wav").exists():
+        checksums["audio.wav"] = sha256_file(dst / "audio.wav")
+    if (src / "recovery.pt").is_file():
+        shutil.copy(src / "recovery.pt", dst / "recovery.pt")
+        checksums["recovery.pt"] = sha256_file(dst / "recovery.pt")
+    manifest["checksums"] = checksums
     write_segment_manifest(dst, manifest)
     (dst / paths.DONE_MARKER).write_bytes(b"")
     return dst
 
 
-def test_commit_rejects_av_drifted_audio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fake commit with drifted probed audio durations fails (003)."""
-    import voyage.supervisor as supervisor_module
+def test_commit_continues_video_timeline(tmp_path: Path) -> None:
+    """Video-only continuation: two commits advance numbering + timeline.
+
+    Replaces the old A/V-drift commit gate (003, now finalize-time):
+    each segment contributes its video frames, `video.mp4` exists per
+    segment, and the timeline is the frame sum — no audio duration
+    involved.
+    """
+    from voyage.persistence import read_state
 
     run_dir = tmp_path / "run"
     _init_run(run_dir)
+    assert _commit(run_dir, 2) == ["000000", "000001"]
+    state = read_state(run_dir)
+    assert state.committed_segments == 2
+    assert state.next_segment_number == 2
+    frames_total = 0
+    for segment_id in ("000000", "000001"):
+        segment = run_dir / paths.SEGMENTS_DIRNAME / segment_id
+        assert (segment / "video.mp4").exists()
+        assert (segment / paths.DONE_MARKER).exists()
+        from voyage.segment_manifest import load_segment_manifest
 
-    def _drifted(path: Path, sample_rate: int, channels: int) -> dict[str, object]:
-        info = validate_audio(path, sample_rate, channels)
-        return {**info, "duration": float(info["duration"]) + 10.0}
-
-    monkeypatch.setattr(supervisor_module, "validate_audio", _drifted)
-    with pytest.raises(MediaError, match="alignment drift"):
-        _commit(run_dir, 1)
-
-
-def test_adopt_rejects_av_drifted_orphan(tmp_path: Path) -> None:
-    """DONE orphan with drifted audio must not adopt silently (003)."""
-    from voyage.fake_backends import FakeAudioBackend
-    from voyage.segment_manifest import load_segment_manifest, write_segment_manifest
-
-    run_dir = tmp_path / "run"
-    _init_run(run_dir)
-    assert _commit(run_dir, 1) == ["000000"]
-    orphan = _build_orphan_from_committed(run_dir, 1)
-    config = read_effective_config(run_dir)
-    FakeAudioBackend().generate_segment(
-        orphan / "audio.wav",
-        style="test",
-        energy=0.5,
-        seed=1,
-        sample_rate=config.audio.sample_rate,
-        channels=config.audio.channels,
-        duration_seconds=10.0,
-    )
-    manifest = load_segment_manifest(orphan)
-    manifest["checksums"] = {
-        "video.mp4": sha256_file(orphan / "video.mp4"),
-        "audio.wav": sha256_file(orphan / "audio.wav"),
-    }
-    write_segment_manifest(orphan, manifest)
-    supervisor = _started_supervisor(run_dir)
-    try:
-        with pytest.raises(MediaError, match="alignment drift"):
-            supervisor.commit_one_segment()
-    finally:
-        supervisor.stop_workers()
+        metrics = load_segment_manifest(segment).get("metrics", {})
+        assert isinstance(metrics, dict)
+        segment_frames = int(metrics.get("frames", 0))
+        assert segment_frames > 0
+        frames_total += segment_frames
+    assert state.timeline_frames == frames_total
 
 
 def test_worker_reported_negative_frames_rejected(tmp_path: Path) -> None:

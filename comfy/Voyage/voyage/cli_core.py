@@ -32,28 +32,20 @@ def _load_run(run: Path) -> ProjectConfig:
 
 
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
-    """CLI augment flags → resolve_config kwargs (Track A).
+    """CLI augment flags → resolve_config kwargs.
 
-    `--no-augment` wins over explicit floors (both to 0) and forces the
-    model pass off. Every read goes through getattr + `is_provided` so
-    TUI/hand-built namespaces (Unset blanks, missing attrs) resolve to
-    absent, never to a value.
+    No minimum floors: `--upscale`/`--interpolate` are explicit
+    multipliers (1 = no work on that axis). Every read goes through
+    getattr + `is_provided` so hand-built namespaces (Unset blanks,
+    missing attrs) resolve to absent, never to a value.
     """
-    if bool(getattr(args, "no_augment", False)):
-        return {"min_fps": 0, "min_resolution": "0", "use_model_pass": False}
     overrides: dict[str, Any] = {}
-    min_fps = getattr(args, "min_fps", None)
-    if is_provided(min_fps):
-        overrides["min_fps"] = min_fps
-    min_resolution = getattr(args, "min_resolution", None)
-    if is_provided(min_resolution):
-        overrides["min_resolution"] = min_resolution
-    use_model_pass = getattr(args, "use_model_pass", None)
-    if is_provided(use_model_pass):
-        overrides["use_model_pass"] = use_model_pass
-    interp_multiplier = getattr(args, "interp_multiplier", None)
-    if is_provided(interp_multiplier):
-        overrides["interp_multiplier"] = interp_multiplier
+    upscale = getattr(args, "upscale", None)
+    if is_provided(upscale):
+        overrides["upscale"] = upscale
+    interpolate = getattr(args, "interpolate", None)
+    if is_provided(interpolate):
+        overrides["interpolate"] = interpolate
     presentation_fps = getattr(args, "presentation_fps", None)
     if is_provided(presentation_fps):
         overrides["presentation_fps"] = presentation_fps

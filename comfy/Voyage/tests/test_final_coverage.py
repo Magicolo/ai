@@ -134,7 +134,7 @@ def test_finalize_run_records_invoker(tmp_path: Path) -> None:
     initialize_run_directory(run_dir, run_id="invoker", seed=7)
     _commit_two(run_dir)
     out = run_dir / "final.mp4"
-    finalize_run(run_dir, out, min_fps=0, min_width=0, min_height=0, invoker="generate")
+    finalize_run(run_dir, out, invoker="generate")
     assert _last_finalize_event(run_dir)["invoker"] == "generate"
 
 
@@ -144,5 +144,5 @@ def test_finalize_run_invoker_defaults_to_none(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="invoker", seed=7)
     _commit_two(run_dir)
-    finalize_run(run_dir, run_dir / "final.mp4", min_fps=0, min_width=0, min_height=0)
+    finalize_run(run_dir, run_dir / "final.mp4")
     assert "invoker" in _last_finalize_event(run_dir)

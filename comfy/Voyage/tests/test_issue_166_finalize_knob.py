@@ -1,13 +1,14 @@
-"""Issue 166 finalize threading: model-augment knob, default-on (DESIGN §140).
+"""Issue 166 finalize threading: explicit quality multipliers, 1/1 default (DESIGN §140).
 
-`use_model_pass` (default True) threads `AugmentConfig` -> `resolve_config`
--> CLI (`--use-model-pass`) -> `FinalizeOptions` /
-`resolve_finalize_settings` -> `finalize_run` (which consults
-`resolve_augment_weights` and keeps the ffmpeg vf path when legs are
-absent). Identity proofs (CPU-only, real ffmpeg via the fake-backend
-commit path): knob-off output == pre-knob output, and knob-on with
-absent weights == knob-off (same bytes). The present-weights tensor
-encode is the GPU-box residual (see the issue).
+`upscale`/`interpolate` (both default 1) thread `AugmentConfig` ->
+`resolve_config` -> CLI (`--upscale`/`--interpolate`/`--presentation-fps`)
+-> `FinalizeOptions` / `resolve_finalize_settings` -> `finalize_run`
+(which consults `resolve_augment_weights` and keeps the ffmpeg path when
+legs are absent or no work is demanded). Identity proofs (CPU-only, real
+ffmpeg via the fake-backend commit path): 1/1 output == explicit 1/1
+output (the ffmpeg-only fast path), and demanded work with absent
+weights still ships via the ffmpeg fallback (never an error). The
+present-weights tensor encode is the GPU-box residual (see the issue).
 """
 
 from __future__ import annotations
@@ -44,17 +45,22 @@ def _sha256(candidate: Path) -> str:
     return hashlib.sha256(candidate.read_bytes()).hexdigest()
 
 
-def test_knob_defaults_on_everywhere() -> None:
-    """Every layer defaults to the model pass when provisioned (DESIGN §140).
+def test_multipliers_default_one_everywhere() -> None:
+    """Every layer defaults to shipping the source as-is (DESIGN §140).
 
-    Absent legs still read as the ffmpeg path (never an error), so the
-    default is safe on weight-free boxes — `--no-augment` opts out.
+    1/1 means no work on either axis (ffmpeg path, never an error), so
+    the default is safe on weight-free boxes.
     """
     from voyage.media import FinalizeOptions, resolve_finalize_settings
 
-    assert AugmentConfig().use_model_pass is True
-    assert FinalizeOptions().use_model_pass is True
-    assert _base_config().augment.use_model_pass is True
+    assert AugmentConfig().upscale == 1
+    assert AugmentConfig().interpolate == 1
+    assert AugmentConfig().presentation_fps is None
+    assert FinalizeOptions().upscale == 1
+    assert FinalizeOptions().interpolate == 1
+    assert FinalizeOptions().presentation_fps is None
+    assert _base_config().augment.upscale == 1
+    assert _base_config().augment.interpolate == 1
     resolved = resolve_finalize_settings(
         options=None,
         skip_bad=None,
@@ -62,31 +68,35 @@ def test_knob_defaults_on_everywhere() -> None:
         channels=None,
         overlap_fraction=None,
         overlap_cap_seconds=None,
-        min_fps=None,
-        min_width=None,
-        min_height=None,
+        upscale=None,
+        interpolate=None,
         crf=None,
         preset=None,
     )
-    assert resolved.use_model_pass is True
-    assert resolved.settings.use_model_pass is True
+    assert resolved.upscale == 1
+    assert resolved.interpolate == 1
+    assert resolved.settings.upscale == 1
+    assert resolved.settings.interpolate == 1
 
 
-def test_default_toml_leaves_knob_on(tmp_path: Path) -> None:
-    """The preset ships with the knob on."""
+def test_default_preset_ships_one_one(tmp_path: Path) -> None:
+    """The preset ships with 1/1 multipliers."""
     from voyage.config import preset_config
 
     config = preset_config("knob166", "line art", 7)
-    assert config.augment.use_model_pass is True
+    assert config.augment.upscale == 1
+    assert config.augment.interpolate == 1
 
 
-def test_knob_rejects_non_bool() -> None:
-    """Wrong-typed knob values fail loud before any media work."""
+def test_multipliers_reject_bad_values() -> None:
+    """Out-of-vocabulary multipliers fail loud before any media work."""
     from voyage.media import FinalizeOptions, resolve_finalize_settings
 
-    with pytest.raises(TypeError, match="use_model_pass"):
-        FinalizeOptions(use_model_pass="yes")  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="use_model_pass"):
+    with pytest.raises(ValueError, match="upscale"):
+        FinalizeOptions(upscale=3)
+    with pytest.raises(ValueError, match="interpolate"):
+        FinalizeOptions(interpolate=0)
+    with pytest.raises(ValueError, match="upscale"):
         resolve_finalize_settings(
             options=None,
             skip_bad=None,
@@ -94,63 +104,63 @@ def test_knob_rejects_non_bool() -> None:
             channels=None,
             overlap_fraction=None,
             overlap_cap_seconds=None,
-            min_fps=None,
-            min_width=None,
-            min_height=None,
+            upscale=3,
+            interpolate=None,
             crf=None,
             preset=None,
-            use_model_pass="yes",  # type: ignore[arg-type]
         )
 
 
-def test_finalize_run_rejects_non_bool_knob(tmp_path: Path) -> None:
-    """`finalize_run` validates the knob before touching segments."""
+def test_finalize_run_rejects_bad_multiplier(tmp_path: Path) -> None:
+    """`finalize_run` validates the multipliers before touching segments."""
     from voyage.media import finalize_run
 
-    with pytest.raises(TypeError, match="use_model_pass"):
+    with pytest.raises(ValueError, match="upscale"):
         finalize_run(
             tmp_path / "run",
             tmp_path / "out.mp4",
-            use_model_pass="yes",  # type: ignore[arg-type]
+            upscale="yes",  # type: ignore[arg-type]
         )
 
 
-def test_config_threads_knob() -> None:
-    """`resolve_config` carries an explicit knob into `[augment]`."""
+def test_config_threads_multipliers() -> None:
+    """`resolve_config` carries explicit multipliers into `[augment]`."""
     from voyage.config import resolve_config
 
-    assert resolve_config(_base_config(), use_model_pass=True).augment.use_model_pass is True
-    assert resolve_config(_base_config(), use_model_pass=False).augment.use_model_pass is False
-    assert resolve_config(_base_config(), use_model_pass=None).augment.use_model_pass is True
-    assert resolve_config(_base_config(), use_model_pass=Unset).augment.use_model_pass is True
-    resolved = resolve_config(_base_config(), use_model_pass=True, min_fps=60)
-    assert resolved.augment.use_model_pass is True
-    assert resolved.augment.min_fps == 60
+    assert resolve_config(_base_config(), upscale=2).augment.upscale == 2
+    assert resolve_config(_base_config(), interpolate=2).augment.interpolate == 2
+    assert resolve_config(_base_config(), upscale=None).augment.upscale == 1
+    assert resolve_config(_base_config(), interpolate=Unset).augment.interpolate == 1
+    resolved = resolve_config(_base_config(), upscale=2, interpolate=4)
+    assert resolved.augment.upscale == 2
+    assert resolved.augment.interpolate == 4
 
 
 def test_cli_flag_parity_and_mapping() -> None:
-    """Finalize-time verbs accept `--use-model-pass`; overrides map it."""
+    """Finalize-time verbs accept `--upscale/--interpolate`; overrides map them."""
     from voyage.cli import build_parser
     from voyage.cli_core import _augment_overrides
 
     parser = build_parser()
     args = parser.parse_args(["configure", "calm", "--segments", "1"])
-    assert args.use_model_pass is None
-    flagged = parser.parse_args(["configure", "calm", "--segments", "1", "--use-model-pass"])
-    assert flagged.use_model_pass is True
+    assert args.upscale is None
+    assert args.interpolate is None
+    flagged = parser.parse_args(
+        ["configure", "calm", "--segments", "1", "--upscale", "2", "--interpolate", "2"]
+    )
+    assert flagged.upscale == 2
+    assert flagged.interpolate == 2
     assert _augment_overrides(argparse.Namespace()) == {}
-    assert _augment_overrides(argparse.Namespace(use_model_pass=None)) == {}
-    assert _augment_overrides(argparse.Namespace(use_model_pass=Unset)) == {}
-    assert _augment_overrides(argparse.Namespace(use_model_pass=True)) == {"use_model_pass": True}
-    assert _augment_overrides(argparse.Namespace(use_model_pass=True, no_augment=True)) == {
-        "min_fps": 0,
-        "min_resolution": "0",
-        "use_model_pass": False,
-    }
+    assert _augment_overrides(argparse.Namespace(upscale=None)) == {}
+    assert _augment_overrides(argparse.Namespace(upscale=Unset)) == {}
+    assert _augment_overrides(argparse.Namespace(upscale=2)) == {"upscale": 2}
+    assert _augment_overrides(
+        argparse.Namespace(upscale=2, interpolate=4, presentation_fps=32)
+    ) == {"upscale": 2, "interpolate": 4, "presentation_fps": 32}
 
 
-def test_finalize_knob_off_byte_identical_to_default(tmp_path: Path) -> None:
-    """Explicit `use_model_pass=False` ships the pre-knob bytes (fast path)."""
+def test_finalize_one_one_byte_identical_to_explicit(tmp_path: Path) -> None:
+    """Default 1/1 ships the same bytes as explicit 1/1 (ffmpeg-only fast path)."""
     from voyage.media import finalize_run
 
     run_dir = tmp_path / "run"
@@ -158,13 +168,13 @@ def test_finalize_knob_off_byte_identical_to_default(tmp_path: Path) -> None:
     _commit(run_dir, 1)
     out_default = tmp_path / "off-default.mp4"
     out_explicit = tmp_path / "off-explicit.mp4"
-    finalize_run(run_dir, out_default, min_fps=0, min_width=0, min_height=0)
-    finalize_run(run_dir, out_explicit, min_fps=0, min_width=0, min_height=0, use_model_pass=False)
+    finalize_run(run_dir, out_default)
+    finalize_run(run_dir, out_explicit, upscale=1, interpolate=1)
     assert _sha256(out_default) == _sha256(out_explicit)
 
 
-def test_finalize_knob_on_absent_weights_byte_identical_to_off(tmp_path: Path) -> None:
-    """Knob on with an empty models dir falls back to the ffmpeg bytes."""
+def test_finalize_demanded_work_absent_weights_falls_back(tmp_path: Path) -> None:
+    """Demanded work with an empty models dir falls back to the ffmpeg bytes."""
     from voyage.media import finalize_run
 
     run_dir = tmp_path / "run"
@@ -172,17 +182,15 @@ def test_finalize_knob_on_absent_weights_byte_identical_to_off(tmp_path: Path) -
     _commit(run_dir, 1)
     empty_models = tmp_path / "empty-models"
     empty_models.mkdir()
-    out_off = tmp_path / "knob-off.mp4"
-    out_on = tmp_path / "knob-on-absent.mp4"
-    finalize_run(run_dir, out_off)
-    finalize_run(run_dir, out_on, use_model_pass=True, models_dir=empty_models)
-    assert _sha256(out_off) == _sha256(out_on)
+    out = tmp_path / "demanded-absent.mp4"
+    finalize_run(run_dir, out, upscale=2, models_dir=empty_models)
+    assert out.exists() and out.stat().st_size > 0
 
 
-def test_finalize_consults_seam_only_when_on(
+def test_finalize_consults_seam_only_when_demanded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Knob off never touches the registry seam; knob on resolves once."""
+    """1/1 never touches the registry seam; demanded work resolves once."""
     import voyage.augment as augment_module
     from voyage.config import preset_config, resolve_config
     from voyage.media import finalize_run
@@ -198,7 +206,8 @@ def test_finalize_consults_seam_only_when_on(
     run_dir = tmp_path / "run"
     stored = resolve_config(
         preset_config("knob166", "pastel neon line-art, peaceful", 7, video_backend="fake"),
-        use_model_pass=False,
+        upscale=1,
+        interpolate=1,
     )
     create_run_dir(run_dir, stored)
     _commit(run_dir, 1)
@@ -206,5 +215,5 @@ def test_finalize_consults_seam_only_when_on(
     empty_models.mkdir()
     finalize_run(run_dir, tmp_path / "seam-off.mp4")
     assert calls == []
-    finalize_run(run_dir, tmp_path / "seam-on.mp4", use_model_pass=True, models_dir=empty_models)
+    finalize_run(run_dir, tmp_path / "seam-on.mp4", upscale=2, models_dir=empty_models)
     assert calls == [str(empty_models)]

@@ -1,10 +1,10 @@
 """Issue 166 final slice: present-legs tensor selection (CPU-safe).
 
-Knob-on + provisioned legs selects the tensor chunk encode
-(`enhance_frames` via SRVGG + FILM on the chunk device); knob-off or
-absent legs keeps the ffmpeg fallback byte-identical. Fallback legs run
-torch-free in the slim gates image; provisioned legs skip loudly without
-torch+weights (run them in `voyage-video` with the models volume).
+Provisioned legs select the tensor chunk encode (`enhance_frames` via
+SRVGG + FILM on the chunk device); absent legs keep the ffmpeg fallback
+byte-identical. Fallback legs run torch-free in the slim gates image;
+provisioned legs skip loudly without torch+weights (run them in
+`voyage-video` with the models volume).
 """
 
 from __future__ import annotations
@@ -30,48 +30,36 @@ def test_model_pass_selector_exists_and_defaults_off() -> None:
     from voyage import augment as augment_module
 
     assert hasattr(augment_module, "model_pass_active")
-    assert (
-        augment_module.model_pass_active(False, AugmentWeights(film=None, realesrgan=None)) is False
-    )
-    assert (
-        augment_module.model_pass_active(True, AugmentWeights(film=None, realesrgan=None)) is False
-    )
+    assert augment_module.model_pass_active(AugmentWeights(film=None, realesrgan=None)) is False
 
 
 def test_model_pass_selector_needs_a_leg() -> None:
-    """Knob-on selects only when at least one leg is provisioned."""
+    """The selector is True when at least one leg is provisioned."""
     from voyage.augment import model_pass_active
 
     both = AugmentWeights(film=Path("/models/film"), realesrgan=Path("/models/esrgan"))
-    assert model_pass_active(True, both) is True
-    assert (
-        model_pass_active(True, AugmentWeights(film=Path("/models/film"), realesrgan=None)) is True
-    )
-    assert (
-        model_pass_active(True, AugmentWeights(film=None, realesrgan=Path("/models/esrgan")))
-        is True
-    )
-    assert model_pass_active(False, both) is False
+    assert model_pass_active(both) is True
+    assert model_pass_active(AugmentWeights(film=Path("/models/film"), realesrgan=None)) is True
+    assert model_pass_active(AugmentWeights(film=None, realesrgan=Path("/models/esrgan"))) is True
+    assert model_pass_active(AugmentWeights(film=None, realesrgan=None)) is False
 
 
 def test_model_pass_selector_rejects_bad_inputs() -> None:
-    """Wrong-typed knob/weights fail loud before any model work."""
+    """Wrong-typed weights fail loud before any model work."""
     from voyage.augment import model_pass_active
 
-    with pytest.raises(TypeError, match="use_model_pass"):
-        model_pass_active("yes", AugmentWeights(film=None, realesrgan=None))  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="weights"):
-        model_pass_active(True, {"film": None})  # type: ignore[arg-type]
+        model_pass_active({"film": None})  # type: ignore[arg-type]
 
 
 def test_finalize_present_legs_selects_tensor_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Knob-on + legs calls the tensor model pass (not the vf-only fallback).
+    """Demanded work + legs calls the tensor model pass (not the vf-only fallback).
 
-    The pass is trigger-gated: the request lifts above the 768x432@24
-    fake source so the plan flags reencode work (a matching request
-    would take the stream-copy fast path — see
+    The pass is trigger-gated: demanded work (`upscale > 1`) on the
+    768x432@24 fake source flags reencode work (a 1/1 request would take
+    the stream-copy fast path — see
     tests/test_native_skips_model_pass.py). Both legs provisioned select
     the durable sidecar path (`run_durable_model_pass`).
     """
@@ -116,6 +104,7 @@ def test_finalize_present_legs_selects_tensor_path(
         device: str = "cuda:1",
         work_dir: Path,
         timings: dict[str, float] | None = None,
+        progress: Any = None,
     ) -> tuple[Path, int]:
         seen["model_pass_called"] = True
         seen["segments"] = len(usable)
@@ -132,13 +121,8 @@ def test_finalize_present_legs_selects_tensor_path(
     finalize_run(
         run_dir,
         out,
-        width=1216,
-        height=704,
-        fps=24,
-        min_fps=0,
-        min_width=0,
-        min_height=0,
-        use_model_pass=True,
+        upscale=2,
+        interpolate=1,
         models_dir=models_dir,
     )
     assert out.exists() and out.stat().st_size > 0
@@ -149,7 +133,7 @@ def test_finalize_present_legs_selects_tensor_path(
 def test_finalize_absent_legs_never_enhances(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Knob-on but absent legs never touches the tensor model pass (fallback)."""
+    """Demanded work but absent legs never touches the tensor model pass (fallback)."""
     import voyage.augment as augment_module
     from tests.conftest import initialize_run_directory
     from voyage.media import finalize_run
@@ -187,10 +171,8 @@ def test_finalize_absent_legs_never_enhances(
     finalize_run(
         run_dir,
         out,
-        min_fps=0,
-        min_width=0,
-        min_height=0,
-        use_model_pass=True,
+        upscale=2,
+        interpolate=1,
         models_dir=empty_models,
     )
     assert out.exists() and out.stat().st_size > 0
@@ -230,5 +212,5 @@ def test_provisioned_selector_matches_resolved_legs() -> None:
     assert film is not None
     assert realesrgan is not None
     resolved = resolve_augment_weights(film.parent.parent)
-    assert model_pass_active(True, resolved) is True
-    assert model_pass_active(False, resolved) is False
+    assert model_pass_active(resolved) is True
+    assert model_pass_active(AugmentWeights(film=None, realesrgan=None)) is False

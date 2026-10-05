@@ -7,9 +7,21 @@ patch the `run_capture`/`probe`/`slice_take`/`_cached_slice_take` seams
 live on the defining module (`voyage.media_audio`, re-homed in the same
 pass); `test_commit_side_integrity_095_101_104.py` keeps its
 `voyage.media` patch target (dirty-foreign, skipped — recorded in 036).
+
+Always-deferred finalize (DESIGN §140): the `audio.wav` concat
+fallbacks are gone (`_concat_fallback_audio`, `_stretched_fallback_audio`,
+`_atempo_stages` deleted); `_verify_segment`/`_check_segment_committed`
+are video-only and `build_final_audio` is ledger-only.
 """
 
 from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
 
 
 def test_audio_group_is_single_sourced_through_facade() -> None:
@@ -46,12 +58,20 @@ def test_audio_group_is_single_sourced_through_facade() -> None:
     assert media._segment_timeline is media_audio._segment_timeline
     assert media._slice_cache_key is media_audio._slice_cache_key
     assert media._cached_slice_take is media_audio._cached_slice_take
-    assert media._concat_fallback_audio is media_audio._concat_fallback_audio
     assert media._audio_duration_seconds is media_audio._audio_duration_seconds
     assert media._blend_fade_seconds is media_audio._blend_fade_seconds
     assert media._blend_pair is media_audio._blend_pair
     assert media._join_audio_single_graph is media_audio._join_audio_single_graph
     assert media.build_final_audio is media_audio.build_final_audio
+
+
+def test_concat_fallbacks_are_gone() -> None:
+    """The `audio.wav` fallbacks were deleted with always-deferred finalize."""
+    from voyage import media, media_audio
+
+    for name in ("_concat_fallback_audio", "_stretched_fallback_audio", "_atempo_stages"):
+        assert not hasattr(media_audio, name), name
+        assert not hasattr(media, name), name
 
 
 def test_drift_math_stays_exact() -> None:
@@ -84,3 +104,68 @@ def test_blend_fade_formula_stays_clamped() -> None:
     assert media_audio.PAIR_BLEND_INPUT_COUNT == 2
     with pytest.raises(MediaError, match="non-positive overlap"):
         media_audio._blend_fade_seconds(10.0, 10.0, 0.0)
+
+
+def _video_only_segment(run_dir: Path, index: int, frames: int = 48, fps: int = 24) -> Path:
+    """Video-only committed segment: DONE + testsrc video + manifest."""
+    segment = run_dir / "segments" / f"{index:06d}"
+    segment.mkdir(parents=True)
+    video = segment / "video.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=size=160x120:rate={fps}:duration={frames / fps}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    manifest = {
+        "format": 1,
+        "transition": {"decision": {"decision_index": index}},
+        "metrics": {"frames": frames},
+        "checksums": {"video.mp4": hashlib.sha256(video.read_bytes()).hexdigest()},
+    }
+    (segment / "manifest.json").write_text(json.dumps(manifest))
+    (segment / "DONE").write_bytes(b"")
+    return segment
+
+
+def test_verify_segment_is_video_only(tmp_path: Path) -> None:
+    """Verify covers `video.mp4` alone — no `audio.wav`, no A/V gate."""
+    from voyage import media_audio
+    from voyage.errors import MediaError
+
+    run_dir = tmp_path / "run"
+    segment = _video_only_segment(run_dir, 0)
+    assert not (segment / "audio.wav").exists()
+    frames, video_duration = media_audio._verify_segment(segment)
+    assert frames == 48
+    assert video_duration > 0
+
+    media_audio._check_segment_committed(segment)
+
+    (segment / "video.mp4").write_bytes(b"corrupt")
+    with pytest.raises(MediaError):
+        media_audio._verify_segment(segment)
+
+
+def test_build_final_audio_is_ledger_only(tmp_path: Path) -> None:
+    """No takes ledger means fail loud — never a silent `audio.wav` concat."""
+    from voyage import media_audio
+    from voyage.errors import MediaError
+
+    run_dir = tmp_path / "run"
+    seg0 = _video_only_segment(run_dir, 0)
+    with pytest.raises(MediaError, match="no rendered takes"):
+        media_audio.build_final_audio(run_dir, [seg0], tmp_path / "tmp", 24, 48000, 2)

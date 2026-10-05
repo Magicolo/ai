@@ -86,7 +86,6 @@ def test_generate_noop_when_complete(
     segment.mkdir(parents=True, exist_ok=True)
     (segment / "DONE").write_text("done\n", encoding="utf-8")
     (segment / "video.mp4").write_bytes(b"fake-video")
-    (segment / "audio.wav").write_bytes(b"fake-audio")
     (segment / "manifest.json").write_text(
         json.dumps(
             {
@@ -98,7 +97,6 @@ def test_generate_noop_when_complete(
                 "metrics": {"frames": 48},
                 "checksums": {
                     "video.mp4": "c9b936a163cb84ee9137fa239ae9050c5831a36156f4e61ab291e13454b3b9ce",
-                    "audio.wav": "69538b86470d5575fc0181cf3b0d0e79ecacb05b6bc6f58c17e759154848e35f",
                 },
             }
         ),

@@ -24,7 +24,11 @@ def _commit_one(run_dir: Path) -> Path:
 
 
 def test_commit_writes_manifest_without_individual_jsons(tmp_path: Path) -> None:
-    """Commit writes manifest.json + DONE and no individual JSONs."""
+    """Commit writes manifest.json + DONE and no individual JSONs.
+
+    Video-only checksums (all backends deferred): only video.mp4 is
+    required; no audio.wav entry is recorded on new commits.
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="manifest")
     segment = _commit_one(run_dir)
@@ -45,7 +49,8 @@ def test_commit_writes_manifest_without_individual_jsons(tmp_path: Path) -> None
         assert isinstance(payload[key], dict), key
     assert isinstance(payload["checksums"], dict)
     assert isinstance(payload["checksums"].get("video.mp4"), str)
-    assert isinstance(payload["checksums"].get("audio.wav"), str)
+    assert "audio.wav" not in payload["checksums"]
+    assert not (segment / "audio.wav").exists()
 
 
 def test_slices_land_in_tmpdir_not_segment_dir(tmp_path: Path) -> None:

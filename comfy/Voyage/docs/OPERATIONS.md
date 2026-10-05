@@ -106,9 +106,9 @@ Full scenario table: `docs/STATE_AND_RECOVERY.md`.
 `generate`'s finalize step collects DONE segments only, verifies
 checksums/ranges/alignment, and publishes atomically (sources never
 mutated). Use `configure --skip-bad` to finalize around corrupt
-segments with warnings. Presentation floors apply at finalize: output
-is ≥24 fps and ≥1216×704 by default (`--min-fps`/`--min-resolution`/
-`--no-augment` on `configure`, stored in `[augment]` — see
+segments with warnings. Explicit quality applies at finalize: output
+ships the probed source geometry by default (`--upscale`/`--interpolate`/
+`--presentation-fps` on `configure`, stored in `[augment]` — see
 `docs/AUGMENT.md`). The SFX pass dubs director-captioned effects
 under the music afterwards unless `--no-sfx` (pins
 `--sfx-caption`/`--music-caption`/`--video-caption` on `configure` —

@@ -1,21 +1,22 @@
-"""Deferred ACE music: commit stub + finalize-time take rendering (DESIGN §140).
+"""Always-deferred finalize: ledger-only music rendering (DESIGN §140).
 
-Why: ltxv/causvid commit no ACE takes (full move to finalize); `usable`
-segments carry timeline-exact silent stubs while `ensure_deferred_takes`
-replays director decisions at finalize. ltx25/ltx23 joint path untouched.
+Why: every backend commits video only — no per-segment `audio.wav`
+previews. `ensure_deferred_takes` replays director decisions at finalize
+(ACE-Step on cuda:0, or the fake sine worker via `audio_backend`
+routing); `build_final_audio` blends the takes ledger and fails loud
+without it.
 """
 
 from __future__ import annotations
 
+import array
+import hashlib
 import json
 import math
-import struct
 import subprocess
 import wave
-from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -23,28 +24,31 @@ from voyage.audio_finalize import (
     deferred_tail_frames,
     derive_conditioning_tail,
     ensure_deferred_takes,
-    is_deferred_backend,
-    write_deferred_stub_audio,
 )
-from voyage.config import ProjectConfig
 from voyage.errors import MediaError
 from voyage.fake_backends import FakeVideoBackend
-from voyage.models import EvolutionDecision
-from voyage.supervisor import Supervisor
 
 
 def _write_sine_wav(path: Path, duration_seconds: float) -> None:
-    """Stdlib sine stub: 48 kHz stereo s16le, exact duration."""
+    """Stdlib sine stub: 48 kHz stereo s16le, exact duration.
+
+    Batches the whole buffer into ONE `writeframes` call: the old
+    per-sample loop paid a syscall per frame (~2 s per rendered second,
+    ~60 s for this module alone).
+    """
     rate, channels, freq = 48000, 2, 440.0
     frames = int(duration_seconds * rate)
     path.parent.mkdir(parents=True, exist_ok=True)
+    mono = array.array(
+        "h",
+        (int(12000.0 * math.sin(2.0 * math.pi * freq * index / rate)) for index in range(frames)),
+    )
+    stereo = array.array("h", (sample for value in mono for sample in (value, value)))
     with wave.open(str(path), "wb") as wav:
         wav.setnchannels(channels)
         wav.setsampwidth(2)
         wav.setframerate(rate)
-        for index in range(frames):
-            sample = int(12000.0 * math.sin(2.0 * math.pi * freq * index / rate))
-            wav.writeframes(struct.pack("<hh", sample, sample))
+        wav.writeframes(stereo.tobytes())
 
 
 def _stub_render(payload: dict[str, Any], output_path: Path) -> None:
@@ -73,21 +77,12 @@ def _segment_with_decision(
     return segment
 
 
-def test_is_deferred_backend_only_ltxv_causvid() -> None:
-    """Every streaming CUDA backend defers; only fake commits inline."""
-    assert is_deferred_backend("ltxv")
-    assert is_deferred_backend("causvid")
-    assert is_deferred_backend("ltx25")
-    assert is_deferred_backend("ltx23")
-    assert not is_deferred_backend("fake")
-
-
 def test_ensure_deferred_takes_forwards_sample_rate_and_channels(tmp_path: Path) -> None:
     """Takes render at the run's audio rate/channels, not a hardcoded pair.
 
-    The commit stub uses the configured rate/channels, so finalize takes
-    must match — a hardcoded 48k/2 would split-brain any run configured
-    otherwise. Defaults stay 48k stereo when not given.
+    The finalize takes must match the run's configured rate/channels —
+    a hardcoded 48k/2 would split-brain any run configured otherwise.
+    Defaults stay 48k stereo when not given.
     """
     from voyage.audio_finalize import ensure_deferred_takes
 
@@ -129,60 +124,6 @@ def test_ensure_deferred_takes_forwards_sample_rate_and_channels(tmp_path: Path)
     )
     assert seen2[0]["sample_rate"] == 48000
     assert seen2[0]["channels"] == 2
-
-
-def test_write_deferred_stub_audio_is_timeline_exact(tmp_path: Path) -> None:
-    """Stub is silent 48k stereo s16le matching the segment duration."""
-    from voyage.media_audio import probed_take_seconds
-
-    segment = tmp_path / "segments" / "000000"
-    segment.mkdir(parents=True)
-    out = write_deferred_stub_audio(segment, 4.0, 48000, 2)
-    assert out == segment / "audio.wav"
-    assert abs(probed_take_seconds(out) - 4.0) < 0.05
-
-
-def test_cover_audio_deferred_branch_skips_take_path(tmp_path: Path) -> None:
-    """Deferred branch writes the stub and never calls the take renderer."""
-    from voyage.supervisor import Supervisor
-
-    segment = tmp_path / "segments" / "000000"
-    _render_testsrc_segment_video(segment / "video.mp4", frames=121, fps=24)
-
-    @contextmanager
-    def _stage(_kind: str, _label: str) -> Any:
-        yield
-
-    def _forbidden(*args: object, **kwargs: object) -> object:
-        raise AssertionError("take path must not run for deferred backends")
-
-    fake_self = SimpleNamespace(_stage=_stage, _ensure_audio_coverage=_forbidden)
-    config = SimpleNamespace(
-        video=SimpleNamespace(backend="ltxv"),
-        audio=SimpleNamespace(
-            backend="acestep",
-            music_style="ambient electronic",
-            sample_rate=48000,
-            channels=2,
-        ),
-    )
-    covered = Supervisor._cover_audio(
-        cast("Supervisor", fake_self),
-        cast("ProjectConfig", config),
-        0,
-        "000000",
-        segment,
-        0.0,
-        4.0,
-        cast("EvolutionDecision", SimpleNamespace()),
-        None,
-        {},
-    )
-    assert covered.take_action == "deferred"
-    assert covered.audio_plan.take_ids == []
-    assert (segment / "audio.wav").exists()
-    assert (segment / "video_tail.mp4").exists()
-    assert _count_frames(segment / "video_tail.mp4") == 25
 
 
 def test_ensure_deferred_takes_renders_and_ledgers(tmp_path: Path) -> None:
@@ -241,6 +182,32 @@ def test_ensure_deferred_takes_cover_stretched_timeline(tmp_path: Path) -> None:
     assert coverage >= (96 / 24.0) * 1.5 - 1e-6
 
 
+def test_deferred_render_pending_tracks_ledger_coverage(tmp_path: Path) -> None:
+    """Dry walk is True fresh, False once the ledger covers the timeline."""
+    from voyage import audio_finalize
+
+    seg0 = _segment_with_decision(tmp_path, 0, 96, "dark drone", 0.4)
+    assert audio_finalize.deferred_render_pending(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        run_seed=0,
+    )
+    ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        run_seed=0,
+        render_take_fn=_stub_render,
+    )
+    assert not audio_finalize.deferred_render_pending(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        run_seed=0,
+    )
+
+
 def _video_segment(
     run_dir: Path,
     index: int,
@@ -249,10 +216,7 @@ def _video_segment(
     caption: str = "dark drone",
     energy: float = 0.4,
 ) -> Path:
-    """Committed-shape segment: DONE + testsrc video + stub audio + manifest."""
-    import hashlib
-    import subprocess
-
+    """Committed-shape video-only segment: DONE + testsrc video + manifest."""
     segment = run_dir / "segments" / f"{index:06d}"
     segment.mkdir(parents=True)
     duration = frames / fps
@@ -276,7 +240,6 @@ def _video_segment(
         check=True,
         capture_output=True,
     )
-    write_deferred_stub_audio(segment, duration, 48000, 2)
 
     def _sha(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -290,23 +253,20 @@ def _video_segment(
             }
         },
         "metrics": {"frames": frames},
-        "checksums": {
-            "video.mp4": _sha(video),
-            "audio.wav": _sha(segment / "audio.wav"),
-        },
+        "checksums": {"video.mp4": _sha(video)},
     }
     (segment / "manifest.json").write_text(json.dumps(manifest))
     (segment / "DONE").write_bytes(b"")
     return segment
 
 
-def test_build_final_audio_deferred_fails_loud_on_stub(tmp_path: Path) -> None:
-    """Deferred mix with no rendered takes raises instead of shipping silence."""
+def test_build_final_audio_fails_loud_without_takes(tmp_path: Path) -> None:
+    """Ledger-only mix with no rendered takes raises instead of shipping silence."""
     from voyage.media_audio import build_final_audio
 
     run_dir = tmp_path / "run"
     seg0 = _video_segment(run_dir, 0)
-    with pytest.raises(MediaError):
+    with pytest.raises(MediaError, match="no rendered takes"):
         build_final_audio(
             run_dir,
             [seg0],
@@ -314,12 +274,11 @@ def test_build_final_audio_deferred_fails_loud_on_stub(tmp_path: Path) -> None:
             24,
             48000,
             2,
-            deferred=True,
         )
 
 
-def test_build_final_audio_deferred_blends_rendered_takes(tmp_path: Path) -> None:
-    """Deferred mix after `ensure_deferred_takes` blends real music."""
+def test_build_final_audio_blends_rendered_takes(tmp_path: Path) -> None:
+    """Mix after `ensure_deferred_takes` blends real music."""
     from voyage.media_audio import build_final_audio, probed_take_seconds
 
     run_dir = tmp_path / "run"
@@ -339,7 +298,6 @@ def test_build_final_audio_deferred_blends_rendered_takes(tmp_path: Path) -> Non
         24,
         48000,
         2,
-        deferred=True,
     )
     assert dest.exists()
     assert abs(probed_take_seconds(dest) - 8.0) < 0.3
@@ -366,7 +324,6 @@ def test_build_final_audio_stretch_uses_stretched_timeline(tmp_path: Path) -> No
         24,
         48000,
         2,
-        deferred=True,
         stretch=1.5,
     )
     assert dest.exists()
@@ -380,10 +337,144 @@ def test_spawn_ace_render_fn_factory_exists() -> None:
     assert callable(audio_finalize.spawn_ace_render_fn)
 
 
-def test_finalize_run_deferred_renders_takes_before_mix(
+def test_spawn_fake_render_fn_factory_exists() -> None:
+    """Offline fake renderer factory is importable (spawning needs only ffmpeg)."""
+    from voyage import audio_finalize
+
+    assert callable(audio_finalize.spawn_fake_render_fn)
+
+
+def test_spawn_fake_render_fn_renders_sine(tmp_path: Path) -> None:
+    """The fake factory renders real sine audio through a live worker."""
+    from voyage import audio_finalize
+
+    render, shutdown = audio_finalize.spawn_fake_render_fn(tmp_path)
+    try:
+        out = tmp_path / "take.wav"
+        render(
+            {
+                "segment_id": "000000",
+                "style": "dark drone",
+                "energy": 0.4,
+                "seed": 0,
+                "duration_seconds": 1.0,
+                "sample_rate": 48000,
+                "channels": 2,
+            },
+            out,
+        )
+        assert out.exists() and out.stat().st_size > 0
+    finally:
+        shutdown()
+
+
+def test_ensure_routing_fake_uses_fake_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`finalize_run(deferred_audio=True)` renders takes, then mixes/muxes."""
+    """`audio_backend="fake"` renders via the fake factory, never ACE."""
+    from voyage import audio_finalize
+
+    seg0 = _segment_with_decision(tmp_path, 0, 96, "dark drone", 0.4)
+    calls: list[str] = []
+
+    def _recording_fake(run_dir: Path) -> tuple[object, object]:
+        calls.append("fake")
+        return (_stub_render, lambda: None)
+
+    monkeypatch.setattr(audio_finalize, "spawn_fake_render_fn", _recording_fake)
+
+    def _forbidden(run_dir: Path, models_dir: Path | str | None, device: str = "cuda:0") -> object:
+        raise AssertionError("ACE factory must not run for audio_backend='fake'")
+
+    monkeypatch.setattr(audio_finalize, "spawn_ace_render_fn", _forbidden)
+    # `models_dir=None` would raise inside the ACE factory — rendering
+    # proves the fake route (which needs no weights) was taken.
+    rendered = audio_finalize.ensure_deferred_for_finalize(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        stretch=1.0,
+        run_seed=0,
+        models_dir=None,
+        audio_backend="fake",
+    )
+    assert rendered is True
+    assert calls == ["fake"]
+    assert (tmp_path / "audio" / "takes.jsonl").exists()
+
+
+def test_ensure_routing_acestep_uses_ace_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`audio_backend="acestep"` (default) renders via the ACE factory."""
+    from voyage import audio_finalize
+
+    seg0 = _segment_with_decision(tmp_path, 0, 96, "dark drone", 0.4)
+    seen: list[object] = []
+
+    def _fake_spawn_fake(run_dir: Path) -> object:
+        raise AssertionError("fake factory must not run for audio_backend='acestep'")
+
+    def _recording_ace(
+        run_dir: Path, models_dir: Path | str | None, device: str = "cuda:0"
+    ) -> tuple[object, object]:
+        seen.append(models_dir)
+        return (_stub_render, lambda: None)
+
+    monkeypatch.setattr(audio_finalize, "spawn_fake_render_fn", _fake_spawn_fake)
+    monkeypatch.setattr(audio_finalize, "spawn_ace_render_fn", _recording_ace)
+    rendered = audio_finalize.ensure_deferred_for_finalize(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        stretch=1.0,
+        run_seed=0,
+        models_dir="/models",
+    )
+    assert rendered is True
+    assert seen == ["/models"]
+
+
+def test_ensure_routing_unknown_backend_fails_loud(tmp_path: Path) -> None:
+    """An unknown audio backend raises instead of guessing a renderer."""
+    from voyage import audio_finalize
+
+    seg0 = _segment_with_decision(tmp_path, 0, 96, "dark drone", 0.4)
+    with pytest.raises(MediaError, match="unknown audio backend"):
+        audio_finalize.ensure_deferred_for_finalize(
+            run_dir=tmp_path,
+            usable=[seg0],
+            source_fps=24.0,
+            stretch=1.0,
+            run_seed=0,
+            models_dir="/models",
+            audio_backend="orchestra",
+        )
+
+
+def test_ensure_fake_end_to_end_needs_no_models(tmp_path: Path) -> None:
+    """Fake routing renders takes through a live worker with no models_dir."""
+    from voyage import audio_finalize
+
+    seg0 = _segment_with_decision(tmp_path, 0, 96, "dark drone", 0.4)
+    rendered = audio_finalize.ensure_deferred_for_finalize(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        stretch=1.0,
+        run_seed=0,
+        models_dir=None,
+        audio_backend="fake",
+    )
+    assert rendered is True
+    ledger = tmp_path / "audio" / "takes.jsonl"
+    assert ledger.exists() and ledger.read_text().strip() != ""
+
+
+def test_finalize_run_always_renders_takes_before_mix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`finalize_run` renders takes, then mixes/muxes (no opt-in flag)."""
     import json as json_module
 
     from voyage import audio_finalize
@@ -401,15 +492,8 @@ def test_finalize_run_deferred_renders_takes_before_mix(
     finalize_run(
         run_dir,
         out,
-        width=320,
-        height=240,
-        fps=24,
-        min_fps=0,
-        min_width=0,
-        min_height=0,
-        use_model_pass=False,
-        interp_multiplier=1,
-        deferred_audio=True,
+        upscale=1,
+        interpolate=1,
         seed=0,
     )
     assert out.exists()
@@ -492,10 +576,10 @@ def _count_frames(path: Path) -> int:
 def test_derive_conditioning_tail_writes_25f_tail(tmp_path: Path) -> None:
     """Commit-time tail derive: last 25 frames of the segment video.
 
-    Why: the deferred branch skips the commit-time audio swap whose
-    rebuild derived `video_tail.mp4`; without this derive the next
-    segment's resident tail path is missing and the worker goes fresh
-    (121f) instead of continuing (96f).
+    Why: the commit path holds no audio worker whose rebuild derived
+    `video_tail.mp4`; without this derive the next segment's resident
+    tail path is missing and the worker goes fresh (121f) instead of
+    continuing (96f).
     """
     segment = tmp_path / "segments" / "000000"
     _render_testsrc_segment_video(segment / "video.mp4", frames=121, fps=24)
@@ -525,7 +609,7 @@ def test_derive_conditioning_tail_fails_loud_without_video(tmp_path: Path) -> No
 
 
 def test_deferred_tail_frames_match_worker_resume_counts() -> None:
-    """Tail lengths pin each worker's resume derive (short tails adopt wrong)."""
+    """Tail lengths pin each streaming worker's resume derive."""
     assert deferred_tail_frames("ltxv") == 25
     assert deferred_tail_frames("ltx25") == 25
     assert deferred_tail_frames("ltx23") == 25

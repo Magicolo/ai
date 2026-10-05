@@ -3,8 +3,8 @@
 `resolve_augment_weights` maps a models dir to loader-ready paths; the
 chunk worker passes non-None legs to `augment_worker.upscale_frames` /
 `interpolate_pair` with `device=chunk.device` and keeps the ffmpeg encode
-for None legs. `use_model_pass=False` (default) returns the input frames
-unchanged — ffmpeg stays the default, so the knob is opt-in.
+for absent legs. Absent legs return the input frames unchanged — ffmpeg
+stays the default, so the model pass runs only when provisioned.
 
 Fallback legs run torch-free in the slim gates image; provisioned legs
 skip loudly without torch+weights (run them in `voyage-video` with the
@@ -42,8 +42,8 @@ def test_enhance_frames_import_fails_red() -> None:
     assert hasattr(augment_module, "run_model_augment_chunks")
 
 
-def test_opt_out_returns_input_unchanged_without_torch() -> None:
-    """Default knob keeps ffmpeg bytes: input frames pass through untouched."""
+def test_absent_legs_return_input_unchanged() -> None:
+    """Absent legs keep ffmpeg bytes: input frames pass through untouched."""
     from voyage.augment import enhance_frames
 
     source = ["frame-a", "frame-b", "frame-c"]
@@ -52,17 +52,17 @@ def test_opt_out_returns_input_unchanged_without_torch() -> None:
     assert enhance_frames(source, weights, device="cuda:0") is not source
 
 
-def test_opt_in_without_weights_skips_without_torch() -> None:
-    """Opt-in with absent legs still skips (no torch import, same frames)."""
+def test_absent_legs_skip_without_torch() -> None:
+    """Absent legs still skip (no torch import, same frames)."""
     from voyage.augment import enhance_frames
 
     source = ["frame-a", "frame-b"]
     weights = AugmentWeights(film=None, realesrgan=None)
-    assert enhance_frames(source, weights, device="cuda:0", use_model_pass=True) == source
+    assert enhance_frames(source, weights, device="cuda:0") == source
 
 
 def test_enhance_frames_rejects_bad_inputs() -> None:
-    """Bad knob/frame/factor inputs fail loud before any model work."""
+    """Bad frame/factor inputs fail loud before any model work."""
     from voyage.augment import enhance_frames
 
     weights = AugmentWeights(film=None, realesrgan=None)
@@ -70,8 +70,6 @@ def test_enhance_frames_rejects_bad_inputs() -> None:
         enhance_frames([], weights, device="cuda:0")
     with pytest.raises(TypeError, match="device"):
         enhance_frames(["frame-a"], weights, device=123)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="use_model_pass"):
-        enhance_frames(["frame-a"], weights, device="cpu", use_model_pass="yes")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="upscale_factor"):
         enhance_frames(["frame-a"], weights, device="cpu", upscale_factor=3)
     with pytest.raises(ValueError, match="multiplier"):
@@ -121,7 +119,6 @@ def test_chunk_worker_forwards_chunk_device(
     worker = augment_module.make_enhance_chunk_worker(
         {0: ["frame-a", "frame-b"]},
         weights,
-        use_model_pass=True,
     )
     chunk = AugmentChunk(
         index=0, start_frame=0, source_frames=2, expected_frames=5, device="cuda:1"
@@ -138,7 +135,7 @@ def test_chunk_worker_missing_chunk_index_fails_loud() -> None:
     from voyage import augment as augment_module
 
     weights = AugmentWeights(film=None, realesrgan=None)
-    worker = augment_module.make_enhance_chunk_worker({}, weights, use_model_pass=False)
+    worker = augment_module.make_enhance_chunk_worker({}, weights)
     chunk = AugmentChunk(
         index=3, start_frame=96, source_frames=4, expected_frames=13, device="cuda:0"
     )
@@ -147,7 +144,7 @@ def test_chunk_worker_missing_chunk_index_fails_loud() -> None:
 
 
 def test_run_model_chunks_preserves_order_without_model() -> None:
-    """Opt-out run threads through `run_augment_chunks` with identical order."""
+    """Absent-legs run threads through `run_augment_chunks` with identical order."""
     from voyage import augment as augment_module
 
     plan = augment_plan(5, chunk=2, multiplier=2, devices=("cuda:0",))
@@ -158,9 +155,7 @@ def test_run_model_chunks_preserves_order_without_model() -> None:
         for chunk in plan
     }
     weights = AugmentWeights(film=None, realesrgan=None)
-    outcomes = augment_module.run_model_augment_chunks(
-        plan, weights, source_frames, use_model_pass=False
-    )
+    outcomes = augment_module.run_model_augment_chunks(plan, weights, source_frames)
     assert outcomes == [source_frames[chunk.index] for chunk in plan]
     assert run_augment_chunks(plan, lambda chunk, device: chunk.index) == [0, 1, 2]
 
@@ -217,7 +212,6 @@ def test_provisioned_model_pass_upscales_and_interpolates_on_cpu() -> None:
         device="cpu",
         upscale_factor=1,
         multiplier=2,
-        use_model_pass=True,
     )
     assert len(enhanced) == 3
     assert tuple(enhanced[0].shape) == (3, 16, 16)

@@ -33,7 +33,13 @@ def _restart_events(run_dir: Path, worker: str) -> int:
 
 
 def test_killed_audio_worker_recovers(tmp_path: Path) -> None:
-    """SIGKILLed audio worker restarts and the segment still commits."""
+    """Killed audio worker is a no-op for video-only commit.
+
+    All backends are deferred: commit never touches the audio worker, so
+    a SIGKILLed audio handle stays dead through the commit (zero restarts)
+    and the segment still commits + validates clean. Audio renders at
+    finalize via ensure_deferred_for_finalize.
+    """
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     config = read_effective_config(run_dir)
@@ -46,7 +52,7 @@ def test_killed_audio_worker_recovers(tmp_path: Path) -> None:
         supervisor.stop_workers()
     assert segment_id == "000000"
     assert (paths.segment_dir(run_dir, segment_id) / paths.DONE_MARKER).exists()
-    assert _restart_events(run_dir, "audio") == 1
+    assert _restart_events(run_dir, "audio") == 0
     assert validate_run(run_dir) == []
 
 

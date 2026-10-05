@@ -1,46 +1,26 @@
-"""Finalize GPU defaults: MMAudio SFX on cuda:0, model pass on cuda:1, parallel.
+"""Finalize GPU defaults: MMAudio SFX on cuda:0, model pass on cuda:1, sequential.
 
 TDD contract for the user-approved defaults change (DESIGN §140): the
 streaming backends defer ACE-Step music to finalize (timeline-exact
 silent stubs at commit, takes rendered after the video worker stops —
 no joint-audio GPU contention on the 4060), then dub MMAudio SFX over
 the rendered music at finalize on the 4060 (cuda:0), while the
-Real-ESRGAN + FILM model pass runs on the 2060 (cuda:1) — side by side
-when two GPUs are visible, sequentially otherwise.
+Real-ESRGAN + FILM model pass runs on the 2060 (cuda:1) — overlapping
+the deferred music takes on 2-GPU boxes (`voyage/media.py`
+fork-join; 1-GPU finalizes stay sequential).
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
 from typing import cast
 
 import pytest
 
-from tests.conftest import initialize_run_directory
 from voyage.config import ProjectConfig, VideoBackendName, with_video_backend
-from voyage.persistence import read_effective_config
-from voyage.supervisor import Supervisor
 
 
 def _config_with_style() -> ProjectConfig:
     return ProjectConfig(style="pastel neon line-art, peaceful")
-
-
-def _commit_two(run_dir: Path) -> None:
-    from voyage.config import resolve_config
-
-    config = read_effective_config(run_dir)
-    # Pin the deterministic director: finalize-path coverage must not
-    # depend on whichever decider backend is the tree default today.
-    config = resolve_config(config, director="deterministic")
-    supervisor = Supervisor(run_dir, config)
-    supervisor.start_workers()
-    try:
-        supervisor.commit_one_segment()
-        supervisor.commit_one_segment()
-    finally:
-        supervisor.stop_workers()
 
 
 def test_ltx_backends_pair_acestep_music_and_sfx_mmaudio_on_cuda0() -> None:
@@ -55,53 +35,29 @@ def test_ltx_backends_pair_acestep_music_and_sfx_mmaudio_on_cuda0() -> None:
 
 
 @pytest.mark.parametrize("backend", ["ltxv", "causvid", "ltx25", "ltx23"])
-def test_all_cuda_backends_route_to_parallel_finalize(backend: str) -> None:
-    """Every CUDA backend's stock preset satisfies the parallel predicate:
-    SFX on (mmaudio) + knob on + provisioned legs + one worker + two GPUs.
-    `fake` never does (SFX off)."""
-    from voyage.finalize_parallel import should_run_parallel
+def test_all_cuda_backends_use_sequential_devices(backend: str) -> None:
+    """Every CUDA backend pairs SFX dub on cuda:0 with the model pass on cuda:1.
+
+    The model pass owns cuda:1 (the 2060) while the SFX dub and the
+    deferred ACE music own cuda:0 (the 4060); the model pass and the
+    music takes overlap on 2-GPU boxes, everything else stays ordered.
+    `fake` never routes (SFX off).
+    """
+    from voyage.augment import model_pass_devices
 
     config = with_video_backend(_config_with_style(), cast(VideoBackendName, backend))
-    assert (
-        should_run_parallel(
-            sfx_backend=config.sfx.backend,
-            use_model_pass=config.augment.use_model_pass,
-            models_dir="/models",
-            num_workers=1,
-            devices=("cuda:0", "cuda:1"),
-            weights_present=True,
-        )
-        is True
-    )
-    assert (
-        should_run_parallel(
-            sfx_backend=config.sfx.backend,
-            use_model_pass=config.augment.use_model_pass,
-            models_dir="/models",
-            num_workers=1,
-            devices=("cuda:0",),
-            weights_present=True,
-        )
-        is False
-    )
+    assert config.sfx.backend == "mmaudio"
+    assert config.sfx.device == "cuda:0"
+    assert config.audio.backend == "acestep"
+    assert config.audio.device == "cuda:0"
+    assert model_pass_devices(devices=("cuda:0", "cuda:1")) == ("cuda:1",)
 
 
-def test_fake_backend_never_routes_to_parallel() -> None:
-    from voyage.finalize_parallel import should_run_parallel
-
+def test_fake_backend_never_routes_sequential_cpu() -> None:
+    """Fake stays CPU-only: no SFX dub, no model-pass device routing."""
     config = with_video_backend(_config_with_style(), "fake")
     assert config.sfx.backend == "fake"
-    assert (
-        should_run_parallel(
-            sfx_backend=config.sfx.backend,
-            use_model_pass=True,
-            models_dir="/models",
-            num_workers=1,
-            devices=("cuda:0", "cuda:1"),
-            weights_present=True,
-        )
-        is False
-    )
+    assert config.audio.backend == "fake"
 
 
 def test_ltx_backends_require_sfx_stack_with_acestep() -> None:
@@ -121,12 +77,15 @@ def test_ltx_backends_require_sfx_stack_with_acestep() -> None:
         assert spec in specs
 
 
-def test_model_pass_defaults_on_everywhere() -> None:
-    """The model pass is default-on: config dataclass and stored config agree."""
+def test_explicit_quality_defaults_ship_source() -> None:
+    """Explicit quality ships the source by default: config dataclass and stored agree."""
     from voyage.config import AugmentConfig, preset_config
 
-    assert AugmentConfig().use_model_pass is True
-    assert preset_config("story", "style", 7).augment.use_model_pass is True
+    assert AugmentConfig().upscale == 1
+    assert AugmentConfig().interpolate == 1
+    assert AugmentConfig().presentation_fps is None
+    assert preset_config("story", "style", 7).augment.upscale == 1
+    assert preset_config("story", "style", 7).augment.interpolate == 1
 
 
 def test_model_pass_devices_pins_secondary_gpu() -> None:
@@ -146,180 +105,3 @@ def test_model_pass_devices_pins_secondary_gpu() -> None:
         assert model_pass_devices() == ("cuda:1",)
     finally:
         augment_module.augment_devices = original  # type: ignore[method-assign]
-
-
-def test_should_run_parallel_gates_all_conditions() -> None:
-    """The parallel predicate needs SFX-on + knob-on + provisioned legs +
-    a single SFX worker + two visible GPUs — each missing leg vetoes."""
-    from voyage.finalize_parallel import should_run_parallel
-
-    full = {
-        "sfx_backend": "mmaudio",
-        "use_model_pass": True,
-        "models_dir": "/models",
-        "num_workers": 1,
-        "devices": ("cuda:0", "cuda:1"),
-        "weights_present": True,
-    }
-    assert should_run_parallel(**full) is True
-    assert should_run_parallel(**{**full, "sfx_backend": "fake"}) is False
-    assert should_run_parallel(**{**full, "use_model_pass": False}) is False
-    assert should_run_parallel(**{**full, "models_dir": None}) is False
-    assert should_run_parallel(**{**full, "num_workers": 2}) is False
-    assert should_run_parallel(**{**full, "devices": ("cuda:0",)}) is False
-    assert should_run_parallel(**{**full, "devices": ()}) is False
-    assert should_run_parallel(**{**full, "weights_present": False}) is False
-
-
-def _sine_wav(dest: Path, seconds: float) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:duration={seconds}",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-c:a",
-            "pcm_s16le",
-            str(dest),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr[-1000:]
-    return dest
-
-
-@pytest.mark.slow
-def test_parallel_finalize_matches_sequential_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Parallel (model pass + SFX bed side by side) ships byte-identical
-    output to the legacy sequential finalize + SFX pass.
-
-    GPU stages are stubbed CPU-only (model pass = stream-copy concat, SFX
-    bed = sine of the timeline) so the test runs in the slim image; the
-    orchestration — reference conditioning, demux/mix/remux, publish —
-    is fully real ffmpeg.
-    """
-    import voyage.augment as augment_module
-    import voyage.augment_finalize as finalize_module
-    import voyage.finalize_parallel as parallel_module
-    import voyage.sfx_finalize as sfx_module
-    from voyage.augment import AugmentWeights
-    from voyage.finalize_parallel import run_parallel_finalize
-    from voyage.media import finalize_run
-    from voyage.sfx_finalize import finalize_sfx_pass
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="parcmp", style="pastel neon line-art", seed=7)
-    _commit_two(run_dir)
-    models_dir = tmp_path / "models"
-    models_dir.mkdir()
-
-    legs = AugmentWeights(film=Path("film.safetensors"), realesrgan=Path("esrgan.pth"))
-    two_gpus = ("cuda:0", "cuda:1")
-    # `finalize_run` lazy-imports these from `voyage.augment` at call
-    # time, so one patch point covers both the sequential and the
-    # parallel (Thread A) video stages.
-    monkeypatch.setattr(augment_module, "resolve_augment_weights", lambda _dir: legs)
-    monkeypatch.setattr(augment_module, "augment_devices", lambda **_: two_gpus)
-
-    def _stub_model_pass(
-        run_dir_arg: Path, usable: list[Path], **kwargs: object
-    ) -> tuple[Path, int]:
-        work_dir = kwargs["work_dir"]
-        assert isinstance(work_dir, Path)
-        work_dir.mkdir(parents=True, exist_ok=True)
-        segment_videos = [segment / "video.mp4" for segment in usable]
-        intermediate = work_dir / "stub_intermediate.mp4"
-        file_list = work_dir / "stub_list.txt"
-        file_list.write_text(
-            "".join(f"file '{video}'\n" for video in segment_videos), encoding="utf-8"
-        )
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-nostdin",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(file_list),
-                "-c",
-                "copy",
-                str(intermediate),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert proc.returncode == 0, proc.stderr[-1000:]
-        return (intermediate, int(cast(float, kwargs["source_fps"])))
-
-    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _stub_model_pass)
-
-    def _stub_bed(
-        run_dir_arg: Path,
-        final_video: Path,
-        timeline_seconds: float,
-        bounds: object,
-        tmpdir: Path,
-        backend: str,
-        models_dir_arg: object,
-        device: str,
-        model_size: str,
-        seed_base: int,
-        sample_rate: int,
-        channels: int,
-        num_workers: int = 1,
-        **kwargs: object,
-    ) -> Path:
-        assert backend == "mmaudio"
-        return _sine_wav(tmpdir / "stub_bed.wav", timeline_seconds)
-
-    monkeypatch.setattr(sfx_module, "render_sfx_bed", _stub_bed)
-    monkeypatch.setattr(parallel_module, "render_sfx_bed", _stub_bed)
-
-    common = {
-        "width": 768,
-        "height": 432,
-        "fps": 24,
-        "sample_rate": 48000,
-        "channels": 2,
-        "min_fps": 0,
-        "min_width": 0,
-        "min_height": 0,
-        "use_model_pass": True,
-        "models_dir": str(models_dir),
-    }
-    sequential = tmp_path / "final-sequential.mp4"
-    assert finalize_run(run_dir, sequential, **common).exists()  # type: ignore[arg-type]
-    finalize_sfx_pass(
-        run_dir,
-        sequential,
-        backend="mmaudio",
-        models_dir=str(models_dir),
-        device="cuda:0",
-        model_size="small_44k",
-        seed=7,
-        sample_rate=48000,
-        channels=2,
-        num_workers=1,
-        fps=24,
-    )
-    parallel = tmp_path / "final-parallel.mp4"
-    run_parallel_finalize(run_dir, parallel, seed=7, sfx_model_size="small_44k", **common)  # type: ignore[arg-type]
-    assert parallel.read_bytes() == sequential.read_bytes()

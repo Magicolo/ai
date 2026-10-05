@@ -390,8 +390,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
             sfx_enabled,
             console,
             allow_download=not bool(getattr(args, "no_download", False)),
-            augment_enabled=not bool(getattr(args, "no_augment", False))
-            and (effective.augment.min_fps > 0 or effective.augment.min_width > 0),
+            augment_enabled=effective.augment.upscale > 1 or effective.augment.interpolate > 1,
         )
         != 0
     ):

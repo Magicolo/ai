@@ -105,10 +105,8 @@ def _finalize_run_dir(
             sfx_device=None,
             sfx_model_size=None,
             sfx_workers=1,
-            min_fps=None,
-            min_resolution=None,
-            no_augment=False,
-            use_model_pass=None,
+            upscale=None,
+            interpolate=None,
             verbose=bool(getattr(args, "verbose", False)),
             no_color=bool(getattr(args, "no_color", False)),
             quiet=bool(getattr(args, "quiet", False)),
@@ -307,7 +305,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             sfx_enabled,
             console,
             allow_download=True,
-            augment_enabled=effective.augment.min_fps > 0 or effective.augment.min_width > 0,
+            augment_enabled=effective.augment.upscale > 1 or effective.augment.interpolate > 1,
         )
         != 0
     ):

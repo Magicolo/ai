@@ -52,17 +52,16 @@ run reuses the same segment number and overwrites the media in place.
 `ltxv`/`causvid` video + `acestep` cannot co-reside on 16 GB. The supervisor
 sequence is: evict video → render audio take → evict audio → rebuild
 video from tape. `del` alone frees nothing — eviction is
-`del` + `gc.collect()` + `torch.cuda.empty_cache()`. All four streaming
-backends (`ltxv`/`causvid`/`ltx25`/`ltx23`) defer ACE music to finalize
-instead: commit writes a timeline-exact silent stub, so no per-segment
-audio swap ever runs for them — only `fake` commits real audio inline
-(`voyage/audio_finalize.py:47-48`).
+`del` + `gc.collect()` + `torch.cuda.empty_cache()`. All backends
+(`fake`/`ltxv`/`causvid`/`ltx25`/`ltx23`) defer ACE music to finalize:
+commit is video-only and takes render once at finalize from the takes
+ledger, so no per-segment audio swap ever runs.
 
 ## What lives where in a run dir
 
 `manifest.json` (`voyage/paths.py:29` — carries the effective config,
 CLI-is-config, no TOML), `state.json` (`:31`), `concepts.jsonl` (`:32`), `novelty/` (vectors +
-index + jsonl), `segments/NNNNNN/` (video.mp4, audio.wav,
+index + jsonl), `segments/NNNNNN/` (video.mp4,
 world/transition/prompt-plan/audio-state/metrics.json, sha256.json,
 recovery.pt on GPU backends, `video_tail.mp4` tail anchor on
 tail-chained backends, DONE), `audio/` (takes ledger + slices,

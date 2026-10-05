@@ -89,7 +89,12 @@ def test_legacy_checksum_without_metadata_stays_valid() -> None:
 
 
 def test_commit_writes_full_checksum_manifest(tmp_path: Path) -> None:
-    """Pruned layout: a real fake-backend commit writes manifest + DONE only."""
+    """Pruned layout: a real fake-backend commit writes manifest + DONE only.
+
+    Video-only commit (all backends deferred): checksums cover video.mp4
+    plus recovery.pt when the backend emits a tape; audio.wav is never
+    required (old runs may still carry the entry, ignored by validators).
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="checksum")
     from voyage.supervisor import Supervisor
@@ -99,8 +104,13 @@ def test_commit_writes_full_checksum_manifest(tmp_path: Path) -> None:
     segment = run_dir / "segments" / "000000"
     manifest = json.loads((segment / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["format"] == 1
-    for name in ("video.mp4", "audio.wav"):
-        assert isinstance(manifest["checksums"].get(name), str) and manifest["checksums"][name]
+    checksums = manifest["checksums"]
+    assert isinstance(checksums.get("video.mp4"), str) and checksums["video.mp4"]
+    assert "audio.wav" not in checksums
+    assert not (segment / "audio.wav").exists()
+    for name, digest in checksums.items():
+        assert isinstance(digest, str) and digest
+        assert (segment / name).exists(), name
     for name in METADATA_ARTIFACTS:
         assert not (segment / name).exists(), name
     assert not (segment / "sha256.json").exists()
@@ -256,75 +266,13 @@ def test_slice_take_rejects_tiny_piece(tmp_path: Path) -> None:
         slice_take(take_file, 0.0, 0.01, tmp_path / "slice.wav", 8000, 1)
 
 
-def test_commit_slice_walk_bounds_tiny_takes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Issue 104: the commit walk must fail loud on 1 ms takes, not spawn thousands."""
-    import voyage.supervisor as supervisor_module
-    from voyage.models import DirectorDestination, EvolutionDecision
-    from voyage.supervisor import Supervisor
-
-    run_dir = tmp_path / "run"
-    initialize_run_directory(run_dir, run_id="walk")
-    config = read_effective_config(run_dir)
-    ledger = run_dir / "audio" / "takes.jsonl"
-    tiny_takes = [
-        AudioTake(
-            take_id=f"take_{index:04d}",
-            path="audio/take.wav",
-            caption="ambient",
-            seed=index,
-            covers_from=index * 0.001,
-            duration=0.001,
-            segment_index=0,
-        )
-        for index in range(400)
-    ]
-    for take in tiny_takes:
-        append_take(ledger, take)
-    slice_calls: list[tuple[float, float]] = []
-
-    def _counting_slice(
-        take_path: Path,
-        start_seconds: float,
-        duration_seconds: float,
-        dest: Path,
-        sample_rate: int,
-        channels: int,
-    ) -> Path:
-        slice_calls.append((start_seconds, duration_seconds))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(b"slice")
-        return dest
-
-    monkeypatch.setattr(supervisor_module, "slice_take", _counting_slice)
-    monkeypatch.setattr(
-        supervisor_module,
-        "assemble_segment_audio",
-        lambda slices, dest, crossfade: dest,
-    )
-    # Audio-ahead would render (0.4 s coverage « 20 s window) — stub the GPU
-    # round-trip so the walk itself is what the test exercises.
-    monkeypatch.setattr(
-        supervisor_module.Supervisor,
-        "_with_audio_gpu",
-        lambda self, segment_id, payload, recovery_tape: None,
-    )
-    monkeypatch.setattr(supervisor_module, "probed_take_seconds", lambda path: 45.0)
-    supervisor = Supervisor(run_dir, config)
-    decision = EvolutionDecision(
-        decision_index=0,
-        destination=DirectorDestination(canonical_name="test-concept"),
-    )
-    segment = run_dir / "segments" / "000000"
-    segment.mkdir(parents=True, exist_ok=True)
-    with pytest.raises(MediaError):
-        supervisor._ensure_audio_coverage(config, 0, "000000", segment, 0.0, 0.4, decision, None)
-    assert len(slice_calls) < 50
-
-
 def test_finalize_window_bounds_tiny_takes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue 104 finalize side: the window walk must fall back, not spawn thousands."""
+    """Issue 104 finalize side: degenerate ledgers fail loud, not spawn thousands.
+
+    Ledger-only finalize (no concat fallback): 10 ms slivers are never
+    legitimate music coverage, so build_final_audio raises instead of
+    slicing thousands of pieces.
+    """
     import voyage.media as media_module
     from voyage.media import build_final_audio
 
@@ -368,6 +316,6 @@ def test_finalize_window_bounds_tiny_takes(tmp_path: Path, monkeypatch: pytest.M
         )
 
     monkeypatch.setattr(media_module, "_cached_slice_take", _counting_cached)
-    output = build_final_audio(run_dir, segments, tmp_path, 24, 8000, 1)
-    assert output.exists()
+    with pytest.raises(MediaError, match="sliver|too many slices|no rendered takes"):
+        build_final_audio(run_dir, segments, tmp_path, 24, 8000, 1)
     assert len(slice_calls) < 50

@@ -48,24 +48,22 @@ def _make_segment(
 def _enabled_config(**overrides: Any) -> Any:
     config = preset_config("prewarm", "pastel neon line-art, peaceful", 11)
     augment = AugmentConfig(
-        use_model_pass=True,
-        interp_multiplier=4,
-        min_fps=24,
-        min_width=1216,
-        min_height=704,
+        upscale=2,
+        interpolate=4,
     )
     return config.model_copy(update={"augment": augment, **overrides})
 
 
-def test_disabled_when_knob_off(tmp_path: Path) -> None:
+def test_disabled_when_no_work_demanded(tmp_path: Path) -> None:
     from voyage import augment_background
 
     _make_segment(tmp_path)
     config = preset_config("prewarm", "pastel neon line-art, peaceful", 11)
     config = config.model_copy(
-        update={"augment": config.augment.model_copy(update={"use_model_pass": False})}
+        update={"augment": config.augment.model_copy(update={"upscale": 1, "interpolate": 1})}
     )
-    assert config.augment.use_model_pass is False
+    assert config.augment.upscale == 1
+    assert config.augment.interpolate == 1
     calls: list[str] = []
 
     def _upscale_probe(**kwargs: Any) -> Any:
@@ -86,7 +84,7 @@ def test_disabled_when_knob_off(tmp_path: Path) -> None:
 def test_plan_matches_finalize_derivation(tmp_path: Path, monkeypatch: Any) -> None:
     from voyage import augment_background
     from voyage.augment import AugmentWeights
-    from voyage.media import plan_augmentation, upscale_factor_for
+    from voyage.media import plan_augmentation
 
     _make_segment(tmp_path)
     config = _enabled_config()
@@ -105,13 +103,20 @@ def test_plan_matches_finalize_derivation(tmp_path: Path, monkeypatch: Any) -> N
     )
     plan = augment_background.resolve_background_plan(tmp_path, config)
     assert plan is not None
-    expected = plan_augmentation(1216, 704, 24.0, 1216, 704, 24, 24, 1216, 704)
+    expected = plan_augmentation(
+        1216,
+        704,
+        24.0,
+        upscale=config.augment.upscale,
+        interpolate=config.augment.interpolate,
+        presentation_fps=config.augment.presentation_fps,
+    )
     assert (plan.out_width, plan.out_height, plan.out_fps) == (
         expected.out_w,
         expected.out_h,
         expected.out_fps,
     )
-    assert plan.upscale_factor == upscale_factor_for(1216, 704, plan.out_width, plan.out_height)
+    assert plan.upscale_factor == config.augment.upscale
     assert plan.source_fps_key == 24
     assert plan.multiplier == 4
     assert plan.device == "cuda:1"

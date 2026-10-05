@@ -72,11 +72,6 @@ MAX_SLICES_PER_WINDOW = 128
 #: `media` imports this module — a back-import would cycle).
 STRETCH_IDENTITY_TOLERANCE = 1e-9
 
-#: Legal band of one ffmpeg `atempo` filter. Ratios outside split into
-#: halving/doubling stages with the remainder last (see `_atempo_stages`).
-_ATEMPO_MIN_TEMPO = 0.5
-_ATEMPO_MAX_TEMPO = 2.0
-
 #: Tolerance when estimating frame counts from duration, frames (issue 096).
 #: Container durations round to milliseconds, so a 29-frame @32fps file can
 #: probe as 28.99 estimated frames — one frame of slack keeps the
@@ -448,11 +443,16 @@ def _sha256_file(path: Path) -> str:
     return sha256_file(path)
 
 
-def _verify_segment(segment: Path) -> tuple[int, float, float]:
-    """DESIGN §56 steps 4-6: checksums, frame ranges, A/V alignment.
+def _verify_segment(segment: Path) -> tuple[int, float]:
+    """DESIGN §56 steps 4-6, video-only: checksum, frame range, duration.
 
-    Returns (frames, video_duration, audio_duration). Raises MediaError
-    on any mismatch — fail loud, never finalize corrupt media silently.
+    Every backend commits video only (always-deferred finalize — no
+    `audio.wav` previews), so verification covers `video.mp4` alone:
+    manifest checksum, non-positive frame count, non-positive probed
+    duration. `audio.wav` is neither required nor verified, and there is
+    no A/V gate — the takes ledger owns the audio timeline at finalize.
+    Returns (frames, video_duration). Raises MediaError on any mismatch
+    — fail loud, never finalize corrupt media silently.
     """
     name = segment.name
     try:
@@ -465,16 +465,15 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
         if (segment / "sha256.json").exists():
             raise MediaError(f"segment {name} has unreadable sha256.json")
         raise MediaError(f"segment {name} missing manifest.json")
-    for artifact in ("video.mp4", "audio.wav"):
-        recorded = expected.get(artifact)
-        if not isinstance(recorded, str) or not recorded:
-            raise MediaError(f"segment {name} manifest missing {artifact}")
-        try:
-            actual = _sha256_file(segment / artifact)
-        except OSError as exc:
-            raise MediaError(f"segment {name} missing {artifact}: {exc}") from exc
-        if actual != recorded:
-            raise MediaError(f"segment {name} checksum mismatch for {artifact}")
+    recorded = expected.get("video.mp4")
+    if not isinstance(recorded, str) or not recorded:
+        raise MediaError(f"segment {name} manifest missing video.mp4")
+    try:
+        actual = _sha256_file(segment / "video.mp4")
+    except OSError as exc:
+        raise MediaError(f"segment {name} missing video.mp4: {exc}") from exc
+    if actual != recorded:
+        raise MediaError(f"segment {name} checksum mismatch for video.mp4")
     for artifact, recorded in sorted(expected.items()):
         if artifact in ("video.mp4", "audio.wav"):
             continue
@@ -494,11 +493,9 @@ def _verify_segment(segment: Path) -> tuple[int, float, float]:
     if frames <= 0:
         raise MediaError(f"segment {name} has non-positive frame count {frames}")
     video_duration = float(probe(segment / "video.mp4").get("format", {}).get("duration", 0.0))
-    audio_duration = float(probe(segment / "audio.wav").get("format", {}).get("duration", 0.0))
-    if video_duration <= 0 or audio_duration <= 0:
+    if video_duration <= 0:
         raise MediaError(f"segment {name} has non-positive media duration")
-    check_av_alignment(video_duration, audio_duration, name)
-    return frames, video_duration, audio_duration
+    return frames, video_duration
 
 
 def _check_segment_committed(segment: Path) -> None:
@@ -508,9 +505,8 @@ def _check_segment_committed(segment: Path) -> None:
     own `try` (the loop catches `MediaError` to skip — a raise in the
     `try` body would read as self-caught).
     """
-    for artifact in ("video.mp4", "audio.wav"):
-        if not (segment / artifact).exists():
-            raise MediaError(f"segment {segment.name} missing {artifact}")
+    if not (segment / "video.mp4").exists():
+        raise MediaError(f"segment {segment.name} missing video.mp4")
     _verify_segment(segment)
 
 
@@ -581,72 +577,6 @@ def _cached_slice_take(
         return dest
     slice_take(take_path, start_seconds, duration_seconds, dest, sample_rate, channels)
     slice_cache[key] = dest
-    return dest
-
-
-def _concat_fallback_audio(inputs: list[Path], dest: Path) -> Path:
-    """Join segment audio.wav files with a plain concat (no blend)."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
-    for source in inputs:
-        argv += ["-i", str(source)]
-    filter_graph = "".join(f"[{i}:a]" for i in range(len(inputs)))
-    filter_graph += f"concat=n={len(inputs)}:v=0:a=1[aout]"
-    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
-    proc = run_capture(argv)
-    if proc.returncode != 0:
-        raise MediaError(f"final audio concat failed: {proc.stderr[-2000:]}")
-    return dest
-
-
-def _atempo_stages(tempo: float) -> list[float]:
-    """Split a tempo ratio into ffmpeg-atempo stages within the legal band.
-
-    One `atempo` filter only accepts the band below, so slow-mo factors
-    outside it (stretch 4x → tempo 0.25 splits into halves; tempo 2.0 is
-    one stage) split into halving/doubling stages with the remainder
-    last. Raises on non-positive tempo (caller bug — validated beside
-    `stretch`).
-    """
-    if not tempo > 0:
-        raise MediaError(f"atempo tempo must be positive (got {tempo})")
-    stages: list[float] = []
-    while tempo < _ATEMPO_MIN_TEMPO:
-        stages.append(_ATEMPO_MIN_TEMPO)
-        tempo *= 2.0
-    while tempo > _ATEMPO_MAX_TEMPO:
-        stages.append(_ATEMPO_MAX_TEMPO)
-        tempo /= 2.0
-    stages.append(tempo)
-    return stages
-
-
-def _stretched_fallback_audio(inputs: list[Path], dest: Path, stretch: float) -> Path:
-    """Concat fallback retimed to the stretched (slow-mo) timeline.
-
-    Joint backends (ltx25/ltx23) commit worker audio directly — no takes
-    ledger — so the finalize mix is this concat, and under slow motion it
-    must cover `stretch` times the source duration. `atempo=1/stretch`
-    slows the mix onto the stretched video (pitch drops with the
-    slowdown — the standard slow-mo tradeoff, sync preserved). The SFX
-    bed needs no parallel change: its windows derive from the shipped
-    (already stretched) duration.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tempo = 1.0 / stretch
-    chain = "".join(f"atempo={stage:.6f}," for stage in _atempo_stages(tempo))
-    argv: list[str] = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
-    for source in inputs:
-        argv += ["-i", str(source)]
-    heads = "".join(f"[{i}:a]" for i in range(len(inputs)))
-    if len(inputs) == 1:
-        filter_graph = f"{heads}{chain[:-1]}[aout]"
-    else:
-        filter_graph = f"{heads}concat=n={len(inputs)}:v=0:a=1,{chain[:-1]}[aout]"
-    argv += ["-filter_complex", filter_graph, "-map", "[aout]", "-c:a", "pcm_s16le", str(dest)]
-    proc = run_capture(argv)
-    if proc.returncode != 0:
-        raise MediaError(f"final audio stretched concat failed: {proc.stderr[-2000:]}")
     return dest
 
 
@@ -859,48 +789,31 @@ def build_final_audio(
     overlap_cap_seconds: float = 0.5,
     *,
     blend_timings: list[float] | None = None,
-    deferred: bool = False,
     stretch: float = 1.0,
 ) -> Path:
     """Blend committed segments into one timeline-exact final mix (§56).
 
-    Each segment boundary gets an overlap crossfade: segment windows are
-    extended by half the overlap on each side and re-sliced from the
-    takes ledger (takes are continuous, so the extension is real musical
-    content — not time-stretched), then blended pairwise with manual
-    fades (afade out/in + adelay + amix). Total
-    length stays exactly the video timeline, so no A/V drift.
-
-    Falls back to a plain concat of the per-segment audio.wav previews
-    when the takes ledger is unavailable (pre-take runs) — the old
-    hard-splice behavior, clicks included. Per-segment previews are
-    never rewritten: the blend exists only in the returned final mix.
-
-    Deferred runs (DESIGN §140 slow-mo finalize): `deferred=True` means
-    the per-segment audio.wav files are commit-time silent stubs, so the
-    single-segment shortcut is bypassed and every fallback raises
-    `MediaError` instead of shipping silence — takes must have rendered
-    via `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
-    divides the timeline fps so the mix covers the stretched video; the
-    joint-backend fallback paths (no takes ledger — pre-deferred runs whose
-    ltx25/ltx23 segments committed worker audio directly) retime via `atempo`
-    instead of shipping the
-    1x mix under stretched video.
+    Ledger-only (always-deferred finalize): every segment boundary gets
+    an overlap crossfade — segment windows are extended by half the
+    overlap on each side and re-sliced from the takes ledger (takes are
+    continuous, so the extension is real musical content — not
+    time-stretched), then blended pairwise with manual fades (afade
+    out/in + adelay + amix). Total length stays exactly the video
+    timeline, so no A/V drift. Segments commit video only, so there are
+    no per-segment `audio.wav` previews to fall back to: a missing takes
+    ledger, a take gap, or any degenerate window raises `MediaError`
+    instead of shipping silence — takes must have rendered via
+    `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
+    divides the timeline fps so the mix covers the stretched video.
     """
     from voyage.audio.planner import AudioPlanner, load_takes
 
     if stretch <= 0:
         raise MediaError(f"final audio stretch must be positive (got {stretch})")
     dest = tmpdir / "final_audio.wav"
-    retime = abs(stretch - 1.0) > STRETCH_IDENTITY_TOLERANCE
 
-    def _fallback_or_raise(reason: str) -> Path:
-        if deferred:
-            raise MediaError(f"deferred final audio has no rendered takes: {reason}")
-        inputs = [s / "audio.wav" for s in usable]
-        if retime:
-            return _stretched_fallback_audio(inputs, dest, stretch)
-        return _concat_fallback_audio(inputs, dest)
+    def _fail(reason: str) -> MediaError:
+        return MediaError(f"final audio has no rendered takes: {reason}")
 
     def _convert_window_to_dest(window: Path, label: str) -> Path:
         proc = run_capture(
@@ -920,18 +833,16 @@ def build_final_audio(
             raise MediaError(f"final audio {label} failed: {proc.stderr[-2000:]}")
         return dest
 
-    if len(usable) == 1 and not deferred:
-        if retime:
-            return _stretched_fallback_audio([usable[0] / "audio.wav"], dest, stretch)
-        return _convert_window_to_dest(usable[0] / "audio.wav", "copy")
     starts, ends, timeline = _segment_timeline(usable, fps / stretch)
     durations = [end - start for start, end in zip(starts, ends, strict=True)]
     overlap = min(overlap_fraction * min(durations), overlap_cap_seconds)
     ledger = run_dir / "audio" / "takes.jsonl"
     takes: list[Any] = load_takes(ledger) if ledger.exists() else []
     planner = AudioPlanner(takes=takes)
-    if not takes or overlap < MIN_OVERLAP_BLEND_SECONDS:
-        return _fallback_or_raise("no takes ledger" if not takes else "tiny overlap")
+    if not takes:
+        raise _fail("no takes ledger")
+    if overlap < MIN_OVERLAP_BLEND_SECONDS:
+        raise _fail("tiny overlap")
     half = overlap / 2.0
     windows: list[Path] = []
     # Issue 031: memo take slices across windows (take joints inside two
@@ -953,20 +864,20 @@ def build_final_audio(
         piece = 0
         while cursor < window_end - 1e-6:
             if piece >= MAX_SLICES_PER_WINDOW:
-                return _fallback_or_raise("too many slices")
+                raise _fail("too many slices")
             serving = planner.take_for_time(cursor)
             if serving is None or not serving.path:
-                return _fallback_or_raise("take gap in window")
+                raise _fail("take gap in window")
             # Issue 016 consumer side: ledger entries may be run-relative
             # or legacy absolute — resolve the same way at every use site.
             serving_path = paths.resolve_stored_path(run_dir, serving.path)
             if not serving_path.exists():
-                return _fallback_or_raise(f"missing take file {serving.path}")
+                raise _fail(f"missing take file {serving.path}")
             piece_end = min(serving.covers_until(), window_end)
             if piece_end <= cursor:
-                return _fallback_or_raise("degenerate take window")
+                raise _fail("degenerate take window")
             if piece_end - cursor < MIN_SLICE_PIECE_SECONDS:
-                return _fallback_or_raise("sliver take piece")
+                raise _fail("sliver take piece")
             slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
             _cached_slice_take(
                 slice_cache,
@@ -1025,9 +936,9 @@ def build_final_audio(
                     slices[-1] = tail_slice
             assemble_segment_audio(slices, window_path, overlap, joint_fade=fade)
         windows.append(window_path)
-    # Single window needs no join (deferred single-segment runs land here:
-    # the shortcut above is bypassed so stubs never ship — the window is
-    # real music re-sliced from rendered takes, so convert and return it).
+    # Single window needs no join (single-segment runs land here: the
+    # window is real music re-sliced from rendered takes, so convert and
+    # return it).
     if len(windows) == 1:
         return _convert_window_to_dest(windows[0], "single-window copy")
     # Single-graph staged join (issue 152): chained pairwise stages with

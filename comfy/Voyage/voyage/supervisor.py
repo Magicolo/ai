@@ -6,8 +6,9 @@ the supervisor validates and commits. One segment commit:
   1. director decide (via worker) → EvolutionDecision (schema-validated)
   2. style check (code-level, §18.1) → novelty score (recorded, never rejects)
   3. staged prompt plan (§18.2)
-  4. video generate_blocks → audio generate_audio
-  5. validate media → write metadata (.partial + fsync + rename)
+4. video generate_blocks → deferred-audio cover (no audio.wav at commit;
+   ACE music renders at finalize)
+5. validate media → write metadata (.partial + fsync + rename)
   6. checksums → DONE (.partial + fsync + rename) → state.json update
 """
 
@@ -19,7 +20,6 @@ import json
 import math
 import os
 import signal
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -30,12 +30,9 @@ from typing import Any, cast
 
 from voyage import llama_server, paths
 from voyage.atomic import JsonValue, atomic_write_bytes
-from voyage.audio.planner import TAKES_FILENAME, AudioPlanner, append_take, load_takes
 from voyage.audio_finalize import (
     deferred_tail_frames,
     derive_conditioning_tail,
-    is_deferred_backend,
-    write_deferred_stub_audio,
 )
 from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
 from voyage.concepts import ConceptStore
@@ -58,15 +55,7 @@ from voyage.errors import (
 from voyage.hashing import sha256_file as sha256_file  # re-export (issue 021, cf. cli.py)
 from voyage.logrotate import append_line, rotate_worker_logs
 from voyage.media import (
-    ABSORPTION_EPSILON_SECONDS,
-    AV_ALIGNMENT_TOLERANCE_SECONDS,
-    _take_joint_fade,
-    assemble_segment_audio,
-    check_av_alignment,
     check_free_space,
-    probed_take_seconds,
-    slice_take,
-    validate_audio,
 )
 from voyage.media import (
     validate_video as validate_video,
@@ -85,7 +74,7 @@ from voyage.prompts import (
     check_prompt_against_style,
 )
 from voyage.rpc import SubprocessWorker
-from voyage.seeds import audio_seed, video_seed
+from voyage.seeds import video_seed
 from voyage.segment_manifest import (
     build_segment_manifest,
     load_segment_manifest,
@@ -307,8 +296,13 @@ class Supervisor:
         self._prefetch_target: int | None = None
         self._prefetch_future: Future[dict[str, Any] | None] | None = None
         self._prefetch_submitted_at: float | None = None
-        # Background model-pass pre-warm driver (None = inactive): the
-        # post-commit report below reads its `ledgered_totals()`.
+        # Background model-pass pre-warm (DESIGN §140): while segment N+1
+        # renders video (cuda:0) + audio, one thread upscales + interpolates
+        # already-committed segments on cuda:1 whenever the director is
+        # idle — finalize then only drains + concats + encodes. Ledgered
+        # chunks are skipped, so a resumed generation resumes pre-warm
+        # trivially, and finalize polls to completion over whatever is
+        # already done. Never fails a commit (best-effort by design).
         self._background: Any | None = None
         # Last reported pre-warm ledger as (driver, upscale, interp): the
         # post-commit report announces only newly ledgered chunks, and the
@@ -538,8 +532,10 @@ class Supervisor:
         self._workers_running = True
         if self._prefetch_executor is None:
             self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        self._start_background_prewarm()
 
     def stop_workers(self) -> None:
+        self._stop_background_prewarm()
         self._video.stop()
         self._audio.stop()
         try:
@@ -567,11 +563,51 @@ class Supervisor:
             except Exception:
                 pass
 
-    def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
-        """Progress spinner around one commit stage (no-op when silent)."""
-        if self._progress is None:
-            return nullcontext()
-        return self._progress.stage(label, detail)
+    def _start_background_prewarm(self) -> None:
+        """Start the background model-pass pre-warm (best-effort, never raises).
+
+        The driver runs the finalize pollers over committed segments on the
+        augment device whenever the director is idle (no prefetch in flight,
+        probe unblocked — director wins every contention on `cuda:1`). A
+        start failure (or a config with the knob off / legs absent) just
+        leaves pre-warm inactive: finalize still polls to completion.
+        """
+        try:
+            from voyage.augment_background import BackgroundPrewarm
+
+            if self._background is not None:
+                return
+            driver = BackgroundPrewarm(
+                self._run_dir,
+                self._config,
+                idle_fn=lambda: (
+                    not self._prefetch_in_flight() and not self._director_probe_blocked()
+                ),
+            )
+            driver.start()
+            self._background = driver
+        except Exception:
+            self._background = None
+
+    def _stop_background_prewarm(self) -> None:
+        """Stop the background pre-warm (best-effort, never raises)."""
+        driver, self._background = self._background, None
+        if driver is None:
+            return
+        try:
+            driver.stop()
+        except Exception:
+            pass
+
+    def _notify_background_committed(self) -> None:
+        """Wake the pre-warm thread after a commit (best-effort, never raises)."""
+        driver = self._background
+        if driver is None:
+            return
+        try:
+            driver.notify_committed()
+        except Exception:
+            pass
 
     def _report_background_prewarm(self) -> None:
         """One console line for newly pre-warm-ledgered chunks (best-effort).
@@ -601,6 +637,12 @@ class Supervisor:
         if not parts:
             return
         self._progress.note(f"pre-warm ledgered {'/'.join(parts)} chunks")
+
+    def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
+        """Progress spinner around one commit stage (no-op when silent)."""
+        if self._progress is None:
+            return nullcontext()
+        return self._progress.stage(label, detail)
 
     def _log_metric(self, event: dict[str, object]) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._config.name, **event})
@@ -1545,387 +1587,6 @@ class Supervisor:
             "completion_tokens": spent_completion_tokens,
         }
 
-    def _with_audio_gpu(
-        self,
-        segment_id: str,
-        audio_payload: dict[str, object],
-        recovery_path: str | None,
-    ) -> dict[str, object]:
-        """Render one music take with the GPU to itself (§40).
-
-        The video session is evicted first, the (lazily loading) ACE stack
-        renders, then audio is evicted and video rebuilds from the latest
-        tape. Fake backends answer the same ops as no-ops, so the swap
-        only happens for the acestep + resident-session video pair — every
-        other pairing renders without touching video residency.
-
-        Teardown never masks the primary failure (issue 010): when the
-        take render raises, evict/rebuild run best-effort (failures land
-        as `audio_swap_teardown_error` metrics) and the original exception
-        propagates — including the no-tape case, where the video is left
-        evicted and marked explicitly instead of stranding the next
-        segment on a fresh stream with no error.
-        """
-        swap = (
-            self._config.audio.backend == "acestep"
-            and self._config.video.backend in STREAMING_VIDEO_BACKENDS
-        )
-        swap_ms = {
-            "video_evict_ms": 0.0,
-            "render_ms": 0.0,
-            "audio_evict_ms": 0.0,
-            "rebuild_ms": 0.0,
-        }
-        if swap:
-            evict_started = time.monotonic()
-            self._call_with_restart(self._video, "video", segment_id, "evict_gpu", {})
-            swap_ms["video_evict_ms"] = (time.monotonic() - evict_started) * 1000.0
-        primary_error: BaseException | None = None
-        audio_result: dict[str, object] | None = None
-        try:
-            render_started = time.monotonic()
-            audio_result = self._call_with_restart(
-                self._audio, "audio", segment_id, "generate_audio", audio_payload
-            )
-            swap_ms["render_ms"] = (time.monotonic() - render_started) * 1000.0
-        except BaseException as exc:
-            primary_error = exc
-        if primary_error is not None:
-            if swap:
-                self._best_effort_audio_teardown(segment_id, recovery_path)
-            raise primary_error
-        assert audio_result is not None  # no exception means a result arrived
-        if swap:
-            evict_error: Exception | None = None
-            try:
-                audio_evict_started = time.monotonic()
-                self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
-                swap_ms["audio_evict_ms"] = (time.monotonic() - audio_evict_started) * 1000.0
-            except Exception as exc:
-                evict_error = exc
-                self._log_metric(
-                    {
-                        "event": "audio_swap_teardown_error",
-                        "segment_id": segment_id,
-                        "phase": "audio_evict",
-                        "error": str(exc),
-                    }
-                )
-            if recovery_path is None:
-                if evict_error is not None:
-                    raise evict_error
-                raise MediaError(f"segment {segment_id}: no recovery tape for video rebuild")
-            # Rebuild runs even when the audio evict failed, so the stream
-            # is never stranded evicted after a rendered take.
-            try:
-                rebuild_started = time.monotonic()
-                self._call_with_restart(
-                    self._video,
-                    "video",
-                    segment_id,
-                    "rebuild",
-                    {"recovery_path": recovery_path},
-                )
-                swap_ms["rebuild_ms"] = (time.monotonic() - rebuild_started) * 1000.0
-            except Exception as exc:
-                self._log_metric(
-                    {
-                        "event": "audio_swap_teardown_error",
-                        "segment_id": segment_id,
-                        "phase": "video_rebuild",
-                        "error": str(exc),
-                    }
-                )
-                raise
-            if evict_error is not None:
-                raise evict_error
-            # GPU-swap wall detail (Stage A telemetry): swap-only metric —
-            # fake pairings render without touching residency and emit
-            # nothing, so the event's presence already means a swap ran.
-            self._log_metric(
-                {
-                    "event": "audio_swap_breakdown",
-                    "segment_id": segment_id,
-                    "windows": {key: round(value, 3) for key, value in swap_ms.items()},
-                }
-            )
-        return audio_result
-
-    def _best_effort_audio_teardown(self, segment_id: str, recovery_path: str | None) -> None:
-        """Post-failure GPU-swap teardown: log, never raise (issue 010).
-
-        A primary failure is already in flight (it propagates from
-        `_with_audio_gpu`), so every teardown step reports through
-        `audio_swap_teardown_error` metrics instead of replacing the
-        cause. Without a tape the video stays evicted — recorded as
-        `video_left_evicted` so the seam is explicit, and the run still
-        rests at FAILED via the propagating primary.
-        """
-        try:
-            self._call_with_restart(self._audio, "audio", segment_id, "evict_gpu", {})
-        except Exception as exc:
-            self._log_metric(
-                {
-                    "event": "audio_swap_teardown_error",
-                    "segment_id": segment_id,
-                    "phase": "audio_evict",
-                    "error": str(exc),
-                }
-            )
-        if recovery_path is not None:
-            try:
-                self._call_with_restart(
-                    self._video,
-                    "video",
-                    segment_id,
-                    "rebuild",
-                    {"recovery_path": recovery_path},
-                )
-            except Exception as exc:
-                self._log_metric(
-                    {
-                        "event": "audio_swap_teardown_error",
-                        "segment_id": segment_id,
-                        "phase": "video_rebuild",
-                        "error": str(exc),
-                    }
-                )
-        else:
-            self._log_metric(
-                {
-                    "event": "video_left_evicted",
-                    "segment_id": segment_id,
-                    "reason": "no recovery tape for video rebuild after audio failure",
-                }
-            )
-
-    def _ensure_audio_coverage(
-        self,
-        config: ProjectConfig,
-        number: int,
-        segment_id: str,
-        segment: Path,
-        video_time: float,
-        duration: float,
-        decision: EvolutionDecision,
-        recovery_tape: str | None,
-    ) -> tuple[AudioPlan, float, str, str]:
-        """Render takes when coverage runs low, then slice/assemble (§35).
-
-        Returns the segment's AudioPlan, the seconds of music coverage
-        remaining ahead of the new segment end, plus the planner
-        action/reason (render/repaint/keep — surfaced in console
-        summaries). Take files
-        are immutable and versioned under `<run>/audio/`; the ledger
-        (`takes.jsonl`) is the truth the next commit plans against.
-        """
-        audio_cfg = config.audio
-        audio_dir = self._run_dir / "audio"
-        ledger = audio_dir / TAKES_FILENAME
-        try:
-            takes = load_takes(ledger)
-        except Exception as exc:
-            # Torn ledger (SIGKILL mid-append) or hand-edit corruption must
-            # read as StateError (issue 002) — never a bare JSONDecodeError
-            # that escapes the commit boundary and strands RUNNING.
-            raise StateError(f"segment {segment_id}: corrupt takes ledger {ledger}: {exc}") from exc
-        planner = AudioPlanner(
-            take_seconds=audio_cfg.take_seconds,
-            ahead_seconds=audio_cfg.ahead_seconds,
-            takes=takes,
-            segment_seconds=duration,
-            repaint_similarity_threshold=audio_cfg.repaint_similarity_threshold,
-        )
-        caption = effective_music_caption(
-            audio_cfg.music_caption, decision.audio.music_caption, audio_cfg.music_style
-        )
-        energy = min(1.0, max(0.0, decision.audio.energy))
-        seed = audio_seed(config.seed, number, len(planner.takes))
-        # Beat grid: the take BPM derives from this segment's duration so
-        # cuts land on beats (adaptive k: 4 → 8 → 16 … until BPM >= 60).
-        # ACE treats tempo as a hint, so alignment is approximate. The grid
-        # opts into the ACE tempo ceiling (issue 120): an over-fine grid
-        # halves toward one beat here, and an impossible one raises naming
-        # `beats_per_segment` — before the ACE load, not as a fatal payload
-        # error after it.
-        from voyage.audio.acestep import MAX_BPM
-        from voyage.audio.beat import beats_for_segment
-
-        beats, grid_bpm = beats_for_segment(duration, audio_cfg.beats_per_segment, max_bpm=MAX_BPM)
-        take_bpm = int(round(grid_bpm))
-        # A clamped-short take (issue 094 below) can leave this segment
-        # uncovered — re-plan boundedly so coverage extends with another
-        # chained take instead of erroring at slice time. Three attempts
-        # bound GPU spend; the slice walk still fails loud on a true gap.
-        # `plan` is primed before the loop (a second identical call opens
-        # the first iteration) so the tail return below stays bound even
-        # when every iteration takes the keep path.
-        plan = planner.plan(video_time, caption, seed, number)
-        for _coverage_attempt in range(3):
-            seed = audio_seed(config.seed, number, len(planner.takes))
-            plan = planner.plan(video_time, caption, seed, number)
-            if plan.action not in ("render", "repaint") or plan.take is None:
-                break
-            take = plan.take
-            take.bpm = float(take_bpm)
-            take_file = audio_dir / f"{take.take_id}.wav"
-            payload: dict[str, object] = {
-                "segment_id": segment_id,
-                "style": caption,
-                "energy": energy,
-                "seed": take.seed,
-                "output_path": str(take_file),
-                "sample_rate": audio_cfg.sample_rate,
-                "channels": audio_cfg.channels,
-                "duration_seconds": take.duration,
-                "bpm": take_bpm,
-            }
-            if plan.action == "repaint" and plan.current is not None:
-                current = plan.current
-                payload["task_type"] = "repaint"
-                # Absolute wire path via the shared 016 convention (the
-                # ledger stores run-relative; the worker needs a real path).
-                payload["reference_audio"] = str(current.resolved_path(self._run_dir))
-                payload["repaint_start"] = video_time - current.covers_from
-                payload["repaint_end"] = current.duration
-            self._with_audio_gpu(segment_id, payload, recovery_tape)
-            # Issue 094: ACE renders are not sample-exact vs the request —
-            # clamp the ledger to the file so coverage math follows reality
-            # instead of overstating it (a fully-past-EOF slice later
-            # degrades the whole finalize to the hard-splice fallback).
-            take_file_seconds = probed_take_seconds(take_file)
-            take_shortfall = max(take.duration - take_file_seconds, 0.0)
-            if take_shortfall > 1e-3:
-                take.duration = take_file_seconds
-            take.path = self._stored_relative(take_file)
-            planner.record(take)
-            append_take(ledger, take)
-            self._log_metric(
-                {
-                    "event": "take_rendered",
-                    "segment_id": segment_id,
-                    "take_id": take.take_id,
-                    "action": plan.action,
-                    "reason": plan.reason,
-                    "beats": beats,
-                    "bpm": take_bpm,
-                    "take_file_seconds": take_file_seconds,
-                    "take_short_seconds": take_shortfall,
-                }
-            )
-            if planner.coverage_until() >= video_time + duration - 1e-6:
-                break
-        # Slice the takes covering [video_time, video_time + duration).
-        # A take boundary inside the segment yields two slices joined with
-        # a crossfade; the common case is exactly one slice. Both guards
-        # below are issue 104: without them a degenerate ledger (1 ms
-        # takes, stagnant coverage) spawns thousands of ffmpeg processes
-        # that the 0.6 s A/V gate only catches after the damage.
-        # Slices live in a TemporaryDirectory (never the segment dir):
-        # only fully-committed segments are adopted, and slices are never
-        # read back after assembly, so crash-safety needs no segment files.
-        with tempfile.TemporaryDirectory(prefix="voyage-slices-") as slice_tmp:
-            slice_dir = Path(slice_tmp)
-            slices: list[Path] = []
-            take_ids: list[str] = []
-            # Piece bounds record take-coverage coordinates so the joint
-            # compensation below can clamp extensions to real content.
-            piece_bounds: list[tuple[float, float]] = []
-            tail_serving_path: Path | None = None
-            tail_take_start: float = 0.0
-            cursor = video_time
-            end = video_time + duration
-            index = 0
-            slice_started = time.monotonic()
-            while cursor < end - 1e-6:
-                if index >= MAX_SLICES_PER_SEGMENT:
-                    raise MediaError(
-                        f"segment {segment_id}: audio slice walk exceeded "
-                        f"{MAX_SLICES_PER_SEGMENT} slices — corrupt takes ledger"
-                    )
-                serving = planner.take_for_time(cursor)
-                if serving is None or not serving.path:
-                    raise MediaError(f"segment {segment_id}: audio gap at {cursor:.2f}s")
-                piece = min(serving.covers_until(), end) - cursor
-                if piece < MIN_SLICE_PIECE_SECONDS:
-                    raise MediaError(
-                        f"segment {segment_id}: degenerate take slice "
-                        f"({piece:.6f}s at {cursor:.2f}s) — corrupt takes ledger"
-                    )
-                slice_path = slice_dir / f"slice_{index:02d}.wav"
-                serving_path = serving.resolved_path(self._run_dir)
-                slice_take(
-                    # Shared 016 convention: run-relative ledger entries
-                    # resolve under the current run dir; legacy absolute
-                    # entries are used as-is while they exist.
-                    serving_path,
-                    cursor - serving.covers_from,
-                    piece,
-                    slice_path,
-                    audio_cfg.sample_rate,
-                    audio_cfg.channels,
-                )
-                slices.append(slice_path)
-                piece_bounds.append((cursor, cursor + piece))
-                tail_serving_path = serving_path
-                tail_take_start = serving.covers_from
-                if serving.take_id not in take_ids:
-                    take_ids.append(serving.take_id)
-                cursor += piece
-                index += 1
-            audio_out = segment / "audio.wav"
-            slice_ms = (time.monotonic() - slice_started) * 1000.0
-            assemble_started = time.monotonic()
-            joint_fade: float | None = None
-            if len(slices) > 1:
-                # A crossfade overlaps unique content, so joining abutting
-                # slices absorbs fade*(joints) seconds and the preview runs
-                # short of the video (boba seg21: 0.959 s drift, unretryable
-                # — same takes, same window, same refusal). Mirror the
-                # issue-095 finalize compensation: extend the tail slice by
-                # exactly the absorption — takes are continuous, so the
-                # extra content is real music — clamped to the take file,
-                # and pass the fade explicitly so assembly consumes exactly
-                # what was added.
-                piece_durations = [piece_end - start for start, piece_end in piece_bounds]
-                joint_fade = _take_joint_fade(min(piece_durations), audio_cfg.crossfade_seconds)
-                absorption = joint_fade * (len(slices) - 1)
-                if absorption >= ABSORPTION_EPSILON_SECONDS and tail_serving_path is not None:
-                    tail_start, tail_end = piece_bounds[-1]
-                    take_file_end = tail_take_start + probed_take_seconds(tail_serving_path)
-                    compensated_end = min(tail_end + absorption, take_file_end)
-                    if compensated_end > tail_end + 1e-6:
-                        tail_slice = slice_dir / f"slice_{len(slices):02d}.wav"
-                        slice_take(
-                            tail_serving_path,
-                            tail_start - tail_take_start,
-                            compensated_end - tail_start,
-                            tail_slice,
-                            audio_cfg.sample_rate,
-                            audio_cfg.channels,
-                        )
-                        slices[-1] = tail_slice
-            assemble_segment_audio(
-                slices, audio_out, audio_cfg.crossfade_seconds, joint_fade=joint_fade
-            )
-            assemble_ms = (time.monotonic() - assemble_started) * 1000.0
-        self._log_metric(
-            {
-                "event": "audio_assemble",
-                "segment_id": segment_id,
-                "windows": {"slice_ms": round(slice_ms, 3), "assemble_ms": round(assemble_ms, 3)},
-            }
-        )
-        ahead = planner.coverage_until() - end
-        audio_plan = AudioPlan(
-            segment_id=segment_id,
-            music_style=caption,
-            energy=energy,
-            seed=seed,
-            take_ids=take_ids,
-        )
-        return audio_plan, max(ahead, 0.0), plan.action, plan.reason
-
     def _segment_plan_info(
         self,
         config: ProjectConfig,
@@ -2163,9 +1824,8 @@ class Supervisor:
         # Truthful frame accounting: the worker reports what it rendered
         # (a worker's decoded count can depend on internal chunking, not
         # the request), so the timeline always matches reality. Reports are
-        # clamped (issue 006): an unbounded count would send the
-        # audio-coverage loop slicing thousands of pieces and corrupt the
-        # timeline, and a foreign tape would burn restart budget on doomed
+        # clamped (issue 006): an unbounded count would corrupt the timeline
+        # directly, and a foreign tape would burn restart budget on doomed
         # resume/rebuild calls. The adapter normalizes leniently, so the
         # raw report is re-gated here with the original predicate before
         # the normalized count is trusted.
@@ -2224,53 +1884,31 @@ class Supervisor:
         recovery_tape: str | None,
         stage_seconds: dict[str, float],
     ) -> CoveredAudio:
-        """Music takes + slice/assemble for one commit (DESIGN §35, issue 020).
+        """Video-only commit cover: every backend is deferred (DESIGN §140).
 
-        Renders takes when coverage runs low, then slices/assembles the
-        segment audio. Records the `audio` timing. Delegates to
-        `_ensure_audio_coverage` — this seam exists so the commit
-        orchestration reads as four stages.
+        No `audio.wav` is ever written at commit; ACE music renders at
+        finalize from the stored director decisions. For streaming
+        backends the conditioning tail (`video_tail.mp4`) is derived so
+        the next segment chains instead of going fresh; `fake` renders
+        statelessly and needs no tail. Records the `audio` stage timing.
+        This seam exists so the commit orchestration reads as four
+        stages. `number`/`video_time`/`duration`/`decision`/
+        `recovery_tape` stay in the signature for caller compatibility —
+        only the backend name feeds the reason text.
         """
         audio_started = time.monotonic()
-        if is_deferred_backend(config.video.backend):
-            with self._stage("audio", f"{config.video.backend} deferred"):
-                write_deferred_stub_audio(
-                    segment,
-                    duration,
-                    config.audio.sample_rate,
-                    config.audio.channels,
-                )
-                # Continuity preservation: the skipped audio swap's rebuild
-                # derived `video_tail.mp4` as a side effect — derive it here
-                # so the next segment chains (96f) instead of going fresh.
+        with self._stage("audio", f"{config.video.backend} deferred"):
+            if config.video.backend in STREAMING_VIDEO_BACKENDS:
                 derive_conditioning_tail(segment, deferred_tail_frames(config.video.backend))
-            stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
-            return CoveredAudio(
-                audio_plan=AudioPlan(segment_id=segment_id),
-                audio_ahead=0.0,
-                take_action="deferred",
-                take_reason=(
-                    f"deferred-audio backend {config.video.backend}: timeline-exact "
-                    "silent stub committed, ACE takes render at finalize"
-                ),
-            )
-        with self._stage("audio", config.audio.backend):
-            audio_plan, audio_ahead, take_action, take_reason = self._ensure_audio_coverage(
-                config,
-                number,
-                segment_id,
-                segment,
-                video_time,
-                duration,
-                decision,
-                recovery_tape,
-            )
         stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
         return CoveredAudio(
-            audio_plan=audio_plan,
-            audio_ahead=audio_ahead,
-            take_action=take_action,
-            take_reason=take_reason,
+            audio_plan=AudioPlan(segment_id=segment_id),
+            audio_ahead=0.0,
+            take_action="deferred",
+            take_reason=(
+                f"all backends deferred: video-only commit for {config.video.backend}, "
+                "no audio.wav; ACE music renders at finalize"
+            ),
         )
 
     def _write_state_preserving_control_plane(self, fresh: RunState) -> None:
@@ -2311,7 +1949,6 @@ class Supervisor:
         eliminates.
         """
         video_out = segment / "video.mp4"
-        audio_out = segment / "audio.wav"
         try:
             manifest = load_segment_manifest(segment)
             recorded_any = manifest.get("checksums")
@@ -2327,32 +1964,27 @@ class Supervisor:
                 f"({exc}); refusing to re-render over it — inspect or remove "
                 f"{segment} manually"
             ) from exc
-        if (
-            not isinstance(recorded, dict)
-            or not isinstance(recorded.get("video.mp4"), str)
-            or not isinstance(recorded.get("audio.wav"), str)
-        ):
+        if not isinstance(recorded, dict) or not isinstance(recorded.get("video.mp4"), str):
             raise MediaError(
                 f"segment {segment_id}: DONE exists but manifest checksums are malformed; "
                 f"refusing to re-render over it — inspect or remove {segment} manually"
             )
-        for name, media_path in (("video.mp4", video_out), ("audio.wav", audio_out)):
-            try:
-                actual = sha256_file(media_path)
-            except OSError as exc:
-                raise MediaError(
-                    f"segment {segment_id}: DONE exists but {name} is missing "
-                    f"({exc}); refusing to re-render over it — inspect or remove "
-                    f"{segment} manually"
-                ) from exc
-            if actual != recorded[name]:
-                raise MediaError(
-                    f"segment {segment_id}: DONE exists but {name} fails checksum "
-                    "verification; refusing to re-render over it — inspect or "
-                    f"remove {segment} manually"
-                )
+        try:
+            actual = sha256_file(video_out)
+        except OSError as exc:
+            raise MediaError(
+                f"segment {segment_id}: DONE exists but video.mp4 is missing "
+                f"({exc}); refusing to re-render over it — inspect or remove "
+                f"{segment} manually"
+            ) from exc
+        if actual != recorded["video.mp4"]:
+            raise MediaError(
+                f"segment {segment_id}: DONE exists but video.mp4 fails checksum "
+                "verification; refusing to re-render over it — inspect or "
+                f"remove {segment} manually"
+            )
         for name, extra in sorted(recorded.items()):
-            if name in ("video.mp4", "audio.wav"):
+            if name == "video.mp4":
                 continue  # already verified above
             if not isinstance(extra, str) or not extra:
                 continue  # legacy manifest: media only means "not covered"
@@ -2387,23 +2019,16 @@ class Supervisor:
                 f"segment {segment_id}: worker reported implausible "
                 f"frames {frames!r} (expected an int within 1..{ceiling})"
             )
-        # Issue 003 (adoption-side mirror of the `_commit_segment` gate):
-        # a DONE orphan whose media drifted past the A/V budget must not
-        # adopt silently — it would commit unfinalizable media exactly
-        # like the pre-fix commit path did.
-        video_info = validate_video(
+        # Video-only adoption (all backends deferred): the segment video
+        # is validated against the configured geometry; audio renders at
+        # finalize from the stored director decisions, so there is no
+        # commit-time audio to verify and no A/V gate here.
+        validate_video(
             video_out,
             self._config.video.width,
             self._config.video.height,
             self._config.video.fps,
         )
-        audio_info = validate_audio(
-            audio_out, self._config.audio.sample_rate, self._config.audio.channels
-        )
-        check_av_alignment(float(video_info["duration"]), float(audio_info["duration"]), segment_id)
-        # The takes ledger stays the truth for audio planning (see
-        # `_ensure_audio_coverage`); the next commit plans from the
-        # ledger, so worst case is an extra take render, never silence.
         fresh = read_state(self._run_dir)
         fresh.next_segment_number = number + 1
         fresh.committed_segments += 1
@@ -2444,24 +2069,18 @@ class Supervisor:
         the commit's monotonic start (drives the elapsed metric).
         """
         video_out = segment / "video.mp4"
-        audio_out = segment / "audio.wav"
         decision = proposed.decision
         frames = rendered.frames
         duration = rendered.duration
         # 4. Validate before anything claims the segment is committed.
+        # Video-only (all backends deferred): the segment video is checked
+        # against the configured geometry; audio renders at finalize, so
+        # there is no commit-time audio to validate and no A/V gate here.
         validate_started = time.monotonic()
         with self._stage("validate", "media checks"):
             video_info = validate_video(
                 video_out, config.video.width, config.video.height, config.video.fps
             )
-            audio_info = validate_audio(audio_out, config.audio.sample_rate, config.audio.channels)
-        if abs(float(video_info["duration"]) - duration) > AV_ALIGNMENT_TOLERANCE_SECONDS:
-            raise MediaError(f"segment {segment_id} A/V duration drift")
-        # Issue 003: video-vs-audio alignment at commit (validate/finalize
-        # already enforce it — the commit gate was strictly weaker).
-        av_drift = check_av_alignment(
-            float(video_info["duration"]), float(audio_info["duration"]), segment_id
-        )
         stage_seconds["validate"] = round(time.monotonic() - validate_started, 3)
 
         # 5. Metadata → checksums → DONE → state. No state file may claim
@@ -2477,7 +2096,6 @@ class Supervisor:
             )
             metrics_payload: dict[str, Any] = {
                 "video": video_info,
-                "audio": audio_info,
                 "frames": frames,
                 # §23: RoPE mode is a first-class record — never change it
                 # silently across resume; compare on recovery.
@@ -2500,7 +2118,6 @@ class Supervisor:
             }
             checksums: dict[str, str] = {
                 "video.mp4": sha256_file(video_out),
-                "audio.wav": sha256_file(audio_out),
             }
             tape_file = segment / "recovery.pt"
             if tape_file.is_file():
@@ -2540,7 +2157,10 @@ class Supervisor:
                 "event": "segment_committed",
                 "segment_id": segment_id,
                 "frames": frames,
-                "av_drift_seconds": av_drift,
+                # Video-only commit (all backends deferred): no audio exists
+                # at commit time, so drift is definitionally zero. The key
+                # stays so metric/log readers never see a missing field.
+                "av_drift_seconds": 0.0,
                 "elapsed_seconds": elapsed,
                 "stages": stage_seconds,
                 "director_tokens": dict(proposed.director_tokens),
@@ -2597,7 +2217,7 @@ class Supervisor:
 
         Sequencing only — the work lives in `_propose_segment` (director
         + prompt plan), `_render_video` (adapter video call),
-        `_cover_audio` (music takes + slice/assemble) and
+        `_cover_audio` (video-only deferred-audio cover) and
         `_commit_segment` (validate + metadata + DONE + state advance),
         each independently testable (issue 020).
         """
@@ -2671,4 +2291,11 @@ class Supervisor:
             stage_seconds,
             started,
         )
+        # Wake the background pre-warm: the freshly committed segment is
+        # now pollable (DONE + manifest), so upscale + interp can render
+        # while the next segment generates. Never fails the commit. The
+        # report describes the previous pass (work done during this
+        # segment's render) — the newly woken pass reports next commit.
+        self._notify_background_committed()
         self._report_background_prewarm()
+        return committed_id
