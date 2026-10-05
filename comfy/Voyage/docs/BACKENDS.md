@@ -48,12 +48,13 @@ finalizer concat path, and checksums run exactly as in production.
 
 Select at `configure` time (`--backend`, `--director`,
 `--quantization`, …) into the run manifest. Resolution tiers:
-`configure --low-definition` / `--high-definition` pick the lowest /
-highest native reasonable geometry for the effective backend (fresh
-creates default to high; both flags together is an error; tier changes
-on committed runs are refused). Tiers: fake 512x288/768x432, ltxv
-512x320/768x512, causvid 832x480 (both tiers — fixed geometry), ltx25 /
-ltx23 768x448/1216x704.
+`configure --low-definition` / `--medium-definition` /
+`--high-definition` pick the lowest / middle / highest native
+reasonable geometry for the effective backend (fresh creates default
+to high; any two tier flags together is an error; tier changes on
+committed runs are refused). Tiers: fake 512x288/1024x576/768x432,
+ltxv 512x320/1024x576/768x512, causvid 832x480 (all tiers — fixed
+geometry), ltx25 / ltx23 768x448/1024x576/1216x704.
 
 ## LTXV chaining model (`ltxv`, Phase 7 alternative)
 

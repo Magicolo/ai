@@ -250,21 +250,24 @@ class DefinitionTier:
 
 
 DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
-    # Lowest / highest native reasonable resolution per backend
-    # (`voyage configure --low-definition / --high-definition`): low
-    # tiers stay on divisor-clean native geometry the worker accepts
-    # (fake /32-able, ltxv /32, ltx25/ltx23 /64); causvid is fixed
-    # 832x480, so both tiers are identical by design.
+    # Lowest / medium / highest native reasonable resolution per backend
+    # (`voyage configure --low-definition / --medium-definition /
+    # --high-definition`): tiers stay on divisor-clean native geometry
+    # the worker accepts (fake /32-able, ltxv /32, ltx25/ltx23 /64);
+    # causvid is fixed 832x480, so all tiers are identical by design.
     "fake": {
         "low": DefinitionTier(width=512, height=288, profile="fake-288p", latent_shape=None),
+        "medium": DefinitionTier(width=1024, height=576, profile="fake-576p", latent_shape=None),
         "high": DefinitionTier(width=768, height=432, profile="fake-432p", latent_shape=None),
     },
     "ltxv": {
         "low": DefinitionTier(width=512, height=320, profile="ltxv-320p", latent_shape=None),
+        "medium": DefinitionTier(width=1024, height=576, profile="ltxv-576p", latent_shape=None),
         "high": DefinitionTier(width=768, height=512, profile="ltxv-512p", latent_shape=None),
     },
     "causvid": {
         "low": DefinitionTier(width=832, height=480, profile="causvid-480p", latent_shape=None),
+        "medium": DefinitionTier(width=832, height=480, profile="causvid-480p", latent_shape=None),
         "high": DefinitionTier(width=832, height=480, profile="causvid-480p", latent_shape=None),
     },
     "ltx25": {
@@ -273,6 +276,12 @@ DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
             height=448,
             profile="ltx25-448p",
             latent_shape=(1, 128, 16, 12, 7),
+        ),
+        "medium": DefinitionTier(
+            width=1024,
+            height=576,
+            profile="ltx25-576p",
+            latent_shape=(1, 128, 16, 16, 9),
         ),
         "high": DefinitionTier(
             width=1216,
@@ -288,6 +297,12 @@ DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
             profile="ltx23-448p",
             latent_shape=(1, 128, 16, 12, 7),
         ),
+        "medium": DefinitionTier(
+            width=1024,
+            height=576,
+            profile="ltx23-576p",
+            latent_shape=(1, 128, 16, 16, 9),
+        ),
         "high": DefinitionTier(
             width=1216,
             height=704,
@@ -296,7 +311,7 @@ DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
         ),
     },
 }
-"""Backend name → low/high definition tiers (geometry + profile + latent
+"""Backend name → low/medium/high definition tiers (geometry + profile + latent
 override). High tiers equal their BACKEND_REGISTRY rows (pinned by
 tests/test_backend_registry.py); the resolver applies the tier AFTER
 the backend preset, so `--backend` then tier always agrees."""
@@ -840,11 +855,12 @@ def _definition_preset(tier_backend: str, tier: str) -> dict[str, str | int | li
     """Geometry override for a definition tier (derived from DEFINITION_TIERS).
 
     Applied after the backend preset, keyed by the resolved backend so
-    `--backend X --low-definition` always yields X's low geometry.
+    `--backend X --low-definition` (or --medium-definition /
+    --high-definition) always yields X's tier geometry.
     A `None` latent keeps the backend row's latent_shape.
     """
-    if tier not in ("low", "high"):
-        raise ValueError(f"unknown definition tier {tier!r} (expected 'low' or 'high')")
+    if tier not in ("low", "medium", "high"):
+        raise ValueError(f"unknown definition tier {tier!r} (expected 'low', 'medium' or 'high')")
     try:
         tiers = DEFINITION_TIERS[tier_backend]  # type: ignore[index]
     except KeyError:

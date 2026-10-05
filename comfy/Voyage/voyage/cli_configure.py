@@ -49,9 +49,11 @@ def _manifest_path(run_dir: Path) -> Path:
 
 
 def _definition_tier(args: argparse.Namespace) -> str | None:
-    """'low'/'high' from the tier flags (None = inherit stored geometry)."""
+    """'low'/'medium'/'high' from the tier flags (None = inherit stored geometry)."""
     if bool(getattr(args, "low_definition", False)):
         return "low"
+    if bool(getattr(args, "medium_definition", False)):
+        return "medium"
     if bool(getattr(args, "high_definition", False)):
         return "high"
     return None
@@ -157,11 +159,13 @@ def cmd_configure(args: argparse.Namespace) -> int:
     run_dir = (output_root() / name.strip()).resolve()
     manifest_path = _manifest_path(run_dir)
     from_name = getattr(args, "from_run", None)
-    if bool(getattr(args, "low_definition", False)) and bool(
-        getattr(args, "high_definition", False)
-    ):
+    tier_flags_selected = sum(
+        bool(getattr(args, flag_name, False))
+        for flag_name in ("low_definition", "medium_definition", "high_definition")
+    )
+    if tier_flags_selected > 1:
         print(
-            "error: pass only one of --low-definition or --high-definition",
+            "error: pass only one of --low-definition, --medium-definition or --high-definition",
             file=sys.stderr,
         )
         return 2

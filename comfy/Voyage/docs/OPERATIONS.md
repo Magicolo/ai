@@ -64,7 +64,8 @@ runs) and pair the audio backend too (`ltxv`/`causvid` get real
 ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Add
 `--low-definition` for the lowest native reasonable resolution of the
 effective backend instead (fresh creates default to high;
-`--high-definition` selects it explicitly; both together is an error;
+`--medium-definition` selects the middle tier, `--high-definition`
+the highest; any two tier flags together is an error;
 tier changes on committed runs are refused). Extra
 run flags (`--director`, `--blocks`, `--take-seconds`,
 `--quantization`) live on `configure`. Validation failure aborts

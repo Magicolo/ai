@@ -81,8 +81,8 @@ COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 
 # Mode A geometry (Phase-0 default): stage 1 at half resolution, commit
 # at 1216x704. Both clear /64 (two-stage contract). The worker accepts
-# the configured commit sizes only (high 1216x704 + low 768x448, see
-# COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
+# the configured commit sizes only (high 1216x704 + medium 1024x576 +
+# low 768x448, see COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
 STAGE1_WIDTH = 608
 STAGE1_HEIGHT = 352
 COMMIT_WIDTH = 1216
@@ -119,19 +119,30 @@ FAST_COMMIT_HEIGHT = 448
 FAST_TARGET_FRAMES = 49
 FAST_TAIL_FRAMES = 9
 
-# Configured commit sizes (`--low-definition` / `--high-definition`): the
+# Medium-definition tier: 1024x576 commit with a 512x288 stage 1, same
+# 121f/25-carry accounting as the high tier. Both clear /64 (16x9 tiles),
+# stage 1 clears /32, so the two-stage latent-upscale contract holds.
+MED_STAGE1_WIDTH = 512
+MED_STAGE1_HEIGHT = 288
+MED_COMMIT_WIDTH = 1024
+MED_COMMIT_HEIGHT = 576
+
+# Configured commit sizes (`--low-definition` / `--medium-definition` /
+# `--high-definition`): the
 # low tier reuses the fast experiment profile's 768x448 commit geometry
 # (and its 384x224 stage 1) with production 121f/25-carry accounting.
-# The worker accepts exactly these two sizes and fails loud otherwise.
+# The worker accepts exactly these three sizes and fails loud otherwise.
 COMMIT_SIZE_OPTIONS = frozenset(
     {
         (COMMIT_WIDTH, COMMIT_HEIGHT),
+        (MED_COMMIT_WIDTH, MED_COMMIT_HEIGHT),
         (FAST_COMMIT_WIDTH, FAST_COMMIT_HEIGHT),
     }
 )
 
 STAGE1_FOR_COMMIT_SIZE = {
     (COMMIT_WIDTH, COMMIT_HEIGHT): (STAGE1_WIDTH, STAGE1_HEIGHT),
+    (MED_COMMIT_WIDTH, MED_COMMIT_HEIGHT): (MED_STAGE1_WIDTH, MED_STAGE1_HEIGHT),
     (FAST_COMMIT_WIDTH, FAST_COMMIT_HEIGHT): (FAST_STAGE1_WIDTH, FAST_STAGE1_HEIGHT),
 }
 """Stage-1 (half-resolution) size per configured commit size."""
@@ -444,7 +455,7 @@ def build_mode_a_graph(
     instead of the empty one. Geometry/accounting resolve from the
     experiment profile (production 121f/25-carry unless VOYAGE_LTX_FAST
     or VOYAGE_LTX_CARRY select the Phase-1 fast profile); `stage1_size`
-    overrides the profile stage-1 node for the low-definition tier.
+    overrides the profile stage-1 node for the low/medium-definition tiers.
     """
     profile = resolve_experiment_profile()
     stage1_width, stage1_height = (
@@ -638,7 +649,7 @@ def _decode_tail_frames(
     """Decode a tail mp4 to RGB uint8 arrays (oldest-first).
 
     `commit_size` overrides the profile commit dims for the
-    low-definition tier (defaults to the experiment profile).
+    low/medium-definition tiers (defaults to the experiment profile).
     """
     import numpy as np
 

@@ -207,14 +207,20 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         "--low-definition",
         action="store_true",
         help="lowest native reasonable resolution for the effective backend "
-        "(mutually exclusive with --high-definition)",
+        "(mutually exclusive with --medium-definition and --high-definition)",
+    )
+    conf.add_argument(
+        "--medium-definition",
+        action="store_true",
+        help="use the medium native reasonable resolution for the effective backend "
+        "(mutually exclusive with --low-definition and --high-definition)",
     )
     conf.add_argument(
         "--high-definition",
         action="store_true",
         help="highest native reasonable resolution for the effective backend "
-        "(default on create when neither tier flag is passed; mutually "
-        "exclusive with --low-definition)",
+        "(default on create when no tier flag is passed; mutually "
+        "exclusive with --low-definition and --medium-definition)",
     )
     conf.add_argument(
         "--from",

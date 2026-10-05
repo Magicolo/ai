@@ -89,8 +89,8 @@ COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 
 # Mode A geometry (Phase-0 default): stage 1 at half resolution, commit
 # at 1216x704. Both clear /64 (two-stage contract). The worker accepts
-# the configured commit sizes only (high 1216x704 + low 768x448, see
-# COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
+# the configured commit sizes only (high 1216x704 + medium 1024x576 +
+# low 768x448, see COMMIT_SIZE_OPTIONS) and rejects anything else loudly.
 STAGE1_WIDTH = 608
 STAGE1_HEIGHT = 352
 COMMIT_WIDTH = 1216
@@ -98,22 +98,32 @@ COMMIT_HEIGHT = 704
 NATIVE_FPS = 24
 
 # Low-definition tier (`--low-definition`): 768x448 commit with a 384x224
-# stage 1, same 121f/25-carry accounting as the high tier. Both sizes
-# clear /64, so the two-stage latent-upscale contract holds either way.
+# stage 1, same 121f/25-carry accounting as the high tier. All three sizes
+# clear /64, so the two-stage latent-upscale contract holds on every tier.
 LOW_STAGE1_WIDTH = 384
 LOW_STAGE1_HEIGHT = 224
 LOW_COMMIT_WIDTH = 768
 LOW_COMMIT_HEIGHT = 448
 
+# Medium-definition tier: 1024x576 commit with a 512x288 stage 1, same
+# 121f/25-carry accounting as the high tier. Both clear /64 (16x9 tiles),
+# stage 1 clears /32, so the two-stage latent-upscale contract holds.
+MED_STAGE1_WIDTH = 512
+MED_STAGE1_HEIGHT = 288
+MED_COMMIT_WIDTH = 1024
+MED_COMMIT_HEIGHT = 576
+
 COMMIT_SIZE_OPTIONS = frozenset(
     {
         (COMMIT_WIDTH, COMMIT_HEIGHT),
+        (MED_COMMIT_WIDTH, MED_COMMIT_HEIGHT),
         (LOW_COMMIT_WIDTH, LOW_COMMIT_HEIGHT),
     }
 )
 
 STAGE1_FOR_COMMIT_SIZE = {
     (COMMIT_WIDTH, COMMIT_HEIGHT): (STAGE1_WIDTH, STAGE1_HEIGHT),
+    (MED_COMMIT_WIDTH, MED_COMMIT_HEIGHT): (MED_STAGE1_WIDTH, MED_STAGE1_HEIGHT),
     (LOW_COMMIT_WIDTH, LOW_COMMIT_HEIGHT): (LOW_STAGE1_WIDTH, LOW_STAGE1_HEIGHT),
 }
 """Stage-1 (half-resolution) size per configured commit size."""
@@ -360,7 +370,7 @@ def build_mode_a_graph(
     graph gains LoadImage x25 (ids 30-54) + BatchImagesNode (55) +
     LTXVImgToVideoInplace (56, strength frozen by default) and node 10 consumes
     the pinned latent instead of the empty one. `stage1_size` overrides the
-    baked stage-1 node for the low-definition tier (defaults to 608x352).
+    baked stage-1 node for the low/medium-definition tiers (defaults to 608x352).
     """
     stage1_width, stage1_height = (
         stage1_size if stage1_size is not None else (STAGE1_WIDTH, STAGE1_HEIGHT)
@@ -561,7 +571,7 @@ def _decode_tail_frames(
     """Decode a tail mp4 to RGB uint8 arrays (oldest-first).
 
     `commit_size` overrides the baked commit dims for the
-    low-definition tier (defaults to 1216x704).
+    low/medium-definition tiers (defaults to 1216x704).
     """
     import numpy as np
 
