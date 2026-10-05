@@ -115,6 +115,20 @@ def test_sfx_window_constants_match_ladder() -> None:
     assert SFX_WINDOW_OVERLAP == 1.0
 
 
+def test_adjacent_windows_overlap_by_exactly_one_second() -> None:
+    """User requirement: a 1s crossfade between SFX takes.
+
+    Adjacent planned windows share exactly SFX_WINDOW_OVERLAP of
+    timeline — the join blends that shared second with manual fades
+    (never acrossfade), so the bed never gaps or double-plays.
+    """
+    windows = plan_sfx_windows(20.0, [(0.0, 20.0, "rain on glass")], seed_base=7)
+    assert len(windows) == 3
+    for first, second in zip(windows, windows[1:], strict=False):
+        shared = first.start + first.duration - second.start
+        assert shared == SFX_WINDOW_OVERLAP == 1.0
+
+
 def test_stale_request_misses_cache_hit() -> None:
     """Swansy regression: windows planned short on an older timeline re-render.
 

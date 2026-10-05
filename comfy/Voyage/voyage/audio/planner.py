@@ -152,6 +152,23 @@ class AudioPlanner:
     # downbeats stay on segment boundaries across take joints). None
     # keeps the legacy unquantized length (old runs, unit tests).
     segment_seconds: float | None = None
+    # Continuation overlap between chained takes (seconds): a chained take
+    # starts this far BEFORE the previous coverage end, so take N+1 opens
+    # with take N's tail and extends it (repaint continuation) instead of
+    # restarting the music from silence. 0.0 keeps the legacy abutting
+    # chain (no overlap). Must be < take_seconds; the chained take keeps
+    # the full quantized duration, so the overlap region is covered twice
+    # and newest-wins serving plays the continuing take there.
+    chain_overlap_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Fail fast on a degenerate continuation overlap (never silent)."""
+        overlap = self.chain_overlap_seconds
+        if not 0.0 <= overlap < self.take_seconds:
+            raise ValueError(
+                f"chain_overlap_seconds must satisfy 0.0 <= overlap < take_seconds "
+                f"({self.take_seconds}); got {overlap}"
+            )
 
     def coverage_until(self) -> float:
         """Video-time covered by rendered takes (0.0 when the ledger is empty)."""
@@ -159,10 +176,36 @@ class AudioPlanner:
             return 0.0
         return max(take.covers_until() for take in self.takes)
 
-    def take_for_time(self, video_time: float) -> AudioTake | None:
-        """Newest take covering `video_time`, or None when uncovered."""
+    def tail_take(self) -> AudioTake | None:
+        """Take reaching furthest into the timeline (None when empty).
+
+        Ties break toward the newest take (highest segment_index) — the
+        one the serving walk would play at the coverage end.
+        """
+        if not self.takes:
+            return None
+        return max(self.takes, key=lambda take: (take.covers_until(), take.segment_index))
+
+    def take_for_time(
+        self, video_time: float, max_segment_index: int | None = None
+    ) -> AudioTake | None:
+        """Newest take covering `video_time`, or None when uncovered.
+
+        `max_segment_index` bounds serving to takes rendered for segments
+        up to that number — a take's `segment_index` is the first video
+        segment it may serve. Repaints backdate their coverage to the
+        source anchor, so without the bound a future repaint retroactively
+        serves earlier cursors and, on replay, re-triggers repaints there
+        forever (kaolin: every re-finalize appended more takes). Chained
+        takes are unaffected: their coverage starts in their start segment,
+        so no earlier cursor ever sees them. None keeps legacy global
+        newest-wins (single-take tests, ad-hoc probes).
+        """
         covering = [
-            take for take in self.takes if take.covers_from <= video_time < take.covers_until()
+            take
+            for take in self.takes
+            if take.covers_from <= video_time < take.covers_until()
+            and (max_segment_index is None or take.segment_index <= max_segment_index)
         ]
         if not covering:
             return None
@@ -178,8 +221,16 @@ class AudioPlanner:
         """Decide the next audio action for the upcoming video time.
 
         - No take covers now → "render" a fresh take starting at `video_time`.
-        - Coverage runs out within `ahead_seconds` → "render" chained at the
-          coverage end (audio-ahead: the swap happens before video needs it).
+        - Max coverage runs out within `ahead_seconds` → "render" chained at
+          the coverage end (audio-ahead: the swap happens before video needs it).
+          The check uses max coverage over ALL takes (not just the take
+          covering now): a chained take anchors in the future, so checking
+          only the present take would chain a duplicate on every later
+          segment inside the same ahead window (kaolin: ~4 takes per joint).
+          With `chain_overlap_seconds` > 0 the chained take starts that far
+          BEFORE the coverage end, overlapping the tail take it extends
+          (continuation); the tail take rides in `current` so the caller can
+          build the continuation source from it.
         - Caption changed and the current take still has an unconsumed region
           → "repaint" that region (continuation, §37) instead of a fresh take.
           ACE repaint output is timeline-aligned with its source (the head
@@ -192,7 +243,7 @@ class AudioPlanner:
           take joint, carried by the chained take's fresh caption.
         - Otherwise → "keep" serving from the current take.
         """
-        current = self.take_for_time(video_time)
+        current = self.take_for_time(video_time, segment_index)
         if current is None:
             return PlanDecision(
                 action="render",
@@ -214,12 +265,20 @@ class AudioPlanner:
             # Rewording, not a new direction (Stage B gate): fall through
             # to chained/keep so the music evolves at the next take joint,
             # carried by the chained take's fresh caption.
-        if current.covers_until() - video_time <= self.ahead_seconds:
-            chained = self._fresh_take(current.covers_until(), caption, seed + 1, segment_index)
+        coverage_end = self.coverage_until()
+        if coverage_end - video_time <= self.ahead_seconds:
+            start = coverage_end
+            chain_current = current
+            if self.chain_overlap_seconds > 0.0:
+                tail = self.tail_take()
+                if tail is not None:
+                    start = max(0.0, coverage_end - self.chain_overlap_seconds)
+                    chain_current = tail
+            chained = self._fresh_take(start, caption, seed + 1, segment_index)
             return PlanDecision(
                 action="render",
                 take=chained,
-                current=current,
+                current=chain_current,
                 reason="coverage within ahead window; chaining next take",
             )
         return PlanDecision(action="keep", current=current, reason="covered")

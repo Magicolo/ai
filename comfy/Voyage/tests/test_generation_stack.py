@@ -56,7 +56,8 @@ def test_audio_config_rhythm_validators() -> None:
     with pytest.raises(ValidationError):
         AudioConfig(beats_per_segment=0)
     with pytest.raises(ValidationError):
-        AudioConfig(final_overlap_fraction=0.6)
+        AudioConfig(final_overlap_fraction=1.1)
+    assert AudioConfig(final_overlap_fraction=1.0).final_overlap_fraction == pytest.approx(1.0)
     with pytest.raises(ValidationError):
         AudioConfig(final_overlap_fraction=-0.1)
     with pytest.raises(ValidationError):

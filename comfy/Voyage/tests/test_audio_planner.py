@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from voyage.audio.planner import (
     AudioPlanner,
@@ -63,6 +64,128 @@ def test_chained_render_inside_ahead_window() -> None:
     assert decision.take.covers_from == 45.0  # chained at coverage end
 
 
+def test_chain_renders_once_per_joint() -> None:
+    """Chaining keys on max coverage, not the present take (kaolin incident).
+
+    A chained take anchors in the future, so every later segment inside the
+    same ahead window must keep — checking only the take covering now
+    chained a duplicate per segment (~4 takes per 48s joint on kaolin).
+    """
+    planner = AudioPlanner(take_seconds=48.0, ahead_seconds=20.0)
+    first = AudioTake(
+        take_id="take_0000",
+        path="/takes/take_0000.wav",
+        caption="ambient drift",
+        seed=7,
+        covers_from=0.0,
+        duration=48.0,
+        segment_index=0,
+    )
+    planner.record(first)
+    # 6s-apart cursors against a 0..48 take: 30.0 chains once at 48.0, and
+    # every later cursor in the same ahead window keeps.
+    chained = planner.plan(30.0, "ambient drift", 7, 5)
+    assert chained.action == "render"
+    assert chained.take is not None
+    assert chained.take.covers_from == 48.0
+    assert chained.take.duration == 48.0
+    planner.record(chained.take)
+    for cursor, segment in ((36.0, 6), (42.0, 7), (48.0, 8), (54.0, 9), (72.0, 12)):
+        decision = planner.plan(cursor, "ambient drift", 7, segment)
+        assert decision.action == "keep", f"duplicate chain at cursor {cursor}"
+    # Next joint chains exactly once at max coverage end (96.0).
+    second = planner.plan(78.0, "ambient drift", 7, 13)
+    assert second.action == "render"
+    assert second.take is not None
+    assert second.take.covers_from == 96.0
+    planner.record(second.take)
+    assert planner.plan(84.0, "ambient drift", 7, 14).action == "keep"
+    assert len(planner.takes) == 3
+
+
+def test_chained_take_overlaps_tail_with_continuation() -> None:
+    """Continuation: a chained take extends, not restarts, its predecessor.
+
+    With a 6s chain overlap the chained take backdates its start by the
+    overlap and carries the tail take as current, so the caller can build
+    the continuation source from the tail's audio.
+    """
+    planner = AudioPlanner(take_seconds=48.0, ahead_seconds=20.0, chain_overlap_seconds=6.0)
+    first = AudioTake(
+        take_id="take_0000",
+        path="/takes/take_0000.wav",
+        caption="ambient drift",
+        seed=7,
+        covers_from=0.0,
+        duration=48.0,
+        segment_index=0,
+    )
+    planner.record(first)
+    decision = planner.plan(30.0, "ambient drift", 7, 5)
+    assert decision.action == "render"
+    assert decision.take is not None
+    assert decision.take.covers_from == 42.0
+    assert decision.take.duration == 48.0
+    assert decision.current is first
+    planner.record(decision.take)
+    # Later cursors in the same ahead window keep (no duplicates); the
+    # next joint chains exactly once, overlapping again.
+    for cursor, segment in ((36.0, 6), (42.0, 7), (48.0, 8), (60.0, 10)):
+        assert planner.plan(cursor, "ambient drift", 7, segment).action == "keep"
+    second = planner.plan(72.0, "ambient drift", 7, 12)
+    assert second.action == "render"
+    assert second.take is not None
+    assert second.take.covers_from == 84.0
+    assert second.current is decision.take
+
+
+def test_chain_overlap_guards_reject_degenerate_values() -> None:
+    with pytest.raises(ValueError, match="chain_overlap_seconds"):
+        AudioPlanner(take_seconds=48.0, ahead_seconds=20.0, chain_overlap_seconds=48.0)
+    with pytest.raises(ValueError, match="chain_overlap_seconds"):
+        AudioPlanner(take_seconds=48.0, ahead_seconds=20.0, chain_overlap_seconds=-1.0)
+
+
+def test_tail_take_prefers_furthest_coverage_then_newest() -> None:
+    planner = AudioPlanner(take_seconds=48.0, ahead_seconds=20.0)
+    assert planner.tail_take() is None
+    original = AudioTake(
+        take_id="take_0000",
+        path="/takes/take_0000.wav",
+        caption="ambient drift",
+        seed=7,
+        covers_from=0.0,
+        duration=48.0,
+        segment_index=0,
+    )
+    repaint = AudioTake(
+        take_id="take_0001",
+        path="/takes/take_0001.wav",
+        caption="brighter pulse",
+        seed=9,
+        covers_from=0.0,
+        duration=48.0,
+        segment_index=5,
+    )
+    chained = AudioTake(
+        take_id="take_0002",
+        path="/takes/take_0002.wav",
+        caption="ambient drift",
+        seed=7,
+        covers_from=48.0,
+        duration=48.0,
+        segment_index=8,
+    )
+    planner.record(original)
+    assert planner.tail_take() is original
+    # Same coverage end: the newer take (higher segment_index) wins — it
+    # is the one the serving walk plays at the coverage end.
+    planner.record(repaint)
+    assert planner.tail_take() is repaint
+    planner.record(chained)
+    assert planner.tail_take() is chained
+
+
 def test_repaint_on_caption_change_with_unconsumed_region() -> None:
     planner = _planner()
     current = _recorded(planner)
@@ -96,6 +219,46 @@ def test_take_ids_increment() -> None:
     planner.record(first)
     second = planner.plan(50.0, "a", 2, 25).take
     assert second is not None and second.take_id == "take_0001"
+
+
+def test_future_repaint_does_not_serve_earlier_segments() -> None:
+    """Replay convergence: a repaint serves only from its own segment on.
+
+    Repaints backdate coverage to the source anchor, so without the
+    serving bound the newest repaint (a later segment's caption) would
+    serve — and re-trigger repaints at — every earlier cursor, and each
+    re-finalize would append more takes forever.
+    """
+    planner = _planner()
+    original = AudioTake(
+        take_id="take_0000",
+        path="/takes/take_0000.wav",
+        caption="ambient drift",
+        seed=7,
+        covers_from=0.0,
+        duration=45.0,
+        segment_index=0,
+    )
+    repaint = AudioTake(
+        take_id="take_0001",
+        path="/takes/take_0001.wav",
+        caption="brighter pulse",
+        seed=9,
+        covers_from=0.0,
+        duration=45.0,
+        segment_index=5,
+    )
+    planner.record(original)
+    planner.record(repaint)
+    # Unbounded (legacy): the future repaint serves cursor 0.0.
+    assert planner.take_for_time(0.0) is repaint
+    # Bounded: segment 0 still hears the original take -> keep, not repaint.
+    assert planner.take_for_time(0.0, 0) is original
+    decision = planner.plan(video_time=0.0, caption="ambient drift", seed=7, segment_index=0)
+    assert decision.action == "keep"
+    assert decision.current is original
+    # From segment 5 on the repaint legitimately serves.
+    assert planner.take_for_time(10.0, 5) is repaint
 
 
 def test_ledger_round_trip(tmp_path: Path) -> None:

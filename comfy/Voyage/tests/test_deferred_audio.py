@@ -77,6 +77,163 @@ def _segment_with_decision(
     return segment
 
 
+def _production_segment(
+    run_dir: Path, index: int, frames: int, caption: str, energy: float = 0.4
+) -> Path:
+    """Production manifest shape: the decision flattened at `transition`.
+
+    The supervisor persists `decision.model_dump()` directly (no `decision`
+    wrapper) — the replay must read per-segment captions from this shape,
+    not fall back to the run music style for every take.
+    """
+    segment = run_dir / "segments" / f"{index:06d}"
+    segment.mkdir(parents=True)
+    manifest = {
+        "format": 1,
+        "transition": {
+            "decision_index": index,
+            "audio": {"music_caption": caption, "energy": energy},
+        },
+        "metrics": {"frames": frames},
+    }
+    (segment / "manifest.json").write_text(json.dumps(manifest))
+    return segment
+
+
+def test_replay_reads_flattened_production_captions(tmp_path: Path) -> None:
+    """Takes carry each segment's own caption, not the style fallback."""
+    seg0 = _production_segment(tmp_path, 0, 96, "hollow winds")
+    seg1 = _production_segment(tmp_path, 1, 96, "hollow winds")
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=[seg0, seg1],
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_stub_render,
+        music_style="fallback style",
+    )
+    assert takes, "expected at least one rendered take"
+    assert takes[0]["caption"] == "hollow winds"
+
+
+def test_chained_take_uses_coverage_start_caption(tmp_path: Path) -> None:
+    """A chained take is prompted with its starting segment's caption.
+
+    10s segments, take 50s (quantized), ahead 20s, chain overlap 6s: seg3
+    (cursor 30s) chains at 50s with covers_from 44s, whose coverage begins
+    in seg4 — so the take must carry seg4's caption, not seg3's. Exactly
+    two takes cover the 60s timeline.
+    (Captions share 4/6 tokens so the repaint gate stays shut — this test
+    pins chaining, not repainting.)
+    """
+    captions = [f"dark ambient drone verse {index}" for index in range(6)]
+    segments = [_production_segment(tmp_path, index, 240, captions[index]) for index in range(6)]
+    seen: list[dict[str, Any]] = []
+
+    def _capture(payload: dict[str, Any], output_path: Path) -> None:
+        seen.append(dict(payload))
+        _stub_render(payload, output_path)
+
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_capture,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 2, f"expected exactly 2 takes, got {len(takes)}"
+    assert takes[0]["covers_from"] == 0.0
+    assert takes[0]["caption"] == "dark ambient drone verse 0"
+    assert takes[1]["covers_from"] == 44.0
+    assert takes[1]["caption"] == "dark ambient drone verse 4"
+    assert takes[1]["segment_index"] == 4
+    assert seen[1]["style"] == "dark ambient drone verse 4"
+    from voyage import audio_finalize
+
+    assert not audio_finalize.deferred_render_pending(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+
+
+def test_chained_take_renders_as_continuation_repaint(tmp_path: Path) -> None:
+    """A chained take extends the previous take (continuation, not restart).
+
+    Same geometry as the chained-caption test (10s segments, 50s take,
+    20s ahead, 6s chain overlap): the chained take renders with the ACE
+    repaint payload (task_type repaint, reference_audio pointing at the
+    throwaway continuation source built from the previous take's tail,
+    repaint_start 6.0, repaint_end = duration), and the source file is
+    cleaned up after the render — never ledgered.
+    """
+    captions = [f"dark ambient drone verse {index}" for index in range(6)]
+    segments = [_production_segment(tmp_path, index, 240, captions[index]) for index in range(6)]
+    seen: list[dict[str, Any]] = []
+
+    def _capture(payload: dict[str, Any], output_path: Path) -> None:
+        seen.append(dict(payload))
+        _stub_render(payload, output_path)
+
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_capture,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 2, f"expected exactly 2 takes, got {len(takes)}"
+    continuations = [payload for payload in seen if payload.get("task_type") == "repaint"]
+    assert len(continuations) == 1, "exactly the chained take continues its predecessor"
+    chained = continuations[0]
+    assert chained["repaint_start"] == 6.0
+    assert chained["repaint_end"] == chained["duration_seconds"]
+    reference = Path(str(chained["reference_audio"]))
+    assert reference.name == "take_0001_src.wav"
+    assert not reference.exists(), "continuation source must be cleaned after render"
+    assert [take["take_id"] for take in takes] == ["take_0000", "take_0001"]
+
+
+def test_replay_converges_after_repaints(tmp_path: Path) -> None:
+    """A re-finalize no-ops once repaints cover the timeline.
+
+    Mutually-dissimilar captions force a repaint per segment; each
+    repaint backdates its coverage, so without the serving bound every
+    replay would repaint the early cursors again (unbounded ledger
+    growth). With it the dry walk keeps everywhere on replay.
+    """
+    from voyage import audio_finalize
+
+    captions = ("crimson brass thunderstorm", "silent glass glacier", "velvet neon circuitry")
+    segments = [_production_segment(tmp_path, index, 96, captions[index]) for index in range(3)]
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_stub_render,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 3, f"expected one take per shifted segment, got {len(takes)}"
+    assert [take["covers_from"] for take in takes] == [0.0, 0.0, 0.0]
+    assert not audio_finalize.deferred_render_pending(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+
+
 def test_ensure_deferred_takes_forwards_sample_rate_and_channels(tmp_path: Path) -> None:
     """Takes render at the run's audio rate/channels, not a hardcoded pair.
 
