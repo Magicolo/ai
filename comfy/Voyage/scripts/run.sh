@@ -21,7 +21,9 @@ cd "$(dirname "$0")/.."
 
 # Backend-aware defaults: the CUDA worker stacks (torch + LTXV/ACE)
 # only exist in voyage-video. Detect the requested backend from
-# --backend <name> / --backend=<name> (defaulting to ltx25 for `generate`);
+# --backend <name> / --backend=<name>; for `generate <NAME>` (positional
+# NAME, no flag) resolve output/<NAME>/manifest.json and read the stored
+# backend, falling back to ltx25 only when no manifest is readable;
 # for run-like commands with --run DIR, read it from DIR/manifest.json
 # (CLI-is-config: the manifest carries the effective config; no TOML).
 # Explicit VOYAGE_IMAGE / VOYAGE_GPUS always win.
@@ -58,8 +60,25 @@ for arg in "$@"; do
     prev_arg=""
   fi
 done
-if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
-  requested_backend="ltx25"
+# `generate` takes a positional run NAME (no --run/--name flag): resolve
+# output/<NAME> so the manifest sniff below selects the stored backend.
+# Without this every generate fell back to ltx25 and e.g. ltxv runs
+# landed in voyage-ltx, which lacks the ltx_video module (WORKER_ERROR
+# at worker start). Skips generate's value-flag arguments (--segments N,
+# --duration LEN) so a value is never mistaken for the NAME.
+if [ "${1:-}" = "generate" ] && [ "$#" -ge 2 ] \
+    && [ -z "${run_dir:-}" ] && [ -z "${requested_backend:-}" ]; then
+  skip_next=0
+  for arg in "${@:2}"; do
+    if [ "$skip_next" = "1" ]; then skip_next=0; continue; fi
+    case "$arg" in
+      --segments|--duration) skip_next=1 ;;
+      --segments=*|--duration=*|--verbose|--no-color|--quiet) ;;
+      -*) ;;
+      *) run_dir="output/$arg"; break ;;
+    esac
+  done
+  unset skip_next
 fi
 # Manifest sniff via the stdlib JSON parser: reads the video/audio/sfx
 # backends from the flat manifest root (the effective config IS the
@@ -76,6 +95,11 @@ if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
   requested_backend="$(RUN_DIR="$run_dir" python3 -c \
     'import json, os; cfg = json.load(open(os.path.join(os.environ["RUN_DIR"], "manifest.json"))); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
     2>/dev/null || true)"
+fi
+# No signal at all (bare `generate` with no NAME, or a NAME whose manifest
+# is missing/unreadable): historical default is the LTX stack.
+if [ -z "${requested_backend:-}" ] && [ "${1:-}" = "generate" ]; then
+  requested_backend="ltx25"
 fi
 needs_cuda=0
 # ltx25/ltx23 run the ComfyUI worker stack, which lives in voyage-ltx

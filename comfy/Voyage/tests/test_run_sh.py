@@ -197,3 +197,68 @@ def test_run_dir_with_ltx_manifest_selects_ltx_image(tmp_path: Path) -> None:
     selection = _dry_run(tmp_path, ["run", "--run", str(run_dir)], "absent")
     assert selection["image"] == "voyage-ltx:latest"
     assert selection["gpus"] == "--gpus all"
+
+
+def _stage_manifest(name: str, backend: str) -> Path:
+    """Stage output/<name>/manifest.json under the real tree (caller removes)."""
+    import json
+
+    staged = RUN_SH.parent.parent / "output" / name
+    staged.mkdir(parents=True, exist_ok=True)
+    staged.joinpath("manifest.json").write_text(
+        json.dumps({"video": {"backend": backend}}),
+        encoding="utf-8",
+    )
+    return staged
+
+
+@needs_bash
+def test_generate_positional_name_sniffs_ltxv_manifest(tmp_path: Path) -> None:
+    """Positional NAME resolves output/<name>: ltxv runs get the video image.
+
+    Regression: `generate crabz` (positional NAME, ltxv manifest) used to
+    fall back to ltx25 and land in voyage-ltx, which lacks the ltx_video
+    module (WORKER_ERROR at worker start). Value-flag arguments
+    (--segments N) must not be mistaken for the NAME either.
+    """
+    import shutil
+
+    staged = _stage_manifest("__run_sh_test_ltxv__", "ltxv")
+    try:
+        selection = _dry_run(tmp_path, ["generate", staged.name], "absent")
+        assert selection["image"] == "voyage-video:latest"
+        assert selection["gpus"] == "--gpus all"
+        flagged_dir = tmp_path / "flagged"
+        flagged_dir.mkdir()
+        flagged = _dry_run(flagged_dir, ["generate", "--segments", "12", staged.name], "absent")
+        assert flagged["image"] == "voyage-video:latest"
+        assert flagged["gpus"] == "--gpus all"
+        dur_dir = tmp_path / "dur"
+        dur_dir.mkdir()
+        dur = _dry_run(dur_dir, ["generate", "--duration", "30s", staged.name], "absent")
+        assert dur["image"] == "voyage-video:latest"
+        assert dur["gpus"] == "--gpus all"
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+@needs_bash
+def test_generate_positional_name_sniffs_ltx25_manifest(tmp_path: Path) -> None:
+    """Positional NAME with an ltx25 manifest keeps the ltx image."""
+    import shutil
+
+    staged = _stage_manifest("__run_sh_test_ltx25__", "ltx25")
+    try:
+        selection = _dry_run(tmp_path, ["generate", staged.name], "absent")
+        assert selection["image"] == "voyage-ltx:latest"
+        assert selection["gpus"] == "--gpus all"
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+@needs_bash
+def test_generate_unknown_name_falls_back_to_ltx(tmp_path: Path) -> None:
+    """Positional NAME with no readable manifest keeps the ltx default."""
+    selection = _dry_run(tmp_path, ["generate", "__run_sh_test_missing__"], "absent")
+    assert selection["image"] == "voyage-ltx:latest"
+    assert selection["gpus"] == "--gpus all"
