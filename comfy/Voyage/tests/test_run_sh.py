@@ -262,3 +262,31 @@ def test_generate_unknown_name_falls_back_to_ltx(tmp_path: Path) -> None:
     selection = _dry_run(tmp_path, ["generate", "__run_sh_test_missing__"], "absent")
     assert selection["image"] == "voyage-ltx:latest"
     assert selection["gpus"] == "--gpus all"
+
+
+@needs_bash
+def test_dry_run_reports_no_ltx_env_by_default(tmp_path: Path) -> None:
+    """Without LTX tuning vars the worker gets no extra environment."""
+    selection = _dry_run(tmp_path, ["generate", "--backend", "ltx25"], "present-ok")
+    assert selection["env"] == "none"
+
+
+@needs_bash
+def test_ltx_tuning_env_reaches_worker(tmp_path: Path) -> None:
+    """VOYAGE_LTX_* vars are forwarded into the worker container.
+
+    Regression: the strength/carry matrix was unrunnable because
+    `docker run` never forwarded the vars the workers validate —
+    `VOYAGE_LTX_STRENGTH=0.8 run.sh generate` silently rendered at 1.0.
+    Unset vars stay absent (empty `-e` would trip the fail-loud
+    validators); MPI-style indirect expansion needs bash, pinned here.
+    """
+    selection = _dry_run(
+        tmp_path,
+        ["generate", "--backend", "ltx25"],
+        "present-ok",
+        {"VOYAGE_LTX_STRENGTH": "0.8", "VOYAGE_LTX_CARRY": "17"},
+    )
+    assert "VOYAGE_LTX_STRENGTH=0.8" in selection["env"]
+    assert "VOYAGE_LTX_CARRY=17" in selection["env"]
+    assert "VOYAGE_LTX_FAST" not in selection["env"]

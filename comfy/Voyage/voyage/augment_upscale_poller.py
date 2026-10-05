@@ -63,13 +63,19 @@ class SegmentSource:
 
 @dataclass(frozen=True)
 class UpscalePollResult:
-    """Counts from one poll pass (advisory; the ledger is the truth)."""
+    """Counts from one poll pass (advisory; the ledger is the truth).
+
+    Frame counts are source frames (one per decoded input frame), so
+    upscale and interp legs share one comparable unit for progress bars.
+    """
 
     segments_seen: int
     segments_skipped: int
     chunks_done: int
     chunks_skipped: int
     partials_pruned: int
+    frames_done: int = 0
+    frames_skipped: int = 0
 
 
 def _manifest_source(segment_dir: Path) -> SegmentSource | None:
@@ -223,6 +229,8 @@ def upscale_poll_once(
     sources, skipped = committed_segment_sources(run_dir)
     chunks_done = 0
     chunks_skipped = 0
+    frames_done = 0
+    frames_skipped = 0
     pruned_total = 0
     for source in sources:
         plan_dir = plan_dir_for_segment(
@@ -268,6 +276,7 @@ def upscale_poll_once(
                 missing_set.add(index)
         missing.sort()
         chunks_skipped += len(indexes) - len(missing)
+        frames_skipped += sum(windows[index][1] for index in indexes if index not in missing_set)
         for index in missing:
             start, count = windows[index]
             output_dir = _chunk_output_dir(plan_dir, index)
@@ -330,12 +339,17 @@ def upscale_poll_once(
             append_chunk_record(ledger_path, key, stage=UPSCALE_STAGE, path=relative)
             records = load_chunk_ledger(ledger_path)
             chunks_done += 1
+            frames_done += count
             if on_chunk is not None:
                 on_chunk(source.segment_id, index, len(windows))
+            if on_chunk_frames is not None:
+                on_chunk_frames(source.segment_id, count)
     return UpscalePollResult(
         segments_seen=len(sources),
         segments_skipped=skipped,
         chunks_done=chunks_done,
         chunks_skipped=chunks_skipped,
         partials_pruned=pruned_total,
+        frames_done=frames_done,
+        frames_skipped=frames_skipped,
     )

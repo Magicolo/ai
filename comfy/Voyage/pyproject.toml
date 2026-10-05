@@ -114,6 +114,7 @@ ignore = [
 "voyage/model_registry.py" = ["S101", "F401"]
 "voyage/persistence.py" = ["RUF100"]
 "voyage/media.py" = ["T201"]
+"voyage/sfx_finalize.py" = ["T201"]
 "voyage/models_ensure.py" = ["BLE"]
 "voyage/workers/loop.py" = ["BLE", "T201"]
 "voyage/workers/director.py" = ["BLE", "TRY004", "TRY300", "RUF100", "T201"]

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,14 +44,33 @@ BACKGROUND_CHUNK_FRAMES = 32
 #: stagger as finalize: the legs share `cuda:1`, never co-resident).
 BACKGROUND_DEVICE_FALLBACK = "cuda:1"
 
-#: Minimum free VRAM (GiB) on the pre-warm device for a sweep to start.
-#: The llama director sidecar permanently holds ~5GB of the 6GB 2060, so
-#: an ungated sweep allocates torch tensors with ~13MB free and spams
-#: CUDACachingAllocator expandable-segments warnings (poualh 2026-10-04:
-#: 25x on device 1). Below this the pass is skipped — finalize covers the
-#: same ledger keys later. Unknown (no nvidia-smi / parse failure) allows
-#: the sweep: the pre-warm must never go quiet on an unprobable box.
+#: Minimum free VRAM (GiB) on the pre-warm device for the upscale
+#: sweep to start. SRVGGNetCompact peaks ~0.34 GiB (2060 probe: 58% with
+#: the llama sidecar resident), so 1.0 leaves comfortable headroom while
+#: letting upscale progress run alongside the director — the kaolin run
+#: showed every pass silently skipped at ~2.8 GiB free under the old
+#: single 3.0 floor for both legs.
+UPSCALE_MIN_FREE_GIB = 1.0
+
+#: Minimum free VRAM (GiB) on the pre-warm device for the interp sweep.
+#: FILM at 2x needs ~5.9 GiB alone, so it can never run alongside the
+#: resident llama sidecar on the 6 GB 2060 — interp waits for finalize
+#: (sidecar stopped, device free), and the post-commit report says so
+#: instead of staying silent. Unknown (no nvidia-smi / parse failure)
+#: allows the sweep: the pre-warm must never go quiet on an unprobable
+#: box.
 PREWARM_MIN_FREE_GIB = 3.0
+
+#: How long a notified pass waits for the director to go idle before
+#: giving up the pass. Prefetch decides hold `cuda:1` for ~10-30s, so a
+#: single-shot idle check at notify time loses the whole pass (kaolin:
+#: zero pre-warm work during either segment render — the notify landed
+#: while prefetch was in flight). 60s covers slow prefetches; past that
+#: the pass is recorded director-busy and the next commit notifies again.
+PREWARM_IDLE_WAIT_SECONDS = 60.0
+
+#: Poll interval inside the idle wait (also the stop-flag latency).
+PREWARM_IDLE_POLL_SECONDS = 1.0
 
 
 def device_free_gib(device: str) -> float | None:
@@ -108,7 +128,16 @@ class BackgroundPlan:
 
 @dataclass(frozen=True)
 class PrewarmResult:
-    """Counts from one pre-warm pass (advisory; the ledger is the truth)."""
+    """Counts from one pre-warm pass (advisory; the ledger is the truth).
+
+    Frame counts are source frames per leg; seconds are per-sweep wall
+    time (upscale sweep, then interp sweep — never co-resident).
+    `skip_reason` is empty when both legs swept: it names the leg the
+    VRAM guard held back (upscale or interp alone) or a busy-device pass
+    the idle wait gave up on. Moot passes (no plan) return None instead —
+    never a zero-count result — so the report can tell "nothing to do"
+    (silent) from "tried but held back" (one compact note).
+    """
 
     segments_seen: int
     upscale_chunks_done: int
@@ -116,6 +145,79 @@ class PrewarmResult:
     interp_chunks_done: int
     interp_chunks_skipped: int
     interp_chunks_waiting: int
+    upscale_frames_done: int = 0
+    interp_frames_done: int = 0
+    upscale_seconds: float = 0.0
+    interp_seconds: float = 0.0
+    skip_reason: str = ""
+
+
+PREWARM_NOTHING_LOUD_NOTE = "pre-warm did nothing — everything defers to finalize"
+"""Loud nothing-all-pass line (DESIGN §§59/140).
+
+A `prewarm_once` pass (or a whole generation run of passes) can do zero
+work — VRAM guards hold back both legs, or the director-busy idle wait
+gives up every pass — with only a per-leg `skip_reason` that the
+post-commit report surfaces once and moot (`None`) passes staying silent
+by design. That leaves the nothing-all-run case invisible on a compact
+console: the operator cannot tell "pre-warm helped" from "finalize will
+do everything". The loud line below names the outcome without gating on
+`--verbose`; the per-leg reason stays verbose-only detail.
+"""
+
+
+def prewarm_pass_did_nothing(result: PrewarmResult | None) -> bool:
+    """True when a finished pass rendered zero chunks and hit zero ledger entries.
+
+    Why a helper (DESIGN §140): the post-commit report must tell
+    "nothing to do" (moot `None` — knob off, no segments yet — silent by
+    design) from "tried but did nothing" (a real zero-count result —
+    loud). Only the latter returns True: every chunk counter (done +
+    skipped + waiting on both legs) and every frame counter is zero.
+    Skipped counts as activity (a ledger hit is useful work), so a pass
+    that skipped everything is NOT nothing — finalize still benefits.
+    """
+    if result is None:
+        return False
+    return (
+        result.upscale_chunks_done == 0
+        and result.upscale_chunks_skipped == 0
+        and result.interp_chunks_done == 0
+        and result.interp_chunks_skipped == 0
+        and result.interp_chunks_waiting == 0
+        and result.upscale_frames_done == 0
+        and result.interp_frames_done == 0
+    )
+
+
+def report_prewarm_pass(
+    result: PrewarmResult | None,
+    progress: Any,
+    *,
+    verbose: bool = False,
+) -> None:
+    """Emit the loud nothing line for a did-nothing pass (DESIGN §§59/140).
+
+    Why this exists: `prewarm_once` callers (and the supervisor
+    post-commit report — FOLLOW-UP: wire this helper into
+    `Supervisor._report_background_prewarm`, which is under concurrent
+    migration and intentionally untouched here) need one non-verbose-gated
+    `progress.note` when a full pass did nothing, so the operator learns
+    everything defers to finalize. Useful work (any chunk/frame activity)
+    and moot (`None`) passes stay silent. The per-leg `skip_reason` rides
+    a second line only when verbose (`--verbose` or an explicit
+    `verbose=True`), keeping the compact console to one line.
+    """
+    if progress is None:
+        return
+    if not prewarm_pass_did_nothing(result):
+        return
+    progress.note(PREWARM_NOTHING_LOUD_NOTE)
+    if result is None:  # Narrowing for mypy (unreachable: None never did nothing).
+        return
+    show_detail = verbose or bool(getattr(progress, "verbose", False))
+    if show_detail and result.skip_reason:
+        progress.note(f"pre-warm detail: {result.skip_reason}")
 
 
 def probe_segment_source(video_path: Path) -> tuple[int, int, float]:
@@ -220,31 +322,67 @@ def prewarm_once(
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    on_upscale_chunk: Callable[[str, int, int], None] | None = None,
+    on_upscale_frames: Callable[[str, int], None] | None = None,
+    on_interp_chunk: Callable[[str, int, int], None] | None = None,
+    on_interp_frames: Callable[[str, int], None] | None = None,
+    include_interp: bool = True,
 ) -> PrewarmResult | None:
-    """Run one upscale sweep + one interp sweep (staggered, `cuda:1`-only).
+    """Run one upscale sweep + (unless disabled) one interp sweep.
 
-    Returns None when pre-warm is moot (see `resolve_background_plan`),
-    when the device lacks `PREWARM_MIN_FREE_GIB` headroom (finalize covers
-    the same ledger keys later), or when `should_stop` fires between the
-    sweeps (lets `stop()` abandon a pass without racing a live CUDA sweep
-    at interpreter exit). Raises `MediaError` on a failed chunk
-    (fail-loud like finalize — the background thread catches it; direct
-    callers such as tests see it).
+    The generation-time driver passes `include_interp=False`: interp runs
+    only at finalize time, so the background never spends the 6GB card's
+    headroom on FILM (nor shows interp progress) during generation. Direct
+    callers (and their tests) keep the default True path.
+
+    Returns None when pre-warm is moot (see `resolve_background_plan`)
+    or when `should_stop` fires between the sweeps (lets `stop()` abandon
+    a pass without racing a live CUDA sweep at interpreter exit). Raises
+    `MediaError` on a failed chunk (fail-loud like finalize — the
+    background thread catches it; direct callers such as tests see it).
+
+    VRAM gating is per leg: the upscale sweep needs `UPSCALE_MIN_FREE_GIB`
+    (SRVGG fits beside the resident sidecar), the interp sweep re-probes
+    and needs `PREWARM_MIN_FREE_GIB` (FILM never fits beside it — interp
+    then waits for finalize). A held-back leg yields a zero-count result
+    carrying `skip_reason` instead of None, so the post-commit report can
+    say what waited and why; both legs held back means no poller runs at
+    all. Unknown free space stays fail-open on both legs.
+
+    The `on_*` callbacks forward to the pollers' `on_chunk` /
+    `on_chunk_frames` (fired per rendered chunk on the calling thread —
+    skipped chunks never fire, so pass-end ledger deltas stay the source
+    of truth for skipped frames). The background driver passes None
+    unless the generation loop supplies live callbacks; any callback must
+    never touch display code (it runs on the pre-warm thread — the main
+    thread drains them into progress bars).
     """
     plan = resolve_background_plan(run_dir, config)
     if plan is None:
-        return None
-    free_gib = device_free_gib(plan.device)
-    if free_gib is not None and free_gib < PREWARM_MIN_FREE_GIB:
         return None
     if upscale_poll_fn is None:
         from voyage.augment_upscale_poller import upscale_poll_once
 
         upscale_poll_fn = upscale_poll_once
-    if interp_poll_fn is None:
+    if interp_poll_fn is None and include_interp:
         from voyage.augment_interp_poller import interp_poll_once
 
         interp_poll_fn = interp_poll_once
+    upscale_free = device_free_gib(plan.device)
+    if upscale_free is not None and upscale_free < UPSCALE_MIN_FREE_GIB:
+        return PrewarmResult(
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            skip_reason=(
+                f"upscale skipped: {upscale_free:.1f} GiB free on {plan.device} < "
+                f"{UPSCALE_MIN_FREE_GIB:.1f} GiB needed"
+            ),
+        )
+    upscale_started = time.monotonic()
     upscale_result = upscale_poll_fn(
         run_dir,
         weights_path=plan.realesrgan_path,
@@ -257,30 +395,70 @@ def prewarm_once(
         device=plan.device,
         crf=plan.crf,
         preset=plan.preset,
+        on_chunk=on_upscale_chunk,
+        on_chunk_frames=on_upscale_frames,
     )
     if should_stop is not None and should_stop():
         return None
-    interp_result = interp_poll_fn(
-        run_dir,
-        weights_path=plan.film_path,
-        weights_key=plan.weights_key,
-        out_width=plan.out_width,
-        out_height=plan.out_height,
-        out_fps=plan.source_fps_key,
-        upscale_factor=plan.upscale_factor,
-        chunk_frames=BACKGROUND_CHUNK_FRAMES,
-        multiplier=plan.multiplier,
-        device=plan.device,
-        crf=plan.crf,
-        preset=plan.preset,
-    )
+    upscale_seconds = time.monotonic() - upscale_started
+    skip_reason = ""
+    interp_chunks_done = 0
+    interp_chunks_skipped = 0
+    interp_chunks_waiting = 0
+    interp_frames_done = 0
+    interp_seconds = 0.0
+    if not include_interp or interp_poll_fn is None:
+        # Generation-time path (or no interp poller): interp runs only at
+        # finalize time, so the background pass is upscale-only by design —
+        # never a skip, never interp progress during generation.
+        pass
+    elif (interp_free := device_free_gib(plan.device)) is not None and (
+        interp_free < PREWARM_MIN_FREE_GIB
+    ):
+        skip_reason = (
+            f"interp skipped: {interp_free:.1f} GiB free on {plan.device} < "
+            f"{PREWARM_MIN_FREE_GIB:.1f} GiB needed (waits for finalize)"
+        )
+        interp_chunks_done = 0
+        interp_chunks_skipped = 0
+        interp_chunks_waiting = 0
+        interp_frames_done = 0
+        interp_seconds = 0.0
+    else:
+        interp_started = time.monotonic()
+        interp_result = interp_poll_fn(
+            run_dir,
+            weights_path=plan.film_path,
+            weights_key=plan.weights_key,
+            out_width=plan.out_width,
+            out_height=plan.out_height,
+            out_fps=plan.source_fps_key,
+            upscale_factor=plan.upscale_factor,
+            chunk_frames=BACKGROUND_CHUNK_FRAMES,
+            multiplier=plan.multiplier,
+            device=plan.device,
+            crf=plan.crf,
+            preset=plan.preset,
+            on_chunk=on_interp_chunk,
+            on_chunk_frames=on_interp_frames,
+        )
+        interp_chunks_done = interp_result.chunks_done
+        interp_chunks_skipped = interp_result.chunks_skipped
+        interp_chunks_waiting = interp_result.chunks_waiting
+        interp_frames_done = interp_result.frames_done
+        interp_seconds = time.monotonic() - interp_started
     return PrewarmResult(
         segments_seen=upscale_result.segments_seen,
         upscale_chunks_done=upscale_result.chunks_done,
         upscale_chunks_skipped=upscale_result.chunks_skipped,
-        interp_chunks_done=interp_result.chunks_done,
-        interp_chunks_skipped=interp_result.chunks_skipped,
-        interp_chunks_waiting=interp_result.chunks_waiting,
+        interp_chunks_done=interp_chunks_done,
+        interp_chunks_skipped=interp_chunks_skipped,
+        interp_chunks_waiting=interp_chunks_waiting,
+        upscale_frames_done=upscale_result.frames_done,
+        interp_frames_done=interp_frames_done,
+        upscale_seconds=round(upscale_seconds, 3),
+        interp_seconds=round(interp_seconds, 3),
+        skip_reason=skip_reason,
     )
 
 
@@ -294,6 +472,14 @@ class BackgroundPrewarm:
     never runs while a prefetch decide occupies `cuda:1`). Failures are
     swallowed: a busy GPU, a torn segment, or a missing binary just means
     finalize does the work later.
+
+    The `on_upscale_*` callbacks (both None by default = today's silent
+    behavior) forward per-rendered-chunk upscale events on THIS thread —
+    they must never touch display code. The generation loop supplies
+    queue-appending callbacks and drains them into progress bars on the
+    main thread while the video render blocks. There are no interp
+    callbacks: interp runs only at finalize time, so the background pass
+    is upscale-only by design.
     """
 
     def __init__(
@@ -303,23 +489,41 @@ class BackgroundPrewarm:
         *,
         prewarm_fn: Callable[[Path, Any], PrewarmResult | None] | None = None,
         idle_fn: Callable[[], bool] | None = None,
+        on_upscale_chunk: Callable[[str, int, int], None] | None = None,
+        on_upscale_frames: Callable[[str, int], None] | None = None,
     ) -> None:
         self._run_dir = run_dir
         self._config = config
-        self._prewarm_fn = prewarm_fn or (
-            lambda run_dir, config: prewarm_once(run_dir, config, should_stop=self._is_stopping)
-        )
+        if prewarm_fn is not None:
+            # Test seam: custom drivers own the whole pass, so live
+            # callbacks cannot flow through them (documented, not
+            # forwarded — tests asserting callbacks use the default path
+            # with fake poll fns).
+            self._prewarm_fn = prewarm_fn
+        else:
+            self._prewarm_fn = lambda run_dir, config: prewarm_once(
+                run_dir,
+                config,
+                should_stop=self._is_stopping,
+                on_upscale_chunk=on_upscale_chunk,
+                on_upscale_frames=on_upscale_frames,
+                include_interp=False,
+            )
         self._idle_fn = idle_fn or (lambda: True)
         self._condition = threading.Condition()
         self._pending = False
         self._stopping = False
         self._thread: threading.Thread | None = None
-        # Cumulative (passes, upscale chunks, interp chunks) ledgered by
-        # finished passes — the generation loop reads this after each
-        # commit and reports newly ledgered work on the console (the
-        # background thread itself never touches display code). One
-        # tuple store keeps the read GIL-atomic.
-        self._ledgered: tuple[int, int, int] = (0, 0, 0)
+        # Cumulative ledgered work finished by passes so far — the
+        # generation loop reads this after each commit and reports newly
+        # ledgered work on the console (the background thread itself never
+        # touches display code). (passes, upscale chunks, interp chunks,
+        # upscale frames, interp frames, upscale seconds, interp seconds.)
+        # One tuple store keeps the read GIL-atomic.
+        self._ledgered: tuple[int, int, int, int, int, float, float] = (0, 0, 0, 0, 0, 0.0, 0.0)
+        # Latest finished pass (for --verbose sweep lines); None before
+        # the first pass or when the latest pass was moot/skipped.
+        self._last_result: PrewarmResult | None = None
 
     def start(self) -> None:
         """Spawn the daemon thread (idempotent; an initial sweep is queued)."""
@@ -352,8 +556,83 @@ class BackgroundPrewarm:
 
         Main-thread read for the post-commit pre-warm report; idle or
         moot passes still count (their result holds no new chunks).
+        Kept chunk-shaped for older readers — prefer `ledgered_frames()`.
+        """
+        passes, up, ip, _upf, _ipf, _ups, _ips = self._ledgered
+        return (passes, up, ip)
+
+    def ledgered_frames(self) -> tuple[int, int, int, int, int, float, float]:
+        """Cumulative (passes, up chunks, ip chunks, up frames, ip frames, up s, ip s).
+
+        Main-thread read for the frame-unit pre-warm report and the
+        persistent model-pass bar. Frame counts are source frames per
+        leg, so both legs share one comparable unit.
         """
         return self._ledgered
+
+    @property
+    def last_result(self) -> PrewarmResult | None:
+        """Latest finished pass (None before the first pass or when moot).
+
+        Main-thread read for --verbose sweep lines. GIL-atomic attribute
+        read; the background thread only ever replaces the object.
+        """
+        return self._last_result
+
+    def did_nothing_all_run(self) -> bool:
+        """True when every finished pass did nothing (DESIGN §140).
+
+        Why cumulative, not per-pass: a single held-back pass already
+        reports once via `skip_reason`, but a run where VRAM guards or
+        the director-busy deadline held back EVERY pass looks identical
+        to "pre-warm helped" on a compact console. Cumulative chunk and
+        frame counters stay zero while at least one real (non-`None`)
+        pass finished — moot-only runs (`_last_result is None`: knob off,
+        no segments) stay silent by design, since nothing was demanded.
+        GIL-atomic tuple read; main-thread only.
+        """
+        passes, upscale_chunks, interpolation_chunks = self.ledgered_totals()
+        _passes, _up, _ip, upscale_frames, interpolation_frames, _ups, _ips = self._ledgered
+        if passes <= 0:
+            return False
+        if (
+            upscale_chunks != 0
+            or interpolation_chunks != 0
+            or upscale_frames != 0
+            or interpolation_frames != 0
+        ):
+            return False
+        last = self._last_result
+        if last is None:
+            return False
+        return prewarm_pass_did_nothing(last)
+
+    def report_at_stop(
+        self,
+        progress: Any,
+        *,
+        verbose: bool = False,
+    ) -> None:
+        """Emit the loud nothing-all-run line when pre-warm never helped.
+
+        Why a stop report (DESIGN §§59/140): per-pass notes describe one
+        sweep, but the operator's real question at the end of generation
+        is "did pre-warm help at all?" — when `did_nothing_all_run`
+        holds, one non-verbose-gated `progress.note` says everything
+        defers to finalize. The per-leg reason stays verbose-only.
+        FOLLOW-UP: wire this into the supervisor stop path (under
+        concurrent migration, intentionally untouched here) — today it
+        is a background-module helper its future caller owns.
+        """
+        if progress is None:
+            return
+        if not self.did_nothing_all_run():
+            return
+        progress.note(PREWARM_NOTHING_LOUD_NOTE)
+        last = self._last_result
+        show_detail = verbose or bool(getattr(progress, "verbose", False))
+        if show_detail and last is not None and last.skip_reason:
+            progress.note(f"pre-warm detail: {last.skip_reason}")
 
     def _is_stopping(self) -> bool:
         """Stop flag read for the between-sweeps abandon check (GIL-atomic)."""
@@ -378,13 +657,48 @@ class BackgroundPrewarm:
                 if self._stopping:
                     return
                 self._pending = False
+            if not self._idle_fn():
+                # The notify landed while the director holds the device
+                # (prefetch decide) — wait for it to go idle instead of
+                # losing the whole pass on a single-shot check. Past the
+                # deadline the pass is recorded director-busy (a zero-count
+                # result, so the report says so once) and the next commit
+                # notifies again.
+                deadline = time.monotonic() + PREWARM_IDLE_WAIT_SECONDS
+                while not self._stopping:
+                    if self._idle_fn():
+                        break
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(PREWARM_IDLE_POLL_SECONDS)
+                if self._stopping:
+                    return
+                if not self._idle_fn():
+                    self._last_result = PrewarmResult(
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        skip_reason=(
+                            f"director busy past {PREWARM_IDLE_WAIT_SECONDS:.0f}s idle wait"
+                        ),
+                    )
+                    passes, up, ip, upf, ipf, ups, ips = self._ledgered
+                    self._ledgered = (passes + 1, up, ip, upf, ipf, ups, ips)
+                    continue
             try:
-                if self._idle_fn():
-                    result = self._prewarm_fn(self._run_dir, self._config)
-                    passes, up, ip = self._ledgered
-                    if result is not None:
-                        up += result.upscale_chunks_done
-                        ip += result.interp_chunks_done
-                    self._ledgered = (passes + 1, up, ip)
+                result = self._prewarm_fn(self._run_dir, self._config)
+                passes, up, ip, upf, ipf, ups, ips = self._ledgered
+                if result is not None:
+                    up += result.upscale_chunks_done
+                    ip += result.interp_chunks_done
+                    upf += result.upscale_frames_done
+                    ipf += result.interp_frames_done
+                    ups += result.upscale_seconds
+                    ips += result.interp_seconds
+                    self._last_result = result
+                self._ledgered = (passes + 1, up, ip, upf, ipf, ups, ips)
             except Exception:  # noqa: BLE001 - pre-warm must never fail generation
                 continue

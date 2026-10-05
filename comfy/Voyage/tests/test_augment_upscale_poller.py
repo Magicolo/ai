@@ -149,3 +149,23 @@ def test_unusable_segments_skipped(tmp_path: Path) -> None:
     assert result.segments_seen == 1
     assert result.segments_skipped == 1
     assert result.chunks_done == 1
+
+
+def test_poll_result_counts_source_frames(tmp_path: Path) -> None:
+    """Rendered + skipped chunks report exact source-frame counts."""
+    _make_segment(tmp_path, "000000", frames=10)
+    seen: list[tuple[str, int]] = []
+
+    def _collect(segment_id: str, frames: int) -> None:
+        seen.append((segment_id, frames))
+
+    result = upscale_poll_once(tmp_path, **_poll_kwargs(on_chunk_frames=_collect))
+    # 10 source frames over chunk_frames=4 → windows of 4/4/2.
+    assert result.chunks_done == 3
+    assert result.frames_done == 10
+    assert result.frames_skipped == 0
+    assert seen == [("000000", 4), ("000000", 4), ("000000", 2)]
+    rerun = upscale_poll_once(tmp_path, **_poll_kwargs())
+    assert rerun.chunks_done == 0
+    assert rerun.frames_done == 0
+    assert rerun.frames_skipped == 10

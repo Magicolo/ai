@@ -77,8 +77,8 @@ def _done_info() -> dict[str, Any]:
     }
 
 
-def test_default_console_shows_video_and_audio_prompts() -> None:
-    """Default output includes the full video + audio prompts per segment."""
+def test_default_console_hides_prompts_behind_verbose() -> None:
+    """Default output is a compact header; full prompts need --verbose."""
     stream = io.StringIO()
     console = VoyageConsole(stream=stream)
     console.segment_start(3, "000003")
@@ -87,10 +87,15 @@ def test_default_console_shows_video_and_audio_prompts() -> None:
     out = stream.getvalue()
     assert "SEGMENT 000003" in out
     assert "neon reef at dusk" in out
-    assert "a neon reef at dusk, glowing polyps" in out
-    assert "slow ambient electronic composition" in out
     assert "120 BPM" in out
     assert "take_000000" in out
+    assert "a neon reef at dusk, glowing polyps" not in out
+    assert "slow ambient electronic composition" not in out
+    verbose_stream = io.StringIO()
+    VoyageConsole(verbose=True, stream=verbose_stream).segment_plan(_plan_info())
+    verbose_out = verbose_stream.getvalue()
+    assert "a neon reef at dusk, glowing polyps" in verbose_out
+    assert "slow ambient electronic composition" in verbose_out
 
 
 def test_deferred_done_shows_no_take_with_action() -> None:
@@ -386,7 +391,7 @@ def test_render_sfx_bed_reports_window_progress(
 def test_rich_segment_progress_delegates() -> None:
     """The supervisor sink forwards all four calls to the console."""
     stream = io.StringIO()
-    progress = RichSegmentProgress(VoyageConsole(stream=stream))
+    progress = RichSegmentProgress(VoyageConsole(verbose=True, stream=stream))
     progress.segment_start(3, "000003")
     stage: AbstractContextManager[Any] = progress.stage("video", "fake")
     with stage:
@@ -399,6 +404,24 @@ def test_rich_segment_progress_delegates() -> None:
     assert "slow ambient electronic composition" in out
 
 
+class _RecordingBar:
+    """Test bar tracker recording advance/total/extra."""
+
+    def __init__(self) -> None:
+        self.updates: list[int] = []
+        self.totals: list[int] = []
+        self.extra: str | None = None
+
+    def update(self, advance: int = 1) -> None:
+        self.updates.append(advance)
+
+    def set_total(self, total: int) -> None:
+        self.totals.append(total)
+
+    def set_extra(self, extra: str) -> None:
+        self.extra = extra
+
+
 class _RecordingProgress:
     """Test sink recording every supervisor progress call."""
 
@@ -408,6 +431,21 @@ class _RecordingProgress:
         self.plans: list[dict[str, Any]] = []
         self.dones: list[dict[str, Any]] = []
         self.notes: list[str] = []
+        self.bars: list[tuple[str, _RecordingBar]] = []
+        self.verbose = False
+
+    def bar(self, label: str, total: int | None = None) -> AbstractContextManager[Any]:
+        from contextlib import contextmanager
+
+        del total
+        tracker = _RecordingBar()
+        self.bars.append((label, tracker))
+
+        @contextmanager
+        def _stay_open():  # type: ignore[no-untyped-def]
+            yield tracker
+
+        return _stay_open()
 
     def segment_start(self, number: int, segment_id: str) -> None:
         self.starts.append((number, segment_id))
@@ -492,14 +530,13 @@ def _configure_fake_console_run(name: str = "console", segments: str = "1") -> N
 def test_run_cli_shows_segment_prompts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`voyage generate` prints the segment header with prompts by default."""
+    """`voyage generate` prints a compact segment header by default."""
     monkeypatch.chdir(tmp_path)
     _configure_fake_console_run()
     assert main(["generate", "console"]) == 0
     out = capsys.readouterr().out
     assert "SEGMENT 000000" in out
-    assert "prompt" in out
-    assert "music:" in out
+    assert "music:" not in out
 
 
 def test_run_cli_accepts_verbose_and_no_color(
@@ -509,7 +546,9 @@ def test_run_cli_accepts_verbose_and_no_color(
     monkeypatch.chdir(tmp_path)
     _configure_fake_console_run()
     assert main(["generate", "console", "--verbose"]) == 0
-    assert "seeds:" in capsys.readouterr().out
+    verbose_out = capsys.readouterr().out
+    assert "seeds:" in verbose_out
+    assert "music:" in verbose_out
     _configure_fake_console_run(segments="2")
     assert main(["generate", "console", "--no-color"]) == 0
     assert "SEGMENT 000001" in capsys.readouterr().out
@@ -533,10 +572,89 @@ def test_note_silent_when_quiet() -> None:
     assert stream.getvalue() == ""
 
 
-def test_prewarm_report_announces_only_new_chunks() -> None:
-    """Post-commit report: deltas only, silent on idle, reset on restart."""
+def _prewarm_supervisor(tmp_path: Path, sink: _RecordingProgress) -> Supervisor:
+    """Supervisor double with just enough state for the pre-warm report."""
+    from types import SimpleNamespace
+
+    supervisor = Supervisor.__new__(Supervisor)
+    supervisor._background = None
+    supervisor._progress = sink
+    config: Any = SimpleNamespace(augment=SimpleNamespace(upscale=2, interpolate=2))
+    supervisor._config = config
+    supervisor._run_dir = tmp_path / "no-state-here"
+    supervisor._reported_prewarm = (None, 0, 0, 0, 0, 0.0, 0.0)
+    supervisor._model_pass_bar = None
+    supervisor._model_pass_tracker = None
+    return supervisor
+
+
+def test_prewarm_report_announces_new_frames_with_seconds(tmp_path: Path) -> None:
+    """Post-commit report: frame deltas with per-leg seconds, silent on idle."""
+    from voyage.augment_background import PrewarmResult
 
     class _Driver:
+        def __init__(self) -> None:
+            self.ledger: tuple[int, int, int, int, int, float, float] = (
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                0.0,
+            )
+            self.result: Any = None
+
+        def ledgered_frames(self):  # type: ignore[no-untyped-def]
+            return self.ledger
+
+        @property
+        def last_result(self):  # type: ignore[no-untyped-def]
+            return self.result
+
+    sink = _RecordingProgress()
+    supervisor = _prewarm_supervisor(tmp_path, sink)
+    # No driver yet: silent, no crash.
+    supervisor._report_background_prewarm()
+    assert sink.notes == [] and sink.bars == []
+    driver = _Driver()
+    supervisor._background = driver
+    supervisor._report_background_prewarm()
+    assert sink.notes == []
+    driver.ledger = (1, 10, 8, 96, 64, 12.5, 9.0)
+    supervisor._report_background_prewarm()
+    assert sink.notes == [
+        "pre-warm ledgered +96f upscale in 12.5s, +64f interp in 9.0s (total 96/64f)"
+    ]
+    # Persistent bar opened once; upscale frames advanced through it (interp
+    # renders at finalize, never in the generation pre-warm).
+    assert [label for label, _tracker in sink.bars] == ["model-pass frames"]
+    _label, tracker = sink.bars[0]
+    assert tracker.updates == [96]
+    # Nothing new since the last report: silent.
+    supervisor._report_background_prewarm()
+    assert len(sink.notes) == 1
+    # A restarted driver resets its totals: baseline resets, full delta shown.
+    replacement = _Driver()
+    replacement.ledger = (1, 5, 0, 32, 0, 4.0, 0.0)
+    supervisor._background = replacement
+    supervisor._report_background_prewarm()
+    assert sink.notes[-1] == "pre-warm ledgered +32f upscale in 4.0s (total 32/0f)"
+    # Verbose adds the latest sweep breakdown (object-identity deduped).
+    sink.verbose = True
+    replacement.result = PrewarmResult(1, 5, 0, 3, 0, 0, 32, 24, 4.0, 6.0)
+    replacement.ledger = (2, 8, 6, 64, 24, 9.0, 12.0)
+    supervisor._report_background_prewarm()
+    assert sink.notes[-1] == ("pre-warm sweep: 1 segments, upscale 32f in 4.0s, interp 24f in 6.0s")
+    before = len(sink.notes)
+    supervisor._report_background_prewarm()
+    assert len(sink.notes) == before  # same result object: no repeat
+
+
+def test_prewarm_report_tolerates_legacy_chunk_only_drivers(tmp_path: Path) -> None:
+    """Drivers without frame accounting never break the report (stay silent)."""
+
+    class _LegacyDriver:
         def __init__(self) -> None:
             self.totals: tuple[int, int, int] = (0, 0, 0)
 
@@ -544,26 +662,12 @@ def test_prewarm_report_announces_only_new_chunks() -> None:
             return self.totals
 
     sink = _RecordingProgress()
-    supervisor = Supervisor.__new__(Supervisor)
-    supervisor._background = None
-    supervisor._progress = sink
-    supervisor._reported_prewarm = (None, 0, 0)
-    # No driver yet: silent, no crash.
-    supervisor._report_background_prewarm()
-    assert sink.notes == []
-    driver = _Driver()
+    supervisor = _prewarm_supervisor(tmp_path, sink)
+    driver = _LegacyDriver()
     supervisor._background = driver
     supervisor._report_background_prewarm()
     assert sink.notes == []
     driver.totals = (1, 2, 3)
     supervisor._report_background_prewarm()
-    assert sink.notes == ["pre-warm ledgered +2 upscale/+3 interp chunks"]
-    # Nothing new since the last report: silent.
-    supervisor._report_background_prewarm()
-    assert len(sink.notes) == 1
-    # A restarted driver resets its totals: baseline resets, full delta shown.
-    replacement = _Driver()
-    replacement.totals = (1, 5, 0)
-    supervisor._background = replacement
-    supervisor._report_background_prewarm()
-    assert sink.notes[-1] == "pre-warm ledgered +5 upscale chunks"
+    assert sink.notes == []  # chunk counts alone no longer report
+    assert sink.bars == []

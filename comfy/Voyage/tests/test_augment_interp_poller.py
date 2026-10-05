@@ -199,3 +199,34 @@ def test_single_frame_chunk_passes_through(tmp_path: Path) -> None:
     interp_records = [record for record in records if record["stage"] == STAGE_INTERPOLATED]
     assert len(interp_records) == 1
     assert interp_records[0]["expected_frames"] == 1
+
+
+def test_interp_result_counts_source_frames_not_output_frames(tmp_path: Path) -> None:
+    """Interp frame counts stay in source frames (multiplier excluded)."""
+    from voyage.augment_upscale_poller import upscale_poll_once
+
+    _make_segment(tmp_path, frames=10)
+    upscale_poll_once(
+        tmp_path,
+        weights_path=Path("/models/realesrgan/realesr-animevideov3.pth"),
+        weights_key="weights-abc",
+        out_width=1216,
+        out_height=704,
+        out_fps=24,
+        chunk_frames=4,
+        decode_fn=_stub_decode,
+        upscale_fn=_stub_upscale,
+    )
+    seen: list[tuple[str, int]] = []
+
+    def _collect(segment_id: str, frames: int) -> None:
+        seen.append((segment_id, frames))
+
+    result = interp_poll_once(tmp_path, **_interp_kwargs(on_chunk_frames=_collect))
+    # 10 source frames over chunk_frames=4 → 4/4/2 in, never the ×4 outputs.
+    assert result.chunks_done == 3
+    assert result.frames_done == 10
+    assert seen == [("000000", 4), ("000000", 4), ("000000", 2)]
+    rerun = interp_poll_once(tmp_path, **_interp_kwargs())
+    assert rerun.frames_done == 0
+    assert rerun.frames_skipped == 10

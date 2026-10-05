@@ -21,6 +21,8 @@ import json
 import math
 import os
 import re
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -50,6 +52,13 @@ SFX_WINDOW_SECONDS = 8.0
 
 SFX_WINDOW_OVERLAP = 1.0
 """Overlap between consecutive windows, killed by manual fades on join."""
+
+SFX_ORPHAN_ADOPT_TOLERANCE = 0.05
+"""Max |probed - requested| seconds for adopting a ledger-less stem.
+
+Stems orphaned by a killed batch (ledger used to append only after the
+pool joined) are adopted when their probed duration matches the current
+plan window this closely; anything further off re-renders instead."""
 
 MIN_SFX_WINDOW_SECONDS = 1.0
 """Shortest renderable window: below ~0.64 s the sync branch yields fewer
@@ -314,9 +323,11 @@ def append_sfx_window(
 
     File fsync persists content; the directory sync persists the namespace
     entry (issue 101 twin of `append_take`, in-tree contract in
-    `voyage/atomic.py`). Callers must serialize appends: `render_sfx_bed`
-    collects worker results and appends in plan order after the pool joins,
-    so the ledger is deterministic and never interleaved (issue 054).
+    `voyage/atomic.py`). Appends are lock-guarded per window from the
+    render path, so a kill/cancel/failure can never orphan a completed
+    stem: the line lands as soon as its window completes. Ledger order is
+    completion order and irrelevant — resume reads key by window_id and
+    validate dedupes last-wins (issue 054).
     """
     ledger.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -580,6 +591,59 @@ def render_sfx_bed(
     sfx_dir.mkdir(parents=True, exist_ok=True)
     _prune_stale_partials(sfx_dir)
     existing = {record["window_id"]: record for record in load_sfx_ledger(ledger)}
+    ledger_timeline = (
+        conditioning_timeline if conditioning_timeline is not None else timeline_seconds
+    )
+    ledger_lock = threading.Lock()
+    # Orphan-stem adoption (SFX resume): batches killed before the old
+    # serial-join append left completed stems with no ledger lines. Adopt
+    # stem files that match the current plan identity — window in plan, no
+    # ledger line yet, file present with a probed duration within tolerance
+    # of the request — and ledger them under the current conditioning
+    # source, so a rerun heals instead of re-rendering. Each adoption is
+    # logged loudly; anything not matching re-renders through the normal
+    # path below.
+    for adopt_index, adopt_window in enumerate(windows):
+        if adopt_window.window_id in existing:
+            continue
+        orphan = sfx_dir / f"{adopt_window.window_id}.wav"
+        if not orphan.exists():
+            continue
+        try:
+            probed_duration = _audio_duration_seconds(orphan)
+        except Exception:  # noqa: BLE001 - unreadable orphan stem re-renders below; adoption must never fail finalize
+            continue
+        if abs(probed_duration - adopt_window.duration) > SFX_ORPHAN_ADOPT_TOLERANCE:
+            continue
+        adopt_size = sizes[adopt_index % num_workers]
+        adopt_stored = f"audio/{SFX_STEMS_DIRNAME}/{adopt_window.window_id}.wav"
+        append_sfx_window(
+            ledger,
+            adopt_window,
+            adopt_stored,
+            adopt_size,
+            probed_duration=probed_duration,
+            conditioning_source=conditioning_source,
+            conditioning_timeline=ledger_timeline,
+        )
+        print(
+            f"sfx orphan adopted: {adopt_window.window_id} "
+            f"(no ledger line, stem {probed_duration:.3f}s ~= request "
+            f"{adopt_window.duration:.3f}s)",
+            file=sys.stderr,
+        )
+        existing[adopt_window.window_id] = {
+            "window_id": adopt_window.window_id,
+            "start": adopt_window.start,
+            "duration": adopt_window.duration,
+            "caption": adopt_window.caption,
+            "seed": adopt_window.seed,
+            "path": adopt_stored,
+            "model_size": adopt_size,
+            "conditioning_source": conditioning_source,
+            "probed_duration": probed_duration,
+            "conditioning_timeline": ledger_timeline,
+        }
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     stems: list[Path] = []
     workers: list[Any] = []
@@ -605,17 +669,16 @@ def render_sfx_bed(
                 workers.append(worker)
 
         def _render_one(index: int, window: SfxWindow) -> _RenderedWindow:
-            """Render one window; ledger append is deferred to the serial join (054).
+            """Render one window; the ledger line lands as it completes.
 
-            Returns a `_RenderedWindow` whose `logged` is the request
-            window to ledger-append (or None on a cache hit) and whose
-            `probed` is the stem file's probed duration (probed on both
-            paths so the join reuses it). Stems land via atomic replace in
-            the worker threads
-            (distinct files, safe in parallel); the ledger itself is
-            appended serially in plan order after the pool joins, so two
-            workers can never interleave lines or race the order. No
-            threading.Lock needed by construction.
+            Returns a `_RenderedWindow` whose `logged` is always None (the
+            line is already durable by return time) and whose `probed` is
+            the stem file's probed duration (probed on both paths so the
+            join reuses it). Stems land via atomic replace in the worker
+            threads (distinct files, safe in parallel); the ledger append
+            is lock-guarded, and order is irrelevant — resume reads key by
+            window_id and validate dedupes last-wins. A kill/cancel/failure
+            later in the batch can never orphan this window.
             """
             stem = sfx_dir / f"{window.window_id}.wav"
             stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}.wav"
@@ -664,7 +727,20 @@ def render_sfx_bed(
             # authoritative: backends echo the request or report yielded
             # frames, while the file is what the join consumes.
             probed = _audio_duration_seconds(stem)
-            return _RenderedWindow(stem, window, stored, sizes[slot], probed)
+            # Durable per-window append (SFX resume): the line lands under a
+            # lock as soon as this window completes, so a kill, a cancel, or
+            # a sibling window's failure can never orphan it.
+            with ledger_lock:
+                append_sfx_window(
+                    ledger,
+                    window,
+                    stored,
+                    sizes[slot],
+                    probed_duration=probed,
+                    conditioning_source=conditioning_source,
+                    conditioning_timeline=ledger_timeline,
+                )
+            return _RenderedWindow(stem, None, "", "", probed)
 
         with optional_bar(progress, "sfx windows", total=len(windows)) as tracker:
             if num_workers == 1:
@@ -681,20 +757,7 @@ def render_sfx_bed(
                         if tracker is not None:
                             tracker.update()
         stems = []
-        ledger_timeline = (
-            conditioning_timeline if conditioning_timeline is not None else timeline_seconds
-        )
         for row in pending:
-            if row.logged is not None:
-                append_sfx_window(
-                    ledger,
-                    row.logged,
-                    row.stored,
-                    row.model_size,
-                    probed_duration=row.probed,
-                    conditioning_source=conditioning_source,
-                    conditioning_timeline=ledger_timeline,
-                )
             stems.append(row.stem)
     finally:
         for worker in workers:

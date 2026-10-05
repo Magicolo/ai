@@ -532,3 +532,107 @@ def test_finalize_sfx_pass_emits_timing_metric(tmp_path: Path) -> None:
     assert timed[0]["sfx_pass_s"] >= 0.0
     assert timed[0]["windows"] == 1
     assert timed[0]["backend"] == "fake"
+
+
+def _write_silence_wav(path: Path, duration: float) -> None:
+    import wave
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = max(1, int(48000 * duration))
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(48000)
+        wav.writeframes(b"\0" * frames * 4)
+
+
+class _FailOnWindowSfxWorker(_NestedResultSfxWorker):
+    """Fails one window (kill/cancel mid-batch simulation)."""
+
+    fail_on = "w0001"
+
+    def call(self, op: str, payload: dict[str, object]) -> dict[str, object]:
+        if op == "generate_sfx" and payload.get("window_id") == self.fail_on:
+            raise RuntimeError("simulated window failure")
+        return super().call(op, payload)
+
+
+def test_failed_batch_keeps_completed_window_ledger_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch dying mid-pool keeps the finished windows' ledger lines."""
+    from voyage.sfx_finalize import load_sfx_ledger, render_sfx_bed
+
+    monkeypatch.setattr("voyage.rpc.SubprocessWorker", _FailOnWindowSfxWorker)
+    run_dir = tmp_path / "run"
+    final_video = tmp_path / "final.mp4"
+    final_video.write_bytes(b"fake-video")
+    with pytest.raises(RuntimeError, match="simulated window failure"):
+        render_sfx_bed(
+            run_dir,
+            final_video,
+            20.0,
+            [(0.0, 20.0, "rain")],
+            tmp_path,
+            "fake",
+            "/models",
+            "cpu",
+            "small_44k",
+            0,
+            48000,
+            2,
+            1,
+        )
+    records = load_sfx_ledger(run_dir / "audio" / "sfx" / "sfx.jsonl")
+    assert [record["window_id"] for record in records] == ["w0000"]
+    assert (run_dir / "audio" / "sfx" / "w0000.wav").exists()
+
+
+_COUNTED_SFX_CALLS: list[str] = []
+
+
+class _CountingSfxWorker(_NestedResultSfxWorker):
+    """Records every generate_sfx window_id (re-render detection)."""
+
+    def call(self, op: str, payload: dict[str, object]) -> dict[str, object]:
+        if op == "generate_sfx":
+            _COUNTED_SFX_CALLS.append(str(payload.get("window_id")))
+        return super().call(op, payload)
+
+
+def test_orphan_stem_adopted_without_rerender(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ledger-less stem matching the plan is adopted, not re-rendered."""
+    from voyage.sfx_finalize import load_sfx_ledger, render_sfx_bed
+
+    _COUNTED_SFX_CALLS.clear()
+    monkeypatch.setattr("voyage.rpc.SubprocessWorker", _CountingSfxWorker)
+    run_dir = tmp_path / "run"
+    final_video = tmp_path / "final.mp4"
+    final_video.write_bytes(b"fake-video")
+    _write_silence_wav(run_dir / "audio" / "sfx" / "w0000.wav", 8.0)
+    args: list[object] = [
+        run_dir,
+        final_video,
+        20.0,
+        [(0.0, 20.0, "rain")],
+        tmp_path,
+        "fake",
+        "/models",
+        "cpu",
+        "small_44k",
+        0,
+        48000,
+        2,
+        1,
+    ]
+    render_sfx_bed(*args)  # type: ignore[arg-type]
+    assert "w0000" not in _COUNTED_SFX_CALLS
+    assert sorted(_COUNTED_SFX_CALLS) == ["w0001", "w0002"]
+    records = load_sfx_ledger(run_dir / "audio" / "sfx" / "sfx.jsonl")
+    assert sorted(record["window_id"] for record in records) == ["w0000", "w0001", "w0002"]
+    # A second run is a full cache-hit no-op (the adoption reads as a hit).
+    _COUNTED_SFX_CALLS.clear()
+    render_sfx_bed(*args)  # type: ignore[arg-type]
+    assert _COUNTED_SFX_CALLS == []

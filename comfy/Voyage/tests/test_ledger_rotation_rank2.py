@@ -58,7 +58,15 @@ def test_054_validate_is_order_insensitive(tmp_path: Path) -> None:
 def test_054_two_workers_append_in_window_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Slow-first worker must not race the ledger: serial append in plan order."""
+    """Slow-first worker appends on completion: both lines land whole, plan order not required.
+
+    Durability-first contract (SFX resume fix): each window's ledger line is
+    appended as that window completes, so a kill mid-batch keeps completed
+    lines instead of orphaning them. Completion order under threads is
+    therefore plan-order-independent — consumers (existing-by-window_id,
+    last-wins dedupe, order-insensitive validate) never depend on line order.
+    This test pins the race-safety half: both lines land whole and parse.
+    """
     from voyage import sfx_finalize as finalize
     from voyage.sfx_finalize import load_sfx_ledger, render_sfx_bed
 
@@ -113,7 +121,7 @@ def test_054_two_workers_append_in_window_order(
     )
     assert bed.exists()
     records = load_sfx_ledger(run_dir / "audio" / "sfx" / "sfx.jsonl")
-    assert [record["window_id"] for record in records] == ["w0000", "w0001"]
+    assert sorted(record["window_id"] for record in records) == ["w0000", "w0001"]
 
 
 def test_054_concurrent_appends_all_parse(tmp_path: Path) -> None:

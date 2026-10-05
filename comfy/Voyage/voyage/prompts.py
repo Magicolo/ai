@@ -81,6 +81,26 @@ _MODERATE_MOTION_CUES = (
     "cruising",
 )
 
+# Calm/still cues (Track C, 2026-10-05): an explicit calm request must win
+# over the charter band AND over moderate cues. The ps-calm probe put
+# "calm static composition, barely drifting" in the style string yet the
+# tail still read "moderate continuous camera movement" — two compounding
+# causes: (1) cue scanning saw only the middle-layer text, never the
+# style string, so the calm words were invisible; (2) "drifting" is a
+# moderate cue, so even visible calm would have lost. Precedence is now
+# fast > slow > moderate > charter band. "gentle" is deliberately NOT a
+# cue: the deterministic template's "in continuous gentle motion" must
+# keep its charter-band pace.
+_SLOW_MOTION_CUES = (
+    "calm",
+    "static",
+    "still",
+    "barely",
+    "minimal motion",
+    "slow",
+    "slowly",
+)
+
 
 def _mentions_motion_cues(lowered_middle: str, cues: tuple[str, ...]) -> bool:
     """Word-boundary cue match over the middle-layer text (hyphens count as spaces).
@@ -116,16 +136,20 @@ STYLE_OVERRIDE_MARKERS = (
 )
 
 
-def motion_constraints(style: StyleSpec, middle: str = "") -> str:
+def motion_constraints(style: StyleSpec, text: str = "") -> str:
     """Camera/motion tail derived from the general prompt first (§18.1 step 4).
 
-    Explicit motion cues in the middle-layer text win: a prompt demanding
-    fast motion renders fast. Otherwise the charter band decides (calm →
-    barely drifts, slow → glides, above slow → moderate pace).
+    Explicit motion cues in the scanned text win: a prompt demanding
+    fast motion renders fast; an explicit calm/still request reads very
+    slow even when moderate words (e.g. "drifting") appear alongside.
+    Otherwise the charter band decides (calm → barely drifts, slow →
+    glides, above slow → moderate pace).
     """
-    lowered = middle.lower()
+    lowered = text.lower()
     if _mentions_motion_cues(lowered, _FAST_MOTION_CUES):
         pace = "fast dynamic"
+    elif _mentions_motion_cues(lowered, _SLOW_MOTION_CUES):
+        pace = "very slow"
     elif _mentions_motion_cues(lowered, _MODERATE_MOTION_CUES):
         pace = "moderate"
     elif style.motion_energy_max <= _MOTION_CALM_MAX:
@@ -149,7 +173,7 @@ def enforce_style(prompt: str, style: StyleSpec) -> str:
     carry style on its own.
     """
     middle = " ".join(prompt.split())
-    parts = [style.prompt.strip(), middle, motion_constraints(style, middle)]
+    parts = [style.prompt.strip(), middle, motion_constraints(style, f"{style.prompt} {middle}")]
     return ", ".join(part for part in parts if part)
 
 

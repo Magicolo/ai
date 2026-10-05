@@ -139,6 +139,32 @@ def test_concept_store_migrates_legacy(tmp_path: Path) -> None:
     assert store.records()[0].canonical_name == canonicalize("old reef")
 
 
+def test_calm_in_style_beats_moderate_cue() -> None:
+    """Track C ps-calm: calm words in the style string win the tail.
+
+    The probe style carried "calm static composition, barely drifting"
+    yet rendered a "moderate" tail — cue scanning never saw the style
+    string, and "drifting" is a moderate cue. Both causes are fixed:
+    the style string is scanned and slow cues outrank moderate ones.
+    """
+    calm_style = StyleSpec(
+        prompt="neon line art, calm static composition, barely drifting",
+        motion_energy_max=0.9,
+    )
+    assert "very slow" in enforce_style("a crystal reef", calm_style)
+
+
+def test_slow_cue_beats_moderate_cue_in_middle() -> None:
+    """A slow request plus a moderate cue still reads very slow."""
+    assert "very slow" in enforce_style("a slow gliding orbit", STYLE)
+
+
+def test_fast_cue_still_beats_slow_cue() -> None:
+    """Explicit fast demand keeps top precedence over calm words."""
+    rendered = enforce_style("a fast chase through a calm valley", STYLE)
+    assert "fast dynamic" in rendered
+
+
 def test_director_shape_instruction_pins_schema_types() -> None:
     message = build_director_user_message(
         style_charter="pastel neon line-art",

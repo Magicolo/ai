@@ -432,6 +432,8 @@ def test_prewarm_skips_sweeps_when_device_full(tmp_path: Path, monkeypatch: Any)
         lambda _video: (1216, 704, 24.0),
     )
     # The llama director sidecar holds ~5GB of the 6GB 2060: 13MB free.
+    # Neither leg fits, so the sweep is held back as a zero-count result
+    # (surfacing the reason) instead of a silent skip.
     monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda _device: 0.013)
     calls: list[str] = []
 
@@ -439,15 +441,16 @@ def test_prewarm_skips_sweeps_when_device_full(tmp_path: Path, monkeypatch: Any)
         calls.append("poll")
         raise AssertionError("must not sweep without VRAM headroom")
 
-    assert (
-        augment_background.prewarm_once(
-            tmp_path,
-            config,
-            upscale_poll_fn=_must_not_run,
-            interp_poll_fn=_must_not_run,
-        )
-        is None
+    result = augment_background.prewarm_once(
+        tmp_path,
+        config,
+        upscale_poll_fn=_must_not_run,
+        interp_poll_fn=_must_not_run,
     )
+    assert result is not None
+    assert result.upscale_frames_done == 0
+    assert result.interp_frames_done == 0
+    assert "upscale" in result.skip_reason
     assert calls == []
 
 

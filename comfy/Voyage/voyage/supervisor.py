@@ -19,7 +19,9 @@ import fcntl
 import json
 import math
 import os
+import queue
 import signal
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -34,7 +36,11 @@ from voyage.audio_finalize import (
     deferred_tail_frames,
     derive_conditioning_tail,
 )
-from voyage.backends import VideoBackendAdapter, transport_from_restarting_call
+from voyage.backends import (
+    VideoBackendAdapter,
+    VideoSegmentResult,
+    transport_from_restarting_call,
+)
 from voyage.concepts import ConceptStore
 from voyage.config import ProjectConfig
 from voyage.console import SegmentProgress
@@ -177,6 +183,13 @@ PREFETCH_TIMEOUT_SECONDS = 60.0
 #: its own PREFETCH_TIMEOUT_SECONDS instead of stalling shutdown.
 PREFETCH_SHUTDOWN_DRAIN_SECONDS = 2.0
 
+#: Seconds the generation pump waits for the next pre-warm event before
+#: re-checking the video worker thread. Small enough that the bar feels
+#: live, large enough that an idle render does not spin the main thread
+#: (a video render runs minutes; a 0.2 s tick is ~10 wakeups per second
+#: of idle at most, each a single queue poll).
+_PREWARM_PUMP_TICK_SECONDS = 0.2
+
 #: Video backends whose resident session cannot survive continuation
 #: blocks (issue 198: ltx25 OOMs in GGUF dequant on the second block in
 #: the same process while a fresh process rebuilt from the recovery tape
@@ -311,7 +324,39 @@ class Supervisor:
         # post-commit report announces only newly ledgered chunks, and the
         # driver identity resets the baseline across worker restarts (a
         # fresh driver starts its totals at zero).
-        self._reported_prewarm: tuple[Any, int, int] = (None, 0, 0)
+        self._reported_prewarm: tuple[Any, int, int, int, int, float, float] = (
+            None,
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+        )
+        # Persistent model-pass bar for the run loop (source frames
+        # ledgered vs committed). Opened lazily after the first commit
+        # when augmentation is demanded; the background thread never
+        # touches it — this post-commit call advances it on the main
+        # thread. Held as the entered context plus its tracker.
+        self._model_pass_bar: Any | None = None
+        self._model_pass_tracker: Any | None = None
+        # Latest background pass already announced on the verbose sweep
+        # line (object identity — the driver only ever replaces it).
+        self._reported_prewarm_result: Any = None
+        # Live pre-warm event queue (generation fork video ∥ model-pass):
+        # the background driver was constructed with queue-appending
+        # callbacks (see `_start_background_prewarm`), so poller
+        # per-chunk/per-frames events land here on the pre-warm thread and
+        # the main thread drains them into the persistent model-pass bar
+        # while the video render blocks (pump in
+        # `_generate_segment_with_live_prewarm`). Unbounded — entries are
+        # small tuples and each render drains fully; the post-commit
+        # report discards stragglers after advancing the ledger delta.
+        self._prewarm_queue: queue.Queue[tuple[Any, ...]] = queue.Queue()
+        # Pumped-since-report frame counts, subtracted from the next
+        # ledger delta so live-advanced frames are never counted twice.
+        self._pumped_upscale_frames = 0
+        self._pumped_interp_frames = 0
         # Post-commit motion sense (cheap tier): pixel-delta energy of the
         # just-committed segment, steering the NEXT proposal via the
         # measured_context/amendments path. Never gates a commit — a frozen
@@ -594,6 +639,12 @@ class Supervisor:
                 idle_fn=lambda: (
                     not self._prefetch_in_flight() and not self._director_probe_blocked()
                 ),
+                on_upscale_chunk=lambda segment, index, total: self._enqueue_prewarm_event(
+                    ("upscale_chunk", segment, index, total)
+                ),
+                on_upscale_frames=lambda segment, frames: self._enqueue_prewarm_event(
+                    ("upscale_frames", segment, frames)
+                ),
             )
             driver.start()
             self._background = driver
@@ -620,34 +671,255 @@ class Supervisor:
         except Exception:
             pass
 
+    def _model_pass_demanded(self) -> bool:
+        """Whether the run wants model-pass work (bar/report worth opening)."""
+        try:
+            augment = self._config.augment
+            return bool(augment.upscale > 1 or augment.interpolate > 1)
+        except Exception:  # noqa: BLE001 - config shape is adopt-path tolerant
+            return False
+
     def _report_background_prewarm(self) -> None:
-        """One console line for newly pre-warm-ledgered chunks (best-effort).
+        """One console line for newly pre-warm-ledgered frames (best-effort).
 
         The background thread never touches display code — it only
-        accumulates `ledgered_totals()`, and this post-commit call (main
-        thread) announces the delta since the last report. Silent when
-        nothing new ledgered, so the log stays clean on idle passes.
+        accumulates `ledgered_frames()`, and this post-commit call (main
+        thread) announces the delta since the last report, advances the
+        persistent model-pass bar, and (verbose only) logs the latest
+        sweep breakdown. Silent when nothing new ledgered, so the log
+        stays clean on idle passes. Frame counts are source frames per
+        leg, so upscale and interp share one comparable unit.
         """
         driver = self._background
-        if driver is None or self._progress is None:
+        progress = self._progress
+        if driver is None or progress is None:
             return
         try:
-            _passes, up, ip = driver.ledgered_totals()
+            reader: Any = getattr(driver, "ledgered_frames", None)
+            if callable(reader):
+                values: Any = reader()
+                _passes, _up, _ip = int(values[0]), int(values[1]), int(values[2])
+                upf, ipf = int(values[3]), int(values[4])
+                ups, ips = float(values[5]), float(values[6])
+            else:  # legacy drivers expose chunk totals only
+                totals = driver.ledgered_totals()
+                _passes, _up, _ip = int(totals[0]), int(totals[1]), int(totals[2])
+                upf, ipf, ups, ips = 0, 0, 0.0, 0.0
         except Exception:
             return
-        _seen_driver, seen_up, seen_ip = self._reported_prewarm
-        if driver is not _seen_driver:
-            seen_up, seen_ip = 0, 0
-        self._reported_prewarm = (driver, up, ip)
-        new_up, new_ip = up - seen_up, ip - seen_ip
-        parts = []
-        if new_up > 0:
-            parts.append(f"+{new_up} upscale")
-        if new_ip > 0:
-            parts.append(f"+{new_ip} interp")
-        if not parts:
+        baseline = self._reported_prewarm
+        if len(baseline) == 7:
+            seen_driver, _seen_up, _seen_ip, seen_upf, seen_ipf, seen_ups, seen_ips = baseline
+        else:  # legacy 3-tuple shape: force a re-baseline below
+            seen_driver, seen_upf, seen_ipf, seen_ups, seen_ips = None, 0, 0, 0.0, 0.0
+        upf, ipf, ups, ips = int(upf), int(ipf), float(ups), float(ips)
+        seen_upf, seen_ipf, seen_ups, seen_ips = (
+            int(seen_upf),
+            int(seen_ipf),
+            float(seen_ups),
+            float(seen_ips),
+        )
+        if driver is not seen_driver:
+            seen_upf, seen_ipf, seen_ups, seen_ips = 0, 0, 0.0, 0.0
+        self._reported_prewarm = (driver, _up, _ip, upf, ipf, ups, ips)
+        new_upf, new_ipf = upf - seen_upf, ipf - seen_ipf
+        new_ups, new_ips = ups - seen_ups, ips - seen_ips
+        # Frames already advanced live during the render (pump) must not
+        # advance twice: the bar moves only by the unreported remainder,
+        # while the note keeps the full ledger delta (ledger truth).
+        # `getattr` guards keep doubles built without `__init__` (which
+        # never pump) working — live instances always carry the counters.
+        pumped_up = int(getattr(self, "_pumped_upscale_frames", 0) or 0)
+        if hasattr(self, "_pumped_upscale_frames"):
+            self._pumped_upscale_frames = 0
+        if hasattr(self, "_pumped_interp_frames"):
+            self._pumped_interp_frames = 0
+        if hasattr(self, "_prewarm_queue"):
+            self._clear_prewarm_queue()
+        unreported_up = max(0, new_upf - pumped_up)
+        if new_upf > 0 or new_ipf > 0:
+            try:
+                total = read_state(self._run_dir).timeline_frames
+            except Exception:  # noqa: BLE001 - unreadable state still reports deltas
+                total = None
+            self._advance_model_pass_bar(unreported_up, total)
+            if isinstance(total, int) and not isinstance(total, bool):
+                scope = f" (total {upf}/{ipf}f of {total}f committed)"
+            else:
+                scope = f" (total {upf}/{ipf}f)"
+            parts = []
+            if new_upf > 0:
+                parts.append(f"+{new_upf}f upscale in {new_ups:.1f}s")
+            if new_ipf > 0:
+                parts.append(f"+{new_ipf}f interp in {new_ips:.1f}s")
+            progress.note(f"pre-warm ledgered {', '.join(parts)}{scope}")
+            last = getattr(driver, "last_result", None)
+            if (
+                last is not None
+                and last is not getattr(self, "_reported_prewarm_result", None)
+                and bool(getattr(progress, "verbose", False))
+            ):
+                progress.note(
+                    f"pre-warm sweep: {last.segments_seen} segments, "
+                    f"upscale {last.upscale_frames_done}f in {last.upscale_seconds:.1f}s, "
+                    f"interp {last.interp_frames_done}f in {last.interp_seconds:.1f}s"
+                )
+            self._reported_prewarm_result = last
+        else:
+            # No new frames, but the pass may still have news: a held-back
+            # sweep (low VRAM, director busy) surfaces once as a compact
+            # note instead of staying silent. Moot passes (result None)
+            # stay silent by design.
+            last = getattr(driver, "last_result", None)
+            if last is not None and last is not getattr(self, "_reported_prewarm_result", None):
+                # Annotated assignment: this mypy pins the 3-arg `getattr`
+                # default against the condition type when the call sits
+                # directly in the boolean chain, so read the reason out
+                # first (probes: bare-chain form fails, assigned form is
+                # clean under `mypy --strict`).
+                skip_reason: str = getattr(cast(Any, last), "skip_reason", "")
+                if skip_reason:
+                    progress.note(f"pre-warm held back: {skip_reason}")
+            self._reported_prewarm_result = last
+
+    def _advance_model_pass_bar(self, new_frames: int, total: int | None) -> None:
+        """Advance the persistent model-pass bar, opening it lazily.
+
+        The bar counts upscale source frames against the committed
+        frames (interpolation runs at finalize time, so the bar never
+        sees the interp leg). No-op when augmentation is not demanded.
+        """
+        progress = self._progress
+        if progress is None or not self._model_pass_demanded():
             return
-        self._progress.note(f"pre-warm ledgered {'/'.join(parts)} chunks")
+        try:
+            if self._model_pass_bar is None:
+                bar_cm = progress.bar("model-pass frames")
+                tracker = bar_cm.__enter__()
+                self._model_pass_bar = bar_cm
+                self._model_pass_tracker = tracker
+            if (
+                isinstance(total, int)
+                and not isinstance(total, bool)
+                and self._model_pass_tracker is not None
+            ):
+                self._model_pass_tracker.set_total(total)
+            if new_frames > 0 and self._model_pass_tracker is not None:
+                self._model_pass_tracker.update(new_frames)
+        except Exception:  # noqa: BLE001 - display must never fail a commit
+            self._model_pass_bar = None
+            self._model_pass_tracker = None
+
+    def _close_model_pass_bar(self) -> None:
+        """Close the persistent model-pass bar (best-effort, idempotent)."""
+        bar_cm, self._model_pass_bar = self._model_pass_bar, None
+        self._model_pass_tracker = None
+        if bar_cm is None:
+            return
+        try:
+            bar_cm.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001 - display must never fail teardown
+            pass
+
+    def _enqueue_prewarm_event(self, event: tuple[Any, ...]) -> None:
+        """Append one background pre-warm event (pre-warm thread, never raises).
+
+        The queue is unbounded so `put_nowait` cannot fail in practice;
+        the guard keeps a display-path hiccup from ever failing a chunk.
+        The main thread drains these into the persistent model-pass bar
+        while the video render blocks.
+        """
+        try:
+            self._prewarm_queue.put_nowait(event)
+        except Exception:  # noqa: BLE001 - best-effort live display only
+            pass
+
+    def _drain_prewarm_queue(self, *, block: bool) -> None:
+        """Drain queued pre-warm events into the model-pass bar (main thread).
+
+        Blocking mode waits up to one pump tick for the next event (the
+        caller re-checks the video thread between drains); non-blocking
+        mode sweeps stragglers after the render finishes. Frame events
+        advance the bar live; chunk lifecycle events carry no frame
+        counts — the pass-end ledger delta stays their source of truth.
+        """
+        while True:
+            try:
+                event = self._prewarm_queue.get(
+                    block=block, timeout=_PREWARM_PUMP_TICK_SECONDS if block else 0
+                )
+            except queue.Empty:
+                return
+            block = False
+            try:
+                kind = event[0] if event else ""
+                if kind == "upscale_frames":
+                    frames = int(event[2])
+                    if frames > 0:
+                        self._pumped_upscale_frames += frames
+                        self._advance_model_pass_bar(frames, None)
+                elif kind == "interp_frames":
+                    frames = int(event[2])
+                    if frames > 0:
+                        self._pumped_interp_frames += frames
+                        self._advance_model_pass_bar(frames, None)
+            except Exception:  # noqa: BLE001 - display must never fail a render
+                pass
+
+    def _clear_prewarm_queue(self) -> None:
+        """Discard queued pre-warm events without advancing (main thread).
+
+        The post-commit report advances the full ledger delta, which
+        already covers any still-queued stragglers — dropping them here
+        keeps the next render's pump from counting them twice. Never
+        raises (display hygiene only).
+        """
+        try:
+            while True:
+                self._prewarm_queue.get_nowait()
+        except queue.Empty:
+            pass
+        except Exception:  # noqa: BLE001 - display must never fail a commit
+            pass
+
+    def _generate_segment_with_live_prewarm(
+        self, adapter: VideoBackendAdapter, request: Any, video_out: Path
+    ) -> VideoSegmentResult:
+        """Run the video render with live model-pass progress (main thread).
+
+        The render itself moves to a worker thread while this thread
+        drains the pre-warm event queue into the persistent model-pass
+        bar — so the console shows the video stage spinner plus a live
+        upscale/interp frame count instead of a frozen spinner. No new
+        Live display is opened (the bar owns the only bar Live, exactly
+        as in the post-commit path), and the worker result or exception
+        is re-surfaced after the join, so behavior without an active
+        pre-warm is byte-identical to the direct call. Falls back to the
+        direct call when progress or the background driver is absent (or
+        its thread died) — silent/library runs never pay for the fork.
+        """
+        driver = self._background
+        if self._progress is None or driver is None or not driver.is_alive():
+            return adapter.generate_segment(request, video_out)
+        outcome: dict[str, Any] = {}
+
+        def _render() -> None:
+            try:
+                outcome["result"] = adapter.generate_segment(request, video_out)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=_render, name="voyage-video-render", daemon=True)
+        worker.start()
+        try:
+            while worker.is_alive():
+                self._drain_prewarm_queue(block=True)
+            self._drain_prewarm_queue(block=False)
+        finally:
+            worker.join()
+        if "error" in outcome:
+            raise outcome["error"]
+        return cast(VideoSegmentResult, outcome["result"])
 
     def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
         """Progress spinner around one commit stage (no-op when silent)."""
@@ -1140,6 +1412,7 @@ class Supervisor:
                 write_state(self._run_dir, resting)
             return committed
         finally:
+            self._close_model_pass_bar()
             self.stop_workers()
 
     def _stop_requested_via_file(self) -> bool:
@@ -1918,7 +2191,7 @@ class Supervisor:
             "video",
             f"{config.video.backend} {config.video.width}x{config.video.height}",
         ):
-            segment_result = adapter.generate_segment(request, video_out)
+            segment_result = self._generate_segment_with_live_prewarm(adapter, request, video_out)
         # Truthful frame accounting: the worker reports what it rendered
         # (a worker's decoded count can depend on internal chunking, not
         # the request), so the timeline always matches reality. Reports are

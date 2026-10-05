@@ -359,8 +359,8 @@ def test_interp_on_chunk_fires_per_chunk(tmp_path: Path) -> None:
     assert seen == [("000000", 0, 2), ("000000", 1, 2)]
 
 
-def test_poll_to_completion_reports_model_pass_bar(tmp_path: Path) -> None:
-    """One `model-pass chunks` bar counts every rendered + skipped chunk."""
+def test_poll_to_completion_reports_per_leg_frame_bars(tmp_path: Path) -> None:
+    """Separate `upscale frames` / `interp frames` bars count source frames."""
     from voyage.augment_interp_poller import InterpPollResult
     from voyage.augment_upscale_poller import UpscalePollResult
 
@@ -372,25 +372,26 @@ def test_poll_to_completion_reports_model_pass_bar(tmp_path: Path) -> None:
     def stub_upscale(run_dir: Path, **kwargs: Any) -> Any:
         del run_dir
         calls["upscale"] += 1
-        on_chunk = kwargs.get("on_chunk")
+        on_frames = kwargs.get("on_chunk_frames")
+        assert callable(on_frames)
         if calls["upscale"] == 1:
-            assert callable(on_chunk)
-            on_chunk("000000", 0, 2)
-            on_chunk("000000", 1, 2)
-            return UpscalePollResult(1, 0, 2, 1, 0)
-        return UpscalePollResult(1, 0, 0, 3, 0)
+            on_frames("000000", 32)
+            on_frames("000000", 32)
+            return UpscalePollResult(1, 0, 2, 1, 0, frames_done=64, frames_skipped=32)
+        return UpscalePollResult(1, 0, 0, 3, 0, frames_done=0, frames_skipped=96)
 
     def stub_interp(run_dir: Path, **kwargs: Any) -> Any:
         del run_dir
         calls["interp"] += 1
-        on_chunk = kwargs.get("on_chunk")
+        on_pair = kwargs.get("on_pair_frames")
+        assert callable(on_pair)
         if calls["interp"] == 1:
-            assert callable(on_chunk)
-            on_chunk("000000", 0, 2)
-            on_chunk("000000", 1, 2)
-            return InterpPollResult(1, 0, 2, 1, 0, 0)
-        return InterpPollResult(1, 0, 0, 3, 0, 0)
+            on_pair("000000", 24.0)
+            on_pair("000000", 24.0)
+            return InterpPollResult(1, 0, 2, 1, 0, 0, frames_done=48, frames_skipped=16)
+        return InterpPollResult(1, 0, 0, 3, 0, 0, frames_done=0, frames_skipped=64)
 
+    timings: dict[str, float] = {}
     _poll_to_completion(
         tmp_path,
         weights=weights,
@@ -399,16 +400,23 @@ def test_poll_to_completion_reports_model_pass_bar(tmp_path: Path) -> None:
         progress=console,
         source_fps=24.0,
         multiplier=2,
+        timings=timings,
         **_poll_kwargs(),
     )
     out = stream.getvalue()
-    assert "▸ model-pass chunks ..." in out
-    # 2 upscale + 1 skipped-upscale + 2 interp + 1 skipped-interp.
-    assert "✓ model-pass chunks (6/6," in out
+    assert "▸ upscale frames ..." in out
+    assert "▸ interp frames ..." in out
+    # Live frame advance (64) + skipped catch-up (32) = 96-frame total.
+    assert "✓ upscale frames (96/96," in out
+    assert "✓ interp frames (64/64," in out
+    # Rate extra rides the finish line; per-leg frame counts hit timings.
+    assert "frames/s)" in out
+    assert timings["upscale_frames_done"] == 64.0
+    assert timings["interp_frames_done"] == 48.0
 
 
 def test_poll_bar_tolerates_legacy_done_only_fakes(tmp_path: Path) -> None:
-    """Done-only stub namespaces (no skipped/waiting) never break polling."""
+    """Done-only stub namespaces (no skipped/waiting/frames) never break polling."""
     weights = _make_weights(tmp_path / "work")
     stream = io.StringIO()
     console = VoyageConsole(stream=stream)
@@ -432,4 +440,5 @@ def test_poll_bar_tolerates_legacy_done_only_fakes(tmp_path: Path) -> None:
         **_poll_kwargs(),
     )
     out = stream.getvalue()
-    assert "model-pass chunks" in out
+    assert "upscale frames" in out
+    assert "interp frames" in out

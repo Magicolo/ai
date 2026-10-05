@@ -161,12 +161,25 @@ user_args=("--user=$(id -u):$(id -g)")
 # which prints a large CUDA banner + license block on every run. Voyage has
 # its own GPU checks (torch/doctor), so exec the CLI directly. The slim
 # image defines no entrypoint, making this override equivalent there.
+# LTX worker tuning passthrough (Track C strength/carry matrix): the
+# video workers read VOYAGE_LTX_STRENGTH / VOYAGE_LTX_CARRY / VOYAGE_LTX_FAST
+# from their own environment (fail-loud validators in video_ltx25.py), but
+# `docker run` below never forwarded them — so `VOYAGE_LTX_STRENGTH=0.8
+# ./scripts/run.sh generate NAME` silently rendered at strength 1.0.
+# Forward each only when set in the caller environment (empty `-e` would
+# inject empty strings the validators reject).
+ltx_env_args=()
+for ltx_env_name in VOYAGE_LTX_STRENGTH VOYAGE_LTX_CARRY VOYAGE_LTX_FAST; do
+  if [ -n "${!ltx_env_name:-}" ]; then
+    ltx_env_args+=(-e "${ltx_env_name}=${!ltx_env_name}")
+  fi
+done
 # Single-sourced so the dry-run seam and `docker run` cannot drift apart.
 entrypoint="voyage"
 if [ "${VOYAGE_DRY_RUN:-}" = "1" ]; then
-  printf 'image=%s\ngpus=%s\nuser=%s\nentrypoint=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}" "$entrypoint"
+  printf 'image=%s\ngpus=%s\nuser=%s\nentrypoint=%s\nenv=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}" "$entrypoint" "${ltx_env_args[*]:-none}"
   exit 0
 fi
-docker run --rm --entrypoint "$entrypoint" -e PYTHONDONTWRITEBYTECODE=1 -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
+docker run --rm --entrypoint "$entrypoint" -e PYTHONDONTWRITEBYTECODE=1 "${ltx_env_args[@]}" -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
   -v "$PWD:/app" -v /tmp:/tmp -v "$models:/models" \
   "$image" "$@"

@@ -378,9 +378,13 @@ class VideoConfig(BaseModel):
 
 
 #: Ceiling for `AudioConfig.final_overlap_fraction` (finalize blend): at most
-#: half a segment may be re-sliced into the overlap — beyond that the "joint"
-#: would swallow the take itself instead of joining two takes.
-MAX_FINAL_OVERLAP_FRACTION = 0.5
+#: one whole shortest segment may be re-sliced into the overlap — the blend
+#: extends each window by half the overlap per side, so 1.0 centers a full
+#: segment-length crossfade on the joint. Takes are 30-60s of continuous
+#: music, so take joints (which land on segment boundaries) stay
+#: well-defined even at generous overlaps; beyond 1.0 the "joint" would
+#: swallow neighboring windows instead of joining them.
+MAX_FINAL_OVERLAP_FRACTION = 1.0
 
 
 class AudioConfig(BaseModel):

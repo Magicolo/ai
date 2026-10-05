@@ -1353,6 +1353,7 @@ def finalize_run(
             # to the pinned presentation rate (plan_augmentation refuses to
             # plan without one of the two).
             audio_fps = int(source_fps) if source_fps > 0 else out_fps
+            music_digest = "silent"
             if no_music:
                 # Silent AAC sized to the stretched timeline (same
                 # frame-count math as the ledger mix, no takes needed).
@@ -1382,17 +1383,43 @@ def finalize_run(
                     raise MediaError(f"silent audio render failed: {silent_proc.stderr[-2000:]}")
                 final_audio = silent_dest
             else:
-                final_audio = build_final_audio(
+                from voyage.final_mix_cache import (
+                    load_music_cache,
+                    music_fingerprint,
+                    store_music_cache,
+                )
+
+                # Durable single-slot music cache (DESIGN §56): a no-change
+                # resume reuses the last published mix instead of re-slicing
+                # the takes ledger and re-joining. A later publish
+                # overwrites the same slot, so the cache never grows.
+                music_digest = music_fingerprint(
                     run_dir,
                     usable,
-                    tmpdir,
-                    audio_fps,
-                    settings.sample_rate,
-                    settings.channels,
-                    settings.effective_overlap_fraction(),
-                    settings.overlap_cap_seconds,
-                    stretch=audio_stretch,
+                    sample_rate=settings.sample_rate,
+                    channels=settings.channels,
+                    overlap_fraction=settings.effective_overlap_fraction(),
+                    overlap_cap_seconds=settings.overlap_cap_seconds,
+                    audio_stretch=audio_stretch,
+                    audio_fps=float(audio_fps),
                 )
+                cached_music = load_music_cache(run_dir, music_digest)
+                if cached_music is not None:
+                    final_audio = tmpdir / "final_audio.wav"
+                    shutil.copyfile(cached_music, final_audio)
+                else:
+                    final_audio = build_final_audio(
+                        run_dir,
+                        usable,
+                        tmpdir,
+                        audio_fps,
+                        settings.sample_rate,
+                        settings.channels,
+                        settings.effective_overlap_fraction(),
+                        settings.overlap_cap_seconds,
+                        stretch=audio_stretch,
+                    )
+                    store_music_cache(run_dir, music_digest, final_audio)
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # DESIGN §140 A/V stream: on the phased path the 4060 runs
@@ -1431,6 +1458,11 @@ def finalize_run(
 
             def _do_sfx_bed() -> None:
                 try:
+                    from voyage.final_mix_cache import (
+                        bed_fingerprint,
+                        load_bed_cache,
+                        store_bed_cache,
+                    )
                     from voyage.sfx_finalize import (
                         SFX_CONDITIONING_PROXY,
                         build_proxy_reference,
@@ -1438,6 +1470,29 @@ def finalize_run(
                         segment_sfx_bounds,
                     )
 
+                    # Durable single-slot bed cache (DESIGN §56): a
+                    # no-change resume reuses the last bed instead of
+                    # re-rendering stems and re-joining. Overwrites the
+                    # same slot on a miss, so the cache never grows.
+                    bed_digest = bed_fingerprint(
+                        run_dir,
+                        usable,
+                        sample_rate=settings.sample_rate,
+                        channels=settings.channels,
+                        backend=sfx_request_snapshot.backend,
+                        model_size=sfx_request_snapshot.model_size,
+                        seed=seed,
+                        caption_override=sfx_request_snapshot.caption_override,
+                        music_digest=music_digest,
+                    )
+                    cached_bed = load_bed_cache(run_dir, bed_digest)
+                    if cached_bed is not None:
+                        cached_wav, cached_seconds = cached_bed
+                        bed = tmpdir / "sfx_bed.wav"
+                        shutil.copyfile(cached_wav, bed)
+                        bed_outcome["bed"] = bed
+                        bed_outcome["source_seconds"] = cached_seconds
+                        return
                     proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
                     bounds = segment_sfx_bounds(
                         run_dir,
@@ -1465,6 +1520,7 @@ def finalize_run(
                     )
                     bed_outcome["bed"] = bed
                     bed_outcome["source_seconds"] = source_seconds
+                    store_bed_cache(run_dir, bed_digest, bed, source_seconds=source_seconds)
                 except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
                     bed_outcome["error"] = exc
 

@@ -66,7 +66,12 @@ DEFAULT_UPSCALE_FACTOR = 2
 
 @dataclass(frozen=True)
 class InterpPollResult:
-    """Counts from one poll pass (advisory; the ledger is the truth)."""
+    """Counts from one poll pass (advisory; the ledger is the truth).
+
+    Frame counts are source frames (one per upscaled input frame), so
+    upscale and interp legs share one comparable unit for progress bars —
+    not the multiplied output frame count.
+    """
 
     segments_seen: int
     segments_skipped: int
@@ -74,6 +79,9 @@ class InterpPollResult:
     chunks_skipped: int
     chunks_waiting: int
     partials_pruned: int
+    frames_done: int = 0
+    frames_skipped: int = 0
+    frames_waiting: int = 0
 
 
 def _upscaled_frame_paths(plan_dir: Path, index: int) -> list[Path]:
@@ -153,6 +161,7 @@ def interp_poll_once(
     preset: str = "veryfast",
     interp_fn: Callable[[list[Path], Path, int], list[Path]] | None = None,
     on_chunk: Callable[[str, int, int], None] | None = None,
+    on_chunk_frames: Callable[[str, int], None] | None = None,
     on_pair_frames: Callable[[str, float], None] | None = None,
 ) -> InterpPollResult:
     """Interpolate every upscaled-but-not-interpolated chunk (one pass).
@@ -166,7 +175,9 @@ def interp_poll_once(
     (fail-loud, retry re-renders only the missing chunks). `weights_key`
     must cover both legs (ESRGAN + FILM): any leg change must miss old
     records. `on_chunk`, when given, fires after each rendered chunk
-    with `(segment_id, chunk_index, chunk_count)`. `on_pair_frames`,
+    with `(segment_id, chunk_index, chunk_count)`. `on_chunk_frames`,
+    when given, fires alongside with `(segment_id, source_frames)` so
+    progress bars can count frames instead of chunks. `on_pair_frames`,
     when given, fires per finished FILM pair with `(segment_id,
     fractional_source_frames)` so long chunks advance the finalize bar
     live instead of jumping once at the end. An injected `interp_fn`
@@ -183,6 +194,9 @@ def interp_poll_once(
     chunks_done = 0
     chunks_skipped = 0
     chunks_waiting = 0
+    frames_done = 0
+    frames_skipped = 0
+    frames_waiting = 0
     pruned_total = 0
     final_fps = out_fps * multiplier
     for source in sources:
@@ -199,6 +213,9 @@ def interp_poll_once(
         )
         if not plan_dir.is_dir():
             chunks_waiting += len(list(chunk_windows(source.total_frames, chunk_frames)))
+            frames_waiting += sum(
+                count for _, count in chunk_windows(source.total_frames, chunk_frames)
+            )
             continue
         pruned_total += prune_stale_partials(plan_dir)
         ledger_path = plan_dir / "chunks.jsonl"
@@ -217,6 +234,7 @@ def interp_poll_once(
         ]
         chunks_waiting += len(indexes) - len(ready)
         ready_set = set(ready)
+        frames_waiting += sum(windows[index][1] for index in indexes if index not in ready_set)
         ledger_missing = missing_chunk_indexes(
             [record for record in records if record.get("stage") == INTERP_STAGE],
             ready,
@@ -251,6 +269,7 @@ def interp_poll_once(
                 missing_set.add(index)
         missing.sort()
         chunks_skipped += len(ready) - len(missing)
+        frames_skipped += sum(windows[index][1] for index in ready if index not in missing_set)
         for index in missing:
             start, count = windows[index]
             expected = interpolated_frame_count(count, multiplier)
@@ -262,6 +281,7 @@ def interp_poll_once(
                 # whole finalize; the stuck-detector still fires when
                 # nothing progresses at all).
                 chunks_waiting += 1
+                frames_waiting += count
                 continue
             output_dir = plan_dir / f"interpolated_{index:02d}"
             if output_dir.exists():
@@ -352,9 +372,12 @@ def interp_poll_once(
             records = load_chunk_ledger(ledger_path)
             done = completed_stages(records)
             chunks_done += 1
+            frames_done += count
             if on_chunk is not None:
                 on_chunk(source.segment_id, index, len(windows))
-            if on_pair_frames is not None and pairs_fired == 0:
+            if on_chunk_frames is not None:
+                on_chunk_frames(source.segment_id, count)
+            elif on_pair_frames is not None and pairs_fired == 0:
                 # No live pair fired (single-frame passthrough or a
                 # legacy 3-arg `interp_fn`): advance the whole chunk at
                 # once so the bar still reaches its total.
@@ -366,4 +389,7 @@ def interp_poll_once(
         chunks_skipped=chunks_skipped,
         chunks_waiting=chunks_waiting,
         partials_pruned=pruned_total,
+        frames_done=frames_done,
+        frames_skipped=frames_skipped,
+        frames_waiting=frames_waiting,
     )

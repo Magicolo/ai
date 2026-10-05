@@ -865,7 +865,7 @@ def build_final_audio(
         while cursor < window_end - 1e-6:
             if piece >= MAX_SLICES_PER_WINDOW:
                 raise _fail("too many slices")
-            serving = planner.take_for_time(cursor)
+            serving = planner.take_for_time(cursor, int(segment.name))
             if serving is None or not serving.path:
                 raise _fail("take gap in window")
             # Issue 016 consumer side: ledger entries may be run-relative
