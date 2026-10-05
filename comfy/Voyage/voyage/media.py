@@ -25,7 +25,7 @@ from voyage.atomic import atomic_copy
 from voyage.augment import CRF_MAXIMUM as _AUGMENT_CRF_MAXIMUM
 from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
 from voyage.augment import interpolated_frame_count as interpolated_frame_count
-from voyage.console import optional_stage
+from voyage.console import ParallelFinalizeDisplay, optional_stage
 from voyage.errors import MediaError, StateError
 from voyage.media_audio import ABSORPTION_EPSILON_SECONDS as ABSORPTION_EPSILON_SECONDS
 from voyage.media_audio import AV_ALIGNMENT_TOLERANCE_SECONDS as AV_ALIGNMENT_TOLERANCE_SECONDS
@@ -321,6 +321,36 @@ def run_model_pass_and_music_parallel(
     music_error = errors.get("music")
     if music_error is not None:
         raise music_error
+
+
+@dataclass
+class SfxParallelRequest:
+    """SFX bed work eligible to overlap the publish encode (two-stream finalize).
+
+    Carries everything the legacy `finalize_sfx_pass` takes except the
+    published final itself: the bed conditions on a stream-copy proxy of
+    the committed segments (same source timeline, no upscale/interp/morph)
+    and dubs onto the staged publish on the main thread. `fps` is the
+    source fps the SFX bounds walk (mirrors the legacy pass's `fps`).
+    """
+
+    backend: str
+    models_dir: str
+    device: str
+    model_size: str
+    num_workers: int
+    fps: int
+    caption_override: str | None = None
+
+
+def sfx_parallel_armed(sfx_request: SfxParallelRequest | None) -> bool:
+    """Bed∥publish gate: overlap only for real SFX backends (DESIGN §140).
+
+    Pure: the fake backend renders test tones offline, so parallelizing
+    it would only add threads without saving GPU time — and offline
+    fake-stack tests must keep the exact legacy path.
+    """
+    return sfx_request is not None and sfx_request.backend != "fake"
 
 
 def presentation_setup_facts(
@@ -724,6 +754,23 @@ def presented_frames(video: Path) -> int | None:
         return None
 
 
+def _model_pass_stage_rows(
+    model_pass_timings: dict[str, float], model_start: float
+) -> dict[str, float]:
+    """Timing-table rows for the model pass: per-leg seconds when known.
+
+    The durable path records `upscale_poll_s` / `interp_poll_s`
+    separately, so the table shows upscale vs interp instead of one
+    aggregate. Legacy/tmpdir paths only know wall time — they keep the
+    single `model pass` row.
+    """
+    up_seconds = float(model_pass_timings.get("upscale_poll_s", 0.0) or 0.0)
+    ip_seconds = float(model_pass_timings.get("interp_poll_s", 0.0) or 0.0)
+    if up_seconds > 0 or ip_seconds > 0:
+        return {"model pass · upscale": up_seconds, "model pass · interp": ip_seconds}
+    return {"model pass": time.monotonic() - model_start}
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -744,6 +791,8 @@ def finalize_run(
     audio_config: AudioConfig | None = None,
     invoker: str | None = None,
     progress: VoyageConsole | None = None,
+    sfx_request: SfxParallelRequest | None = None,
+    sfx_report: dict[str, Any] | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -1024,6 +1073,7 @@ def finalize_run(
         )
         music_rendered = False
         branch_progress: VoyageConsole | None = progress
+        music_branch_progress: VoyageConsole | None = progress
 
         def _do_model_pass() -> None:
             nonlocal tensor_intermediate
@@ -1080,7 +1130,7 @@ def finalize_run(
                         devices=tensor_devices,
                     )
             if tensor_intermediate is not None:
-                final_stages["model pass"] = time.monotonic() - model_start
+                final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
 
         def _do_music_takes() -> None:
             # Always-deferred music (DESIGN §140): segments commit video
@@ -1105,7 +1155,7 @@ def finalize_run(
                 beats_per_segment=music_beats_per_segment,
                 sample_rate=music_sample_rate,
                 channels=music_channels,
-                progress=branch_progress,
+                progress=music_branch_progress,
             )
             if music_rendered:
                 final_stages["music takes"] = time.monotonic() - music_start
@@ -1116,16 +1166,32 @@ def finalize_run(
             model_devices=tensor_devices,
         ):
             # Two cards: the model pass owns cuda:1 while ACE renders
-            # takes on cuda:0 — one outer stage (branch progress stays
-            # None: a single bar, no concurrent console writes). The
-            # blend clock covers the whole fork-join: model and music
-            # overlap, so this is fork-to-mix, not music+mix.
+            # takes on cuda:0 — one outer stage, with the two branches
+            # sharing one N-stream display so upscale/interp (model leg)
+            # and ACE takes (music leg) report live bars concurrently
+            # (DESIGN §59). The display degrades to plain lines when
+            # progress is None or the console is not a TTY. The blend
+            # clock covers the whole fork-join: model and music overlap,
+            # so this is fork-to-mix, not music+mix.
             audio_start = time.monotonic()
-            branch_progress = None
-            with optional_stage(progress, "model pass + music takes"):
-                run_model_pass_and_music_parallel(
-                    model_work=_do_model_pass, music_work=_do_music_takes
-                )
+            model_music_display: ParallelFinalizeDisplay | None = None
+            span_progress: VoyageConsole | None = progress
+            if progress is not None:
+                model_music_display = ParallelFinalizeDisplay(progress)
+                span_progress = model_music_display.stream_view("model pass + music takes")
+                branch_progress = model_music_display.stream_view("model pass")
+                music_branch_progress = model_music_display.stream_view("music takes")
+            else:
+                branch_progress = None
+                music_branch_progress = None
+            try:
+                with optional_stage(span_progress, "model pass + music takes"):
+                    run_model_pass_and_music_parallel(
+                        model_work=_do_model_pass, music_work=_do_music_takes
+                    )
+            finally:
+                if model_music_display is not None:
+                    model_music_display.close()
         else:
             _do_model_pass()
             # Sequential keeps the historical music+mix meaning of
@@ -1154,6 +1220,72 @@ def finalize_run(
             )
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
+        # Two-stream SFX (DESIGN §140): the bed conditions on a
+        # stream-copy proxy of the committed segments, so it needs
+        # nothing from the mix or the publish — start it now (cuda:0 is
+        # free: the ACE worker stopped at take-render end) and let it
+        # overlap the publish encode below. The main thread dubs after
+        # the join; a bed failure ships music-only and the caller falls
+        # back to the legacy shipped-pixels pass.
+        sfx_armed = sfx_parallel_armed(sfx_request)
+        sfx_display: ParallelFinalizeDisplay | None = None
+        publish_progress = progress
+        bed_outcome: dict[str, Any] = {}
+        bed_start = 0.0
+        bed_thread: threading.Thread | None = None
+        if sfx_armed and sfx_request is not None:
+            sfx_request_snapshot = sfx_request
+            if progress is not None:
+                sfx_display = ParallelFinalizeDisplay(progress)
+                bed_view: VoyageConsole | None = sfx_display.stream_view("sfx bed")
+                publish_progress = sfx_display.stream_view("publish")
+            else:
+                bed_view = None
+
+            def _do_sfx_bed() -> None:
+                try:
+                    from voyage.sfx_finalize import (
+                        SFX_CONDITIONING_PROXY,
+                        build_proxy_reference,
+                        render_sfx_bed,
+                        segment_sfx_bounds,
+                    )
+
+                    proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
+                    bounds = segment_sfx_bounds(
+                        run_dir,
+                        usable,
+                        sfx_request_snapshot.fps,
+                        sfx_request_snapshot.caption_override,
+                    )
+                    bed = render_sfx_bed(
+                        run_dir,
+                        proxy_ref,
+                        source_seconds,
+                        bounds,
+                        tmpdir,
+                        sfx_request_snapshot.backend,
+                        sfx_request_snapshot.models_dir,
+                        sfx_request_snapshot.device,
+                        sfx_request_snapshot.model_size,
+                        seed,
+                        settings.sample_rate,
+                        settings.channels,
+                        sfx_request_snapshot.num_workers,
+                        progress=bed_view,
+                        conditioning_source=SFX_CONDITIONING_PROXY,
+                        conditioning_timeline=source_seconds,
+                    )
+                    bed_outcome["bed"] = bed
+                    bed_outcome["source_seconds"] = source_seconds
+                except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
+                    bed_outcome["error"] = exc
+
+            bed_start = time.monotonic()
+            bed_thread = threading.Thread(target=_do_sfx_bed, name="voyage-sfx-bed", daemon=True)
+            bed_thread.start()
+        else:
+            bed_thread = None
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
         # stream copy and mux the final audio — zero video re-encodes. The
@@ -1175,7 +1307,9 @@ def finalize_run(
             if native
             else "encode presentation video"
         )
-        publish_cm = optional_stage(progress, publish_label, f"{out_w}x{out_h}@{out_fps}fps")
+        publish_cm = optional_stage(
+            publish_progress, publish_label, f"{out_w}x{out_h}@{out_fps}fps"
+        )
         publish_start = time.monotonic()
         with publish_cm:
             if tensor_intermediate is not None:
@@ -1338,10 +1472,66 @@ def finalize_run(
                 final_encode_ms = (time.monotonic() - final_start) * 1000.0
                 if proc.returncode != 0:
                     raise MediaError(f"final encode failed: {proc.stderr[-2000:]}")
-            validate_video(staged, out_w, out_h, out_fps)
+            # Two-stream SFX join + dub (main thread): the bed overlapped
+            # the encode above; stretch it onto the shipped timeline and
+            # dub it here so `validate_video` below covers the dub and
+            # `output_frames` stays honest. A bed failure ships the
+            # music-only staged file and reports for the legacy fallback.
+            ship = staged
+            if sfx_armed and bed_thread is not None:
+                bed_thread.join()
+                if sfx_display is not None:
+                    sfx_display.close()
+                final_stages["sfx bed"] = time.monotonic() - bed_start
+                bed_error = bed_outcome.get("error")
+                if bed_error is None:
+                    staged_info = probe(staged)
+                    shipped_seconds = float(staged_info.get("format", {}).get("duration", 0.0))
+                    source_seconds = float(bed_outcome.get("source_seconds", 0.0))
+                    if shipped_seconds <= 0.0 or source_seconds <= 0.0:
+                        raise MediaError(
+                            "sfx dub needs positive durations "
+                            f"(got shipped={shipped_seconds}/{source_seconds})"
+                        )
+                    from voyage.sfx_finalize import stretch_and_dub_sfx_bed
+
+                    if publish_progress is not None:
+                        publish_progress.info("dub sfx bed onto final")
+                    dubbed = tmpdir / "final_sfx.mp4"
+                    stretch_and_dub_sfx_bed(
+                        staged,
+                        bed_outcome["bed"],
+                        final_audio,
+                        dubbed,
+                        settings.sample_rate,
+                        settings.channels,
+                        shipped_seconds / source_seconds,
+                    )
+                    ship = dubbed
+                    if sfx_report is not None:
+                        sfx_report.update(
+                            {
+                                "sfx_status": "dubbed",
+                                "sfx_stretch": round(shipped_seconds / source_seconds, 4),
+                            }
+                        )
+                elif sfx_report is not None:
+                    sfx_report.update({"sfx_status": "music-only", "sfx_error": str(bed_error)})
+            elif sfx_report is not None:
+                sfx_report.update({"sfx_status": "skipped"})
+            published = validate_video(ship, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_copy(staged, output_path)
+            atomic_copy(ship, output_path)
         final_stages["publish video"] = time.monotonic() - publish_start
+        output_frames = published.get("frames")
+        if isinstance(output_frames, int) and not isinstance(output_frames, bool):
+            if publish_progress is not None:
+                publish_progress.info(
+                    f"final video {output_frames}f {out_w}x{out_h}@{out_fps}fps "
+                    f"({len(usable)} segments)"
+                )
+        else:
+            output_frames = None
         from voyage.logrotate import append_line
 
         append_line(
@@ -1354,6 +1544,7 @@ def finalize_run(
                     "out_w": out_w,
                     "out_h": out_h,
                     "out_fps": out_fps,
+                    "output_frames": output_frames,
                     "crf": effective_crf,
                     "preset": effective_preset,
                     "parts_encode_ms": round(parts_encode_ms, 1),
@@ -1365,6 +1556,11 @@ def finalize_run(
                     "presentation_fps": effective_presentation_fps,
                     "slowmo_factor": round(stretch, 4),
                     "invoker": invoker,
+                    "sfx_status": (
+                        sfx_report.get("sfx_status", "skipped")
+                        if sfx_report is not None
+                        else "skipped"
+                    ),
                     "model_pass_timings_s": {
                         key: round(value, 3)
                         for key, value in model_pass_timings.items()

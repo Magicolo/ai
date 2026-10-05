@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import time
@@ -90,6 +91,22 @@ a large/small mix would step quality at window joints)."""
 SFX_MAX_WORKERS = 2
 """Only the 1- and 2-GPU shapes exist: 2 is the video-aug-cuda:0/SFX-cuda:1
 pairing, and anything above fail-fasts without 2 visible GPUs (issue 158)."""
+
+ATEMPO_MIN_FACTOR = 0.5
+ATEMPO_MAX_FACTOR = 2.0
+"""ffmpeg atempo accepts a single factor in [0.5, 2.0] — larger stretches
+chain filters (1.5x slow-mo is one filter; 4x is two)."""
+
+SFX_CONDITIONING_SHIPPED = "shipped"
+SFX_CONDITIONING_PROXY = "proxy"
+"""Conditioning-pixel identity for ledger records (parallel finalize).
+
+The bed can condition on the shipped final pixels (`shipped`, the legacy
+post-pass) or on a stream-copy concat of the committed segments (`proxy`,
+the parallel path — same source timeline, no upscale/interp/morph).
+Stems only cache-hit within one identity: a re-finalize on shipped pixels
+must never reuse proxy-conditioned stems or the SFX would silently track
+the wrong motion. Legacy lines predate the key and read as `shipped`."""
 
 
 @dataclass
@@ -278,6 +295,8 @@ def append_sfx_window(
     path: str,
     model_size: str,
     probed_duration: float | None = None,
+    conditioning_source: str = SFX_CONDITIONING_SHIPPED,
+    conditioning_timeline: float | None = None,
 ) -> None:
     """Durably append one rendered window (flush + fsync + fsync_dir, takes pattern).
 
@@ -286,6 +305,12 @@ def append_sfx_window(
     bed join and coverage math follow the stem, not the plan). Legacy
     lines without `probed_duration` read back as requested duration,
     which is exact for them: pre-split ledgers always recorded the plan.
+
+    `conditioning_source` pins which pixels the stem conditioned on
+    (`shipped` vs `proxy`); `conditioning_timeline` is the timeline the
+    bounds tiled (source duration for proxy beds, shipped duration for
+    the legacy pass). Legacy lines carry neither and validate against
+    the passed timeline exactly as before.
 
     File fsync persists content; the directory sync persists the namespace
     entry (issue 101 twin of `append_take`, in-tree contract in
@@ -302,9 +327,12 @@ def append_sfx_window(
         "seed": window.seed,
         "path": path,
         "model_size": model_size,
+        "conditioning_source": conditioning_source,
     }
     if probed_duration is not None:
         record["probed_duration"] = probed_duration
+    if conditioning_timeline is not None:
+        record["conditioning_timeline"] = conditioning_timeline
     with ledger.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
         handle.flush()
@@ -345,6 +373,9 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
     Duplicate `window_id` lines (re-render appends) dedupe last-wins and
     the walk sorts by start, so ledger order can never false-positive
     coverage (153, mirroring the `existing` dict in `render_sfx_bed`).
+    Records group by conditioning identity: proxy-conditioned stems tile
+    their source timeline, shipped-conditioned stems (and legacy lines,
+    which read as shipped) tile the passed timeline.
     """
     ledger = run_dir / "audio" / SFX_STEMS_DIRNAME / SFX_LEDGER_NAME
     if not ledger.exists():
@@ -354,30 +385,42 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
         records = load_sfx_ledger(ledger)
     except (OSError, ValueError) as exc:
         return [f"sfx ledger unreadable: {exc}"]
-    deduped = {str(record.get("window_id", "")): record for record in records}
-    ordered = sorted(deduped.values(), key=lambda record: float(record.get("start", 0.0)))
-    cursor = 0.0
-    covered_until = 0.0
-    for record in ordered:
-        try:
-            stem = resolve_stored_path(run_dir, str(record.get("path", "")))
-        except MediaError as exc:
-            errors.append(f"sfx {record.get('window_id')} escapes the run dir: {exc}")
-            stem = None
-        if stem is None or not stem.exists():
-            errors.append(f"sfx {record.get('window_id')} missing {record.get('path')}")
-        start = float(record.get("start", -1.0))
-        if abs(start - cursor) > SFX_WINDOW_OVERLAP + 0.01:
-            errors.append(
-                f"sfx coverage gap: window {record.get('window_id')} starts at "
-                f"{start:.2f}s, expected ~{cursor:.2f}s"
-            )
-        covered_until = start + _record_covered_duration(record)
-        cursor = covered_until - SFX_WINDOW_OVERLAP
-    if covered_until < timeline_seconds - AV_ALIGNMENT_TOLERANCE_SECONDS:
-        errors.append(
-            f"sfx coverage {covered_until:.2f}s short of timeline {timeline_seconds:.2f}s"
+    deduped = {}
+    for record in records:
+        key = (
+            str(record.get("conditioning_source", SFX_CONDITIONING_SHIPPED)),
+            str(record.get("window_id", "")),
         )
+        deduped[key] = record
+    grouped: dict[tuple[str, float], list[dict[str, Any]]] = {}
+    for (_source, _window_id), record in deduped.items():
+        raw_timeline = record.get("conditioning_timeline", None)
+        group_timeline = float(raw_timeline) if raw_timeline is not None else timeline_seconds
+        grouped.setdefault((_source, group_timeline), []).append(record)
+    for (_source, group_timeline), group in sorted(grouped.items()):
+        ordered = sorted(group, key=lambda record: float(record.get("start", 0.0)))
+        cursor = 0.0
+        covered_until = 0.0
+        for record in ordered:
+            try:
+                stem = resolve_stored_path(run_dir, str(record.get("path", "")))
+            except MediaError as exc:
+                errors.append(f"sfx {record.get('window_id')} escapes the run dir: {exc}")
+                stem = None
+            if stem is None or not stem.exists():
+                errors.append(f"sfx {record.get('window_id')} missing {record.get('path')}")
+            start = float(record.get("start", -1.0))
+            if abs(start - cursor) > SFX_WINDOW_OVERLAP + 0.01:
+                errors.append(
+                    f"sfx coverage gap: window {record.get('window_id')} starts at "
+                    f"{start:.2f}s, expected ~{cursor:.2f}s"
+                )
+            covered_until = start + _record_covered_duration(record)
+            cursor = covered_until - SFX_WINDOW_OVERLAP
+        if covered_until < group_timeline - AV_ALIGNMENT_TOLERANCE_SECONDS:
+            errors.append(
+                f"sfx coverage {covered_until:.2f}s short of timeline {group_timeline:.2f}s"
+            )
     return errors
 
 
@@ -402,7 +445,12 @@ def _sfx_worker_module(backend: str) -> str:
         raise MediaError(f"unknown sfx backend {backend!r} (known: {known})") from None
 
 
-def _stem_cache_hit(record: dict[str, Any], window: SfxWindow, model_size: str) -> bool:
+def _stem_cache_hit(
+    record: dict[str, Any],
+    window: SfxWindow,
+    model_size: str,
+    conditioning_source: str = SFX_CONDITIONING_SHIPPED,
+) -> bool:
     """Whether a ledger record satisfies a planned window (153, pure).
 
     The ledger `duration` is the requested plan duration, so the hit-test
@@ -410,10 +458,15 @@ def _stem_cache_hit(record: dict[str, Any], window: SfxWindow, model_size: str) 
     a re-finalize after probe rounding still hits, while a stale window
     from a shorter timeline (tenths of a second off) always re-renders.
     Caption/seed/model_size must match exactly so real plan changes always
-    re-render. Malformed durations miss. Stem reality (`probed_duration`)
-    never participates: an honest encode shortfall (hundredths of a
-    second) must not force a re-render every finalize.
+    re-render. The conditioning source must match too: shipped-pixel stems
+    and proxy-pixel stems are never interchangeable (parallel finalize).
+    Legacy lines predate the key and read as `shipped`. Malformed
+    durations miss. Stem reality (`probed_duration`) never participates:
+    an honest encode shortfall (hundredths of a second) must not force a
+    re-render every finalize.
     """
+    if record.get("conditioning_source", SFX_CONDITIONING_SHIPPED) != conditioning_source:
+        return False
     if record.get("caption") != window.caption:
         return False
     if record.get("seed") != window.seed:
@@ -461,6 +514,8 @@ def render_sfx_bed(
     *,
     blend_timings: list[float] | None = None,
     progress: VoyageConsole | None = None,
+    conditioning_source: str = SFX_CONDITIONING_SHIPPED,
+    conditioning_timeline: float | None = None,
 ) -> Path:
     """Render every window (reusing ledger-matching stems) and join the bed.
 
@@ -473,7 +528,9 @@ def render_sfx_bed(
     fold, each stem decoded once) and verifies timeline-exactness before
     returning. Each stem is probed once and threaded through the join;
     `blend_timings` collects the single join wall-milliseconds for soak
-    trending.
+    trending. `conditioning_source` pins the pixel identity the stems
+    condition on (and ledger under); the timeline the bounds tile rides
+    in `conditioning_timeline` (defaults to `timeline_seconds`).
     """
     from voyage.logrotate import append_line
     from voyage.rpc import SubprocessWorker
@@ -550,7 +607,7 @@ def render_sfx_bed(
             record = existing.get(window.window_id)
             if (
                 record is not None
-                and _stem_cache_hit(record, window, sizes[slot])
+                and _stem_cache_hit(record, window, sizes[slot], conditioning_source)
                 and resolve_stored_path(run_dir, str(record.get("path", ""))).exists()
             ):
                 hit = resolve_stored_path(run_dir, str(record["path"]))
@@ -608,10 +665,19 @@ def render_sfx_bed(
                         if tracker is not None:
                             tracker.update()
         stems = []
+        ledger_timeline = (
+            conditioning_timeline if conditioning_timeline is not None else timeline_seconds
+        )
         for row in pending:
             if row.logged is not None:
                 append_sfx_window(
-                    ledger, row.logged, row.stored, row.model_size, probed_duration=row.probed
+                    ledger,
+                    row.logged,
+                    row.stored,
+                    row.model_size,
+                    probed_duration=row.probed,
+                    conditioning_source=conditioning_source,
+                    conditioning_timeline=ledger_timeline,
                 )
             stems.append(row.stem)
     finally:
@@ -811,6 +877,140 @@ def remux_video_with_audio(source_video: Path, mixed_audio: Path, dest_mp4: Path
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx pass remux failed: {proc.stderr[-2000:]}")
+    return dest_mp4
+
+
+def build_proxy_reference(run_dir: Path, usable: list[Path], tmpdir: Path) -> tuple[Path, float]:
+    """Concat the committed segments into a source-timeline proxy (no re-encode).
+
+    The parallel finalize path conditions the SFX bed on this reference
+    instead of the shipped final: stream-copy concat keeps the exact source
+    duration 1:1, so the worker's (start, duration) contract and the
+    unscaled source bounds stay exact with no seeking math. Documented
+    approximations vs shipped pixels: hard cuts instead of morph joints,
+    duplicated frames instead of FILM-smooth slow-mo, no upscale (all
+    near-irrelevant at the worker's 384px conditioning resample).
+    Returns the proxy path and its probed source duration.
+    """
+    from voyage.media import write_concat_list
+
+    if not usable:
+        raise MediaError("sfx proxy: no usable segments to reference")
+    sources = [segment / "video.mp4" for segment in usable]
+    missing = [str(source) for source in sources if not source.exists()]
+    if missing:
+        raise MediaError(f"sfx proxy: missing segment videos: {', '.join(missing)}")
+    concat_list = write_concat_list(sources, tmpdir / "sfx_proxy_concat.txt")
+    proxy = tmpdir / "sfx_proxy_ref.mp4"
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c:v",
+            "copy",
+            str(proxy),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"sfx proxy concat failed: {proc.stderr[-2000:]}")
+    source_seconds = float(probe(proxy).get("format", {}).get("duration", 0.0) or 0.0)
+    if source_seconds <= 0.0:
+        raise MediaError(f"sfx proxy: unprobable reference duration for {proxy}")
+    return proxy, source_seconds
+
+
+def atempo_chain_for_stretch(stretch: float) -> str | None:
+    """Build an atempo filter chain for a uniform retime factor (pure).
+
+    Returns None when `stretch` is identity within float noise (the dub
+    then skips the stretch leg byte-identically). Otherwise decomposes
+    the factor into atempo filters each inside the [0.5, 2.0] accepted
+    range (halving/doubling the remainder until it fits). Non-finite or
+    non-positive factors fail loud — a bogus stretch must never
+    silently ship unstretched audio.
+    """
+    if not math.isfinite(stretch) or stretch <= 0.0:
+        raise MediaError(f"sfx stretch needs a positive factor (got {stretch})")
+    if abs(stretch - 1.0) <= BOUNDS_RESCALE_IDENTITY_TOLERANCE:
+        return None
+    factors: list[float] = []
+    remaining = stretch
+    while remaining > ATEMPO_MAX_FACTOR:
+        factors.append(ATEMPO_MAX_FACTOR)
+        remaining /= ATEMPO_MAX_FACTOR
+    while remaining < ATEMPO_MIN_FACTOR:
+        factors.append(ATEMPO_MIN_FACTOR)
+        remaining /= ATEMPO_MIN_FACTOR
+    factors.append(remaining)
+    parts = []
+    for factor in factors:
+        quantized = round(factor, 6)
+        if not ATEMPO_MIN_FACTOR <= quantized <= ATEMPO_MAX_FACTOR:
+            raise MediaError(f"sfx stretch {stretch} leaves atempo out of range ({quantized})")
+        parts.append(f"atempo={quantized}")
+    return ",".join(parts)
+
+
+def stretch_and_dub_sfx_bed(
+    staged_video: Path,
+    proxy_bed: Path,
+    music_wav: Path,
+    dest_mp4: Path,
+    sample_rate: int,
+    channels: int,
+    stretch: float,
+) -> Path:
+    """Dub a proxy-conditioned bed onto the staged final (parallel path).
+
+    The bed tiles the source timeline; `stretch` (probed shipped duration
+    over probed source duration) retimes it once via an atempo chain, then
+    the dub reuses the `mix_music_and_sfx` + `remux_video_with_audio`
+    single-homes — same mix levels and publish encode as the sequential
+    pass. The dubbed file is verified against the staged video within
+    `AV_ALIGNMENT_TOLERANCE_SECONDS` (not frame-exact: the remux `-shortest`
+    trims to the audio, same semantics as the sequential dub).
+    """
+    chain = atempo_chain_for_stretch(stretch)
+    work_bed = proxy_bed
+    if chain is not None:
+        stretched = dest_mp4.parent / "sfx_bed_stretched.wav"
+        proc = run_capture(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(proxy_bed),
+                "-af",
+                chain,
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-c:a",
+                "pcm_s16le",
+                str(stretched),
+            ]
+        )
+        if proc.returncode != 0:
+            raise MediaError(f"sfx bed stretch failed: {proc.stderr[-2000:]}")
+        work_bed = stretched
+    mixed = dest_mp4.parent / "sfx_dub_mixed.wav"
+    mix_music_and_sfx(music_wav, work_bed, mixed, sample_rate, channels)
+    remux_video_with_audio(staged_video, mixed, dest_mp4)
+    staged_seconds = float(probe(staged_video).get("format", {}).get("duration", 0.0) or 0.0)
+    dubbed_seconds = float(probe(dest_mp4).get("format", {}).get("duration", 0.0) or 0.0)
+    if abs(dubbed_seconds - staged_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(f"sfx dub {dubbed_seconds:.2f}s drifts from staged {staged_seconds:.2f}s")
     return dest_mp4
 
 

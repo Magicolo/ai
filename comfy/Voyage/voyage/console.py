@@ -39,7 +39,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from typing import Any, Protocol, TextIO
 
 from voyage.motion_sense import LOW_MOTION_FLOOR
@@ -71,6 +71,20 @@ class SegmentProgress(Protocol):
 
     def note(self, message: str) -> None:
         """One background-worker line (prefetch submit/hit, pre-warm ledger)."""
+        ...
+
+    @property
+    def verbose(self) -> bool:
+        """Whether --verbose detail lines are wanted (sweep breakdowns)."""
+        ...
+
+    def bar(self, label: str, total: int | None = None) -> AbstractContextManager[Any]:
+        """Determinate bar (known total) or spinner (total=None, unknown).
+
+        The owner advances via the yielded tracker (`update()` /
+        `set_total()`); exactly one bar is ever live at a time (never
+        two concurrent rich Live displays).
+        """
         ...
 
     def stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
@@ -419,6 +433,10 @@ class RichSegmentProgress:
     def note(self, message: str) -> None:
         self._console.info(message)
 
+    @property
+    def verbose(self) -> bool:
+        return self._console.verbose
+
     def stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
         return self._console.stage(label, detail)
 
@@ -525,6 +543,7 @@ class BarTracker:
         self._started = time.monotonic()
         self._progress: Any = None
         self._task: Any = None
+        self._extra: str | None = None
 
     @property
     def done(self) -> int:
@@ -580,6 +599,14 @@ class BarTracker:
         if self._progress is not None and self._task is not None:
             self._progress.update(self._task, total=total)
 
+    def set_extra(self, extra: str) -> None:
+        """Extra detail appended to the finish line (e.g. a frames/s rate).
+
+        Opt-in per bar — unset bars keep the historical `X/Y, Ns` format
+        byte-identical, so existing pins never move.
+        """
+        self._extra = extra
+
     def _finish(self) -> None:
         elapsed = time.monotonic() - self._started
         if self._progress is not None:
@@ -587,14 +614,17 @@ class BarTracker:
                 self._progress.update(self._task, completed=self._done)
             self._progress.stop()
             self._progress = None
+        extra = f", {self._extra}" if self._extra else ""
         if not self._console._quiet:
             if self._total is not None:
                 self._console.styled(
-                    "✓", f"{self._label} ({self._done}/{self._total}, {elapsed:.1f}s)", "green"
+                    "✓",
+                    f"{self._label} ({self._done}/{self._total}, {elapsed:.1f}s{extra})",
+                    "green",
                 )
             else:
                 self._console.styled(
-                    "✓", f"{self._label} ({self._done} done, {elapsed:.1f}s)", "green"
+                    "✓", f"{self._label} ({self._done} done, {elapsed:.1f}s{extra})", "green"
                 )
 
     def _fail(self) -> None:
@@ -638,3 +668,248 @@ def optional_bar(
     else:
         with progress.bar(label, total) as tracker:
             yield tracker
+
+
+class ParallelFinalizeDisplay:
+    """One shared live display for N concurrent streams (parallel work).
+
+    Why: each ``BarTracker`` owns its own ``Progress`` + ``Live`` — two
+    concurrent bars would run two Live displays on the same terminal and
+    garble. The coordinator owns ONE ``Progress`` (on the main console's
+    rich console, the same object sequential bars already share) plus a
+    lock; per-stream ``ParallelStreamDisplay`` views route their bars to
+    shared tasks and their lines through the lock. Text and bars stay
+    whole; the non-TTY path degrades to lock-guarded boundary lines and
+    quiet stays silent, exactly like the sequential display.
+
+    First used for the two-stream finalize forks (model∥music, sfx∥
+    publish); generation reuses the same coordinator for the video∥
+    model-pass fork (the video stream's stage degrades to plain lines,
+    so the model-pass bar owns the only Live).
+    """
+
+    def __init__(self, console: VoyageConsole) -> None:
+        self._console = console
+        self._lock = threading.Lock()
+        self._progress: Any = None
+
+    def _live(self) -> bool:
+        return self._console._rich is not None and self._console._is_tty
+
+    def _ensure_progress(self) -> Any:
+        if self._progress is None and self._live() and not self._console._quiet:
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                TextColumn,
+                TimeElapsedColumn,
+                TimeRemainingColumn,
+            )
+
+            self._progress = Progress(
+                TextColumn("{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=self._console._rich,
+                transient=False,
+            )
+            self._progress.start()
+        return self._progress
+
+    def add_task(self, label: str, total: int | None) -> Any:
+        """Register one bar; returns the task id (None when silent)."""
+        with self._lock:
+            if self._console._quiet:
+                return None
+            progress = self._ensure_progress()
+            if progress is None:
+                return None
+            return progress.add_task(label, total=total)
+
+    def update_task(self, task: Any, advance: int = 1) -> None:
+        with self._lock:
+            if self._progress is not None and task is not None:
+                self._progress.update(task, advance=advance)
+
+    def set_task_total(self, task: Any, total: int) -> None:
+        with self._lock:
+            if self._progress is not None and task is not None:
+                self._progress.update(task, total=total)
+
+    def complete_task(self, task: Any, done: int) -> None:
+        with self._lock:
+            if self._progress is not None and task is not None:
+                with suppress(Exception):
+                    self._progress.update(task, completed=done)
+
+    def stream_view(self, label: str) -> VoyageConsole:
+        """One per-stream view (a VoyageConsole, so signatures never churn)."""
+        return ParallelStreamDisplay(self, label)
+
+    def close(self) -> None:
+        """Stop the shared display (bars already finished via their contexts)."""
+        with self._lock:
+            if self._progress is not None:
+                with suppress(Exception):
+                    self._progress.stop()
+                self._progress = None
+
+
+class ParallelStreamDisplay(VoyageConsole):
+    """One stream's view of a ``ParallelFinalizeDisplay`` (branch threads).
+
+    A real VoyageConsole sharing the coordinator's rich console object,
+    so branch ``optional_bar``/``optional_stage`` calls behave exactly
+    like sequential ones. Bars route to shared tasks; stages degrade to
+    lock-guarded plain lines (two spinners would fight the shared Live —
+    same reason the model∥music fork silences its branches); every text
+    emit holds the coordinator lock so concurrent lines stay whole.
+    """
+
+    def __init__(self, display: ParallelFinalizeDisplay, label: str) -> None:
+        source = display._console
+        self._verbose = source._verbose
+        self._no_color = source._no_color
+        self._stream = source._stream
+        self._quiet = source._quiet
+        self._rich = source._rich
+        self._display = display
+        self._stream_label = label
+
+    @contextmanager
+    def stage(self, label: str, detail: str = "") -> Iterator[None]:
+        """Lock-guarded plain lines (no spinner — shared Live owns the screen)."""
+        started = time.monotonic()
+        head = f"{label} … {detail}".rstrip(" …")
+        if self._quiet:
+            try:
+                yield
+            except BaseException:
+                elapsed = time.monotonic() - started
+                self.error(f"{label} failed after {elapsed:.1f}s")
+                raise
+            return
+        with self._display._lock:
+            VoyageConsole.line(self, f"▸ {head} ...")
+        try:
+            yield
+        except BaseException:
+            elapsed = time.monotonic() - started
+            with self._display._lock:
+                VoyageConsole.line(self, f"✗ {label} failed after {elapsed:.1f}s")
+            raise
+        elapsed = time.monotonic() - started
+        with self._display._lock:
+            VoyageConsole.line(self, f"✓ {label} in {elapsed:.1f}s")
+
+    @contextmanager
+    def bar(self, label: str, total: int | None = None) -> Iterator[BarTracker]:
+        """Route the bar to a shared task (boundary lines when not live)."""
+        tracker = SharedBarTracker(self, label, total, self._display)
+        tracker._begin()
+        try:
+            yield tracker
+        except BaseException:
+            tracker._fail()
+            raise
+        else:
+            tracker._finish()
+
+    def line(self, text: str = "") -> None:
+        with self._display._lock:
+            VoyageConsole.line(self, text)
+
+    def styled(self, icon: str, text: str, style: str) -> None:
+        with self._display._lock:
+            VoyageConsole.styled(self, icon, text, style)
+
+    def error(self, message: str) -> None:
+        with self._display._lock:
+            VoyageConsole.error(self, message)
+
+    # NOTE (no-deadlock rule): only leaf emits are overridden here. The
+    # base `info`/`ok` fan out through `self.styled`, so they are
+    # inherited untouched — overriding them with their own lock (and
+    # calling super) would re-acquire this non-reentrant lock on the
+    # same thread and wedge the caller forever.
+
+
+class SharedBarTracker(BarTracker):
+    """A ``BarTracker`` routed to the shared parallel display (branch use).
+
+    Same finish-line contract as ``BarTracker`` (opt-in ``set_extra``,
+    historical format otherwise); only the live task is shared instead
+    of owned, so ``_finish`` completes the task without stopping the
+    display — the coordinator stops it after the join.
+    """
+
+    def __init__(
+        self,
+        console: ParallelStreamDisplay,
+        label: str,
+        total: int | None,
+        display: ParallelFinalizeDisplay,
+    ) -> None:
+        super().__init__(console, label, total)
+        self._display = display
+
+    def _begin(self) -> None:
+        if self._console._quiet:
+            return
+        self._task = self._display.add_task(self._label, self._total)
+        if self._task is None:
+            suffix = f" (0/{self._total})" if self._total is not None else ""
+            with self._display._lock:
+                VoyageConsole.line(self._console, f"▸ {self._label} ...{suffix}")
+
+    def update(self, advance: int = 1) -> None:
+        """Mark units complete (finish accounting reads ``done``)."""
+        self._done += advance
+        self._display.update_task(self._task, advance)
+
+    def set_total(self, total: int) -> None:
+        """Learn the total mid-step (spinner → determinate on a TTY)."""
+        self._total = total
+        self._display.set_task_total(self._task, total)
+
+    def _finish(self) -> None:
+        self._display.complete_task(self._task, self._done)
+        elapsed = time.monotonic() - self._started
+        extra = f", {self._extra}" if self._extra else ""
+        if not self._console._quiet:
+            with self._display._lock:
+                if self._total is not None:
+                    VoyageConsole.styled(
+                        self._console,
+                        "✓",
+                        f"{self._label} ({self._done}/{self._total}, {elapsed:.1f}s{extra})",
+                        "green",
+                    )
+                else:
+                    VoyageConsole.styled(
+                        self._console,
+                        "✓",
+                        f"{self._label} ({self._done} done, {elapsed:.1f}s{extra})",
+                        "green",
+                    )
+
+    def _fail(self) -> None:
+        self._display.complete_task(self._task, self._done)
+        elapsed = time.monotonic() - self._started
+        if self._console._quiet:
+            self._console.error(f"{self._label} failed after {elapsed:.1f}s")
+        else:
+            with self._display._lock:
+                VoyageConsole.styled(
+                    self._console, "✗", f"{self._label} failed after {elapsed:.1f}s", "red"
+                )
+
+
+#: Generation-side name for the shared live display (same coordinator as
+#: the finalize forks — stream-count agnostic; the generation fork is
+#: video ∥ model-pass). A plain alias so call sites read in their own
+#: domain without a second implementation to drift.
+GenerationDisplay = ParallelFinalizeDisplay

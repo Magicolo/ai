@@ -18,7 +18,7 @@ from voyage.cli_core import _augment_overrides, _load_run, get_console
 from voyage.cli_paths import resolve_run_ref, warn_if_outside_output_dir
 from voyage.config import resolve_config
 from voyage.errors import DiskSpaceError, MediaError, StateError
-from voyage.media import finalize_run, presented_frames
+from voyage.media import SfxParallelRequest, finalize_run, presented_frames
 from voyage.media import probe as media_probe
 from voyage.persistence import read_state, record_final_coverage
 
@@ -65,9 +65,27 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         "audio_config": config.audio,
         "seed": config.seed,
     }
-    # Always-deferred finalize is sequential: takes render inside
-    # `finalize_run` (ACE-Step on cuda:0, same card as the SFX bed), then
-    # the SFX dub runs after — the two GPU stages never share the card.
+    # Two-stream finalize: the SFX bed renders inside `finalize_run` while
+    # the model pass publishes (stream A ∥ stream B — music, then the bed
+    # on cuda:0 after the ACE teardown, then the dub on the main thread),
+    # so a dubbed final skips the legacy post-pass below. A bed failure
+    # inside finalize ships music-only and the legacy shipped-pixels pass
+    # retries as the fallback (the keyed ledger keeps proxy stems from
+    # false-hitting there).
+    sfx_request = (
+        SfxParallelRequest(
+            backend=sfx_backend,
+            models_dir=config.sfx.models_dir,
+            device=getattr(args, "sfx_device", None) or config.sfx.device,
+            model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
+            num_workers=getattr(args, "sfx_workers", 1),
+            fps=config.video.fps,
+            caption_override=getattr(args, "sfx_caption", None),
+        )
+        if sfx_will_run
+        else None
+    )
+    sfx_report: dict[str, Any] = {}
     try:
         finalize_run(
             run_dir,
@@ -75,11 +93,13 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             **video_kwargs,
             invoker=getattr(args, "invoker", None),
             progress=console,
+            sfx_request=sfx_request,
+            sfx_report=sfx_report,
         )
     except (MediaError, StateError, DiskSpaceError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)
         return 1
-    if sfx_will_run:
+    if sfx_will_run and sfx_report.get("sfx_status") != "dubbed":
         from voyage.sfx_finalize import finalize_sfx_pass
 
         try:
