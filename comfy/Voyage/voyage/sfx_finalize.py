@@ -626,12 +626,15 @@ def render_sfx_bed(
             conditioning_source=conditioning_source,
             conditioning_timeline=ledger_timeline,
         )
-        print(
+        message = (
             f"sfx orphan adopted: {adopt_window.window_id} "
             f"(no ledger line, stem {probed_duration:.3f}s ~= request "
-            f"{adopt_window.duration:.3f}s)",
-            file=sys.stderr,
+            f"{adopt_window.duration:.3f}s)"
         )
+        if progress is not None:
+            progress.warn(message)
+        else:
+            print(message, file=sys.stderr)
         existing[adopt_window.window_id] = {
             "window_id": adopt_window.window_id,
             "start": adopt_window.start,

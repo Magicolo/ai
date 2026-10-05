@@ -226,11 +226,19 @@ def _heal_safe_transients(run_dir: Path) -> int:
     return healed
 
 
-def _heal_and_report(run_dir: Path) -> int:
-    """Heal safe transients, printing the user-visible count when nonzero."""
+def _heal_and_report(run_dir: Path, console: Any | None = None) -> int:
+    """Heal safe transients, reporting the count (console when present).
+
+    The bare-`print` fallback keeps the exact historical stdout words for
+    direct callers with no console (pinned by tests).
+    """
     healed = _heal_safe_transients(run_dir)
     if healed:
-        print(f"healed: removed {healed} transient file(s)/dir(s)")
+        message = f"healed: removed {healed} transient file(s)/dir(s)"
+        if console is not None:
+            console.ok(message)
+        else:
+            print(message)
     return healed
 
 
@@ -275,6 +283,7 @@ def _extend_plan(
     run_dir: Path,
     manifest: dict[str, object],
     effective: Any,
+    console: Any | None = None,
 ) -> int | None:
     """Additive plan extension from --segments XOR --duration (0 if neither).
 
@@ -317,7 +326,11 @@ def _extend_plan(
         return None
     manifest["segments"] = old + added
     write_manifest(run_dir, manifest)
-    print(f"extended plan: {old} -> {old + added} segments")
+    message = f"extended plan: {old} -> {old + added} segments"
+    if console is not None:
+        console.ok(message)
+    else:
+        print(message)
     return added
 
 
@@ -365,7 +378,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    added = _extend_plan(args, run_dir, manifest, effective)
+    console = get_console(args)
+    added = _extend_plan(args, run_dir, manifest, effective, console)
     if added is None:
         return 2
     planned += added
@@ -377,10 +391,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
     removed = _discard_uncommitted_segments(run_dir, state.committed_segments)
     if removed:
         plural = "y" if removed == 1 else "ies"
-        print(f"reconcile: removed {removed} uncommitted segment entr{plural}")
-    _heal_and_report(run_dir)
+        console.ok(f"reconcile: removed {removed} uncommitted segment entr{plural}")
+    _heal_and_report(run_dir, console)
     remaining = planned - state.committed_segments
-    console = get_console(args)
     sink = getattr(args, "progress_sink", None)
     if remaining <= 0:
         errors = _pre_finalize_errors(run_dir, manifest, effective, args)
@@ -406,7 +419,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             state.committed_segments,
             expected_skip_key=_expected_skip_key(args, manifest, effective),
         ):
-            print(
+            console.ok(
                 f"nothing to do: {state.committed_segments} segment(s) committed, "
                 f"{final.name} is current"
             )
@@ -463,7 +476,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             f"voyage generate · {effective.video.backend} "
             f"{effective.video.width}x{effective.video.height} @{effective.video.fps}fps"
         )
-        print(
+        console.info(
             f"generating {remaining} segment(s) "
             f"(segments {state.committed_segments}..{planned - 1} of {planned} planned) "
             f"with {effective.video.backend} (resuming at segment {state.committed_segments}) ..."
@@ -496,10 +509,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
         console.ok(
             f"generated {final_value if isinstance(final_value, str) else run_dir / 'final.mp4'} "
             f"({state.committed_segments} segments, "
-            f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
-        )
-        print(
-            f"generated ({state.committed_segments} segments, "
             f"{state.timeline_frames} frames, ~{actual_seconds:.1f}s)"
         )
     return 0

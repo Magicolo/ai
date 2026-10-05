@@ -256,7 +256,7 @@ class VoyageConsole:
                 self.line(f"✗ {label} failed after {elapsed:.1f}s")
                 raise
             elapsed = time.monotonic() - started
-            self.line(f"✓ {label} in {elapsed:.1f}s")
+            self.line(f"✓ {label} ({elapsed:.1f}s)")
 
     @contextmanager
     def bar(self, label: str, total: int | None = None) -> Iterator[BarTracker]:
@@ -560,30 +560,26 @@ class BarTracker:
                 BarColumn,
                 MofNCompleteColumn,
                 Progress,
-                SpinnerColumn,
                 TextColumn,
                 TimeElapsedColumn,
                 TimeRemainingColumn,
             )
 
-            if self._total is None:
-                self._progress = Progress(
-                    SpinnerColumn(),
-                    TextColumn("{task.description}"),
-                    TimeElapsedColumn(),
-                    console=self._console._rich,
-                    transient=False,
-                )
-            else:
-                self._progress = Progress(
-                    TextColumn("{task.description}"),
-                    BarColumn(),
-                    MofNCompleteColumn(),
-                    TimeElapsedColumn(),
-                    TimeRemainingColumn(),
-                    console=self._console._rich,
-                    transient=False,
-                )
+            # One determinate layout whether or not the total is known yet:
+            # rich renders a total=None task without X/Y or ETA, and the
+            # same columns pick up the bar + ETA live once set_total()
+            # learns it — a spinner-only layout picked here could never
+            # upgrade (the observed "⠧ interp frames 0:01:54" with no
+            # X/Y or ETA for the whole pass).
+            self._progress = Progress(
+                TextColumn("{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=self._console._rich,
+                transient=False,
+            )
             self._progress.start()
             self._task = self._progress.add_task(self._label, total=self._total)
         else:
@@ -597,7 +593,7 @@ class BarTracker:
             self._progress.update(self._task, advance=advance)
 
     def set_total(self, total: int) -> None:
-        """Learn the total mid-step (spinner → determinate on a TTY)."""
+        """Learn the total mid-step (X/Y + ETA appear live on a TTY)."""
         self._total = total
         if self._progress is not None and self._task is not None:
             self._progress.update(self._task, total=total)
@@ -806,7 +802,7 @@ class ParallelStreamDisplay(VoyageConsole):
             raise
         elapsed = time.monotonic() - started
         with self._display._lock:
-            VoyageConsole.line(self, f"✓ {label} in {elapsed:.1f}s")
+            VoyageConsole.line(self, f"✓ {label} ({elapsed:.1f}s)")
 
     @contextmanager
     def bar(self, label: str, total: int | None = None) -> Iterator[BarTracker]:
@@ -874,7 +870,7 @@ class SharedBarTracker(BarTracker):
         self._display.update_task(self._task, advance)
 
     def set_total(self, total: int) -> None:
-        """Learn the total mid-step (spinner → determinate on a TTY)."""
+        """Learn the total mid-step (X/Y + ETA appear live on a TTY)."""
         self._total = total
         self._display.set_task_total(self._task, total)
 

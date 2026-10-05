@@ -553,10 +553,14 @@ def ensure_deferred_takes(
                     takes.append(take)
                     append_take(ledger, take)
                     rendered.append(take.to_dict())
-                    sys.stderr.write(
+                    message = (
                         f"deferred orphan adopted: {take.take_id} "
-                        "(no ledger line, take file matches plan)\n"
+                        "(no ledger line, take file matches plan)"
                     )
+                    if progress is not None:
+                        progress.warn(message)
+                    else:
+                        sys.stderr.write(f"{message}\n")
                     if tracker is not None:
                         tracker.update()
                     if planner.coverage_until() >= end - 1e-6:

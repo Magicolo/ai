@@ -194,9 +194,7 @@ def _poll_to_completion(
         up_per_segment: dict[str, list[int]] = {}
         if include_upscale:
             upscale_start = time.monotonic()
-            with optional_bar(progress, "upscale frames") as up_tracker:
-                if up_tracker is not None and expected_source > 0:
-                    up_tracker.set_total(expected_source)
+            with optional_bar(progress, "upscale frames", expected_source or None) as up_tracker:
 
                 def _up_chunk(
                     segment_id: str,
@@ -255,9 +253,7 @@ def _poll_to_completion(
         if include_interp:
             interp_start = time.monotonic()
             ip_per_segment: dict[str, list[int]] = {}
-            with optional_bar(progress, "interp frames") as ip_tracker:
-                if ip_tracker is not None and expected_source > 0:
-                    ip_tracker.set_total(expected_source)
+            with optional_bar(progress, "interp frames", expected_source or None) as ip_tracker:
                 _ip_carry: list[float] = [0.0]
 
                 def _ip_chunk(

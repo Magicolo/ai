@@ -169,5 +169,4 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     except OSError:
         size_text = "unknown size"
     console.ok(f"finalized -> {output} ({duration}s, {size_text})")
-    print(f"finalized -> {output}")
     return 0

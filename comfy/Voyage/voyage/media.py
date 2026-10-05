@@ -679,14 +679,18 @@ def resolve_finalize_settings(
     )
 
 
-def committed_usable_segments(run_dir: Path, skip_bad: bool) -> list[Path]:
+def committed_usable_segments(
+    run_dir: Path, skip_bad: bool, progress: Any | None = None
+) -> list[Path]:
     """Committed segment dirs in order, triaged per §56 steps 4-6 (issues 138/188).
 
     Shared by `finalize_run` and the parallel finalize path (DESIGN §140
     GPU defaults): numbering gaps raise unless `skip_bad` (then the first
     gap warns and stops the scan), and every segment passes
-    `_check_segment_committed` (failures raise, or print a loud skip line
-    under `skip_bad`). An empty usable set raises either way.
+    `_check_segment_committed` (failures raise, or warn a skip line
+    under `skip_bad`). Skip lines go through the progress sink when one
+    is present (quiet-aware, TTY-consistent) and keep the historical
+    bare `print` otherwise. An empty usable set raises either way.
     """
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     segment_dirs = (
@@ -698,10 +702,14 @@ def committed_usable_segments(run_dir: Path, skip_bad: bool) -> list[Path]:
     if skip_bad:
         for position, segment in enumerate(committed):
             if segment.name != f"{position:06d}":
-                print(
+                message = (
                     "finalize: skipping segment numbering gap: "
                     f"expected {position:06d}, found {segment.name}"
                 )
+                if progress is not None:
+                    progress.warn(message)
+                else:
+                    print(message)
                 break
     else:
         for position, segment in enumerate(committed):
@@ -716,7 +724,11 @@ def committed_usable_segments(run_dir: Path, skip_bad: bool) -> list[Path]:
         except MediaError as exc:
             if not skip_bad:
                 raise
-            print(f"finalize: skipping {segment.name} ({exc})")
+            message = f"finalize: skipping {segment.name} ({exc})"
+            if progress is not None:
+                progress.warn(message)
+            else:
+                print(message)
             continue
         usable.append(segment)
     if not usable:
@@ -958,7 +970,7 @@ def finalize_run(
     triage_cm = optional_stage(progress, "triage segments")
     triage_start = time.monotonic()
     with triage_cm:
-        usable = committed_usable_segments(run_dir, settings.skip_bad)
+        usable = committed_usable_segments(run_dir, settings.skip_bad, progress)
 
         # Output box/fps via the pure augment plan: `source x upscale`
         # per axis, `round(source_fps x interpolate)` for fps unless
