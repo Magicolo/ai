@@ -73,8 +73,14 @@ def test_invalidated_prefetch_logs_invalidated_not_hit(tmp_path: Path) -> None:
     assert "amendments" in invalidated[0]
 
 
-def test_drift_hold_logs_invalidated_not_hit(tmp_path: Path) -> None:
-    """168 e2e: every held segment with a ready prefetch used to count a hit."""
+def test_drift_hold_skips_prefetch_submit_logs_miss(tmp_path: Path) -> None:
+    """168 e2e: held segments no longer spend a background decide at all.
+
+    The submit for a drift-hold target is skipped (it would be consumed
+    as `invalidated` while contending with prompt enhancement on the
+    single-slot sidecar), so the held segment logs a plain `miss` —
+    not a `hit`, and no `invalidated` either.
+    """
     run_dir = tmp_path / "run"
     initialize_run_directory(run_dir, run_id="hold168")
     config = read_effective_config(run_dir)
@@ -91,6 +97,5 @@ def test_drift_hold_logs_invalidated_not_hit(tmp_path: Path) -> None:
     events = _prefetch_events(run_dir)
     seg1 = [line for line in events if '"segment_id": "000001"' in line]
     assert not any("director_prefetch_hit" in line for line in seg1)
-    invalidated = [line for line in seg1 if "director_prefetch_invalidated" in line]
-    assert len(invalidated) == 1
-    assert "drift_hold" in invalidated[0]
+    assert not any("director_prefetch_invalidated" in line for line in seg1)
+    assert any("director_prefetch_miss" in line for line in seg1)

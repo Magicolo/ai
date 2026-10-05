@@ -1168,6 +1168,15 @@ class Supervisor:
         if self._prefetch_future is not None and not self._prefetch_future.done():
             return
         target = number + 1
+        drift_every = max(1, config.voyage.drift_every_n_segments)
+        if target % drift_every != 0:
+            # The next segment holds the current concept deterministically
+            # (no LLM call) — a prefetch for it would be consumed as
+            # `invalidated`, so skip the wasted 30-40 s of sidecar/worker
+            # time. The waste is not free: on the llama backend it
+            # contends with prompt enhancement at the next render start
+            # on the single-slot sidecar server.
+            return
         self._prefetch_target = target
         spec_state = SimpleNamespace(
             decision_index=decision.decision_index + 1,
@@ -1227,6 +1236,10 @@ class Supervisor:
         Hit = future done with a dict result (used as the accept loop's
         first candidate, still fully validated). Anything else is a miss:
         the next commit decides synchronously. Stale targets are dropped.
+        A still-running future for this segment is waited out (bounded by
+        its remaining RPC budget) instead of instantly missed: the miss
+        path would queue a second decide behind the orphan on the serial
+        worker lock, doubling the latency the prefetch was meant to hide.
 
         `invalidated` is the third outcome (issues 136 + 168): the caller
         knows the proposal cannot be used — the drift-cadence hold returns
@@ -1240,26 +1253,42 @@ class Supervisor:
         self._prefetch_future = None
         self._prefetch_target = None
         submitted_at, self._prefetch_submitted_at = self._prefetch_submitted_at, None
-        prefetch_age_ms = (
-            round((time.monotonic() - submitted_at) * 1000.0, 3)
-            if submitted_at is not None
-            else 0.0
-        )
+
+        def _age_ms() -> float:
+            if submitted_at is None:
+                return 0.0
+            return round((time.monotonic() - submitted_at) * 1000.0, 3)
+
         if future is None or target != number:
             self._log_metric(
                 {
                     "event": "director_prefetch_miss",
                     "segment_id": segment_id,
-                    "prefetch_age_ms": prefetch_age_ms,
+                    "prefetch_age_ms": _age_ms(),
                 }
             )
             return None
+        if not future.done() and not invalidated:
+            # The prefetch overlapped this segment's whole video render, so
+            # a still-running future is nearly done — or the worker is
+            # wedged, whose recovery the sync path's restart budget owns.
+            # Wait out its remaining RPC budget instead of instantly
+            # missing and then queueing a second decide behind the orphan
+            # on the serial worker lock: that queue is the observed
+            # director-between-segments gap. A hold discards the proposal
+            # unread, so it never waits.
+            remaining = PREFETCH_TIMEOUT_SECONDS - _age_ms() / 1000.0
+            if remaining > 0:
+                try:
+                    future.result(timeout=remaining)
+                except Exception:  # noqa: BLE001 — falls through to done() re-check
+                    pass
         if not future.done():
             self._log_metric(
                 {
                     "event": "director_prefetch_miss",
                     "segment_id": segment_id,
-                    "prefetch_age_ms": prefetch_age_ms,
+                    "prefetch_age_ms": _age_ms(),
                 }
             )
             return None
@@ -1270,7 +1299,7 @@ class Supervisor:
                 {
                     "event": "director_prefetch_miss",
                     "segment_id": segment_id,
-                    "prefetch_age_ms": prefetch_age_ms,
+                    "prefetch_age_ms": _age_ms(),
                 }
             )
             return None
@@ -1279,7 +1308,7 @@ class Supervisor:
                 {
                     "event": "director_prefetch_miss",
                     "segment_id": segment_id,
-                    "prefetch_age_ms": prefetch_age_ms,
+                    "prefetch_age_ms": _age_ms(),
                 }
             )
             return None
@@ -1289,7 +1318,7 @@ class Supervisor:
                     "event": "director_prefetch_invalidated",
                     "segment_id": segment_id,
                     "reason": invalidation_reason or "discarded",
-                    "prefetch_age_ms": prefetch_age_ms,
+                    "prefetch_age_ms": _age_ms(),
                 }
             )
             return None
@@ -1297,7 +1326,7 @@ class Supervisor:
             {
                 "event": "director_prefetch_hit",
                 "segment_id": segment_id,
-                "prefetch_age_ms": prefetch_age_ms,
+                "prefetch_age_ms": _age_ms(),
             }
         )
         return raw
@@ -1489,7 +1518,13 @@ class Supervisor:
         feedback = ""
         spent_prompt_tokens = 0
         spent_completion_tokens = 0
-        prefetch_pending = prefetched_raw is not None and not amendments
+        # A prefetched proposal stays usable with or without motion
+        # steering: amendments apply post-hoc to both paths below, so a
+        # prefetch generated without measured_context still enters the
+        # accept loop as the first candidate instead of forcing a
+        # redundant synchronous decide (the sequential director gap).
+        # Validation, style and novelty still run on it.
+        prefetch_pending = prefetched_raw is not None
         for attempt in range(max_attempts):
             served_prefetch = False
             if prefetch_pending:
