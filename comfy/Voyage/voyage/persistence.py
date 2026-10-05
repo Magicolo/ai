@@ -53,7 +53,13 @@ def write_manifest(run_dir: Path, manifest: dict[str, object]) -> None:
     atomic_write_json(run_dir / paths.MANIFEST_FILENAME, manifest)
 
 
-def record_final_coverage(run_dir: Path, presented_frames: int, segments: int) -> None:
+def record_final_coverage(
+    run_dir: Path,
+    presented_frames: int,
+    segments: int,
+    *,
+    skip_key: str | None = None,
+) -> None:
     """Stamp the shipped coverage into the manifest (redundant-finalize gate).
 
     `final_coverage` records what `final.mp4` actually presents (ffprobe
@@ -64,9 +70,17 @@ def record_final_coverage(run_dir: Path, presented_frames: int, segments: int) -
     `read_effective_config`, and `build_manifest` never emits this key —
     every `configure` wipes coverage, i.e. conservative invalidation of
     the freshness stamp on any plan/settings change for free.
+
+    `skip_key` (optional, generate skip flags): the canonical behavior key
+    for this finalize. Omitted keeps the legacy 2-key dict so old callers
+    and tests stay green; provided stores it alongside for the freshness
+    gate to compare against.
     """
     manifest = read_manifest(run_dir)
-    manifest["final_coverage"] = {"segments": segments, "presented_frames": presented_frames}
+    coverage: dict[str, object] = {"segments": segments, "presented_frames": presented_frames}
+    if skip_key is not None:
+        coverage["skip_key"] = skip_key
+    manifest["final_coverage"] = coverage
     write_manifest(run_dir, manifest)
 
 

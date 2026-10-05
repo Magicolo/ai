@@ -72,7 +72,7 @@ def test_generate_noop_when_complete(
 ) -> None:
     import voyage.cli_generate as gen_ops
     from tests.conftest import initialize_run_directory
-    from voyage.persistence import read_state, write_state
+    from voyage.persistence import read_effective_config, read_state, write_state
 
     monkeypatch.chdir(tmp_path)
     run_dir = tmp_path / "output" / "done"
@@ -107,9 +107,19 @@ def test_generate_noop_when_complete(
     state.next_segment_number = 1
     state.timeline_frames = 48
     write_state(run_dir, state)
-    from voyage.persistence import record_final_coverage
+    from voyage.persistence import read_manifest, record_final_coverage
 
-    record_final_coverage(run_dir, presented_frames=48, segments=1)
+    manifest = read_manifest(run_dir)
+    record_final_coverage(
+        run_dir,
+        presented_frames=48,
+        segments=1,
+        skip_key=gen_ops._expected_skip_key(
+            argparse.Namespace(),
+            manifest,
+            read_effective_config(run_dir),
+        ),
+    )
     from voyage.fake_backends import FakeVideoBackend
 
     FakeVideoBackend().generate_segment(

@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from voyage.cli_core import _augment_overrides, _load_run, get_console
+from voyage.cli_core import _augment_overrides, _load_run, generate_skip_key, get_console
 from voyage.cli_paths import resolve_run_ref, warn_if_outside_output_dir
 from voyage.config import resolve_config
 from voyage.errors import DiskSpaceError, MediaError, StateError
@@ -64,6 +64,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         "models_dir": config.video.models_dir,
         "audio_config": config.audio,
         "seed": config.seed,
+        # Generate-only --no-music/--no-audio (getattr: hand-built
+        # namespaces + the stop --finalize handoff lack the flag — off).
+        "no_music": bool(getattr(args, "no_music", False)),
     }
     # Two-stream finalize: the SFX bed renders inside `finalize_run` while
     # the model pass publishes (stream A ∥ stream B — music, then the bed
@@ -125,12 +128,35 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     # finalize fix): records what final.mp4 actually presents, so a revisit
     # compares presented-against-presented. Only on full success — an SFX
     # failure returns above, and its music-only final must stay re-finalizable.
+    # The skip_key records the behavior (music/sfx/upscale/interpolate) so
+    # a revisit with different generate-only skips re-finalizes instead of
+    # reading a music-only diff as fresh. Format is owned by
+    # `generate_skip_key` (shared with the generate gate); legacy callers
+    # without the flags stamp the all-off key over the resolved
+    # multipliers — same shape as the generate gate computes for a
+    # no-skip run.
     coverage_frames = presented_frames(output)
     if coverage_frames is not None:
+        # Single format source with the generate gate (`generate_skip_key`):
+        # args.no_sfx already ORs the manifest policy (generate passes the
+        # ORed value; direct callers pass their own), args.upscale/None rode
+        # resolve_config above, so the resolved multipliers are effective.
+        skip_key = generate_skip_key(
+            {
+                "skip_music": bool(getattr(args, "no_music", False)),
+                "skip_sfx": False,
+                "force_upscale_1": False,
+                "force_interpolate_1": False,
+            },
+            manifest_no_sfx=bool(getattr(args, "no_sfx", False)),
+            stored_upscale=config.augment.upscale,
+            stored_interpolate=config.augment.interpolate,
+        )
         record_final_coverage(
             run_dir,
             presented_frames=coverage_frames,
             segments=read_state(run_dir).committed_segments,
+            skip_key=skip_key,
         )
     try:
         info = media_probe(output)

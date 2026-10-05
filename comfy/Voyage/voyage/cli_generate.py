@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
 
-from voyage.cli_core import get_console
+from voyage.cli_core import generate_skip_key, get_console, resolve_generate_skips
 from voyage.cli_paths import _check_run_id, output_root
 from voyage.cli_planning import _frames_per_segment, _require_cuda_stack, segments_for_duration
 from voyage.cli_validate import validate_run
@@ -59,7 +59,12 @@ def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
     return removed
 
 
-def _final_is_fresh(run_dir: Path, final: Path, committed: int) -> bool:
+def _final_is_fresh(
+    run_dir: Path,
+    final: Path,
+    committed: int,
+    expected_skip_key: str | None = None,
+) -> bool:
     """True when final.mp4 matches the recorded finalize coverage.
 
     Compares presented-against-presented: the manifest's `final_coverage`
@@ -67,6 +72,12 @@ def _final_is_fresh(run_dir: Path, final: Path, committed: int) -> bool:
     current commit count + a fresh ffprobe count. Any mismatch — new
     segments, a missing/unreadable final, a re-configure (which wipes the
     stamp), or a changed present — reads as stale and re-finalizes.
+
+    `expected_skip_key` (optional, generate skip flags): when provided, the
+    stamped `skip_key` must match too — a music-only or augment-only diff
+    re-finalizes even when segments + frames match. Omitted keeps the
+    legacy segments+frames comparison (old callers stay green); a stamp
+    without the key reads as stale once a key is expected (one re-stamp).
     """
     if committed <= 0 or not final.is_file():
         return False
@@ -78,8 +89,26 @@ def _final_is_fresh(run_dir: Path, final: Path, committed: int) -> bool:
         return False
     if coverage.get("segments") != committed:
         return False
+    if expected_skip_key is not None and coverage.get("skip_key") != expected_skip_key:
+        return False
     presented = presented_frames(final)
     return presented is not None and presented == coverage.get("presented_frames")
+
+
+def _expected_skip_key(
+    args: argparse.Namespace,
+    manifest: dict[str, object],
+    effective: Any,
+) -> str:
+    """Canonical behavior key for this generate's finalize (freshness gate)."""
+    skips = resolve_generate_skips(args)
+    augment = getattr(effective, "augment", None)
+    return generate_skip_key(
+        skips,
+        manifest_no_sfx=bool(manifest.get("no_sfx", False)),
+        stored_upscale=int(getattr(augment, "upscale", 1)),
+        stored_interpolate=int(getattr(augment, "interpolate", 1)),
+    )
 
 
 def _finalize_run_dir(
@@ -88,9 +117,16 @@ def _finalize_run_dir(
     args: argparse.Namespace,
     console: VoyageConsole | None = None,
 ) -> int:
-    """Run the finalize step with manifest policy (final_video/skip_bad/no_sfx)."""
+    """Run the finalize step with manifest policy + generate skip flags.
+
+    Generate-only skips are non-persistent: --no-upscale/--no-interpolate
+    force multiplier 1 via explicit overrides (stored manifest untouched),
+    --no-sfx ORs with the manifest policy, --no-music rides the synthetic
+    namespace for `cmd_finalize` to consume.
+    """
     from voyage.cli_finalize import cmd_finalize
 
+    skips = resolve_generate_skips(args)
     final_value = manifest.get("final_video")
     final = Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -99,14 +135,15 @@ def _finalize_run_dir(
             run=str(run_dir),
             output=str(final),
             skip_bad=bool(manifest.get("skip_bad", False)),
-            no_sfx=bool(manifest.get("no_sfx", False)),
+            no_sfx=bool(manifest.get("no_sfx", False) or skips["skip_sfx"]),
+            no_music=bool(skips["skip_music"]),
             sfx_backend=None,
             sfx_caption=None,
             sfx_device=None,
             sfx_model_size=None,
             sfx_workers=1,
-            upscale=None,
-            interpolate=None,
+            upscale=1 if skips["force_upscale_1"] else None,
+            interpolate=1 if skips["force_interpolate_1"] else None,
             verbose=bool(getattr(args, "verbose", False)),
             no_color=bool(getattr(args, "no_color", False)),
             quiet=bool(getattr(args, "quiet", False)),
@@ -116,20 +153,29 @@ def _finalize_run_dir(
     )
 
 
-def _pre_finalize_errors(run_dir: Path, manifest: dict[str, Any], effective: Any) -> list[str]:
+def _pre_finalize_errors(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    effective: Any,
+    args: argparse.Namespace | None = None,
+) -> list[str]:
     """Validate errors minus the healable SFX tail shortfall.
 
     SFX stems render only at finalize, so a resume-generate on a run whose
     ledger predates the new segments always trips the pure-shortfall line
     — which finalize heals via `render_sfx_bed` (cache-hits + renders).
     The filter applies only when the SFX pass will actually run; with
-    `no_sfx` (or a fake sfx backend) nothing heals it, so it stays hard.
+    `no_sfx` (manifest policy or the generate-only --no-sfx/--no-audio
+    skip) or a fake sfx backend nothing heals it, so it stays hard.
     """
     from voyage.sfx_finalize import is_healable_sfx_shortfall
 
     errors = validate_run(run_dir)
-    sfx_enabled = not bool(manifest.get("no_sfx", False)) and (
-        getattr(getattr(effective, "sfx", None), "backend", "fake") != "fake"
+    generate_skip_sfx = bool(args is not None and resolve_generate_skips(args)["skip_sfx"])
+    sfx_enabled = (
+        not bool(manifest.get("no_sfx", False))
+        and not generate_skip_sfx
+        and (getattr(getattr(effective, "sfx", None), "backend", "fake") != "fake")
     )
     if not sfx_enabled:
         return errors
@@ -248,7 +294,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     console = get_console(args)
     sink = getattr(args, "progress_sink", None)
     if remaining <= 0:
-        errors = _pre_finalize_errors(run_dir, manifest, effective)
+        errors = _pre_finalize_errors(run_dir, manifest, effective, args)
         if errors:
             print("INVALID:")
             for error in errors:
@@ -265,7 +311,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         final = (
             Path(final_value).resolve() if isinstance(final_value, str) else run_dir / "final.mp4"
         )
-        if _final_is_fresh(run_dir, final, state.committed_segments):
+        if _final_is_fresh(
+            run_dir,
+            final,
+            state.committed_segments,
+            expected_skip_key=_expected_skip_key(args, manifest, effective),
+        ):
             print(
                 f"nothing to do: {state.committed_segments} segment(s) committed, "
                 f"{final.name} is current"
@@ -298,14 +349,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
     from voyage.models_ensure import ensure_models
 
-    sfx_enabled = not bool(manifest.get("no_sfx", False)) and effective.sfx.backend != "fake"
+    skips = resolve_generate_skips(args)
+    sfx_enabled = (
+        not bool(manifest.get("no_sfx", False))
+        and not skips["skip_sfx"]
+        and effective.sfx.backend != "fake"
+    )
+    effective_upscale = 1 if skips["force_upscale_1"] else effective.augment.upscale
+    effective_interpolate = 1 if skips["force_interpolate_1"] else effective.augment.interpolate
     if (
         ensure_models(
             effective,
             sfx_enabled,
             console,
             allow_download=True,
-            augment_enabled=effective.augment.upscale > 1 or effective.augment.interpolate > 1,
+            augment_enabled=effective_upscale > 1 or effective_interpolate > 1,
+            music_enabled=not skips["skip_music"],
         )
         != 0
     ):
@@ -325,7 +384,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     committed = supervisor.run_segments(remaining)
     if sink is None:
         console.ok(f"run finished · {len(committed)} segment(s) committed")
-    errors = _pre_finalize_errors(run_dir, manifest, effective)
+    errors = _pre_finalize_errors(run_dir, manifest, effective, args)
     if errors:
         print("INVALID:")
         for error in errors:

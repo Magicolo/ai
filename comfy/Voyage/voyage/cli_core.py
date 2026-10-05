@@ -53,6 +53,52 @@ def _prompt_enhance_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return {}
 
 
+def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
+    """Generate-only skip flags → canonical skip tuple (non-persistent).
+
+    Shorthands OR in: --no-audio = --no-music + --no-sfx,
+    --no-augment = --no-upscale + --no-interpolate. Every read goes
+    through getattr so hand-built namespaces default to off, never crash.
+    """
+    no_music = bool(getattr(args, "no_music", False))
+    no_sfx = bool(getattr(args, "no_sfx", False))
+    no_upscale = bool(getattr(args, "no_upscale", False))
+    no_interpolate = bool(getattr(args, "no_interpolate", False))
+    if bool(getattr(args, "no_audio", False)):
+        no_music = True
+        no_sfx = True
+    if bool(getattr(args, "no_augment", False)):
+        no_upscale = True
+        no_interpolate = True
+    return {
+        "skip_music": no_music,
+        "skip_sfx": no_sfx,
+        "force_upscale_1": no_upscale,
+        "force_interpolate_1": no_interpolate,
+    }
+
+
+def generate_skip_key(
+    skips: dict[str, bool],
+    *,
+    manifest_no_sfx: bool,
+    stored_upscale: int,
+    stored_interpolate: int,
+) -> str:
+    """Canonical freshness key for the current generate finalize behavior.
+
+    Combines the generate skips with the stored manifest policy so the
+    'nothing to do' gate re-finalizes when the behavior differs from the
+    stamped coverage (e.g. same segments but music-only diff).
+    """
+    effective_sfx_off = bool(manifest_no_sfx or skips.get("skip_sfx", False))
+    effective_up = 1 if skips.get("force_upscale_1", False) else stored_upscale
+    effective_interp = 1 if skips.get("force_interpolate_1", False) else stored_interpolate
+    music = int(bool(skips.get("skip_music", False)))
+    sfx = int(effective_sfx_off)
+    return f"music={music},sfx={sfx},up={effective_up},interp={effective_interp}"
+
+
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
     """CLI augment flags → resolve_config kwargs.
 

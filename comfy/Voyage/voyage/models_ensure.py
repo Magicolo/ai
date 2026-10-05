@@ -85,6 +85,7 @@ def required_specs(
     sfx_enabled: bool = False,
     models_root: str | Path | None = None,
     augment_enabled: bool = True,
+    music_enabled: bool = True,
 ) -> list[RequiredModel]:
     """Specs the effective generate config needs — nothing else.
 
@@ -100,7 +101,9 @@ def required_specs(
     takes (DESIGN §140 audio continuity), not from the worker's joint
     track. SFX is pulled when enabled: MMAudio dubs effects under the
     soundtrack at finalize on cuda:0, after the video worker has
-    stopped (DESIGN §140 GPU defaults).
+    stopped (DESIGN §140 GPU defaults). `music_enabled=False` (the
+    generate-only --no-music/--no-audio skip) drops the ACE-Step stack:
+    the finalize ships silent AAC, so no takes render.
     `VideoBackendName` is a closed Literal, so past the fake early-return
     the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
     """
@@ -125,7 +128,7 @@ def required_specs(
                 ),
             ]
         )
-    if config.audio.backend == "acestep":
+    if music_enabled and config.audio.backend == "acestep":
         required.append(
             RequiredModel(
                 spec="audio-acestep",
@@ -251,6 +254,7 @@ def ensure_models(
     *,
     allow_download: bool = True,
     augment_enabled: bool = True,
+    music_enabled: bool = True,
 ) -> int:
     """Verify (+ download when allowed) every spec `generate` needs.
 
@@ -259,10 +263,12 @@ def ensure_models(
     missing stacks fail fast with their verify message instead.
     `augment_enabled=False` skips the FILM/Real-ESRGAN floors (weight-free
     probes); the CLI never passes it today, so CUDA runs ensure them.
+    `music_enabled=False` (generate-only --no-music/--no-audio) skips
+    the ACE-Step stack.
     """
     from voyage import model_registry
 
-    required = required_specs(config, sfx_enabled, models_root, augment_enabled)
+    required = required_specs(config, sfx_enabled, models_root, augment_enabled, music_enabled)
     if not required:
         return 0
     checked = [

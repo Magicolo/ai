@@ -401,11 +401,13 @@ def test_generate_ensure_receives_selective_scope(
         *,
         allow_download: bool = True,
         augment_enabled: bool = True,
+        music_enabled: bool = True,
     ) -> int:
         seen["video"] = config.video.backend
         seen["sfx_enabled"] = sfx_enabled
         seen["allow_download"] = allow_download
         seen["augment_enabled"] = augment_enabled
+        seen["music_enabled"] = music_enabled
         return real_ensure(config, sfx_enabled, console, models_root)
 
     monkeypatch.chdir(tmp_path)
@@ -419,4 +421,6 @@ def test_generate_ensure_receives_selective_scope(
         # Defaults are upscale=1/interpolate=1 (no augment work), so the
         # selective scope correctly carries augment_enabled=False.
         "augment_enabled": False,
+        # No --no-music/--no-audio on this run, so the music stack stays ensured.
+        "music_enabled": True,
     }

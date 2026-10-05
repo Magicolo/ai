@@ -319,6 +319,43 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         "(additive: converts to segments rounding up, like configure; "
         "exactly one of --segments/--duration)",
     )
+    gen.add_argument(
+        "--no-music",
+        action="store_true",
+        default=False,
+        help="skip the finalize-time music mix for this generate only "
+        "(ships silent AAC sized to the timeline; non-persistent)",
+    )
+    gen.add_argument(
+        "--no-sfx",
+        action="store_true",
+        default=False,
+        help="skip the finalize-time SFX pass for this generate only (non-persistent)",
+    )
+    gen.add_argument(
+        "--no-upscale",
+        action="store_true",
+        default=False,
+        help="force upscale multiplier 1 for this generate only (non-persistent)",
+    )
+    gen.add_argument(
+        "--no-interpolate",
+        action="store_true",
+        default=False,
+        help="force interpolate multiplier 1 for this generate only (non-persistent)",
+    )
+    gen.add_argument(
+        "--no-audio",
+        action="store_true",
+        default=False,
+        help="shorthand for --no-music --no-sfx (this generate only)",
+    )
+    gen.add_argument(
+        "--no-augment",
+        action="store_true",
+        default=False,
+        help="shorthand for --no-upscale --no-interpolate (this generate only)",
+    )
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)
 

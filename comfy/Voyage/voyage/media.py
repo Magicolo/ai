@@ -794,6 +794,7 @@ def finalize_run(
     progress: VoyageConsole | None = None,
     sfx_request: SfxParallelRequest | None = None,
     sfx_report: dict[str, Any] | None = None,
+    no_music: bool = False,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -872,6 +873,11 @@ def finalize_run(
     deferred music takes on cuda:0) and Phase C (SFX bed, then FILM
     interp on cuda:0, then publish) — the 4060 runs music -> SFX ->
     interp sequentially and the 2060 never shares a card.
+
+    `no_music` (generate-only `--no-music`): skips the deferred ACE takes
+    render and the ledger mix entirely — finalize ships silent AAC sized
+    to the stretched timeline via `anullsrc`. SFX is independent: with a
+    live `sfx_request` the bed still dubs over the silence below.
     """
     resolved = resolve_finalize_settings(
         options=options,
@@ -1076,19 +1082,23 @@ def finalize_run(
         # Dry walk (no worker, no writes): True when the takes ledger
         # still owes the timeline — the fork gate needs the same answer
         # `ensure_deferred_for_finalize` derives first thing.
-        music_pending = deferred_render_pending(
-            run_dir=run_dir,
-            usable=usable,
-            source_fps=source_fps,
-            run_seed=seed,
-            music_style=music_style_value,
-            explicit_caption=music_caption_value,
-            stretch=audio_stretch,
-            take_seconds=music_take_seconds,
-            ahead_seconds=music_ahead_seconds,
-            beats_per_segment=music_beats_per_segment,
-            sample_rate=music_sample_rate,
-            channels=music_channels,
+        music_pending = (
+            False
+            if no_music
+            else deferred_render_pending(
+                run_dir=run_dir,
+                usable=usable,
+                source_fps=source_fps,
+                run_seed=seed,
+                music_style=music_style_value,
+                explicit_caption=music_caption_value,
+                stretch=audio_stretch,
+                take_seconds=music_take_seconds,
+                ahead_seconds=music_ahead_seconds,
+                beats_per_segment=music_beats_per_segment,
+                sample_rate=music_sample_rate,
+                channels=music_channels,
+            )
         )
         music_rendered = False
         branch_progress: VoyageConsole | None = progress
@@ -1218,8 +1228,11 @@ def finalize_run(
             # Always-deferred music (DESIGN §140): segments commit video
             # only, so the takes render here — overlapping the upscale
             # Phase A on two cards (upscale on cuda:1, music on cuda:0)
-            # or after it on one — and BEFORE the mix below.
+            # or after it on one — and BEFORE the mix below. With
+            # `no_music` this is a no-op (silent AAC ships instead).
             nonlocal music_rendered
+            if no_music:
+                return
             music_start = time.monotonic()
             music_rendered = ensure_deferred_for_finalize(
                 run_dir=run_dir,
@@ -1296,17 +1309,46 @@ def finalize_run(
             # to the pinned presentation rate (plan_augmentation refuses to
             # plan without one of the two).
             audio_fps = int(source_fps) if source_fps > 0 else out_fps
-            final_audio = build_final_audio(
-                run_dir,
-                usable,
-                tmpdir,
-                audio_fps,
-                settings.sample_rate,
-                settings.channels,
-                settings.effective_overlap_fraction(),
-                settings.overlap_cap_seconds,
-                stretch=audio_stretch,
-            )
+            if no_music:
+                # Silent AAC sized to the stretched timeline (same
+                # frame-count math as the ledger mix, no takes needed).
+                _, _, silent_timeline = _segment_timeline(usable, audio_fps / audio_stretch)
+                silent_dest = tmpdir / "final_audio.wav"
+                channel_layout = "mono" if settings.channels == 1 else "stereo"
+                silent_proc = run_capture(
+                    [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-nostdin",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        f"anullsrc=r={settings.sample_rate}:cl={channel_layout}",
+                        "-t",
+                        f"{silent_timeline:.6f}",
+                        "-ac",
+                        f"{settings.channels}",
+                        "-c:a",
+                        "pcm_s16le",
+                        str(silent_dest),
+                    ]
+                )
+                if silent_proc.returncode != 0:
+                    raise MediaError(f"silent audio render failed: {silent_proc.stderr[-2000:]}")
+                final_audio = silent_dest
+            else:
+                final_audio = build_final_audio(
+                    run_dir,
+                    usable,
+                    tmpdir,
+                    audio_fps,
+                    settings.sample_rate,
+                    settings.channels,
+                    settings.effective_overlap_fraction(),
+                    settings.overlap_cap_seconds,
+                    stretch=audio_stretch,
+                )
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # DESIGN §140 A/V stream: on the phased path the 4060 runs
@@ -1687,6 +1729,7 @@ def finalize_run(
                     "presentation_fps": effective_presentation_fps,
                     "slowmo_factor": round(stretch, 4),
                     "invoker": invoker,
+                    "no_music": no_music,
                     "sfx_status": (
                         sfx_report.get("sfx_status", "skipped")
                         if sfx_report is not None
