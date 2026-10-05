@@ -44,7 +44,7 @@ __all__ = [
 
 
 def _add_console_args(parser: argparse.ArgumentParser) -> None:
-    """Two verbosity levels + color kill-switch (console output only)."""
+    """Two verbosity levels + color kill-switch + quiet (console output only)."""
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -54,6 +54,11 @@ def _add_console_args(parser: argparse.ArgumentParser) -> None:
         "--no-color",
         action="store_true",
         help="plain console output (no colors or animation; also honors NO_COLOR)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="only failures and final paths (exit code callers, log scrapers)",
     )
 
 

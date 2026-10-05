@@ -318,6 +318,12 @@ class BackgroundPrewarm:
         self._pending = False
         self._stopping = False
         self._thread: threading.Thread | None = None
+        # Cumulative (passes, upscale chunks, interp chunks) ledgered by
+        # finished passes — the generation loop reads this after each
+        # commit and reports newly ledgered work on the console (the
+        # background thread itself never touches display code). One
+        # tuple store keeps the read GIL-atomic.
+        self._ledgered: tuple[int, int, int] = (0, 0, 0)
 
     def start(self) -> None:
         """Spawn the daemon thread (idempotent; an initial sweep is queued)."""
@@ -345,6 +351,14 @@ class BackgroundPrewarm:
         thread = self._thread
         return thread is not None and thread.is_alive()
 
+    def ledgered_totals(self) -> tuple[int, int, int]:
+        """Cumulative (passes, upscale chunks, interp chunks) finished so far.
+
+        Main-thread read for the post-commit pre-warm report; idle or
+        moot passes still count (their result holds no new chunks).
+        """
+        return self._ledgered
+
     def _is_stopping(self) -> bool:
         """Stop flag read for the between-sweeps abandon check (GIL-atomic)."""
         return self._stopping
@@ -370,6 +384,11 @@ class BackgroundPrewarm:
                 self._pending = False
             try:
                 if self._idle_fn():
-                    self._prewarm_fn(self._run_dir, self._config)
+                    result = self._prewarm_fn(self._run_dir, self._config)
+                    passes, up, ip = self._ledgered
+                    if result is not None:
+                        up += result.upscale_chunks_done
+                        ip += result.interp_chunks_done
+                    self._ledgered = (passes + 1, up, ip)
             except Exception:  # noqa: BLE001 - pre-warm must never fail generation
                 continue

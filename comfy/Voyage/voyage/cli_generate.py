@@ -111,6 +111,7 @@ def _finalize_run_dir(
             use_model_pass=None,
             verbose=bool(getattr(args, "verbose", False)),
             no_color=bool(getattr(args, "no_color", False)),
+            quiet=bool(getattr(args, "quiet", False)),
             progress_sink=getattr(args, "progress_sink", None),
             invoker="generate",
         )
@@ -318,6 +319,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
         print(
             f"generating {remaining} segment(s) "
+            f"(segments {state.committed_segments}..{planned - 1} of {planned} planned) "
             f"with {effective.video.backend} (resuming at segment {state.committed_segments}) ..."
         )
     progress = sink if sink is not None else RichSegmentProgress(console)

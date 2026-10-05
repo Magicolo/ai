@@ -12,6 +12,7 @@ skipped, unledgered partials re-rendered. No torch/GPU/ffmpeg.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -496,6 +497,30 @@ def test_device_free_gib_unknown_allows_prewarm(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(subprocess, "run", _boom)
     assert augment_background.device_free_gib("cuda:1") is None
+
+
+def test_driver_accumulates_ledgered_totals(tmp_path: Path) -> None:
+    """Finished passes accumulate (passes, upscale, interp) for the report."""
+    from voyage.augment_background import BackgroundPrewarm, PrewarmResult
+
+    def _fake_prewarm(run_dir: Path, config: Any) -> PrewarmResult | None:
+        del run_dir, config
+        return PrewarmResult(1, 2, 0, 3, 0, 0)
+
+    driver = BackgroundPrewarm(tmp_path, object(), prewarm_fn=_fake_prewarm, idle_fn=lambda: True)
+    assert driver.ledgered_totals() == (0, 0, 0)
+    driver.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        while driver.ledgered_totals()[0] < 2 and time.monotonic() < deadline:
+            driver.notify_committed()
+            time.sleep(0.05)
+    finally:
+        driver.stop()
+    passes, up, ip = driver.ledgered_totals()
+    assert passes >= 2
+    assert up == 2 * passes
+    assert ip == 3 * passes
 
 
 if __name__ == "__main__":

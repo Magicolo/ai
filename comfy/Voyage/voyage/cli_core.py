@@ -22,6 +22,7 @@ def get_console(args: argparse.Namespace) -> VoyageConsole:
     return VoyageConsole(
         verbose=bool(getattr(args, "verbose", False)),
         no_color=bool(getattr(args, "no_color", False)),
+        quiet=bool(getattr(args, "quiet", False)),
     )
 
 

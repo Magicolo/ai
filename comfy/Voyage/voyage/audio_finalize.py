@@ -29,7 +29,7 @@ import contextlib
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from voyage.audio.beat import beats_for_segment
 from voyage.audio.planner import (
@@ -39,11 +39,15 @@ from voyage.audio.planner import (
     append_take,
     load_takes,
 )
+from voyage.console import optional_bar, optional_stage
 from voyage.errors import MediaError
 from voyage.media_audio import probed_take_seconds
 from voyage.seeds import audio_seed
 from voyage.segment_manifest import load_metrics, load_transition
 from voyage.supervisor_proposal import effective_music_caption
+
+if TYPE_CHECKING:
+    from voyage.console import VoyageConsole
 
 #: Backends whose ACE music renders at finalize, never at commit.
 DEFERRED_AUDIO_BACKENDS = frozenset({"ltxv", "causvid", "ltx25", "ltx23"})
@@ -275,6 +279,7 @@ def ensure_deferred_takes(
     beats_per_segment: int = _BEATS_PER_SEGMENT,
     sample_rate: int = 48000,
     channels: int = 2,
+    progress: VoyageConsole | None = None,
 ) -> list[dict[str, Any]]:
     """Replay director decisions and render ACE takes at finalize.
 
@@ -294,62 +299,66 @@ def ensure_deferred_takes(
     takes: list[AudioTake] = _load_existing_takes(run_dir)
     rendered: list[dict[str, Any]] = []
     cursor = 0.0
-    for segment in usable:
-        number = int(segment.name)
-        stretched = _segment_stretched_seconds(segment, source_fps, stretch)
-        caption, energy = _segment_music_inputs(segment, music_style, explicit_caption)
-        planner = AudioPlanner(
-            take_seconds=take_seconds,
-            ahead_seconds=ahead_seconds,
-            takes=list(takes),
-            segment_seconds=stretched,
-        )
-        _, grid_bpm = beats_for_segment(stretched, beats_per_segment, max_bpm=_ACE_MAX_BPM)
-        take_bpm = int(round(grid_bpm))
-        end = cursor + stretched
-        while True:
-            seed = audio_seed(run_seed, number, len(takes))
-            plan = planner.plan(cursor, caption, seed, number)
-            if plan.action == "keep":
-                cursor = end
-                break
-            take = plan.take
-            if take is None:
-                raise MediaError(f"deferred plan for {segment.name} rendered no take")
-            take.bpm = float(take_bpm)
-            take_file, stored = _take_path(audio_dir, run_dir, take.take_id)
-            payload: dict[str, Any] = {
-                "segment_id": segment.name,
-                "style": caption,
-                "energy": energy,
-                "seed": take.seed,
-                "output_path": str(take_file),
-                "sample_rate": sample_rate,
-                "channels": channels,
-                "duration_seconds": take.duration,
-                "bpm": take_bpm,
-            }
-            if plan.action == "repaint" and plan.current is not None:
-                current = plan.current
-                payload["task_type"] = "repaint"
-                payload["reference_audio"] = str(current.resolved_path(run_dir))
-                payload["repaint_start"] = cursor - current.covers_from
-                payload["repaint_end"] = current.duration
-            try:
-                render_take_fn(payload, take_file)
-            except Exception as exc:
-                raise MediaError(f"deferred take {take.take_id} render failed: {exc}") from exc
-            shortfall = take.duration - probed_take_seconds(take_file)
-            if shortfall > 1e-3:
-                take.duration = probed_take_seconds(take_file)
-            take.path = stored
-            planner.record(take)
-            takes.append(take)
-            append_take(ledger, take)
-            rendered.append(take.to_dict())
-            if planner.coverage_until() >= end - 1e-6:
-                cursor = end
-                break
+    take_bar = optional_bar(progress, "ace takes")
+    with take_bar as tracker:
+        for segment in usable:
+            number = int(segment.name)
+            stretched = _segment_stretched_seconds(segment, source_fps, stretch)
+            caption, energy = _segment_music_inputs(segment, music_style, explicit_caption)
+            planner = AudioPlanner(
+                take_seconds=take_seconds,
+                ahead_seconds=ahead_seconds,
+                takes=list(takes),
+                segment_seconds=stretched,
+            )
+            _, grid_bpm = beats_for_segment(stretched, beats_per_segment, max_bpm=_ACE_MAX_BPM)
+            take_bpm = int(round(grid_bpm))
+            end = cursor + stretched
+            while True:
+                seed = audio_seed(run_seed, number, len(takes))
+                plan = planner.plan(cursor, caption, seed, number)
+                if plan.action == "keep":
+                    cursor = end
+                    break
+                take = plan.take
+                if take is None:
+                    raise MediaError(f"deferred plan for {segment.name} rendered no take")
+                take.bpm = float(take_bpm)
+                take_file, stored = _take_path(audio_dir, run_dir, take.take_id)
+                payload: dict[str, Any] = {
+                    "segment_id": segment.name,
+                    "style": caption,
+                    "energy": energy,
+                    "seed": take.seed,
+                    "output_path": str(take_file),
+                    "sample_rate": sample_rate,
+                    "channels": channels,
+                    "duration_seconds": take.duration,
+                    "bpm": take_bpm,
+                }
+                if plan.action == "repaint" and plan.current is not None:
+                    current = plan.current
+                    payload["task_type"] = "repaint"
+                    payload["reference_audio"] = str(current.resolved_path(run_dir))
+                    payload["repaint_start"] = cursor - current.covers_from
+                    payload["repaint_end"] = current.duration
+                try:
+                    render_take_fn(payload, take_file)
+                except Exception as exc:
+                    raise MediaError(f"deferred take {take.take_id} render failed: {exc}") from exc
+                shortfall = take.duration - probed_take_seconds(take_file)
+                if shortfall > 1e-3:
+                    take.duration = probed_take_seconds(take_file)
+                take.path = stored
+                planner.record(take)
+                takes.append(take)
+                append_take(ledger, take)
+                rendered.append(take.to_dict())
+                if tracker is not None:
+                    tracker.update()
+                if planner.coverage_until() >= end - 1e-6:
+                    cursor = end
+                    break
     return rendered
 
 
@@ -369,6 +378,7 @@ def ensure_deferred_for_finalize(
     beats_per_segment: int = _BEATS_PER_SEGMENT,
     sample_rate: int = 48000,
     channels: int = 2,
+    progress: VoyageConsole | None = None,
 ) -> bool:
     """Render pending deferred takes, spawning ACE only when needed.
 
@@ -397,15 +407,18 @@ def ensure_deferred_for_finalize(
     ):
         return False
     render_fn, shutdown = spawn_ace_render_fn(run_dir, models_dir, device)
+    stage_cm = optional_stage(progress, "music takes", device)
     try:
-        ensure_deferred_takes(
-            run_dir=run_dir,
-            usable=usable,
-            source_fps=source_fps,
-            run_seed=run_seed,
-            render_take_fn=render_fn,
-            **sizing,
-        )
+        with stage_cm:
+            ensure_deferred_takes(
+                run_dir=run_dir,
+                usable=usable,
+                source_fps=source_fps,
+                run_seed=run_seed,
+                render_take_fn=render_fn,
+                progress=progress,
+                **sizing,
+            )
     finally:
         shutdown()
     return True

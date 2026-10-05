@@ -307,6 +307,14 @@ class Supervisor:
         self._prefetch_target: int | None = None
         self._prefetch_future: Future[dict[str, Any] | None] | None = None
         self._prefetch_submitted_at: float | None = None
+        # Background model-pass pre-warm driver (None = inactive): the
+        # post-commit report below reads its `ledgered_totals()`.
+        self._background: Any | None = None
+        # Last reported pre-warm ledger as (driver, upscale, interp): the
+        # post-commit report announces only newly ledgered chunks, and the
+        # driver identity resets the baseline across worker restarts (a
+        # fresh driver starts its totals at zero).
+        self._reported_prewarm: tuple[Any, int, int] = (None, 0, 0)
         # Commit→propose gap ledger (Stage A telemetry): each gap-phase
         # site adds its wall ms here; `_propose_segment` emits the
         # `gap_breakdown` metric and resets. Keys are fixed so the metric
@@ -511,13 +519,14 @@ class Supervisor:
         self._logs.mkdir(parents=True, exist_ok=True)
         started: list[SubprocessWorker] = []
         try:
-            for worker in (self._video, self._audio, self._director):
-                if worker is self._director:
-                    # Sidecar readiness gates the director init: the worker
-                    # must never initialize against a dead server.
-                    self._start_llama_sidecar()
-                worker.start()
-                started.append(worker)
+            with self._stage("start workers", "video/audio/director"):
+                for worker in (self._video, self._audio, self._director):
+                    if worker is self._director:
+                        # Sidecar readiness gates the director init: the worker
+                        # must never initialize against a dead server.
+                        self._start_llama_sidecar()
+                    worker.start()
+                    started.append(worker)
         except Exception:
             self._stop_llama_sidecar()
             for worker in reversed(started):
@@ -563,6 +572,35 @@ class Supervisor:
         if self._progress is None:
             return nullcontext()
         return self._progress.stage(label, detail)
+
+    def _report_background_prewarm(self) -> None:
+        """One console line for newly pre-warm-ledgered chunks (best-effort).
+
+        The background thread never touches display code — it only
+        accumulates `ledgered_totals()`, and this post-commit call (main
+        thread) announces the delta since the last report. Silent when
+        nothing new ledgered, so the log stays clean on idle passes.
+        """
+        driver = self._background
+        if driver is None or self._progress is None:
+            return
+        try:
+            _passes, up, ip = driver.ledgered_totals()
+        except Exception:
+            return
+        _seen_driver, seen_up, seen_ip = self._reported_prewarm
+        if driver is not _seen_driver:
+            seen_up, seen_ip = 0, 0
+        self._reported_prewarm = (driver, up, ip)
+        new_up, new_ip = up - seen_up, ip - seen_ip
+        parts = []
+        if new_up > 0:
+            parts.append(f"+{new_up} upscale")
+        if new_ip > 0:
+            parts.append(f"+{new_ip} interp")
+        if not parts:
+            return
+        self._progress.note(f"pre-warm ledgered {'/'.join(parts)} chunks")
 
     def _log_metric(self, event: dict[str, object]) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._config.name, **event})
@@ -1956,6 +1994,8 @@ class Supervisor:
             invalidation_reason="+".join(invalidation_reasons),
         )
         prefetch_hit = prefetched_raw is not None
+        if prefetch_hit and self._progress is not None:
+            self._progress.note("director prefetch hit (used as first candidate)")
         director_started = time.monotonic()
         with self._stage("director", config.director.backend):
             decision, director_tokens = self._accept_director_decision(
@@ -1979,6 +2019,14 @@ class Supervisor:
         # Prefetch the next segment's raw proposal while this one renders
         # (CPU director vs GPU video — no contention by construction).
         self._prefetch_decide_for_next(config, number, decision, store, style_spec)
+        if (
+            self._progress is not None
+            and self._prefetch_target == number + 1
+            and self._prefetch_in_flight()
+        ):
+            self._progress.note(
+                f"director prefetch running for {paths.format_segment_id(number + 1)} (background)"
+            )
 
         # 3. Staged prompt plan (§18.2) + media generation.
         streaming = config.video.backend in STREAMING_VIDEO_BACKENDS
@@ -2623,3 +2671,4 @@ class Supervisor:
             stage_seconds,
             started,
         )
+        self._report_background_prewarm()

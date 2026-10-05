@@ -12,7 +12,18 @@ or any artifact — those stay machine-readable plain text. ``rich`` is
 an optional display dependency: when it is missing, the stream is not
 a TTY (tests, pipes), or ``--no-color``/``NO_COLOR`` is set, every
 method degrades to plain ``print`` lines with the same words, so
-substring assertions in tests keep passing either way.
+substring assertions in tests keep passing either way. Non-TTY prints
+stage boundaries only (start + finish — per-unit updates would spam
+logs); ``quiet=True`` silences everything except failures plus the
+final paths.
+
+Two complementary arms: ``stage()`` marks one checklist step with a
+spinner + elapsed timer (unknown duration), while ``bar()`` counts X/Y
+inside it (SFX windows, ACE takes, drained segments) with % + elapsed
++ ETA when the total is known. ``timing_table()`` closes a phase with
+per-stage seconds + slowest + total. Library layers (media/augment/
+audio/sfx) never print — they take an optional ``progress`` sink
+(``VoyageConsole`` satisfies it; ``None`` = silent) and report upward.
 
 Stream contract (063/028): every method — including ``error()`` — writes
 to the injected ``stream`` (default ``sys.stdout``), never to the real
@@ -26,8 +37,8 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any, Protocol, TextIO
 
 _SPINNER_TICK_SECONDS = 0.2
@@ -53,6 +64,10 @@ class SegmentProgress(Protocol):
 
     def segment_start(self, number: int, segment_id: str) -> None:
         """A new segment commit began (number + zero-padded id)."""
+        ...
+
+    def note(self, message: str) -> None:
+        """One background-worker line (prefetch submit/hit, pre-warm ledger)."""
         ...
 
     def stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
@@ -90,6 +105,9 @@ class VoyageConsole:
     ``verbose=True`` adds retry feedback, beat math, take decisions,
     prefetch reasons and payload minutiae. Colors/animation engage only
     on a real TTY with ``rich`` installed and color allowed.
+    ``quiet=True`` silences everything except failures (``error()`` and
+    the failure arm of ``stage()``/``bar()`` still report) — for
+    scripts that only care about the exit code plus the final paths.
     """
 
     def __init__(
@@ -97,10 +115,12 @@ class VoyageConsole:
         verbose: bool = False,
         no_color: bool = False,
         stream: TextIO | None = None,
+        quiet: bool = False,
     ) -> None:
         self._verbose = verbose
         self._no_color = no_color or bool(os.environ.get("NO_COLOR"))
         self._stream = stream if stream is not None else sys.stdout
+        self._quiet = quiet
         self._rich: Any = None
         if not self._no_color and self._is_tty and rich_available():
             from rich.console import Console
@@ -110,6 +130,10 @@ class VoyageConsole:
     @property
     def verbose(self) -> bool:
         return self._verbose
+
+    @property
+    def quiet(self) -> bool:
+        return self._quiet
 
     @property
     def color_enabled(self) -> bool:
@@ -125,6 +149,8 @@ class VoyageConsole:
 
     def line(self, text: str = "") -> None:
         """One plain line (wraps long prompts when rich owns the stream)."""
+        if self._quiet:
+            return
         if self._rich is not None:
             self._rich.print(text, markup=False, highlight=False)
         else:
@@ -132,6 +158,8 @@ class VoyageConsole:
 
     def styled(self, icon: str, text: str, style: str) -> None:
         """Icon + text, colored on a color terminal, plain otherwise."""
+        if self._quiet:
+            return
         if self._rich is not None:
             from rich.text import Text
 
@@ -156,6 +184,8 @@ class VoyageConsole:
 
     def rule(self, title: str) -> None:
         """Section header (rich rule on a TTY, plain dashes otherwise)."""
+        if self._quiet:
+            return
         if self._rich is not None and self._is_tty:
             self._rich.rule(title)
         else:
@@ -166,6 +196,14 @@ class VoyageConsole:
         """Spinner with a live elapsed timer; always reports the total."""
         started = time.monotonic()
         head = f"{label} … {detail}".rstrip(" …")
+        if self._quiet:
+            try:
+                yield
+            except BaseException:
+                elapsed = time.monotonic() - started
+                self.error(f"{label} failed after {elapsed:.1f}s")
+                raise
+            return
         if self._rich is not None and self._is_tty:
             from rich.status import Status
 
@@ -202,6 +240,44 @@ class VoyageConsole:
                 raise
             elapsed = time.monotonic() - started
             self.line(f"✓ {label} in {elapsed:.1f}s")
+
+    @contextmanager
+    def bar(self, label: str, total: int | None = None) -> Iterator[BarTracker]:
+        """Determinate bar (known total) or spinner (total=None, unknown).
+
+        Hybrid checklist arm next to ``stage()``: ``stage()`` marks one
+        checklist step, ``bar()`` counts X/Y inside it (SFX windows,
+        ACE takes, model-pass chunks) with % + elapsed + ETA when the
+        total is known. Non-TTY prints stage boundaries only (start +
+        finish lines — per-update lines would spam logs); quiet prints
+        nothing on success and the failure line on error.
+        """
+        tracker = BarTracker(self, label, total)
+        tracker._begin()
+        try:
+            yield tracker
+        except BaseException:
+            tracker._fail()
+            raise
+        else:
+            tracker._finish()
+
+    def timing_table(self, title: str, timings: Mapping[str, float]) -> None:
+        """Per-stage seconds + slowest stage + total (finalize summary).
+
+        Plain words (``⏱`` + ``name Ns`` cells) so substring assertions
+        hold with or without rich — the same degradation contract as
+        every other method here.
+        """
+        if self._quiet or not timings:
+            return
+        cells = " · ".join(f"{name} {seconds:.1f}s" for name, seconds in timings.items())
+        total = sum(timings.values())
+        slowest = max(timings.items(), key=lambda item: item[1])
+        self.line(
+            f"     ⏱ {title}: {cells} · slowest {slowest[0]} ({slowest[1]:.1f}s)"
+            f" · total {total:.1f}s"
+        )
 
     def segment_start(self, number: int, segment_id: str) -> None:
         self.line("")
@@ -323,6 +399,9 @@ class RichSegmentProgress:
     def segment_start(self, number: int, segment_id: str) -> None:
         self._console.segment_start(number, segment_id)
 
+    def note(self, message: str) -> None:
+        self._console.info(message)
+
     def stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
         return self._console.stage(label, detail)
 
@@ -331,6 +410,14 @@ class RichSegmentProgress:
 
     def segment_done(self, info: dict[str, Any]) -> None:
         self._console.segment_done(info)
+
+    @contextmanager
+    def bar(self, label: str, total: int | None = None) -> Iterator[BarTracker]:
+        with self._console.bar(label, total) as tracker:
+            yield tracker
+
+    def timing_table(self, title: str, timings: Mapping[str, float]) -> None:
+        self._console.timing_table(title, timings)
 
 
 class ParallelDownloadTracker:
@@ -400,3 +487,137 @@ class ParallelDownloadTracker:
         if self._progress is not None:
             self._progress.stop()
             self._progress = None
+
+
+class BarTracker:
+    """X/Y counter for one ``VoyageConsole.bar`` step (main thread only).
+
+    Why a separate object: same reason as ``ParallelDownloadTracker`` —
+    all progress writes stay on the thread that entered the ``bar()``
+    context (rich ``Progress`` updates are lock-guarded, but one owner
+    keeps the finish accounting exact). Callers advance after each
+    completed unit; ``total=None`` (unknown upfront, e.g. ACE takes)
+    shows a spinner + count until ``set_total`` learns the total.
+    """
+
+    def __init__(self, console: VoyageConsole, label: str, total: int | None) -> None:
+        self._console = console
+        self._label = label
+        self._total = total
+        self._done = 0
+        self._started = time.monotonic()
+        self._progress: Any = None
+        self._task: Any = None
+
+    @property
+    def done(self) -> int:
+        return self._done
+
+    def _begin(self) -> None:
+        if self._console._quiet:
+            return
+        if self._console._rich is not None and self._console._is_tty:
+            from rich.progress import (
+                BarColumn,
+                MofNCompleteColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+                TimeElapsedColumn,
+                TimeRemainingColumn,
+            )
+
+            if self._total is None:
+                self._progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("{task.description}"),
+                    TimeElapsedColumn(),
+                    console=self._console._rich,
+                    transient=False,
+                )
+            else:
+                self._progress = Progress(
+                    TextColumn("{task.description}"),
+                    BarColumn(),
+                    MofNCompleteColumn(),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                    console=self._console._rich,
+                    transient=False,
+                )
+            self._progress.start()
+            self._task = self._progress.add_task(self._label, total=self._total)
+        else:
+            suffix = f" (0/{self._total})" if self._total is not None else ""
+            self._console.line(f"▸ {self._label} ...{suffix}")
+
+    def update(self, advance: int = 1) -> None:
+        """Mark units complete (finish accounting reads ``done``)."""
+        self._done += advance
+        if self._progress is not None and self._task is not None:
+            self._progress.update(self._task, advance=advance)
+
+    def set_total(self, total: int) -> None:
+        """Learn the total mid-step (spinner → determinate on a TTY)."""
+        self._total = total
+        if self._progress is not None and self._task is not None:
+            self._progress.update(self._task, total=total)
+
+    def _finish(self) -> None:
+        elapsed = time.monotonic() - self._started
+        if self._progress is not None:
+            if self._task is not None:
+                self._progress.update(self._task, completed=self._done)
+            self._progress.stop()
+            self._progress = None
+        if not self._console._quiet:
+            if self._total is not None:
+                self._console.styled(
+                    "✓", f"{self._label} ({self._done}/{self._total}, {elapsed:.1f}s)", "green"
+                )
+            else:
+                self._console.styled(
+                    "✓", f"{self._label} ({self._done} done, {elapsed:.1f}s)", "green"
+                )
+
+    def _fail(self) -> None:
+        if self._progress is not None:
+            self._progress.stop()
+            self._progress = None
+        elapsed = time.monotonic() - self._started
+        if self._console._quiet:
+            self._console.error(f"{self._label} failed after {elapsed:.1f}s")
+        else:
+            self._console.styled("✗", f"{self._label} failed after {elapsed:.1f}s", "red")
+
+
+@contextmanager
+def optional_stage(progress: VoyageConsole | None, label: str, detail: str = "") -> Iterator[None]:
+    """Spinner around one stage, silent no-op when ``progress`` is None.
+
+    Library layers (media/augment/audio/sfx) report through this so
+    every ``progress`` parameter stays a one-line ``with`` — no
+    ``nullcontext`` ternaries at the call sites.
+    """
+    if progress is None:
+        with nullcontext():
+            yield
+    else:
+        with progress.stage(label, detail):
+            yield
+
+
+@contextmanager
+def optional_bar(
+    progress: VoyageConsole | None, label: str, total: int | None = None
+) -> Iterator[BarTracker | None]:
+    """X/Y counter around one step, silent no-op when ``progress`` is None.
+
+    Yields the tracker (or ``None`` when silent — guard ``update()``
+    calls with ``if tracker is not None``).
+    """
+    if progress is None:
+        yield None
+    else:
+        with progress.bar(label, total) as tracker:
+            yield tracker

@@ -8,6 +8,7 @@ segment order. No torch/GPU/ffmpeg — poll/drain/concat enter via seams.
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,10 +19,12 @@ import pytest
 from voyage import augment_sidecar as sidecar
 from voyage.augment import AugmentWeights
 from voyage.augment_finalize import (
+    _poll_to_completion,
     plan_dir_for_segment,
     run_durable_model_pass,
     weights_key_for,
 )
+from voyage.console import VoyageConsole
 from voyage.errors import MediaError
 
 
@@ -255,3 +258,178 @@ def test_usable_segment_without_source_fails_loud(tmp_path: Path) -> None:
                 interp_poll_fn=stub_interp,
             ),
         )
+
+
+def _stub_decode(source_video: Path, dest_dir: Path, start: int, count: int) -> list[Path]:
+    """Decode seam stub: stage `count` PNGs (contents never read)."""
+    del source_video
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for position in range(count):
+        frame = dest_dir / f"frame_{start + position:05d}.png"
+        frame.write_bytes(b"png")
+        out.append(frame)
+    return out
+
+
+def _stub_upscale_pngs(decoded: list[Path], dest_dir: Path) -> list[Path]:
+    """Upscale seam stub: copy names over (one output per input)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for frame in decoded:
+        dest = dest_dir / frame.name
+        dest.write_bytes(b"up")
+        out.append(dest)
+    return out
+
+
+def _stub_interp_pngs(upscaled: list[Path], dest_dir: Path, multiplier: int) -> list[Path]:
+    """Interp seam stub: write exactly the recipe's expected frame count."""
+    from voyage.augment import interpolated_frame_count
+
+    expected = interpolated_frame_count(len(upscaled), multiplier)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for position in range(expected):
+        frame = dest_dir / f"frame_{position:05d}.png"
+        frame.write_bytes(b"ip")
+        out.append(frame)
+    return out
+
+
+def _poll_kwargs() -> dict[str, Any]:
+    return {
+        "weights_key": "test-key",
+        "out_width": 1216,
+        "out_height": 704,
+        "upscale_factor": 2,
+        "chunk_frames": 4,
+        "device": "cpu",
+        "crf": 15,
+        "preset": "veryfast",
+    }
+
+
+def test_upscale_on_chunk_fires_per_chunk(tmp_path: Path) -> None:
+    """`on_chunk` reports (segment, index, window count) per rendered chunk."""
+    from voyage.augment_upscale_poller import upscale_poll_once
+
+    _make_segment(tmp_path, "000000", frames=8)
+    seen: list[tuple[str, int, int]] = []
+    result = upscale_poll_once(
+        tmp_path,
+        weights_path=tmp_path / "esrgan.pth",
+        decode_fn=_stub_decode,
+        upscale_fn=_stub_upscale_pngs,
+        on_chunk=lambda sid, idx, total: seen.append((sid, idx, total)),
+        out_fps=24,
+        **_poll_kwargs(),
+    )
+    assert result.chunks_done == 2
+    assert seen == [("000000", 0, 2), ("000000", 1, 2)]
+
+
+def test_interp_on_chunk_fires_per_chunk(tmp_path: Path) -> None:
+    """Same contract on the interp leg (after a real upscale pass)."""
+    from voyage.augment_interp_poller import interp_poll_once
+    from voyage.augment_upscale_poller import upscale_poll_once
+
+    _make_segment(tmp_path, "000000", frames=8)
+    weights = _make_weights(tmp_path / "work")
+    assert weights.realesrgan is not None
+    upscale_poll_once(
+        tmp_path,
+        weights_path=weights.realesrgan,
+        decode_fn=_stub_decode,
+        upscale_fn=_stub_upscale_pngs,
+        out_fps=24,
+        **_poll_kwargs(),
+    )
+    seen: list[tuple[str, int, int]] = []
+    assert weights.film is not None
+    result = interp_poll_once(
+        tmp_path,
+        weights_path=weights.film,
+        interp_fn=_stub_interp_pngs,
+        on_chunk=lambda sid, idx, total: seen.append((sid, idx, total)),
+        out_fps=24,
+        **_poll_kwargs(),
+    )
+    assert result.chunks_done == 2
+    assert seen == [("000000", 0, 2), ("000000", 1, 2)]
+
+
+def test_poll_to_completion_reports_model_pass_bar(tmp_path: Path) -> None:
+    """One `model-pass chunks` bar counts every rendered + skipped chunk."""
+    from voyage.augment_interp_poller import InterpPollResult
+    from voyage.augment_upscale_poller import UpscalePollResult
+
+    weights = _make_weights(tmp_path / "work")
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream)
+    calls = {"upscale": 0, "interp": 0}
+
+    def stub_upscale(run_dir: Path, **kwargs: Any) -> Any:
+        del run_dir
+        calls["upscale"] += 1
+        on_chunk = kwargs.get("on_chunk")
+        if calls["upscale"] == 1:
+            assert callable(on_chunk)
+            on_chunk("000000", 0, 2)
+            on_chunk("000000", 1, 2)
+            return UpscalePollResult(1, 0, 2, 1, 0)
+        return UpscalePollResult(1, 0, 0, 3, 0)
+
+    def stub_interp(run_dir: Path, **kwargs: Any) -> Any:
+        del run_dir
+        calls["interp"] += 1
+        on_chunk = kwargs.get("on_chunk")
+        if calls["interp"] == 1:
+            assert callable(on_chunk)
+            on_chunk("000000", 0, 2)
+            on_chunk("000000", 1, 2)
+            return InterpPollResult(1, 0, 2, 1, 0, 0)
+        return InterpPollResult(1, 0, 0, 3, 0, 0)
+
+    _poll_to_completion(
+        tmp_path,
+        weights=weights,
+        upscale_poll_fn=stub_upscale,
+        interp_poll_fn=stub_interp,
+        progress=console,
+        source_fps=24.0,
+        multiplier=2,
+        **_poll_kwargs(),
+    )
+    out = stream.getvalue()
+    assert "▸ model-pass chunks ..." in out
+    # 2 upscale + 1 skipped-upscale + 2 interp + 1 skipped-interp.
+    assert "✓ model-pass chunks (6/6," in out
+
+
+def test_poll_bar_tolerates_legacy_done_only_fakes(tmp_path: Path) -> None:
+    """Done-only stub namespaces (no skipped/waiting) never break polling."""
+    weights = _make_weights(tmp_path / "work")
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream)
+
+    def stub_upscale(run_dir: Path, **kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
+        del run_dir, kwargs
+        return SimpleNamespace(chunks_done=0)
+
+    def stub_interp(run_dir: Path, **kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
+        del run_dir, kwargs
+        return SimpleNamespace(chunks_done=0, chunks_waiting=0)
+
+    _poll_to_completion(
+        tmp_path,
+        weights=weights,
+        upscale_poll_fn=stub_upscale,
+        interp_poll_fn=stub_interp,
+        progress=console,
+        source_fps=24.0,
+        multiplier=2,
+        **_poll_kwargs(),
+    )
+    out = stream.getvalue()
+    assert "model-pass chunks" in out

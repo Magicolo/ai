@@ -199,6 +199,7 @@ def upscale_poll_once(
     preset: str = "veryfast",
     decode_fn: Callable[[Path, Path, int, int], list[Path]] | None = None,
     upscale_fn: Callable[..., list[Path]] | None = None,
+    on_chunk: Callable[[str, int, int], None] | None = None,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -206,7 +207,10 @@ def upscale_poll_once(
     the segment checksum + weights + geometry + recipe, so a re-rendered
     segment or a settings change never falsely hits old outputs. Returns
     counts; raises `MediaError` on a failed chunk (fail-loud, retry
-    re-runs only the missing chunks).
+    re-runs only the missing chunks). `on_chunk`, when given, fires
+    after each rendered chunk with `(segment_id, chunk_index,
+    chunk_count)` — the finalize model-pass bar advances on it (main
+    thread only; the background pre-warm passes None).
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -309,6 +313,8 @@ def upscale_poll_once(
             append_chunk_record(ledger_path, key, stage=UPSCALE_STAGE, path=relative)
             records = load_chunk_ledger(ledger_path)
             chunks_done += 1
+            if on_chunk is not None:
+                on_chunk(source.segment_id, index, len(windows))
     return UpscalePollResult(
         segments_seen=len(sources),
         segments_skipped=skipped,

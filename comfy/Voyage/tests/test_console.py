@@ -147,8 +147,126 @@ def test_stage_context_reports_failure() -> None:
     assert "failed" in stream.getvalue()
 
 
+def test_quiet_suppresses_success_but_not_errors() -> None:
+    """--quiet silences lines/ok/stages but failures still report."""
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream, quiet=True)
+    console.line("plans")
+    console.ok("done")
+    with console.stage("video", "fake"):
+        pass
+    assert stream.getvalue() == ""
+    console.error("boom")
+    assert "boom" in stream.getvalue()
+    with pytest.raises(RuntimeError, match="boom"):
+        with console.stage("audio"):
+            raise RuntimeError("boom")
+    assert "audio" in stream.getvalue()
+
+
+def test_bar_reports_boundaries_without_tty() -> None:
+    """Non-TTY bar: start line + X/Y finish line, silent per-update."""
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream)
+    with console.bar("sfx windows", total=8) as tracker:
+        for _ in range(8):
+            tracker.update()
+    out = stream.getvalue()
+    assert "sfx windows" in out
+    assert "8/8" in out
+
+
+def test_bar_unknown_total_counts_completions() -> None:
+    """total=None bar counts completions until set_total learns the total."""
+    stream = io.StringIO()
+    console = VoyageConsole(stream=stream)
+    with console.bar("ace takes") as tracker:
+        tracker.update()
+        tracker.update()
+        tracker.set_total(2)
+    out = stream.getvalue()
+    assert "ace takes" in out
+    assert "2/2" in out
+
+
+def test_timing_table_names_slowest_and_total() -> None:
+    """Finalize summary prints every stage + slowest + total."""
+    stream = io.StringIO()
+    VoyageConsole(stream=stream).timing_table("finalize", {"model": 10.0, "music": 2.0})
+    out = stream.getvalue()
+    assert "model 10.0s" in out
+    assert "slowest model" in out
+    assert "total 12.0s" in out
+
+
+def test_timing_table_empty_is_silent() -> None:
+    stream = io.StringIO()
+    VoyageConsole(stream=stream).timing_table("finalize", {})
+    assert stream.getvalue() == ""
+
+
 def test_rich_available_returns_bool() -> None:
     assert isinstance(rich_available(), bool)
+
+
+class _SilentSfxWorker:
+    """SubprocessWorker double writing valid WAVs (no GPU, no models)."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    def start(self) -> None:
+        return None
+
+    def call(self, op: str, payload: dict[str, object]) -> dict[str, object]:
+        import wave
+
+        del op
+        out = str(payload["output_path"])
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        duration = float(payload["duration_seconds"])  # type: ignore[arg-type]
+        frames = max(1, int(48000 * duration))
+        with wave.open(out, "wb") as wav:
+            wav.setnchannels(2)
+            wav.setsampwidth(2)
+            wav.setframerate(48000)
+            wav.writeframes(b"\0" * frames * 4)
+        return {"artifacts": {"path": out}}
+
+    def stop(self) -> None:
+        return None
+
+
+def test_render_sfx_bed_reports_window_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SFX bed counts windows X/Y on the console."""
+    from voyage.sfx_finalize import render_sfx_bed
+
+    monkeypatch.setattr("voyage.rpc.SubprocessWorker", _SilentSfxWorker)
+    run_dir = tmp_path / "run"
+    final_video = tmp_path / "final.mp4"
+    final_video.write_bytes(b"fake-video")
+    stream = io.StringIO()
+    render_sfx_bed(
+        run_dir,
+        final_video,
+        4.0,
+        [(0.0, 4.0, "rain")],
+        tmp_path,
+        "fake",
+        "/models",
+        "cpu",
+        "small_44k",
+        0,
+        48000,
+        2,
+        1,
+        progress=VoyageConsole(stream=stream),
+    )
+    text = stream.getvalue()
+    assert "sfx windows" in text
+    assert "1/1" in text
 
 
 def test_rich_segment_progress_delegates() -> None:
@@ -175,6 +293,7 @@ class _RecordingProgress:
         self.stages: list[str] = []
         self.plans: list[dict[str, Any]] = []
         self.dones: list[dict[str, Any]] = []
+        self.notes: list[str] = []
 
     def segment_start(self, number: int, segment_id: str) -> None:
         self.starts.append((number, segment_id))
@@ -191,6 +310,9 @@ class _RecordingProgress:
 
     def segment_done(self, info: dict[str, Any]) -> None:
         self.dones.append(info)
+
+    def note(self, message: str) -> None:
+        self.notes.append(message)
 
 
 def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
@@ -265,3 +387,57 @@ def test_run_cli_accepts_verbose_and_no_color(
     _configure_fake_console_run(segments="2")
     assert main(["generate", "console", "--no-color"]) == 0
     assert "SEGMENT 000001" in capsys.readouterr().out
+
+
+def test_note_reports_background_worker_line() -> None:
+    """`note()` prints one ▸ line (prefetch submit/hit, pre-warm ledger)."""
+    stream = io.StringIO()
+    RichSegmentProgress(VoyageConsole(stream=stream)).note(
+        "director prefetch hit (used as first candidate)"
+    )
+    assert "▸ director prefetch hit (used as first candidate)" in stream.getvalue()
+
+
+def test_note_silent_when_quiet() -> None:
+    """Quiet consoles suppress background-worker notes (failures only)."""
+    stream = io.StringIO()
+    RichSegmentProgress(VoyageConsole(stream=stream, quiet=True)).note(
+        "pre-warm ledgered +2 upscale chunks"
+    )
+    assert stream.getvalue() == ""
+
+
+def test_prewarm_report_announces_only_new_chunks() -> None:
+    """Post-commit report: deltas only, silent on idle, reset on restart."""
+
+    class _Driver:
+        def __init__(self) -> None:
+            self.totals: tuple[int, int, int] = (0, 0, 0)
+
+        def ledgered_totals(self) -> tuple[int, int, int]:
+            return self.totals
+
+    sink = _RecordingProgress()
+    supervisor = Supervisor.__new__(Supervisor)
+    supervisor._background = None
+    supervisor._progress = sink
+    supervisor._reported_prewarm = (None, 0, 0)
+    # No driver yet: silent, no crash.
+    supervisor._report_background_prewarm()
+    assert sink.notes == []
+    driver = _Driver()
+    supervisor._background = driver
+    supervisor._report_background_prewarm()
+    assert sink.notes == []
+    driver.totals = (1, 2, 3)
+    supervisor._report_background_prewarm()
+    assert sink.notes == ["pre-warm ledgered +2 upscale/+3 interp chunks"]
+    # Nothing new since the last report: silent.
+    supervisor._report_background_prewarm()
+    assert len(sink.notes) == 1
+    # A restarted driver resets its totals: baseline resets, full delta shown.
+    replacement = _Driver()
+    replacement.totals = (1, 5, 0)
+    supervisor._background = replacement
+    supervisor._report_background_prewarm()
+    assert sink.notes[-1] == "pre-warm ledgered +5 upscale chunks"

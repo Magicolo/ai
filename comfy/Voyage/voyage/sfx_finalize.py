@@ -24,11 +24,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from voyage import paths
 from voyage.atomic import fsync_dir
 from voyage.augment import augment_devices
+from voyage.console import optional_bar, optional_stage
 from voyage.errors import MediaError
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
@@ -39,6 +40,9 @@ from voyage.media import (
 )
 from voyage.paths import resolve_stored_path
 from voyage.segment_manifest import load_transition
+
+if TYPE_CHECKING:
+    from voyage.console import VoyageConsole
 
 SFX_WINDOW_SECONDS = 8.0
 """Native MMAudio window (upstream: 1.23 s per 8 s clip on small)."""
@@ -456,6 +460,7 @@ def render_sfx_bed(
     num_workers: int = 1,
     *,
     blend_timings: list[float] | None = None,
+    progress: VoyageConsole | None = None,
 ) -> Path:
     """Render every window (reusing ledger-matching stems) and join the bed.
 
@@ -506,24 +511,25 @@ def render_sfx_bed(
     stems: list[Path] = []
     workers: list[Any] = []
     try:
-        for slot in range(num_workers):
-            worker = SubprocessWorker(
-                module,
-                run_dir,
-                run_dir / "logs" / f"sfx-{slot}.log",
-                init_op="init",
-                init_payload={
-                    "models_dir": models_dir,
-                    "device": devices[slot],
-                    "model_size": sizes[slot],
-                },
-                # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
-                # stack is isolated from the LTX freeze; unset (video
-                # image, tests) falls back to the supervisor interpreter.
-                executable=os.environ.get("VOYAGE_SFX_PYTHON"),
-            )
-            worker.start()
-            workers.append(worker)
+        with optional_stage(progress, "load sfx workers", f"{num_workers} worker(s)"):
+            for slot in range(num_workers):
+                worker = SubprocessWorker(
+                    module,
+                    run_dir,
+                    run_dir / "logs" / f"sfx-{slot}.log",
+                    init_op="init",
+                    init_payload={
+                        "models_dir": models_dir,
+                        "device": devices[slot],
+                        "model_size": sizes[slot],
+                    },
+                    # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
+                    # stack is isolated from the LTX freeze; unset (video
+                    # image, tests) falls back to the supervisor interpreter.
+                    executable=os.environ.get("VOYAGE_SFX_PYTHON"),
+                )
+                worker.start()
+                workers.append(worker)
 
         def _render_one(index: int, window: SfxWindow) -> _RenderedWindow:
             """Render one window; ledger append is deferred to the serial join (054).
@@ -586,11 +592,20 @@ def render_sfx_bed(
             probed = _audio_duration_seconds(stem)
             return _RenderedWindow(stem, window, stored, sizes[slot], probed)
 
-        if num_workers == 1:
-            pending = [_render_one(index, window) for index, window in enumerate(windows)]
-        else:
-            with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                pending = list(pool.map(_render_one, range(len(windows)), windows))
+        with optional_bar(progress, "sfx windows", total=len(windows)) as tracker:
+            if num_workers == 1:
+                pending = []
+                for index, window in enumerate(windows):
+                    pending.append(_render_one(index, window))
+                    if tracker is not None:
+                        tracker.update()
+            else:
+                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                    pending = []
+                    for row in pool.map(_render_one, range(len(windows)), windows):
+                        pending.append(row)
+                        if tracker is not None:
+                            tracker.update()
         stems = []
         for row in pending:
             if row.logged is not None:
@@ -811,6 +826,7 @@ def finalize_sfx_pass(
     num_workers: int,
     fps: int,
     caption_override: str | None = None,
+    progress: VoyageConsole | None = None,
 ) -> Path:
     """Full post-pass: bed over the shipped pixels, mixed, remuxed in place.
 
@@ -854,14 +870,16 @@ def finalize_sfx_pass(
             sample_rate,
             channels,
             num_workers,
+            progress=progress,
         )
-        music = tmpdir / "final_music.wav"
-        demux_music_audio(final_path, music)
-        mixed = tmpdir / "final_mixed.wav"
-        mix_music_and_sfx(music, bed, mixed, sample_rate, channels)
-        remuxed = tmpdir / "final_sfx.mp4"
-        remux_video_with_audio(final_path, mixed, remuxed)
-        from voyage.atomic import atomic_write_bytes
+        with optional_stage(progress, "dub sfx onto final"):
+            music = tmpdir / "final_music.wav"
+            demux_music_audio(final_path, music)
+            mixed = tmpdir / "final_mixed.wav"
+            mix_music_and_sfx(music, bed, mixed, sample_rate, channels)
+            remuxed = tmpdir / "final_sfx.mp4"
+            remux_video_with_audio(final_path, mixed, remuxed)
+            from voyage.atomic import atomic_write_bytes
 
-        atomic_write_bytes(final_path, remuxed.read_bytes())
+            atomic_write_bytes(final_path, remuxed.read_bytes())
     return final_path

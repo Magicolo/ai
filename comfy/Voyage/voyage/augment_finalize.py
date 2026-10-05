@@ -18,12 +18,16 @@ import math
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from voyage.augment_seam import render_seam_once, seam_endpoints, seam_plan_dir
 from voyage.augment_sidecar import plan_dir_for_segment
+from voyage.console import optional_bar, optional_stage
 from voyage.errors import MediaError
 from voyage.hashing import sha256_file
+
+if TYPE_CHECKING:
+    from voyage.console import VoyageConsole
 
 FINAL_INTERMEDIATE_FILENAME = "model_intermediate.mp4"
 """Concat output in the caller's work dir (cheap stream copy, redone per finalize)."""
@@ -115,8 +119,17 @@ def _poll_to_completion(
     upscale_poll_fn: Callable[..., Any] | None,
     interp_poll_fn: Callable[..., Any] | None,
     timings: dict[str, float] | None = None,
+    progress: VoyageConsole | None = None,
 ) -> None:
-    """Run both pollers until a full pass finishes nothing (fail-loud when stuck)."""
+    """Run both pollers until a full pass finishes nothing (fail-loud when stuck).
+
+    `progress` renders one determinate `model-pass chunks` bar: both legs
+    cover the same chunk windows 1:1, so the settled total is twice the
+    per-leg count (learned after the first pass from done + skipped +
+    interp-waiting) and every rendered chunk advances it via the pollers'
+    `on_chunk` callbacks. A re-rendered chunk (output-truth rejoin)
+    fires again but advances once — the seen-set dedupes it.
+    """
     if upscale_poll_fn is None:
         from voyage.augment_upscale_poller import upscale_poll_once
 
@@ -126,49 +139,90 @@ def _poll_to_completion(
 
         interp_poll_fn = interp_poll_once
     source_fps_key = int(round(source_fps))
-    for _ in range(_MAX_POLL_PASSES):
-        upscale_start = time.monotonic()
-        upscale_result = upscale_poll_fn(
-            run_dir,
-            weights_path=weights.realesrgan,
-            weights_key=weights_key,
-            out_width=out_width,
-            out_height=out_height,
-            out_fps=source_fps_key,
-            upscale_factor=upscale_factor,
-            chunk_frames=chunk_frames,
-            device=device,
-            crf=crf,
-            preset=preset,
-        )
-        if timings is not None:
-            timings["upscale_poll_s"] += time.monotonic() - upscale_start
-            timings["upscale_chunks_done"] += float(upscale_result.chunks_done)
-        interp_start = time.monotonic()
-        interp_result = interp_poll_fn(
-            run_dir,
-            weights_path=weights.film,
-            weights_key=weights_key,
-            out_width=out_width,
-            out_height=out_height,
-            out_fps=source_fps_key,
-            upscale_factor=upscale_factor,
-            chunk_frames=chunk_frames,
-            multiplier=multiplier,
-            device=device,
-            crf=crf,
-            preset=preset,
-        )
-        if timings is not None:
-            timings["interp_poll_s"] += time.monotonic() - interp_start
-            timings["interp_chunks_done"] += float(interp_result.chunks_done)
-        if upscale_result.chunks_done == 0 and interp_result.chunks_done == 0:
-            if interp_result.chunks_waiting > 0:
-                raise MediaError(
-                    f"augment polling stuck: {interp_result.chunks_waiting} chunks "
-                    "waiting with no progress (rerun the pollers, then finalize again)"
-                )
-            return
+    seen: set[tuple[str, str, int]] = set()
+    with optional_bar(progress, "model-pass chunks") as tracker:
+
+        def _advance(leg: str, segment_id: str, index: int) -> None:
+            key = (leg, segment_id, index)
+            if key in seen:
+                return
+            seen.add(key)
+            if tracker is not None:
+                tracker.update()
+
+        def _up_chunk(segment_id: str, index: int, _total: int) -> None:
+            _advance("upscale", segment_id, index)
+
+        def _ip_chunk(segment_id: str, index: int, _total: int) -> None:
+            _advance("interp", segment_id, index)
+
+        first_pass = True
+        for _ in range(_MAX_POLL_PASSES):
+            upscale_start = time.monotonic()
+            upscale_result = upscale_poll_fn(
+                run_dir,
+                weights_path=weights.realesrgan,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=source_fps_key,
+                upscale_factor=upscale_factor,
+                chunk_frames=chunk_frames,
+                device=device,
+                crf=crf,
+                preset=preset,
+                on_chunk=_up_chunk,
+            )
+            if timings is not None:
+                timings["upscale_poll_s"] += time.monotonic() - upscale_start
+                timings["upscale_chunks_done"] += float(upscale_result.chunks_done)
+            interp_start = time.monotonic()
+            interp_result = interp_poll_fn(
+                run_dir,
+                weights_path=weights.film,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=source_fps_key,
+                upscale_factor=upscale_factor,
+                chunk_frames=chunk_frames,
+                multiplier=multiplier,
+                device=device,
+                crf=crf,
+                preset=preset,
+                on_chunk=_ip_chunk,
+            )
+            if timings is not None:
+                timings["interp_poll_s"] += time.monotonic() - interp_start
+                timings["interp_chunks_done"] += float(interp_result.chunks_done)
+            if first_pass:
+                # Learn the settled total: rendered chunks advanced via
+                # the callbacks above; already-ledgered ones never fire,
+                # so count them here (later passes only repeat them).
+                # `getattr` keeps legacy injected fakes (done-only
+                # namespaces) working — the bar just learns a short total.
+                first_pass = False
+                if tracker is not None:
+                    total = (
+                        upscale_result.chunks_done
+                        + getattr(upscale_result, "chunks_skipped", 0)
+                        + interp_result.chunks_done
+                        + getattr(interp_result, "chunks_skipped", 0)
+                        + getattr(interp_result, "chunks_waiting", 0)
+                    )
+                    if total > 0:
+                        tracker.set_total(total)
+                    tracker.update(
+                        getattr(upscale_result, "chunks_skipped", 0)
+                        + getattr(interp_result, "chunks_skipped", 0)
+                    )
+            if upscale_result.chunks_done == 0 and interp_result.chunks_done == 0:
+                if getattr(interp_result, "chunks_waiting", 0) > 0:
+                    raise MediaError(
+                        f"augment polling stuck: {interp_result.chunks_waiting} chunks "
+                        "waiting with no progress (rerun the pollers, then finalize again)"
+                    )
+                return
     raise MediaError(
         f"augment polling made no settling pass in {_MAX_POLL_PASSES} rounds "
         "(rerun the pollers, then finalize again)"
@@ -198,6 +252,7 @@ def run_durable_model_pass(
     morph_joints: bool = False,
     morph_interp_fn: Callable[..., Any] | None = None,
     timings: dict[str, float] | None = None,
+    progress: VoyageConsole | None = None,
 ) -> tuple[Path, int]:
     """Poll, drain, and concat the durable sidecar path (issue: independent workers).
 
@@ -280,6 +335,7 @@ def run_durable_model_pass(
         upscale_poll_fn=upscale_poll_fn,
         interp_poll_fn=interp_poll_fn,
         timings=timings,
+        progress=progress,
     )
     if drain_fn is None:
         from voyage.augment_drain import drain_interpolated_plan
@@ -295,53 +351,18 @@ def run_durable_model_pass(
     by_id = {source.segment_id: source for source in sources}
     intermediates: list[Path] = []
     previous: tuple[str, Path] | None = None
-    for segment in segments:
-        source = by_id.get(segment.name)
-        if source is None:
-            raise MediaError(
-                f"usable segment {segment.name} has no pollable source "
-                "(DONE + manifest with video checksum/frames required)"
-            )
-        plan_dir = plan_dir_for_segment(
-            run_dir,
-            source_key=source.source_key,
-            weights_key=weights_key,
-            out_width=out_width,
-            out_height=out_height,
-            out_fps=source_fps_key,
-            upscale_factor=upscale_factor,
-            crf=crf,
-            preset=preset,
-        )
-        if previous is not None and multiplier > 1 and not morph_joints:
-            prev_key, prev_plan = previous
-            seam_dir = seam_plan_dir(
-                run_dir,
-                key_a=prev_key,
-                key_b=source.source_key,
-                weights_key=weights_key,
-                out_width=out_width,
-                out_height=out_height,
-                out_fps=source_fps_key,
-                upscale_factor=upscale_factor,
-                crf=crf,
-                preset=preset,
-            )
-            endpoints = seam_endpoints(prev_plan, plan_dir)
-            if endpoints is None:
+    drain_cm = optional_bar(progress, "drain segments", total=len(segments))
+    with drain_cm as drain_tracker:
+        for segment in segments:
+            source = by_id.get(segment.name)
+            if source is None:
                 raise MediaError(
-                    f"seam endpoints missing between {prev_key} and "
-                    f"{source.source_key} (interp incomplete after polling)"
+                    f"usable segment {segment.name} has no pollable source "
+                    "(DONE + manifest with video checksum/frames required)"
                 )
-            before_png, after_png = endpoints
-            seam_start = time.monotonic()
-            rendered = render_seam_once(
+            plan_dir = plan_dir_for_segment(
                 run_dir,
-                seam_dir,
-                before_png=before_png,
-                after_png=after_png,
-                multiplier=multiplier,
-                source_key=f"{prev_key}|{source.source_key}",
+                source_key=source.source_key,
                 weights_key=weights_key,
                 out_width=out_width,
                 out_height=out_height,
@@ -349,44 +370,85 @@ def run_durable_model_pass(
                 upscale_factor=upscale_factor,
                 crf=crf,
                 preset=preset,
-                weights_path=weights.film,
-                device=device,
-                interp_fn=seam_interp_fn,
             )
+            if previous is not None and multiplier > 1 and not morph_joints:
+                prev_key, prev_plan = previous
+                seam_dir = seam_plan_dir(
+                    run_dir,
+                    key_a=prev_key,
+                    key_b=source.source_key,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=source_fps_key,
+                    upscale_factor=upscale_factor,
+                    crf=crf,
+                    preset=preset,
+                )
+                endpoints = seam_endpoints(prev_plan, plan_dir)
+                if endpoints is None:
+                    raise MediaError(
+                        f"seam endpoints missing between {prev_key} and "
+                        f"{source.source_key} (interp incomplete after polling)"
+                    )
+                before_png, after_png = endpoints
+                seam_start = time.monotonic()
+                rendered = render_seam_once(
+                    run_dir,
+                    seam_dir,
+                    before_png=before_png,
+                    after_png=after_png,
+                    multiplier=multiplier,
+                    source_key=f"{prev_key}|{source.source_key}",
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=source_fps_key,
+                    upscale_factor=upscale_factor,
+                    crf=crf,
+                    preset=preset,
+                    weights_path=weights.film,
+                    device=device,
+                    interp_fn=seam_interp_fn,
+                )
+                if timings is not None:
+                    timings["seam_s"] += time.monotonic() - seam_start
+                    timings["seams_done"] += float(rendered)
+                seam_drain_start = time.monotonic()
+                seam_drained = drain_fn(seam_dir, out_fps=source_fps * multiplier)
+                if timings is not None:
+                    timings["drain_s"] += time.monotonic() - seam_drain_start
+                    timings["chunks_drained"] += float(seam_drained.chunks_drained)
+                intermediates.append(seam_drained.intermediate_mp4)
+            drain_start = time.monotonic()
+            drained = drain_fn(plan_dir, out_fps=source_fps * multiplier)
             if timings is not None:
-                timings["seam_s"] += time.monotonic() - seam_start
-                timings["seams_done"] += float(rendered)
-            seam_drain_start = time.monotonic()
-            seam_drained = drain_fn(seam_dir, out_fps=source_fps * multiplier)
-            if timings is not None:
-                timings["drain_s"] += time.monotonic() - seam_drain_start
-                timings["chunks_drained"] += float(seam_drained.chunks_drained)
-            intermediates.append(seam_drained.intermediate_mp4)
-        drain_start = time.monotonic()
-        drained = drain_fn(plan_dir, out_fps=source_fps * multiplier)
-        if timings is not None:
-            timings["drain_s"] += time.monotonic() - drain_start
-            timings["chunks_drained"] += float(drained.chunks_drained)
-        intermediates.append(drained.intermediate_mp4)
-        previous = (source.source_key, plan_dir)
+                timings["drain_s"] += time.monotonic() - drain_start
+                timings["chunks_drained"] += float(drained.chunks_drained)
+            intermediates.append(drained.intermediate_mp4)
+            previous = (source.source_key, plan_dir)
+            if drain_tracker is not None:
+                drain_tracker.update()
     work_dir.mkdir(parents=True, exist_ok=True)
     final = work_dir / FINAL_INTERMEDIATE_FILENAME
     if morph_joints:
         from voyage.augment_morph import assemble_morphed_timeline
 
+        morph_cm = optional_stage(progress, "morph joints", f"{len(intermediates) - 1} joint(s)")
         morph_start = time.monotonic()
-        final = assemble_morphed_timeline(
-            intermediates,
-            joint_root=run_dir / "augment" / "morph_joints",
-            fps=int(round(source_fps * multiplier)),
-            crf=crf,
-            preset=preset,
-            pix_fmt="yuv420p",
-            interp_fn=morph_interp_fn,
-            weights=weights.film,
-            device=device,
-            concat_fn=concat_fn,
-        )
+        with morph_cm:
+            final = assemble_morphed_timeline(
+                intermediates,
+                joint_root=run_dir / "augment" / "morph_joints",
+                fps=int(round(source_fps * multiplier)),
+                crf=crf,
+                preset=preset,
+                pix_fmt="yuv420p",
+                interp_fn=morph_interp_fn,
+                weights=weights.film,
+                device=device,
+                concat_fn=concat_fn,
+            )
         if timings is not None:
             timings["morph_s"] += time.monotonic() - morph_start
             timings["morphs_done"] += float(len(intermediates) - 1)

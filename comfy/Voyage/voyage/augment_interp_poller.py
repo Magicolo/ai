@@ -130,6 +130,7 @@ def interp_poll_once(
     crf: int = 15,
     preset: str = "veryfast",
     interp_fn: Callable[[list[Path], Path, int], list[Path]] | None = None,
+    on_chunk: Callable[[str, int, int], None] | None = None,
 ) -> InterpPollResult:
     """Interpolate every upscaled-but-not-interpolated chunk (one pass).
 
@@ -141,7 +142,10 @@ def interp_poll_once(
     output fps). Returns counts; raises `MediaError` on a failed chunk
     (fail-loud, retry re-runs only the missing chunks). `weights_key`
     must cover both legs (ESRGAN + FILM): any leg change must miss old
-    records.
+    records. `on_chunk`, when given, fires after each rendered chunk
+    with `(segment_id, chunk_index, chunk_count)` — the finalize
+    model-pass bar advances on it (main thread only; the background
+    pre-warm passes None).
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -264,6 +268,8 @@ def interp_poll_once(
             records = load_chunk_ledger(ledger_path)
             done = completed_stages(records)
             chunks_done += 1
+            if on_chunk is not None:
+                on_chunk(source.segment_id, index, len(windows))
     return InterpPollResult(
         segments_seen=len(sources),
         segments_skipped=skipped,
