@@ -127,7 +127,10 @@ def _default_seam_pngs(
     interp_backend: str = "rife",
 ) -> list[Path]:
     """Render the seam mids via the resident interp leg (lazy torch import)."""
-    from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
+    from voyage.augment import (
+        load_png_frames_as_tensors,
+        write_tensors_as_png_frames,
+    )
     from voyage.workers.augment_worker import (
         interpolate_mids,
         interpolate_rife_mids,
@@ -177,6 +180,8 @@ def render_seam_once(
     (`multiplier=1` has zero mids — the finalize wiring skips seams
     entirely instead of calling here).
     """
+    from voyage.augment import chunk_frames_match_size
+
     if not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier < 2:
         raise ValueError(f"seam multiplier must be an int >= 2 (got {multiplier!r})")
     if not isinstance(seam_dir, Path):
@@ -204,7 +209,9 @@ def render_seam_once(
     records = load_chunk_ledger(ledger_path)
     output_dir = seam_dir / f"interpolated_{SEAM_CHUNK_INDEX:02d}"
     if chunk_cache_hit(records, key, stage=STAGE_INTERPOLATED):
-        if chunk_output_complete(output_dir, expected):
+        if chunk_output_complete(output_dir, expected) and chunk_frames_match_size(
+            output_dir, (out_width, out_height)
+        ):
             return False
         # Auto-heal: ledger hit but output wrong (stale publish, partial
         # cleanup) — drop the stale dir and fall through to re-render.

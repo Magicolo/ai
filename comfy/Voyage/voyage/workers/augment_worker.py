@@ -47,6 +47,7 @@ from __future__ import annotations
 import gc
 import importlib.util
 import pickle
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -183,13 +184,86 @@ def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
     return (str(weights_path), str(device))
 
 
+_AUGMENT_MODEL_LOCK = threading.Lock()
+"""Serializes resident-net load + prepare (torch best practice).
+
+PyTorch modules are thread-safe to READ but not to WRITE (maintainer
+albanD): sharing one net across inference threads is safe iff the forward
+pass mutates no shared state. This lock covers the three writes —
+cache check-then-set, `_prepare_model` (.half/.to/.eval), and the
+warp-grid memo dicts — while steady-state forwards run lock-free.
+Per-thread CUDA streams (the `cuda_stream` params) let the launches
+overlap; kernel launches are async so Python threads share well.
+"""
+
+_WARP_GRID_LOCK = threading.Lock()
+"""Serializes warp-grid memo builds (FILM + RIFE nets own one dict each)."""
+
+_PREPARED_MODEL_KEYS: set[tuple[str, str]] = set()
+"""Cache keys already moved/cast/eval'd — later calls skip the write path."""
+
+
+def _get_prepared_model(
+    cache: dict[tuple[str, str], Any],
+    key: tuple[str, str],
+    device: str,
+    loader: Callable[[], Any],
+) -> tuple[Any, Any, Any]:
+    """Locked get-or-load + prepare-once; returns (model, torch_device, dtype).
+
+    The loader (disk decode, seconds) runs under the lock so concurrent
+    first calls wait instead of double-loading; `_prepare_model` runs at
+    most once per key, so steady-state calls never `.half()`/`.to()`/`.eval()`
+    under a live forward (torn precision / training-flag flips).
+    """
+    with _AUGMENT_MODEL_LOCK:
+        model = cache.get(key)
+        if model is None:
+            model = loader()
+            cache[key] = model
+        if key in _PREPARED_MODEL_KEYS:
+            import torch
+
+            torch_device = _resolve_device(device)
+            dtype = torch.float16 if torch_device.type == "cuda" else torch.float32
+        else:
+            torch_device, dtype = _prepare_model(model, device)
+            model.eval()
+            _PREPARED_MODEL_KEYS.add(key)
+        return model, torch_device, dtype
+
+
+def _inference_stream_context(torch_device: Any, cuda_stream: Any) -> Any:
+    """`torch.cuda.stream(s)` for a live CUDA stream, else a null context.
+
+    Per torch CUDA-semantics: work on a non-default stream needs the inputs
+    recorded on it (callers `record_stream` right after H2D) and a join
+    before CPU reads (our loops `.cpu()` per item, which synchronizes).
+    CPU devices / `None` streams take the null path (current stream).
+    """
+    import contextlib
+
+    import torch
+
+    if cuda_stream is not None and torch_device.type == "cuda":
+        return torch.cuda.stream(cuda_stream)
+    return contextlib.nullcontext()
+
+
 def evict_augment_models() -> int:
-    """Drop all resident augment nets; return the evicted entry count."""
-    count = len(_ESRGAN_CACHE) + len(_FILM_CACHE) + len(_RIFE_CACHE)
-    _ESRGAN_CACHE.clear()
-    _FILM_CACHE.clear()
-    _RIFE_CACHE.clear()
-    return count
+    """Drop all resident augment nets; return the evicted entry count.
+
+    Prepared flags go with the nets (a reloaded net must be prepared
+    again); the lock keeps an in-flight `_get_prepared_model` from
+    observing a half-cleared cache.
+    """
+    with _AUGMENT_MODEL_LOCK:
+        count = len(_ESRGAN_CACHE) + len(_FILM_CACHE) + len(_RIFE_CACHE)
+        _ESRGAN_CACHE.clear()
+        _FILM_CACHE.clear()
+        _RIFE_CACHE.clear()
+        _PREPARED_MODEL_KEYS.clear()
+        return count
 
 
 def _require_torch() -> None:
@@ -889,24 +963,33 @@ def _build_film_net() -> Any:
             self._warp_grids: dict[tuple[int, int], Any] = {}
 
         def _build_warp_grids(self, height: int, width: int, levels: int, device: Any) -> None:
-            """Pre-compute warp grids for every pyramid level of this resolution."""
-            if (height, width) in self._warp_grids:
-                return
-            self._warp_grids = {}
-            for _ in range(levels):
-                self._warp_grids[(height, width)] = (
-                    torch.linspace(
-                        -(1 - 1 / width), 1 - 1 / width, width, dtype=torch.float32, device=device
-                    ),
-                    torch.linspace(
-                        -(1 - 1 / height),
-                        1 - 1 / height,
-                        height,
-                        dtype=torch.float32,
-                        device=device,
-                    ),
-                )
-                height, width = height // 2, width // 2
+            """Pre-compute warp grids for every pyramid level of this resolution.
+
+            Per-geometry memo WITHOUT reset (concurrency fix, same rationale
+            as RIFE `_grids_for`): entries are small linspace vectors and are
+            never deleted, so `warp` reads stay race-free.
+            """
+            with _WARP_GRID_LOCK:
+                if (height, width) in self._warp_grids:
+                    return
+                for _ in range(levels):
+                    self._warp_grids[(height, width)] = (
+                        torch.linspace(
+                            -(1 - 1 / width),
+                            1 - 1 / width,
+                            width,
+                            dtype=torch.float32,
+                            device=device,
+                        ),
+                        torch.linspace(
+                            -(1 - 1 / height),
+                            1 - 1 / height,
+                            height,
+                            dtype=torch.float32,
+                            device=device,
+                        ),
+                    )
+                    height, width = height // 2, width // 2
 
         def warp(self, image: Any, flow: Any) -> Any:
             grid_x, grid_y = self._warp_grids[(int(flow.shape[2]), int(flow.shape[3]))]
@@ -1377,6 +1460,7 @@ def upscale_frames(
     device: str = "cuda:0",
     timings: dict[str, float] | None = None,
     tile: int | None = None,
+    cuda_stream: Any = None,
 ) -> list[Any]:
     """Upscale (3, H, W) float frames in [0, 1] by `scale` (Real-ESRGAN x4 + downscale).
 
@@ -1390,6 +1474,12 @@ def upscale_frames(
     over `UPSCALE_TILE_BUDGET_PIXELS` (a single big frame OOMs small GPUs
     where batch-halving cannot help — DESIGN §140 GPU defaults), an int
     forces that tile size (tests, manual override; validated positive).
+
+    `cuda_stream`, when a live `torch.cuda.Stream` on the inference
+    device, encloses the forward loop so N worker threads on one GPU
+    overlap H2D/compute across streams (torch best practice: one private
+    stream per worker thread; per-frame `.cpu()` is the join). `None`
+    (default) uses the current stream.
     """
     target = validate_upscale_factor(scale)
     weights_path = _require_weights(weights, "Real-ESRGAN")
@@ -1404,18 +1494,15 @@ def upscale_frames(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _ESRGAN_CACHE.get(key)
-    if model is None:
-        model = _load_esrgan_net(weights_path)
-        _ESRGAN_CACHE[key] = model
+    model, torch_device, dtype = _get_prepared_model(
+        _ESRGAN_CACHE, key, device, lambda: _load_esrgan_net(weights_path)
+    )
     load_ms = (time.monotonic() - load_started) * 1000.0
-    torch_device, dtype = _prepare_model(model, device)
-    model.eval()
     cpu_frames = [torch.as_tensor(frame, dtype=torch.float32) for frame in frames]
     results: list[Any] = []
     infer_started = time.monotonic()
     try:
-        with torch.no_grad():
+        with torch.no_grad(), _inference_stream_context(torch_device, cuda_stream):
             natives: list[Any] = []
             for cpu_frame in cpu_frames:
                 _, frame_h, frame_w = cpu_frame.shape
@@ -1459,13 +1546,10 @@ def interpolate_pair(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _FILM_CACHE.get(key)
-    if model is None:
-        model = _load_film_net(weights_path)
-        _FILM_CACHE[key] = model
+    model, torch_device, dtype = _get_prepared_model(
+        _FILM_CACHE, key, device, lambda: _load_film_net(weights_path)
+    )
     load_ms = (time.monotonic() - load_started) * 1000.0
-    torch_device, dtype = _prepare_model(model, device)
-    model.eval()
     batched = torch.stack(
         [
             torch.as_tensor(before, dtype=torch.float32),
@@ -1501,13 +1585,10 @@ def interpolate_triplet(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _FILM_CACHE.get(key)
-    if model is None:
-        model = _load_film_net(weights_path)
-        _FILM_CACHE[key] = model
+    model, torch_device, dtype = _get_prepared_model(
+        _FILM_CACHE, key, device, lambda: _load_film_net(weights_path)
+    )
     load_ms = (time.monotonic() - load_started) * 1000.0
-    torch_device, dtype = _prepare_model(model, device)
-    model.eval()
     first_tensor = torch.as_tensor(first, dtype=torch.float32)
     middle_tensor = torch.as_tensor(middle, dtype=torch.float32)
     last_tensor = torch.as_tensor(last, dtype=torch.float32)
@@ -1622,13 +1703,10 @@ def interpolate_mids(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _FILM_CACHE.get(key)
-    if model is None:
-        model = _load_film_net(weights_path)
-        _FILM_CACHE[key] = model
+    model, torch_device, dtype = _get_prepared_model(
+        _FILM_CACHE, key, device, lambda: _load_film_net(weights_path)
+    )
     load_ms = (time.monotonic() - load_started) * 1000.0
-    torch_device, dtype = _prepare_model(model, device)
-    model.eval()
     pair_count = len(frames) - 1
     mids: list[Any] = []
     infer_started = time.monotonic()
@@ -1790,23 +1868,33 @@ def _build_rife_net(
             self.warp_grids: dict[Any, Any] = {}
 
         def _grids_for(self, height: int, width: int, device: Any) -> Any:
-            """Base grid + flow divisors for a frame geometry (cached per device)."""
+            """Base grid + flow divisors for a frame geometry (cached per device).
+
+            Per-geometry memo WITHOUT clear() (concurrency fix): the old
+            `clear()` deleted every geometry, so two threads building
+            different sizes corrupted each other (KeyError on return). One
+            grid is ~18 MiB at 2x and a finalize holds a single geometry;
+            double-checked under `_WARP_GRID_LOCK` so concurrent builds of
+            the same size compute once. Keys are never deleted, so `warp`
+            reads stay lock-free and race-free.
+            """
             key = (height, width, str(device))
             if key not in self.warp_grids:
-                self.warp_grids.clear()
-                grid_y, grid_x = torch.meshgrid(
-                    torch.linspace(-1.0, 1.0, height, device=device, dtype=torch.float32),
-                    torch.linspace(-1.0, 1.0, width, device=device, dtype=torch.float32),
-                    indexing="ij",
-                )
-                self.warp_grids[key] = (
-                    torch.stack((grid_x, grid_y), dim=0).unsqueeze(0),
-                    torch.tensor(
-                        [(width - 1.0) / 2.0, (height - 1.0) / 2.0],
-                        dtype=torch.float32,
-                        device=device,
-                    ),
-                )
+                with _WARP_GRID_LOCK:
+                    if key not in self.warp_grids:
+                        grid_y, grid_x = torch.meshgrid(
+                            torch.linspace(-1.0, 1.0, height, device=device, dtype=torch.float32),
+                            torch.linspace(-1.0, 1.0, width, device=device, dtype=torch.float32),
+                            indexing="ij",
+                        )
+                        self.warp_grids[key] = (
+                            torch.stack((grid_x, grid_y), dim=0).unsqueeze(0),
+                            torch.tensor(
+                                [(width - 1.0) / 2.0, (height - 1.0) / 2.0],
+                                dtype=torch.float32,
+                                device=device,
+                            ),
+                        )
             return self.warp_grids[key]
 
         def warp(self, image: Any, flow: Any) -> Any:
@@ -1932,6 +2020,7 @@ def interpolate_rife_mids(
     device: str = "cuda:0",
     timings: dict[str, float] | None = None,
     on_pair: Callable[[int, int], None] | None = None,
+    cuda_stream: Any = None,
 ) -> list[Any]:
     """Mid frames for every adjacent pair at each moment (RIFE IFNet).
 
@@ -1952,6 +2041,9 @@ def interpolate_rife_mids(
     Validation order (before any torch import): moments, frame count
     (>= 2 — a bare length check, so it stays torch-free), weights, then
     torch, then frame shapes and the `RIFE_MIN_SIDE` floor.
+
+    `cuda_stream` optionally pins the forward loop to a caller-owned CUDA
+    stream (same threading contract as `upscale_frames`); `None` default.
     """
     if isinstance(moments, (str, bytes)) or not isinstance(moments, (list, tuple)):
         raise TypeError(
@@ -1980,17 +2072,14 @@ def interpolate_rife_mids(
 
     load_started = time.monotonic()
     key = _model_cache_key(weights_path, device)
-    model = _RIFE_CACHE.get(key)
-    if model is None:
-        model = _load_rife_net(weights_path)
-        _RIFE_CACHE[key] = model
+    model, torch_device, dtype = _get_prepared_model(
+        _RIFE_CACHE, key, device, lambda: _load_rife_net(weights_path)
+    )
     load_ms = (time.monotonic() - load_started) * 1000.0
-    torch_device, dtype = _prepare_model(model, device)
-    model.eval()
     pair_count = len(frames) - 1
     mids: list[Any] = []
     infer_started = time.monotonic()
-    with torch.no_grad():
+    with torch.no_grad(), _inference_stream_context(torch_device, cuda_stream):
         for pair_index in range(pair_count):
             first = torch.as_tensor(frames[pair_index], dtype=torch.float32).unsqueeze(0)
             second = torch.as_tensor(frames[pair_index + 1], dtype=torch.float32).unsqueeze(0)
@@ -2002,6 +2091,9 @@ def interpolate_rife_mids(
                 second = functional.pad(second, (0, pad_right, 0, pad_bottom), mode="reflect")
             first = first.to(torch_device, dtype=dtype)
             second = second.to(torch_device, dtype=dtype)
+            if cuda_stream is not None and torch_device.type == "cuda":
+                first.record_stream(cuda_stream)
+                second.record_stream(cuda_stream)
             try:
                 # One encode per pair, shared across moments (the RIFE
                 # feature-cache win — moments only re-run the flow cascade).

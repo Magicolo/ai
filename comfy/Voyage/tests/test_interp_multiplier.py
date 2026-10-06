@@ -142,6 +142,12 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _fake_resolve)
     monkeypatch.setattr(finalize_module, "run_durable_model_pass", _fake_durable_pass)
+    import voyage.augment_parallel as parallel_module
+
+    # Parallel disarmed: pin the pre-parallel path (model∥music fork /
+    # single interleaved driver). The audio-first bidirectional branch
+    # is pinned in tests/test_parallel_model_pass.py.
+    monkeypatch.setattr(parallel_module, "parallel_model_pass_armed", lambda **kwargs: False)
     # `media` imports these lazily from `voyage.augment`, so the source
     # module (not `voyage.media`) is the patch target.
     monkeypatch.setattr(augment_module, "augment_devices", lambda: ("cuda:0", "cuda:1"))

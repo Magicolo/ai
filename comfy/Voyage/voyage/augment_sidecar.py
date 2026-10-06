@@ -11,6 +11,7 @@ last-wins dedupe, partial pruning) — never torch, never ffmpeg.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage.atomic import atomic_write_bytes, fsync_dir
+from voyage.augment import chunk_frames_match_size
 from voyage.hashing import sha256_file, sha256_text
 
 AUGMENT_DIRNAME = "augment"
@@ -158,9 +160,15 @@ def append_chunk_record(ledger: Path, key: ChunkKey, *, stage: str, path: str) -
     ledger.parent.mkdir(parents=True, exist_ok=True)
     record: dict[str, Any] = {**asdict(key), "stage": resolved_stage, "path": path}
     with ledger.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+        # Exclusive lock: parallel finalize workers may append to the
+        # same ledger concurrently (flock releases on close regardless).
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.write(json.dumps(record) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     fsync_dir(ledger.parent)
 
 
@@ -416,7 +424,10 @@ def find_upscaled_donor(
                 continue
             if rel.startswith("/") or ".." in rel.split("/"):
                 continue
-            if not chunk_output_complete(run_dir / rel, source_frames):
+            donor_dir = run_dir / rel
+            if not chunk_output_complete(donor_dir, source_frames):
+                continue
+            if not chunk_frames_match_size(donor_dir, (out_width, out_height)):
                 continue
             return record
     return None
@@ -559,3 +570,115 @@ def prune_stale_interp_plans(
             if removed_any or stripped:
                 pruned += 1
     return pruned
+
+
+def _strip_dangling_chunk_records(ledger: Path) -> int:
+    """Drop chunk records whose outputs are missing or incomplete (DESIGN §56).
+
+    Mirrors `_check_sidecar_plan_consistency` in `voyage/cli_validate.py`
+    exactly: groups records by latest-per-`(chunk_index, stage)` among the
+    known stages, resolves the output dir as
+    `ledger.parent / f"{stage}_{index:02d}"`, and requires
+    `chunk_output_complete` for the latest record's `expected_frames`.
+    Records whose frames additionally fail `chunk_frames_match_size`
+    against the record's own `out_width`/`out_height` (valid ints only)
+    are stripped too — donor adoption once propagated a mixed-geometry
+    chunk whose counts were intact, and no validator sees that. The whole
+    group goes (all records of a group share one output dir), while
+    unparseable/foreign lines and records the validator skips are kept.
+    Rewrite is atomic via `atomic_write_bytes`; returns removed count.
+    `chunk_frames_match_size` fails open without PIL, so slim-image runs
+    strip on count-truth only (unit tests and fakes unaffected).
+    """
+    try:
+        text = ledger.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    raw_lines = text.splitlines()
+    lines: list[str] = []
+    parsed: list[dict[str, Any] | None] = []
+    for raw in raw_lines:
+        if not raw.strip():
+            continue
+        lines.append(raw)
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            parsed.append(None)
+            continue
+        parsed.append(record if isinstance(record, dict) else None)
+
+    def _group(record: dict[str, Any]) -> tuple[int, str] | None:
+        try:
+            index = int(record["chunk_index"])
+            expected = int(record["expected_frames"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        stage = record.get("stage")
+        if stage not in _KNOWN_STAGES or expected <= 0:
+            return None
+        return (index, stage)
+
+    latest: dict[tuple[int, str], dict[str, Any]] = {}
+    for record in parsed:
+        if record is None:
+            continue
+        group = _group(record)
+        if group is not None:
+            latest[group] = record
+    dangling: set[tuple[int, str]] = set()
+    for group, record in latest.items():
+        index, stage = group
+        expected = int(record["expected_frames"])
+        chunk_dir = ledger.parent / f"{stage}_{index:02d}"
+        if not chunk_output_complete(chunk_dir, expected):
+            dangling.add(group)
+            continue
+        try:
+            size = (int(record["out_width"]), int(record["out_height"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not chunk_frames_match_size(chunk_dir, size):
+            dangling.add(group)
+    if not dangling:
+        return 0
+    kept = [
+        line
+        for line, record in zip(lines, parsed, strict=True)
+        if record is None or _group(record) not in dangling
+    ]
+    removed = len(lines) - len(kept)
+    if not removed:
+        return 0
+    payload = ("".join(line + "\n" for line in kept)).encode("utf-8")
+    try:
+        atomic_write_bytes(ledger, payload)
+    except OSError:
+        return 0
+    return removed
+
+
+def heal_augment_ledgers(run_dir: Path) -> int:
+    """Strip dangling chunk records in every plan ledger; return removed count.
+
+    Self-healing hook for generate/finalize start (the kaolin case: healed
+    outputs were deleted while their ledger records stayed, and the
+    pre-finalize validator aborts on ledgered-but-missing instead of
+    re-rendering). Stripped records fail the pollers' output-truth gates,
+    so the next pass re-renders them. Never raises — per-plan-dir
+    `OSError` is skipped so one unreadable plan never blocks the sweep.
+    """
+    try:
+        plan_dirs = sorted(p for p in (run_dir / AUGMENT_DIRNAME).iterdir() if p.is_dir())
+    except OSError:
+        return 0
+    stripped = 0
+    for plan_dir in plan_dirs:
+        ledger = plan_dir / CHUNKS_LEDGER_FILENAME
+        if not ledger.is_file():
+            continue
+        try:
+            stripped += _strip_dangling_chunk_records(ledger)
+        except OSError:
+            continue
+    return stripped

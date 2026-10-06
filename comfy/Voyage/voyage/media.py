@@ -1010,6 +1010,21 @@ def finalize_run(
                     f"pruned stale interp outputs in {pruned_stale_plans} plan dir(s) "
                     "from the previous interpolation backend"
                 )
+        if model_selected:
+            # Ledger self-healing: healed or deleted chunk outputs leave
+            # stale ledger records that the pre-finalize validator would
+            # reject (ledgered-but-missing), so strip them here — finalize
+            # is the run's single writer — before the model pass
+            # re-renders them. Same gate shape as the prune above, minus
+            # the interp>1 requirement (upscale-only runs heal too).
+            from voyage.augment_sidecar import heal_augment_ledgers
+
+            healed_ledger_records = heal_augment_ledgers(run_dir)
+            if healed_ledger_records and progress is not None:
+                progress.info(
+                    f"healed {healed_ledger_records} stale augment ledger "
+                    "record(s) (missing outputs re-render next)"
+                )
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     # §56 steps 4-6 per segment, before any encoding work. skip_bad is
@@ -1261,6 +1276,61 @@ def finalize_run(
             if tensor_intermediate is not None:
                 final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
 
+        def _do_parallel_model_pass() -> None:
+            nonlocal tensor_intermediate
+            if not phased or resolved_weights is None or not upscale_devices or not interp_devices:
+                return
+            # Bidirectional (finalize-only, RIFE-only, DESIGN §140): the
+            # work-stealing deque renders every queued chunk (worker A on
+            # cuda:1 front-to-back, worker B on cuda:0 back-to-front),
+            # then the same drain (+ seam/morph joints) as the single
+            # driver emits one intermediate. No seam-early in workers —
+            # the drain fallback owns seams.
+            from voyage.augment_finalize import _drain_to_intermediate, weights_key_for
+            from voyage.augment_parallel import run_parallel_model_pass
+
+            model_work = tmpdir / "model_pass"
+            parallel_key = weights_key_for(resolved_weights, effective_interp_backend)
+            run_parallel_model_pass(
+                run_dir,
+                weights=resolved_weights,
+                weights_key=parallel_key,
+                out_width=out_w,
+                out_height=out_h,
+                source_fps=source_fps,
+                upscale_factor=effective_upscale,
+                multiplier=effective_interpolate,
+                # Durable default: keeps ledger windows identical to the
+                # single-driver pass, so retries resume instead of redoing.
+                chunk_frames=32,
+                crf=effective_crf,
+                preset=effective_preset,
+                interp_backend=effective_interp_backend,
+                timings=model_pass_timings,
+                progress=branch_progress,
+            )
+            tensor_intermediate, _ = _drain_to_intermediate(
+                run_dir,
+                usable,
+                weights=resolved_weights,
+                weights_key=parallel_key,
+                out_width=out_w,
+                out_height=out_h,
+                source_fps=source_fps,
+                source_fps_key=int(round(source_fps)),
+                upscale_factor=effective_upscale,
+                multiplier=effective_interpolate,
+                crf=effective_crf,
+                preset=effective_preset,
+                device=interp_devices[0],
+                work_dir=model_work,
+                interp_backend=effective_interp_backend,
+                timings=model_pass_timings,
+                progress=branch_progress,
+            )
+            if tensor_intermediate is not None:
+                final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
+
         def _do_model_pass() -> None:
             nonlocal tensor_intermediate
             # Legacy flow (partial legs, or tensor path without the
@@ -1472,7 +1542,34 @@ def finalize_run(
         # the request is armed (mirrors the post-mix setup computation).
         fork_sfx_armed = sfx_parallel_armed(sfx_request)
 
-        if model_music_parallel_armed(
+        # Unconditional (the line-1086 import only binds inside its own
+        # `if`, and the parallel gate below needs both names bound).
+        from voyage.augment import augment_devices
+        from voyage.augment_parallel import parallel_model_pass_armed
+
+        if phased and parallel_model_pass_armed(
+            interp_backend=effective_interp_backend,
+            devices=augment_devices(),
+        ):
+            # Bidirectional (finalize-only, RIFE-only, DESIGN §140): audio
+            # first on the main thread — music takes then the SFX bed on
+            # cuda:0 while both cards are still free — then the
+            # work-stealing model pass (A on cuda:1 front-to-back, B on
+            # cuda:0 back-to-front, meeting in the middle), then fall
+            # through to the mix block with fork_ran set so downstream
+            # bed/publish-thread logic treats the bed as done.
+            audio_start = time.monotonic()
+            _do_music_takes()
+            # `_do_sfx_bed` reads the closure `bed_view`: bind it before
+            # the call (the fork/post-mix blocks rebind it later).
+            bed_view = progress
+            if fork_sfx_armed:
+                bed_start_parallel = time.monotonic()
+                _do_sfx_bed()
+                final_stages["sfx bed"] = time.monotonic() - bed_start_parallel
+            _do_parallel_model_pass()
+            fork_ran = True
+        elif model_music_parallel_armed(
             tensor_path=tensor_path,
             deferred_pending=music_pending,
             # Phased: the overlapping branch is the upscale leg (cuda:1
@@ -1652,8 +1749,9 @@ def finalize_run(
             bed_thread = None
         if fork_ran:
             # Thread-B already rendered the bed pre-mix (and Thread-A the
-            # interleaved model pass): mark the outcome consumable and
-            # skip the sequential bed/thread below.
+            # interleaved model pass) — or the parallel audio-first
+            # branch did both on the main thread: mark the outcome
+            # consumable and skip the sequential bed/thread below.
             bed_done_sync = True
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
@@ -1924,6 +2022,13 @@ def finalize_run(
             published = validate_video(ship, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_copy(ship, output_path)
+            # Fix [evict]: drop resident SRVGG/RIFE nets now that
+            # publish is done — finalize holds no more GPU work.
+            from voyage.workers.augment_worker import evict_augment_models
+
+            evicted_nets = evict_augment_models()
+            if progress is not None:
+                progress.info(f"evicted {evicted_nets} resident augment nets")
         final_stages["publish video"] = time.monotonic() - publish_start
         output_frames = published.get("frames")
         if isinstance(output_frames, int) and not isinstance(output_frames, bool):

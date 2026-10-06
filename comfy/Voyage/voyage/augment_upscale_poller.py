@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from voyage import paths
-from voyage.augment import chunk_windows
+from voyage.augment import chunk_frames_match_size, chunk_windows
 from voyage.augment_sidecar import (
     STAGE_UPSCALED,
     ChunkKey,
@@ -255,7 +255,9 @@ def _adopt_upscaled_chunk(
                 shutil.copy2(frame, output_dir / frame.name)
     except OSError:
         return False
-    if not chunk_output_complete(output_dir, count):
+    if not chunk_output_complete(output_dir, count) or not chunk_frames_match_size(
+        output_dir, (out_width, out_height)
+    ):
         return False
     key = ChunkKey(
         chunk_index=index,
@@ -296,6 +298,8 @@ def upscale_poll_once(
     on_chunk: Callable[[str, int, int], None] | None = None,
     on_chunk_frames: Callable[[str, int], None] | None = None,
     segment_ids: list[str] | None = None,
+    chunk_ids: list[int] | None = None,
+    prune_partials: bool = True,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -311,6 +315,13 @@ def upscale_poll_once(
     progress bars can count frames instead of chunks. When
     `segment_ids` is given, only those committed segments are polled
     (segment-interleaved pipeline); None (default) polls every segment.
+    When `chunk_ids` is given, only those chunk indexes are rendered by
+    this call (parallel workers split disjoint index sets; unowned
+    missing chunks count as skipped, never as this worker's `done`).
+    None (default) renders every missing chunk. `prune_partials`
+    (default True) sweeps stale `.partial` dirs per plan dir; the
+    parallel driver passes False (it prunes once upfront — a
+    per-call sweep would rmtree the other worker's live partial).
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -348,7 +359,8 @@ def upscale_poll_once(
             preset=preset,
         )
         plan_dir.mkdir(parents=True, exist_ok=True)
-        pruned_total += prune_stale_partials(plan_dir)
+        if prune_partials:
+            pruned_total += prune_stale_partials(plan_dir)
         ledger_path = plan_dir / "chunks.jsonl"
         records = load_chunk_ledger(ledger_path)
         windows = list(chunk_windows(source.total_frames, chunk_frames))
@@ -374,10 +386,21 @@ def upscale_poll_once(
             if index in missing_set:
                 continue
             _start, count = windows[index]
-            if not chunk_output_complete(_chunk_output_dir(plan_dir, index), count):
+            chunk_dir = _chunk_output_dir(plan_dir, index)
+            if not chunk_output_complete(chunk_dir, count) or not chunk_frames_match_size(
+                chunk_dir, (out_width, out_height)
+            ):
                 missing.append(index)
                 missing_set.add(index)
         missing.sort()
+        if chunk_ids is not None:
+            if not isinstance(chunk_ids, list) or not all(
+                isinstance(item, int) and not isinstance(item, bool) for item in chunk_ids
+            ):
+                raise TypeError("chunk_ids must be a list of int or None")
+            owned = set(chunk_ids)
+            missing = [index for index in missing if index in owned]
+            missing_set = set(missing)
         chunks_skipped += len(indexes) - len(missing)
         frames_skipped += sum(windows[index][1] for index in indexes if index not in missing_set)
         for index in missing:

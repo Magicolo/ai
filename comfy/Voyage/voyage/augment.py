@@ -143,6 +143,41 @@ def chunk_windows(
         yield (start, min(size, total - start))
 
 
+def chunk_frames_match_size(output_dir: Path, expected_size: tuple[int, int]) -> bool:
+    """True when every PNG frame in `output_dir` has `expected_size` (w, h).
+
+    Geometry forensics (kaolin, 2026-10-06): donor adoption once propagated
+    a mixed-geometry `upscaled_NN/` dir (some frames 1024x576, rest
+    2048x1152) past every count-only output-truth gate, failing loud only
+    later in the tensor load bridge. All ledger output-truth checks call
+    this alongside their count checks. Header-only PIL reads (no pixel
+    decode). Fail-OPEN (True) when PIL is unavailable (slim image has no
+    PIL — keeps unit tests and fakes unaffected); fail-closed (False) on
+    unreadable/unparseable PNGs, empty dirs, or a first mismatch.
+    """
+    try:
+        import importlib
+
+        Image = importlib.import_module("PIL.Image")
+    except ImportError:
+        return True
+    try:
+        frame_paths = sorted(output_dir.glob("frame_*.png"))
+    except OSError:
+        return False
+    if not frame_paths:
+        return False
+    for frame_path in frame_paths:
+        try:
+            with Image.open(frame_path) as image:
+                size = image.size
+        except OSError:
+            return False
+        if (int(size[0]), int(size[1])) != (int(expected_size[0]), int(expected_size[1])):
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class AugmentChunk:
     """One augment unit: source window + expected output frames + assigned device."""

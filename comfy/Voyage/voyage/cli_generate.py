@@ -177,7 +177,12 @@ def _heal_safe_transients(run_dir: Path) -> int:
     next pass re-creates (atomic-write partials, poller/SFX/ACE staging,
     finalize window wavs re-rendered from the takes ledger) — never
     DONE/video.mp4/manifests/state/takes. Best-effort, files-only, never
-    follows or removes symlinks. Returns the removed count.
+    follows or removes symlinks. Stale augment chunk records whose
+    outputs are gone or short are likewise stripped from every
+    plan-dir ledger via `augment_sidecar.heal_augment_ledgers`, so
+    the pre-finalize validator sees the healed view and the pollers
+    re-render the gaps on the next finalize instead of aborting
+    INVALID. Returns the removed count.
     """
     from voyage import paths
     from voyage.cli_validate import _ORPHAN_PATTERNS
@@ -225,6 +230,9 @@ def _heal_safe_transients(run_dir: Path) -> int:
             healed += 1
         except OSError:
             continue
+    from voyage.augment_sidecar import heal_augment_ledgers
+
+    healed += heal_augment_ledgers(run_dir)
     return healed
 
 

@@ -129,6 +129,12 @@ def test_phased_finalize_thread_a_runs_interleaved_pass(
     monkeypatch.setattr(augment_module, "augment_devices", lambda: ("cuda:0", "cuda:1"))
     monkeypatch.setattr(augment_module, "model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr(finalize_module, "run_durable_model_pass", _fake_durable_pass)
+    import voyage.augment_parallel as parallel_module
+
+    # Parallel disarmed: pin the pre-parallel path (model∥music fork /
+    # single interleaved driver). The audio-first bidirectional branch
+    # is pinned in tests/test_parallel_model_pass.py.
+    monkeypatch.setattr(parallel_module, "parallel_model_pass_armed", lambda **kwargs: False)
     monkeypatch.setattr(audio_finalize_module, "ensure_deferred_for_finalize", _recording_ensure)
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -207,6 +213,12 @@ def test_phased_finalize_two_streams_join_before_publish(
     monkeypatch.setattr(augment_module, "augment_devices", lambda: ("cuda:0", "cuda:1"))
     monkeypatch.setattr(augment_module, "model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr(finalize_module, "run_durable_model_pass", _fake_durable_pass)
+    import voyage.augment_parallel as parallel_module
+
+    # Parallel disarmed: pin the pre-parallel path (model∥music fork /
+    # single interleaved driver). The audio-first bidirectional branch
+    # is pinned in tests/test_parallel_model_pass.py.
+    monkeypatch.setattr(parallel_module, "parallel_model_pass_armed", lambda **kwargs: False)
     monkeypatch.setattr(sfx_finalize_module, "build_proxy_reference", _fake_proxy)
     monkeypatch.setattr(sfx_finalize_module, "segment_sfx_bounds", _fake_bounds)
     monkeypatch.setattr(sfx_finalize_module, "render_sfx_bed", _fake_bed)
