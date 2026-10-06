@@ -6,7 +6,8 @@ default to high; updates without flags keep stored geometry; --from
 inherits the source geometry unless --backend or a tier flag overrides
 it. Any two tier flags together are exit 2. The ltx25/ltx23 workers accept
 exactly the three tier geometries (high 1216x704 + medium 1024x576 + low
-768x448, same 121f/25f accounting) — the graph-builder stage-1 override is
+768x448; ltx25 runs 257f/25-carry windows, ltx23 121f/25-carry — the
+graph-builder stage-1 override is
 pure and tested here; the GPU commit path is covered by the worker suites.
 """
 
@@ -66,10 +67,9 @@ def test_high_tiers_equal_registry_rows() -> None:
 
 
 def test_ltx_low_tier_latent_is_halved_stage1() -> None:
-    """ltx25/23 low latent is [1,128,16,12,7] (384//32 x 224//32)."""
-    low_backends: tuple[VideoBackendName, ...] = ("ltx25", "ltx23")
-    for backend in low_backends:
-        assert DEFINITION_TIERS[backend]["low"].latent_shape == (1, 128, 16, 12, 7)
+    """ltx low latent is [1,128,T,12,7] (384//32 x 224//32; T=33 ltx25, T=16 ltx23)."""
+    assert DEFINITION_TIERS["ltx25"]["low"].latent_shape == (1, 128, 33, 12, 7)
+    assert DEFINITION_TIERS["ltx23"]["low"].latent_shape == (1, 128, 16, 12, 7)
 
 
 def test_tier_medium_geometries_match_spec() -> None:
@@ -100,10 +100,9 @@ def test_tier_medium_profile_names() -> None:
 
 
 def test_ltx_medium_tier_latent_shape() -> None:
-    """ltx25/23 medium latent is [1,128,16,16,9] (512//32 x 288//32)."""
-    medium_backends: tuple[VideoBackendName, ...] = ("ltx25", "ltx23")
-    for backend in medium_backends:
-        assert DEFINITION_TIERS[backend]["medium"].latent_shape == (1, 128, 16, 16, 9)
+    """ltx medium latent is [1,128,T,16,9] (512//32 x 288//32; T=33 ltx25, T=16 ltx23)."""
+    assert DEFINITION_TIERS["ltx25"]["medium"].latent_shape == (1, 128, 33, 16, 9)
+    assert DEFINITION_TIERS["ltx23"]["medium"].latent_shape == (1, 128, 16, 16, 9)
 
 
 def test_definition_preset_rejects_bad_tier_and_backend() -> None:
@@ -122,7 +121,7 @@ def test_resolve_config_definition_low_on_default_backend() -> None:
     effective = resolve_config(preset_config("r", "s", 1), definition="low")
     assert (effective.video.width, effective.video.height) == (768, 448)
     assert effective.video.profile == "ltx25-448p"
-    assert effective.video.latent_shape == [1, 128, 16, 12, 7]
+    assert effective.video.latent_shape == [1, 128, 33, 12, 7]
 
 
 def test_resolve_config_backend_then_tier() -> None:
@@ -144,7 +143,7 @@ def test_resolve_config_definition_medium_on_default_backend() -> None:
     effective = resolve_config(preset_config("r", "s", 1), definition="medium")
     assert (effective.video.width, effective.video.height) == (1024, 576)
     assert effective.video.profile == "ltx25-576p"
-    assert effective.video.latent_shape == [1, 128, 16, 16, 9]
+    assert effective.video.latent_shape == [1, 128, 33, 16, 9]
 
 
 def test_resolve_config_backend_then_medium_tier() -> None:
@@ -289,7 +288,7 @@ def test_configure_create_defaults_to_high_definition(
     video = _manifest_video(tmp_path, "hi")
     assert (video["width"], video["height"]) == (1216, 704)
     assert video["profile"] == "ltx25-704p"
-    assert video["latent_shape"] == [1, 128, 16, 19, 11]
+    assert video["latent_shape"] == [1, 128, 33, 19, 11]
 
 
 def test_configure_create_low_definition(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,7 +299,7 @@ def test_configure_create_low_definition(tmp_path: Path, monkeypatch: pytest.Mon
     video = _manifest_video(tmp_path, "lo")
     assert (video["width"], video["height"]) == (768, 448)
     assert video["profile"] == "ltx25-448p"
-    assert video["latent_shape"] == [1, 128, 16, 12, 7]
+    assert video["latent_shape"] == [1, 128, 33, 12, 7]
 
 
 @pytest.mark.parametrize(
@@ -334,7 +333,7 @@ def test_configure_create_medium_definition(
     video = _manifest_video(tmp_path, "med")
     assert (video["width"], video["height"]) == (1024, 576)
     assert video["profile"] == "ltx25-576p"
-    assert video["latent_shape"] == [1, 128, 16, 16, 9]
+    assert video["latent_shape"] == [1, 128, 33, 16, 9]
 
 
 def test_configure_implicit_high_follows_selected_backend(

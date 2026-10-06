@@ -64,7 +64,7 @@ def test_carry_override_valid_on_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (profile.target_frames, profile.tail_frames) == (49, 17)
 
 
-@pytest.mark.parametrize("raw_carry", ["16", "0", "-7", "121", "129", "nine", "9.0", ""])
+@pytest.mark.parametrize("raw_carry", ["16", "0", "-7", "257", "265", "nine", "9.0", ""])
 def test_carry_override_invalid(monkeypatch: pytest.MonkeyPatch, raw_carry: str) -> None:
     monkeypatch.delenv("VOYAGE_LTX_FAST", raising=False)
     monkeypatch.setenv("VOYAGE_LTX_CARRY", raw_carry)
@@ -133,7 +133,7 @@ def test_extend_tail_fresh_is_novel_suffix() -> None:
 
 def test_extend_tail_production_is_novel_suffix() -> None:
     old = [f"o{i}" for i in range(25)]
-    novel = [f"n{i}" for i in range(96)]
+    novel = [f"n{i}" for i in range(232)]
     assert extend_conditioning_tail(old, novel, 25) == novel[-25:]
 
 

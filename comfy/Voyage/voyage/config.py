@@ -179,13 +179,15 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
     ),
     # ltx25/ltx23 (DESIGN §140 ltx plan, Voyage/LTX2.md campaign):
     # LTX-2.5 / LTX-2.3 distilled GGUF via in-process ComfyUI
-    # (voyage/workers/video_ltx25.py / video_ltx23.py). Committed
+    # (voyage/workers/video_ltx25.py / video_ltx23.py). ltx25 committed
     # segments are Mode A two-stage 1216x704@24 (stage-1
-    # 608x352x121 8-sigma distilled, 2x latent upscale, stage-2
-    # 3-step refine); 121-frame windows with a 25-frame frozen
-    # prefix carry commit 96 novel (same 25+96 math as ltxv).
+    # 608x352x257 8-sigma distilled, 2x latent upscale, stage-2
+    # 3-step refine); 257-frame windows with a 25-frame frozen
+    # prefix carry commit 232 novel (257 is the native upstream ceiling
+    # and a 2026-10-06 GPU sweep proved it fits VRAM at ~13.4 GiB peak;
+    # ltx23 stays 121f/96-novel on its own row below).
     # latent_shape is the stage-1 video latent [B, C, T, H, W] =
-    # [1, 128, (121-1)//8+1, 608//32, 352//32] (EmptyLTXVLatentVideo
+    # [1, 128, (257-1)//8+1, 608//32, 352//32] (EmptyLTXVLatentVideo
     # convention); the workers enforce the fixed native geometry
     # themselves. Quantization, text encoder, and VAE are implicit
     # per family (Q3_K_M DiT only — OOM is a clean failure, no
@@ -204,8 +206,8 @@ BACKEND_REGISTRY: dict[VideoBackendName, BackendRecord] = {
         width=1216,
         height=704,
         fps=24,
-        segment_frames=96,
-        latent_shape=(1, 128, 16, 19, 11),
+        segment_frames=232,
+        latent_shape=(1, 128, 33, 19, 11),
         device="cuda:0",
         audio_backend="acestep",
         audio_device="cuda:0",
@@ -246,7 +248,9 @@ class DefinitionTier:
     `latent_shape=None` keeps the backend row's latent (fake/ltxv/causvid
     derive or ignore it); a tuple overrides it (ltx25/ltx23 low tier
     halves both stage-1 axes, so the stage-1 video latent shrinks from
-    [1, 128, 16, 19, 11] to [1, 128, 16, 12, 7]).
+    [1, 128, 33, 19, 11] to [1, 128, 33, 12, 7] — the T=33 frame axis
+    rides the 257f production window on every tier, only the spatial
+    axes shrink).
     """
 
     width: int
@@ -281,19 +285,19 @@ DEFINITION_TIERS: dict[VideoBackendName, dict[str, DefinitionTier]] = {
             width=768,
             height=448,
             profile="ltx25-448p",
-            latent_shape=(1, 128, 16, 12, 7),
+            latent_shape=(1, 128, 33, 12, 7),
         ),
         "medium": DefinitionTier(
             width=1024,
             height=576,
             profile="ltx25-576p",
-            latent_shape=(1, 128, 16, 16, 9),
+            latent_shape=(1, 128, 33, 16, 9),
         ),
         "high": DefinitionTier(
             width=1216,
             height=704,
             profile="ltx25-704p",
-            latent_shape=(1, 128, 16, 19, 11),
+            latent_shape=(1, 128, 33, 19, 11),
         ),
     },
     "ltx23": {

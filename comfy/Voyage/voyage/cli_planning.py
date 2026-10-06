@@ -87,11 +87,15 @@ _LTXV_NOVEL_BLOCK_FRAMES = 96
 _CAUSVID_NOVEL_PER_ROLLOUT = 72
 
 
-# LTX-2.5/2.3 Mode A: 121-frame windows with a 25-frame frozen prefix
-# carry commit 96 novel per block (Voyage/LTX2.md Phase-0 Spike A/B).
-# Same 96 steady-state number as ltxv by construction (25+96=121), but
-# a separate constant: the mechanism (two-stage Mode A vs multiscale)
-# differs, so the values must never be assumed coupled.
+# LTX-2.5 Mode A: 257-frame windows with a 25-frame frozen prefix
+# carry commit 232 novel per block (2026-10-06 GPU sweep: 257 is the
+# native ceiling and fits VRAM). ltx23 keeps its own 121f/96-novel
+# accounting below — same mechanism, shorter window, so the values must
+# never be assumed coupled.
+_LTX25_NOVEL_BLOCK_FRAMES = 232
+
+# LTX-2.3 Mode A: 121-frame windows with a 25-frame frozen prefix carry
+# commit 96 novel per block (Voyage/LTX2.md Phase-0 Spike A/B).
 _LTX_NOVEL_BLOCK_FRAMES = 96
 
 
@@ -101,7 +105,9 @@ def _frames_per_segment(config: ProjectConfig) -> int:
         return _LTXV_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
     if config.video.backend == "causvid":
         return _CAUSVID_NOVEL_PER_ROLLOUT * config.video.blocks_per_segment
-    if config.video.backend in ("ltx25", "ltx23"):
+    if config.video.backend == "ltx25":
+        return _LTX25_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
+    if config.video.backend == "ltx23":
         return _LTX_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
     return config.video.segment_frames
 

@@ -104,15 +104,17 @@ Resident ComfyUI in-process worker (`voyage/workers/video_ltx25.py`)
 driving the pinned experiment stack (ComfyUI @2f35f4a + ComfyUI-GGUF
 @6ea2651 + gemma4 patch, image `voyage-ltx:latest`) via a fake-server
 `PromptExecutor`. The quality path is the default and only mode: Mode A
-two-stage — stage 1 renders 608×352×121 with the distilled 8-sigma
+two-stage — stage 1 renders 608×352×257 with the distilled 8-sigma
 `euler_ancestral` schedule (CFG 1.0), a 2× latent upscale follows, and
-stage 2 refines 1216×704×121 in 3 steps. Quantization, TE, and VAE are
+stage 2 refines 1216×704×257 in 3 steps. Quantization, TE, and VAE are
 implicit (Q3_K_M DiT + Gemma4-Q2K TE + conv video VAE — Q3-only, OOM
 fails clean, no fallback rung). Chaining is an explicit frozen prefix:
 the previous segment's last 25 frames pin the new latent via
 `LTXVImgToVideoInplace` (`noise_mask` strength 1.0); every segment
-renders 121-frame windows, fresh blocks commit all 121, conditioned
-blocks drop the 25-frame prefix and commit 96 novel. Music comes from
+renders 257-frame windows, fresh blocks commit all 257, conditioned
+blocks drop the 25-frame prefix and commit 232 novel (257 is the native
+upstream ceiling, GPU-proven to fit VRAM — see UPSTREAM_LTX25_NOTES).
+Music comes from
 the ACE-Step planner's long caption-driven takes (continuous mood —
 the worker's joint `LTXVAudioVAEDecode` track is ignored), with MMAudio
 SFX dubbed at finalize. The tail file
@@ -120,7 +122,7 @@ SFX dubbed at finalize. The tail file
 `recovery.pt` carries the §5.3 JSON record with profile `ltx25` (tapes
 never resume across backends); `scene_cut` forces a fresh start. Native
 1216×704 @ 24 fps (high tier); low tier renders 768×448 with a 384×224
-stage 1, same 121/25/96 chaining. Needs `models download ltx25`. The `benchmark` op
+stage 1, same 257/25/232 chaining. Needs `models download ltx25`. The `benchmark` op
 saves/restores tail state around its probes, so it does not advance any
 stream — safe to run mid-sequence.
 

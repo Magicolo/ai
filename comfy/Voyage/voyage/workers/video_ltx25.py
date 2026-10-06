@@ -6,14 +6,17 @@ drives the pinned ComfyUI stack (ComfyUI @2f35f4a + ComfyUI-GGUF @6ea2651
 `execution.PromptExecutor` on a fake server — no ComfyUI server process,
 single resident GPU session like the other streaming workers.
 
-Generation recipe (validated: LTX2.md Phase-0 Spike A, 14933 MiB peak):
-Mode A two-stage — stage 1 608x352x121 distilled 8-sigma euler_ancestral
-CFG 1.0, 2x latent upscale, stage-2 1216x704x121 3-step euler refine,
+Generation recipe (validated: LTX2.md Phase-0 Spike A, 14933 MiB peak;
+length raised 121 -> 257 windows 2026-10-06 after a GPU VRAM sweep proved
+257f fresh + production-shape continued both fit at ~13.4 GiB peak on the
+4060 Ti — 257 is the native upstream ceiling):
+Mode A two-stage — stage 1 608x352x257 distilled 8-sigma euler_ancestral
+CFG 1.0, 2x latent upscale, stage-2 1216x704x257 3-step euler refine,
 conv video VAE tiled decode, Gemma4 Q2_K text encoder. Continuation is
 the native frozen-prefix mechanism (Phase-0 Spike B, seam 0.93x/1.02x
 vs the 3x qual gate): trailing 25 frames pinned via
-`LTXVImgToVideoInplace` strength 1.0, so 121f windows commit 96 novel
-frames — the same 25+96 accounting as `video_ltxv`.
+`LTXVImgToVideoInplace` strength 1.0, so 257f windows commit 232 novel
+frames (25 + 232 accounting; ltxv keeps its own 25 + 96).
 
 All parameterization is implicit (no user-facing quant/TE/VAE knobs):
 Q3_K_M DiT only (user decision — OOM is a clean failure, no fallback
@@ -72,10 +75,15 @@ from voyage.workers.video_ltx25_validators import validate_spatial_size as valid
 
 RECOVERY_PROFILE = "ltx25"
 
-# Mode A segment accounting: 121 = 8*15+1 and 25 = 8*3+1 satisfy the
-# upstream (F-1)%8==0 contract; 121-25 = 96 novel frames (4.0 s at
-# 24 fps). Baked constants, not tunables (Phase-0 Spike A locks them).
-SEGMENT_TARGET_FRAMES = 121
+# Mode A segment accounting: 257 = 8*32+1 and 25 = 8*3+1 satisfy the
+# upstream (F-1)%8==0 contract; 257-25 = 232 novel frames (9.67 s at
+# 24 fps, 10.7 s fresh). 257 is the native upstream ceiling ("best below
+# 720x1280 and 257 frames"); a 2026-10-06 GPU sweep on the 4060 Ti proved
+# it fits VRAM (fresh 121/169/193/225/257 peaks 13.9/13.8/13.7/13.4/13.4
+# GiB + production-shape continued 257 commits 232 novel at 13.37 GiB —
+# VAE tiled decode bounds memory, so length is flat). Baked constants,
+# not tunables.
+SEGMENT_TARGET_FRAMES = 257
 CONDITIONING_TAIL_FRAMES = 25
 COMMITTED_NOVEL_FRAMES = SEGMENT_TARGET_FRAMES - CONDITIONING_TAIL_FRAMES
 
@@ -120,7 +128,7 @@ FAST_TARGET_FRAMES = 49
 FAST_TAIL_FRAMES = 9
 
 # Medium-definition tier: 1024x576 commit with a 512x288 stage 1, same
-# 121f/25-carry accounting as the high tier. Both clear /64 (16x9 tiles),
+# 257f/25-carry accounting as the high tier. Both clear /64 (16x9 tiles),
 # stage 1 clears /32, so the two-stage latent-upscale contract holds.
 MED_STAGE1_WIDTH = 512
 MED_STAGE1_HEIGHT = 288
@@ -130,7 +138,7 @@ MED_COMMIT_HEIGHT = 576
 # Configured commit sizes (`--low-definition` / `--medium-definition` /
 # `--high-definition`): the
 # low tier reuses the fast experiment profile's 768x448 commit geometry
-# (and its 384x224 stage 1) with production 121f/25-carry accounting.
+# (and its 384x224 stage 1) with production 257f/25-carry accounting.
 # The worker accepts exactly these three sizes and fails loud otherwise.
 COMMIT_SIZE_OPTIONS = frozenset(
     {
@@ -268,7 +276,7 @@ def extend_conditioning_tail(old_tail: list[Any] | None, novel: list[Any], carry
 
     The full window is (staged prefix + novel); the staged prefix IS the old
     tail, so the window tail is `(old_tail + novel)[-carry:]`. Production
-    (novel 96 >= carry 25) reduces to `novel[-carry:]`; wide carries on
+    (novel 232 >= carry 25) reduces to `novel[-carry:]`; wide carries on
     short fast windows (novel 24 < carry 25) keep one stale frame instead of
     silently shortening the tail (which broke the next `_block_prefix` with
     `tail holds 24 frames, need 25`). Pure — pinned by host tests.
@@ -440,8 +448,8 @@ def build_mode_a_graph(
     """Build the validated Mode A prompt-format graph (pure — CPU-testable).
 
     Mirrors Spike A `s0_121_B.json` node-for-node (29 nodes): Q3 DiT +
-    Gemma4 TE + conv/audio VAEs, stage-1 608x352x121 distilled 8-sigma
-    euler_ancestral CFG 1.0, 2x latent upscale, stage-2 1216x704x121
+    Gemma4 TE + conv/audio VAEs, stage-1 608x352x257 distilled 8-sigma
+    euler_ancestral CFG 1.0, 2x latent upscale, stage-2 1216x704x257
     3-step euler refine, tiled VAE decode into SaveImage. The graph
     retains the audio VAE/empty-latent/decode/SaveAudio branch (nodes
     7/9/27/29) only because the joint AV latent is the validated denoise
@@ -453,7 +461,7 @@ def build_mode_a_graph(
     gains LoadImage xN (ids 30+) + BatchImagesNode + LTXVImgToVideoInplace
     (strength frozen by default) and node 10 consumes the pinned latent
     instead of the empty one. Geometry/accounting resolve from the
-    experiment profile (production 121f/25-carry unless VOYAGE_LTX_FAST
+    experiment profile (production 257f/25-carry unless VOYAGE_LTX_FAST
     or VOYAGE_LTX_CARRY select the Phase-1 fast profile); `stage1_size`
     overrides the profile stage-1 node for the low/medium-definition tiers.
     """
@@ -881,7 +889,7 @@ class LTX25Session:
         clips commit the whole window; conditioned clips drop the carry
         prefix and commit the novel remainder. Counts are measured from
         disk, never assumed. Geometry/accounting follow the experiment
-        profile (production 121f/25-carry unless VOYAGE_LTX_FAST or
+        profile (production 257f/25-carry unless VOYAGE_LTX_FAST or
         VOYAGE_LTX_CARRY select Phase-1 fast values). Audio is
         all-deferred — no audio is rendered or committed here.
         """

@@ -13,6 +13,8 @@ import pytest
 
 from voyage.workers import video_ltx25
 from voyage.workers.video_ltx25 import (
+    COMMITTED_NOVEL_FRAMES,
+    SEGMENT_TARGET_FRAMES,
     build_mode_a_graph,
     build_recovery_tape,
     generation_profile_hash,
@@ -47,6 +49,15 @@ def test_frame_count_accepts_121_and_25() -> None:
     """121f windows and 25f tails satisfy 8n+1."""
     validate_frame_count(121)
     validate_frame_count(25)
+
+
+def test_frame_count_accepts_257_production_window() -> None:
+    """257f production windows satisfy 8n+1 (native upstream ceiling)."""
+    assert SEGMENT_TARGET_FRAMES == 257
+    assert COMMITTED_NOVEL_FRAMES == 232
+    validate_frame_count(SEGMENT_TARGET_FRAMES)
+    assert split_prefix_novel(SEGMENT_TARGET_FRAMES, 0) == (0, 257)
+    assert split_prefix_novel(SEGMENT_TARGET_FRAMES, 25) == (25, 232)
 
 
 def test_frame_count_rejects_non_8n_plus_1() -> None:
@@ -130,7 +141,7 @@ def test_fresh_graph_matches_spike_a_recipe() -> None:
     assert dit["inputs"]["unet_name"] == "LTX-2.5-Distilled-Q3_K_M.gguf"
     assert graph["2"]["inputs"]["clip_name"] == "gemma4-12b-with-proj-ltx-2.5-Q2_K.gguf"
     assert graph["3"]["inputs"]["text"] == "orchard"
-    assert graph["8"]["inputs"] == {"width": 608, "height": 352, "length": 121, "batch_size": 1}
+    assert graph["8"]["inputs"] == {"width": 608, "height": 352, "length": 257, "batch_size": 1}
     assert graph["10"]["inputs"]["video_latent"] == ["8", 0]
     assert graph["13"]["inputs"] == {"sampler_name": "euler_ancestral"}
     assert graph["14"]["inputs"]["sigmas"].startswith("1.0, 0.99375")

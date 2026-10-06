@@ -46,16 +46,23 @@ trio (deferred experiment, still in the volume, out of spec).
 
 ## Mode-A accounting (DESIGN §5.3)
 
-Every segment renders a 121-frame Mode-A clip: stage-1 608x352x121
+Every segment renders a 257-frame Mode-A clip: stage-1 608x352x257
 distilled 8-sigma euler_ancestral, 2x latent upscale, stage-2
-1216x704x121 3-step refine. Fresh blocks commit all 121; continued
+1216x704x257 3-step refine. Fresh blocks commit all 257; continued
 blocks pin the 25-frame tail prefix (`LTXVImgToVideoInplace`,
-strength 1.0) and commit 96 novel (`_LTX_NOVEL_BLOCK_FRAMES * blocks`
-plans the steady-state 96). `video_tail.mp4` + §5.3 JSON tape anchor
+strength 1.0) and commit 232 novel (`_LTX25_NOVEL_BLOCK_FRAMES * blocks`
+plans the steady-state 232). `video_tail.mp4` + §5.3 JSON tape anchor
 recovery. Native 1216x704@24 (segment geometry is fixed; finalize
-floors are a minimum, never a downscale target). Peak ~14.8 GiB —
-locks `segment_frames=96` (Phase-0 Spike A: 14933 MiB; handover seam
-ratios 0.93x/1.02x vs the 3x qual gate, Spike B).
+floors are a minimum, never a downscale target). Peak ~13.4 GiB —
+locks `segment_frames=232` (2026-10-06 GPU sweep on the 4060 Ti:
+fresh 121/169/193/225/257 windows peak 13.9/13.8/13.7/13.4/13.4 GiB,
+production-shape continued 257 commits 232 novel at 13.37 GiB with a
+frame-exact 257f mp4; VAE tiled decode bounds memory so length is
+flat; 257 is the native upstream ceiling. Same-process continuation
+with a fresh prompt can still OOM in the TE encode — the known flaky
+fragmentation class, handled by supervisor re-issue, not a length
+regression; handover seam ratios 0.93x/1.02x vs the 3x qual gate,
+Spike B).
 
 ## License implications
 

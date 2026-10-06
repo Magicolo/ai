@@ -115,6 +115,15 @@ def test_frames_per_segment_ltxv_uses_novel_minimum(tmp_path: Path) -> None:
     assert _frames_per_segment(two_blocks) == 192
 
 
+def test_frames_per_segment_ltx25_uses_232_novel_minimum(tmp_path: Path) -> None:
+    """ltx25 duration math must use the 232-novel steady state, not 257 fresh."""
+    from voyage.config import preset_config
+
+    config = preset_config("preset", "pastel neon line-art, peaceful", 11)
+    one_block = with_video_backend(config, "ltx25")
+    assert _frames_per_segment(one_block) == 232
+
+
 def test_causvid_preset_pins_native_geometry(tmp_path: Path) -> None:
     from voyage.config import preset_config
 

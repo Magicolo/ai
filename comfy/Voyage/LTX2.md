@@ -3475,3 +3475,25 @@ the LTX-2/2.5 experiment arc E0–E9 + S21–S30 + Phase 0–5;
 remaining Voyage work is the floors-as-minimum hardening
 (`plan_augmentation` treats 1280x720@32 as a floor, never a
 ceiling) and routine operation.
+
+## Phase 6 — ltx25 maximum-length segments (2026-10-06)
+
+User directive: ltx25 segments at the maximum natively supported
+length that fits VRAM, with GPU probing.
+
+- Native ceiling 257f (upstream "best below 720x1280 and 257
+  frames"; validators already quote it as the 8n+1 example).
+- Sweep (idle 4060 Ti, ephemeral drivers, production 1216x704@24
+  Mode A): fresh 121/169/193/225/257 commit exact frame counts at
+  peaks 13.93/13.75/13.65/13.37/13.37 GiB (150/174/196/224/265 s);
+  257f mp4 ffprobe-verified (257 frames h264 1216x704@24).
+  Production-shape continued 257 (fresh process + tape resume +
+  new prompt): 257 generated / 25 conditioning / 232 novel at
+  13.37 GiB peak. Length is VRAM-flat (tiled VAE decode bounds
+  memory), so the ceiling — not memory — binds.
+- Same-process continuation with a fresh prompt OOMs in the Gemma
+  TE encode (3.75 GiB vs ~12.4 resident) — the known flaky
+  fragmentation class, not a length regression; production
+  restarts the worker per segment and re-issues in place.
+- VERDICT: ltx25 locks 257f windows / 232 novel (ltx23 stays
+  121f/96 on its own row).
