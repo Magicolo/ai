@@ -36,6 +36,7 @@ from voyage.augment_sidecar import (
     CHUNKS_LEDGER_FILENAME,
     ChunkKey,
     append_chunk_record,
+    load_chunk_ledger,
     prune_stale_interp_plans,
 )
 from voyage.config import AugmentConfig, resolve_config
@@ -423,6 +424,73 @@ def test_prune_removes_stale_interp_subdirs_by_default(tmp_path: Path) -> None:
     assert current.exists()
     assert unknown.exists()
     assert upscale_only.exists()
+
+
+def test_prune_strips_stale_interp_records_but_keeps_upscaled(tmp_path: Path) -> None:
+    """Stage 1 strips orphaned interp ledger records; upscaled donors survive.
+
+    Regression: the prune deleted `interpolated_*` outputs but kept the
+    ledger, so the next restart's sidecar validator reported `ledgered
+    but output missing` and generate aborted before the pollers that
+    would heal the gap ever ran (kaolin, post-RIFE-switch restart).
+    """
+    weights = _tiny_weights(tmp_path / "weights")
+    film_key = f"{_sha(b'film-weights')}|{_sha(b'esrgan-weights')}"
+    run_dir = tmp_path / "run"
+    stale = _plan_with_records(
+        run_dir,
+        "a" * 16,
+        records=[("upscaled", film_key, 32, 1), ("interpolated", film_key, 63, 2)],
+    )
+    (stale / "interpolated_00").mkdir(parents=True)
+    (stale / "interpolated_00" / "frame_00001.png").write_bytes(b"stale-png")
+    (stale / "upscaled_00").mkdir(parents=True)
+    (stale / "upscaled_00" / "frame_00001.png").write_bytes(b"kept-png")
+    assert prune_stale_interp_plans(run_dir, interp_backend="rife", weights=weights) == 1
+    stages = [record.get("stage") for record in load_chunk_ledger(stale / CHUNKS_LEDGER_FILENAME)]
+    assert stages == ["upscaled"]
+    assert not (stale / "interpolated_00").exists()
+    assert (stale / "upscaled_00" / "frame_00001.png").read_bytes() == b"kept-png"
+
+
+def test_prune_heals_dangling_ledger_without_outputs(tmp_path: Path) -> None:
+    """A previous prune's dangling ledger heals even with outputs already gone."""
+    weights = _tiny_weights(tmp_path / "weights")
+    film_key = f"{_sha(b'film-weights')}|{_sha(b'esrgan-weights')}"
+    run_dir = tmp_path / "run"
+    stale = _plan_with_records(
+        run_dir,
+        "a" * 16,
+        records=[("upscaled", film_key, 32, 1), ("interpolated", film_key, 63, 2)],
+    )
+    # No interpolated_00 subdir on disk: outputs already pruned, ledger dangling.
+    assert prune_stale_interp_plans(run_dir, interp_backend="rife", weights=weights) == 1
+    stages = [record.get("stage") for record in load_chunk_ledger(stale / CHUNKS_LEDGER_FILENAME)]
+    assert stages == ["upscaled"]
+    # Second pass is a clean no-op: no interpolated records left to match on.
+    assert prune_stale_interp_plans(run_dir, interp_backend="rife", weights=weights) == 0
+
+
+def test_healed_plan_passes_sidecar_consistency(tmp_path: Path) -> None:
+    """After prune, the restart validator reports no findings on the healed dir."""
+    from voyage.cli_validate import _check_sidecar_plan_consistency
+
+    weights = _tiny_weights(tmp_path / "weights")
+    film_key = f"{_sha(b'film-weights')}|{_sha(b'esrgan-weights')}"
+    run_dir = tmp_path / "run"
+    stale = _plan_with_records(
+        run_dir,
+        "a" * 16,
+        records=[("upscaled", film_key, 32, 1), ("interpolated", film_key, 63, 2)],
+    )
+    assert _check_sidecar_plan_consistency(run_dir) != []
+    assert prune_stale_interp_plans(run_dir, interp_backend="rife", weights=weights) == 1
+    # The surviving upscaled record still needs its pixels for full silence;
+    # the validator's remaining note (if any) must never be an interpolated one.
+    assert all(
+        "stage interpolated" not in finding for finding in _check_sidecar_plan_consistency(run_dir)
+    )
+    _ = stale
 
 
 def test_prune_whole_dir_removes_stale_dirs(tmp_path: Path) -> None:

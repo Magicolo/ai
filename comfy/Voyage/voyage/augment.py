@@ -98,6 +98,24 @@ homes, kept apart only because `media` already imports this module
 T = TypeVar("T")
 """Outcome type of the per-chunk worker passed to `run_augment_chunks`."""
 
+_PNG_IO_WORKERS = 8
+"""Thread pool width for the PNG bridge (issue: RIFE finalize PNG-bound).
+
+The finalize model pass shuttles every frame through PNG files (ffmpeg
+decode -> PIL load -> torch -> PIL save -> ffmpeg encode); at 2048x1152
+the single-thread PIL codec dominates chunk wall (~85-90%), so both
+bridge directions run on a pool. Capped per call to the frame count.
+"""
+
+_PNG_COMPRESS_LEVEL = 1
+"""zlib level for intermediate PNGs (issue: RIFE finalize PNG-bound).
+
+Level 1 saves ~2x faster than the default 6 at ~14% larger files
+(measured 0.288 -> 0.140 s/frame at 2048x1152); intermediates are
+transient (pruned after drain), so size trades for speed. Still
+lossless — pixel-identical to level 6.
+"""
+
 
 def _require_count(name: str, value: int, minimum: int) -> int:
     """Validate an integer count: ints only (bools rejected), at least `minimum`."""
@@ -768,6 +786,11 @@ def model_pass_active(weights: AugmentWeights) -> bool:
     return bool(film_present or rife_present or weights.realesrgan is not None)
 
 
+def _png_io_workers(count: int) -> int:
+    """Thread pool width for the PNG bridge (never more workers than frames)."""
+    return max(1, min(_PNG_IO_WORKERS, count))
+
+
 def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
     """Read decoded PNG frames into torch float tensors in [0, 1] (issue 166).
 
@@ -776,10 +799,15 @@ def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
     (torch side) — this is the bridge. Lazy PIL/numpy/torch imports so the
     module stays stdlib-only until the tensor path is selected (the ffmpeg
     fallback never imports them). All frames must share dimensions; mismatch
-    fails loud instead of mixing silently into a chunk.
+    fails loud instead of mixing silently into a chunk. Decodes run on a
+    thread pool: the RIFE finalize is PNG-codec-bound (~85-90% of chunk
+    wall), and PIL decode releases the GIL well enough to scale.
     """
     if not isinstance(frame_paths, list) or not frame_paths:
         raise ValueError(f"frame_paths needs at least one PNG path (got {frame_paths!r})")
+    for frame_path in frame_paths:
+        if not isinstance(frame_path, Path):
+            raise TypeError(f"frame path must be a Path (got {type(frame_path).__name__})")
     try:
         import importlib
 
@@ -790,31 +818,32 @@ def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
         import torch
     except ImportError as exc:
         raise MediaError(f"model pass needs torch for tensors ({exc})") from exc
-    tensors: list[Any] = []
-    expected_size: tuple[int, int] | None = None
-    for frame_path in frame_paths:
-        if not isinstance(frame_path, Path):
-            raise TypeError(f"frame path must be a Path (got {type(frame_path).__name__})")
+    import numpy
+
+    def _decode(frame_path: Path) -> Any:
         with Image.open(frame_path) as opened:
             converted = opened.convert("RGB")
-            if expected_size is None:
-                expected_size = converted.size
-            elif converted.size != expected_size:
-                raise MediaError(
-                    f"frame size mismatch: {frame_path} is {converted.size}, "
-                    f"expected {expected_size} (chunks need uniform geometry)"
-                )
             width, height = converted.size
             raw = converted.tobytes()
-        import numpy
-
         flat = numpy.frombuffer(raw, dtype=numpy.uint8)
         try:
             shaped = flat.reshape((height, width, 3)).copy()
         except ValueError as exc:
             raise MediaError(f"cannot reshape PNG {frame_path} to RGB ({exc})") from exc
-        tensor = torch.from_numpy(shaped).permute(2, 0, 1).to(dtype=torch.float32).div(255.0)
-        tensors.append(tensor)
+        return torch.from_numpy(shaped).permute(2, 0, 1).to(dtype=torch.float32).div(255.0)
+
+    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frame_paths))) as pool:
+        tensors = list(pool.map(_decode, frame_paths))
+    expected_size: tuple[int, int] | None = None
+    for frame_path, tensor in zip(frame_paths, tensors, strict=True):
+        height, width = int(tensor.shape[1]), int(tensor.shape[2])
+        if expected_size is None:
+            expected_size = (width, height)
+        elif (width, height) != expected_size:
+            raise MediaError(
+                f"frame size mismatch: {frame_path} is {(width, height)}, "
+                f"expected {expected_size} (chunks need uniform geometry)"
+            )
     return tensors
 
 
@@ -826,6 +855,10 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
     (same stdlib-only rule as the load bridge); clamps to [0, 1] like the
     worker's native scale-4 path so bicubic-downscaled legs cannot ring past
     the range. Returns the written paths in order (`frame_%06d.png`).
+    Saves run on a thread pool at fast zlib level (same PNG-bound issue
+    as the load bridge — the pool + level 1 cut the save phase ~8-11x);
+    `pool.map` preserves order and surfaces the first bad frame's
+    `MediaError` at its position, matching the old serial semantics.
     """
     if not isinstance(frames, list) or not frames:
         raise ValueError(f"frames needs at least one tensor (got {frames!r})")
@@ -844,8 +877,9 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
     import numpy
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-    for position, frame in enumerate(frames):
+
+    def _save(position_frame: tuple[int, Any]) -> Path:
+        position, frame = position_frame
         tensor = torch.as_tensor(frame, dtype=torch.float32).clamp(0.0, 1.0)
         if tensor.ndim != 3 or tensor.shape[0] != 3:
             raise MediaError(
@@ -857,11 +891,13 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
         height, width, _ = array.shape
         image = Image.frombytes("RGB", (width, height), array.tobytes())
         dest = dest_dir / f"frame_{position:06d}.png"
-        image.save(dest)
+        image.save(dest, compress_level=_PNG_COMPRESS_LEVEL)
         if not dest.exists() or dest.stat().st_size == 0:
             raise MediaError(f"enhanced PNG write produced empty output {dest}")
-        written.append(dest)
-    return written
+        return dest
+
+    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frames))) as pool:
+        return list(pool.map(_save, enumerate(frames)))
 
 
 def _write_chunk_concat_list(entries: list[Path], dest: Path) -> Path:

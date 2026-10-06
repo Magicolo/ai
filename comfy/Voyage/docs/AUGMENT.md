@@ -187,7 +187,9 @@ Lifting costs pixels × fps. `--upscale 2 --interpolate 2` on a
 mids; expect finalize to dominate e2e wall time whenever the
 multipliers are raised. With RIFE the interp leg is the cheap part
 (~2 s per 32-frame chunk at 2048×1152 vs ~26 s FILM on the 4060 Ti)
-— upscale + PNG/ffmpeg I/O dominate the model pass. Defaults (1/1)
+— upscale + PNG/ffmpeg I/O dominate the model pass (the PNG bridge
+is threaded at fast zlib level 1: ~2–3 s per 63-frame chunk save at
+2048×1152 vs ~18 s serial level 6, pixel-identical). Defaults (1/1)
 ship native, so `BENCHMARKING.md` e2e numbers are comparable
 run-to-run only when the multipliers match — record them in the
 setup block (`presentation_setup_facts`).

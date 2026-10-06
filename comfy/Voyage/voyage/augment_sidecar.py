@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from voyage.atomic import fsync_dir
+from voyage.atomic import atomic_write_bytes, fsync_dir
 from voyage.hashing import sha256_file, sha256_text
 
 AUGMENT_DIRNAME = "augment"
@@ -422,6 +422,52 @@ def find_upscaled_donor(
     return None
 
 
+def _strip_stale_interpolated_records(ledger: Path, *, other_sha: str) -> bool:
+    """Strip stale interpolated-stage records from a pruned ledger (else False).
+
+    The `whole_dir=False` prune deletes `interpolated_*` outputs but leaves
+    the ledger — without this strip the ledger keeps records for pixels
+    that no longer exist, and the next restart's sidecar validator reports
+    `ledgered but output missing` and aborts before the pollers (which
+    would otherwise heal the gap by re-rendering) ever run. Upscaled
+    records stay untouched: they remain valid cross-backend donors. Only
+    records whose interp leg keys to `other_sha` are stripped; anything
+    unparseable or foreign stays (never delete unknown provenance).
+    Atomic rewrite (temp + fsync + replace + fsync_dir); OSError →
+    False (best-effort, retried on the next prune pass).
+    """
+    try:
+        raw_lines = ledger.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    kept: list[str] = []
+    stripped_any = False
+    for line in raw_lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            kept.append(line)
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("stage") == STAGE_INTERPOLATED
+            and _interp_sha_from_weights_key(record.get("weights_key")) == other_sha
+        ):
+            stripped_any = True
+            continue
+        kept.append(line)
+    if not stripped_any:
+        return False
+    payload = ("".join(line + "\n" for line in kept)).encode("utf-8")
+    try:
+        atomic_write_bytes(ledger, payload)
+    except OSError:
+        return False
+    return True
+
+
 def prune_stale_interp_plans(
     run_dir: Path, *, interp_backend: str, weights: Any, whole_dir: bool = False
 ) -> int:
@@ -436,14 +482,18 @@ def prune_stale_interp_plans(
     dirs with current-backend records never match either.
 
     Two modes: with `whole_dir=False` (default) only the
-    `interpolated_*` output subdirs are deleted (the ledger,
-    the upscaled pixels and the dir itself stay — the dir
-    remains a valid upscale donor for cross-key adoption and
-    the interp leg re-renders into it); with `whole_dir=True`
-    the whole plan dir goes. Use False at finalize start
-    (frees the bulk under disk pressure while keeping donors)
-    and True pre-publish once every poll and drain on every
-    path has finished.
+    `interpolated_*` output subdirs are deleted (the upscaled pixels
+    and the dir itself stay — the dir remains a valid upscale donor
+    for cross-key adoption and the interp leg re-renders into it) and
+    the orphaned `interpolated`-stage ledger records are stripped
+    (same atomic-rewrite durability as every ledger append; upscaled
+    records stay, so donors survive). Without the strip the ledger
+    would keep pointing at deleted pixels and the next restart's
+    sidecar validator would abort before the pollers that would heal
+    the gap ever run. With `whole_dir=True` the whole plan dir goes.
+    Use False at finalize start (frees the bulk under disk pressure
+    while keeping donors) and True pre-publish once every poll and
+    drain on every path has finished.
 
     Skips silently (returns 0) when the non-active leg file is
     missing or unreadable — never deletes blind. Best-effort
@@ -484,9 +534,15 @@ def prune_stale_interp_plans(
                 shutil.rmtree(plan_dir)
                 pruned += 1
         else:
-            # Free the bulk now, keep the dir: the ledger stays (so the
-            # dir remains a valid upscale donor for cross-key adoption)
-            # and the upscaled pixels stay (backend-independent).
+            # Free the bulk now, keep the dir and its donors: the
+            # upscaled pixels stay (backend-independent) and the
+            # upscaled ledger records stay with them, while the
+            # orphaned interpolated records are stripped (a ledger
+            # pointing at deleted pixels would abort the next
+            # restart's validation before the pollers heal it).
+            # The strip is NOT gated on removed_any: a previous
+            # prune (or any external deletion) may already have
+            # taken the outputs, leaving a dangling ledger behind.
             removed_any = False
             for child in sorted(plan_dir.iterdir()):
                 if (
@@ -497,6 +553,9 @@ def prune_stale_interp_plans(
                     with contextlib.suppress(OSError):
                         shutil.rmtree(child)
                         removed_any = True
-            if removed_any:
+            stripped = _strip_stale_interpolated_records(
+                plan_dir / CHUNKS_LEDGER_FILENAME, other_sha=other_sha
+            )
+            if removed_any or stripped:
                 pruned += 1
     return pruned
