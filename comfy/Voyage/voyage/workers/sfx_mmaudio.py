@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from voyage import paths
 from voyage.audio.mmaudio_sfx import (
     CLIP_FPS,
     CLIP_SIZE,
@@ -49,8 +50,10 @@ _stack: SfxStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
 _model_size = "large_44k_v2"
+_scratch_dir: str | None = None
+"""Run scratch root for window/bench staging (`init` payload, boba /tmp-quota incident)."""
 
-_INIT_STR_KEYS = ("models_dir", "device", "model_size")
+_INIT_STR_KEYS = ("models_dir", "device", "model_size", "scratch_dir")
 """`init` fields this worker records (issue 127).
 
 Anything else is a caller typo (`model_is`, `backemd`, `model_dir`) —
@@ -145,7 +148,7 @@ def _require_stack() -> SfxStack:
 
 def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     """Record where/how the MMAudio stack will load (no GPU touched here)."""
-    global _models_dir, _device, _model_size
+    global _models_dir, _device, _model_size, _scratch_dir
     unknown = sorted(set(payload) - set(_INIT_STR_KEYS))
     if unknown:
         raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(_INIT_STR_KEYS)})")
@@ -161,9 +164,15 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
                 f"init field 'model_size' must be str, got {type(payload['model_size']).__name__}"
             )
         validate_model_size(payload["model_size"])
+    if "scratch_dir" in payload and not isinstance(payload["scratch_dir"], str):
+        raise TypeError(
+            f"init field 'scratch_dir' must be str, got {type(payload['scratch_dir']).__name__}"
+        )
     _models_dir = str(payload.get("models_dir", "/models"))
     _device = str(payload.get("device", "cuda:0"))
     _model_size = str(payload.get("model_size", "large_44k_v2"))
+    if "scratch_dir" in payload:
+        _scratch_dir = str(payload["scratch_dir"])
     return {
         "status": "READY",
         "backend": "mmaudio",
@@ -379,7 +388,9 @@ def handle_generate_sfx(payload: dict[str, Any]) -> dict[str, Any]:
             f"sfx window {payload['window_id']}: source yielded {resolved:.2f}s "
             f"for {duration:.2f}s requested — timeline/video mismatch, failing loud"
         )
-    with tempfile.TemporaryDirectory(prefix="voyage-sfx-") as staging:
+    with tempfile.TemporaryDirectory(
+        prefix="voyage-sfx-", dir=paths.staging_parent(_scratch_dir)
+    ) as staging:
         rendered = render_window(
             _require_stack(),
             caption=str(payload["caption"]),
@@ -421,7 +432,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     walls: list[float] = []
     peaks: list[float] = []
     cuda_available = _cuda_available()
-    with tempfile.TemporaryDirectory(prefix="voyage-sfx-bench-") as staging_directory:
+    with tempfile.TemporaryDirectory(
+        prefix="voyage-sfx-bench-", dir=paths.staging_parent(_scratch_dir)
+    ) as staging_directory:
         staging = Path(staging_directory)
         probe_video = staging / "probe.mp4"
         probe = subprocess.run(

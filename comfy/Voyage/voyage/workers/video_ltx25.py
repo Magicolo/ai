@@ -399,8 +399,8 @@ def _comfy_bootstrap(models_dir: Path, work_root: Path) -> None:
     """Import ComfyUI once and point it at the volume + scratch dirs.
 
     `folder_paths` output/input/temp land under a session scratch dir
-    (system tmp, cleaned on evict — never the run dir, so `validate_run`
-    orphan scans stay clean). Model folders point at the consolidated
+    (run `tmp/`, cleaned on evict — never the run dir proper, so
+    `validate_run` orphan scans stay clean). Model folders point at the consolidated
     `/models/ltx25` volume (Hub layout); the `unet_gguf`/`clip_gguf`
     aliases follow their backing paths automatically (GGUF nodes.py).
     """
@@ -692,13 +692,18 @@ def _decode_tail_frames(
     ]
 
 
-def _save_mp4(frames: list[Any], path: Path, fps: int) -> None:
+def _save_mp4(
+    frames: list[Any], path: Path, fps: int, *, staging_parent: Path | None = None
+) -> None:
     """Write RGB uint8 frames as h264 mp4 via system ffmpeg.
 
     The voyage-ltx image carries no imageio (by design — system ffmpeg
     is the guaranteed muxer, also used for tail decodes), so this
     mirrors `video_common.save_mp4` (libx264) through a temp PNG sequence
-    instead of imageio.mimsave.
+    instead of imageio.mimsave. The PNG staging lands under
+    `staging_parent` (the session work_root in production) — never bare
+    /tmp (boba /tmp-quota incident); None keeps the legacy default for
+    bench/test callers (covered by the TMPDIR backstop).
     """
     from PIL import Image
 
@@ -706,7 +711,7 @@ def _save_mp4(frames: list[Any], path: Path, fps: int) -> None:
         raise ValueError(f"mp4 frame rate must be positive (got {fps})")
     if not frames:
         raise ValueError("mp4 needs at least one frame")
-    with tempfile.TemporaryDirectory(prefix="ltx25-mux-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="ltx25-mux-", dir=staging_parent) as tmp:
         for index, frame in enumerate(frames):
             Image.fromarray(frame).save(Path(tmp) / f"frame_{index:05d}.png")
         _run_ffmpeg(
@@ -956,10 +961,10 @@ class LTX25Session:
         # The caller may pass an output path whose parent does not exist yet
         # (e.g. a fresh run directory); create it before any commit write.
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        _save_mp4(novel_frames_all, output_path, fps)
+        _save_mp4(novel_frames_all, output_path, fps, staging_parent=self._work_root)
         tail_path = output_path.parent / TAIL_FILENAME
         tail_frames = novel_frames_all[-profile.tail_frames :]
-        _save_mp4(tail_frames, tail_path, fps)
+        _save_mp4(tail_frames, tail_path, fps, staging_parent=self._work_root)
         save_total_ms = (time.perf_counter() - save_started) * MILLISECONDS_PER_SECOND
 
         tape = build_recovery_tape(
@@ -1089,8 +1094,11 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("video_ltx25 requires a CUDA GPU")
     started = time.monotonic()
-    _INIT_PARAMS.update({"models_dir": models_dir, "device": device})
-    work_root = Path(tempfile.mkdtemp(prefix="voyage-ltx25-"))
+    scratch_parent = video_common.session_scratch_parent(payload)
+    _INIT_PARAMS.update(
+        {"models_dir": models_dir, "device": device, "scratch_dir": str(scratch_parent)}
+    )
+    work_root = Path(tempfile.mkdtemp(prefix="voyage-ltx25-", dir=scratch_parent))
     _SESSION = _build_session(work_root)
     name = torch.cuda.get_device_name(0)
     free_gib, total_gib = torch.cuda.mem_get_info()
@@ -1283,7 +1291,9 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
         _SESSION.evict()
         _SESSION = None
         shutil.rmtree(work_root, ignore_errors=True)
-    work_root = Path(tempfile.mkdtemp(prefix="voyage-ltx25-"))
+    stored_scratch = _INIT_PARAMS.get("scratch_dir")
+    scratch_parent = video_common.session_scratch_parent(payload, stored_scratch_dir=stored_scratch)
+    work_root = Path(tempfile.mkdtemp(prefix="voyage-ltx25-", dir=scratch_parent))
     _SESSION = _build_session(work_root)
     tape = _load_tape_json(str(payload["recovery_path"]))
     return {"rebuilt": True, **_SESSION.resume_from_tape(tape)}

@@ -21,6 +21,7 @@ import math
 import os
 import queue
 import signal
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -142,6 +143,24 @@ from voyage.supervisor_tape import (
 # (issue 081; re-exported at the top so existing importers keep working).
 
 
+def point_temp_at_run_scratch(scratch: Path) -> None:
+    """Point all default-tempfile users at the run scratch (boba /tmp-quota incident).
+
+    Explicit `scratch_dir` init fields cover the big session dirs, but
+    bench harnesses, `TemporaryDirectory` calls without `dir=`, and
+    third-party libs (torch, diffusers, PIL) all resolve through
+    `tempfile` defaults — which is the host /tmp tmpfs (31G, usrquota)
+    that a 12-segment LTX25 run exhausted mid-mux. Setting `TMPDIR`
+    redirects child processes (workers inherit the supervisor env via
+    `rpc._spawn_env`) while `tempfile.tempdir` redirects this process
+    (overriding any cached /tmp value). Called in `start_workers` —
+    mere construction stays side-effect-free for tests.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(scratch)
+    tempfile.tempdir = str(scratch)
+
+
 def _director_init_payload(config: ProjectConfig) -> dict[str, Any]:
     """Director worker init payload: models_dir + device, plus the sidecar
     endpoint when the llama backend is active (DESIGN §140 llama entry).
@@ -253,12 +272,20 @@ class Supervisor:
         # Optional console progress sink (None = silent; tests use None).
         self._progress = progress
         self._logs = run_dir / paths.LOGS_DIRNAME
+        # Generation scratch (boba /tmp-quota incident): every temp file
+        # this run produces lives under `run_dir/tmp/`, never on the host
+        # /tmp tmpfs. Workers that need session dirs get the path
+        # explicitly (`scratch_dir` init field); everything else — bench
+        # harnesses, third-party libs — follows the TMPDIR backstop set
+        # in `start_workers`.
+        self._scratch_dir = paths.ensure_scratch_dir(run_dir)
         video_module = video_worker_module(config.video.backend)
         video_init: dict[str, Any] = {}
         if config.video.backend in STREAMING_VIDEO_BACKENDS:
             video_init = {
                 "models_dir": config.video.models_dir,
                 "device": config.video.device,
+                "scratch_dir": str(self._scratch_dir),
             }
         self._video = SubprocessWorker(
             video_module,
@@ -273,6 +300,7 @@ class Supervisor:
             audio_init = {
                 "models_dir": config.audio.models_dir,
                 "device": config.audio.device,
+                "scratch_dir": str(self._scratch_dir),
             }
         self._audio = SubprocessWorker(
             audio_module,
@@ -566,6 +594,7 @@ class Supervisor:
         (video DiT ~6-14 GiB, ACE ~5 GiB). A stop failure during the
         unwind must not mask the original start error.
         """
+        point_temp_at_run_scratch(self._scratch_dir)
         self._logs.mkdir(parents=True, exist_ok=True)
         started: list[SubprocessWorker] = []
         try:

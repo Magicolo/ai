@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from voyage import paths
 from voyage.audio.beat import beats_for_segment
 from voyage.audio.planner import (
     TAKES_FILENAME,
@@ -765,7 +766,11 @@ def spawn_ace_render_fn(
         run_dir,
         run_dir / "logs" / "ace-finalize.log",
         init_op="init",
-        init_payload={"models_dir": str(models_dir), "device": device},
+        init_payload={
+            "models_dir": str(models_dir),
+            "device": device,
+            "scratch_dir": str(paths.ensure_scratch_dir(run_dir)),
+        },
         # ACE-Step venv (DESIGN §140 audio continuity): the ACE stack is
         # isolated in /opt/venvs/acestep on voyage-ltx; unset (video
         # image, tests) falls back to the supervisor interpreter.

@@ -151,6 +151,7 @@ def test_ltxv_supervisor_init_payload(tmp_path: Path) -> None:
     assert supervisor._video._init_payload == {
         "models_dir": config.video.models_dir,
         "device": "cuda:0",
+        "scratch_dir": str(run_dir / "tmp"),
     }
 
 

@@ -61,6 +61,34 @@ def boundary_from_scene_cut(scene_cut: bool) -> BoundaryKind:
     return "fresh" if scene_cut else "continue"
 
 
+def session_scratch_parent(
+    payload: dict[str, Any], *, stored_scratch_dir: Any | None = None
+) -> Path:
+    """Parent dir for a worker session work_root (boba /tmp-quota incident).
+
+    The supervisor passes absolute `scratch_dir` (`run_dir/tmp/`) in every
+    production init payload; session `mkdtemp` dirs land there instead of
+    the host /tmp tmpfs. Rebuild handlers pass their `_INIT_PARAMS`
+    value as `stored_scratch_dir` (their payload only carries the tape
+    path); legacy/test callers without either fall back to `CWD/tmp/` —
+    worker processes always spawn with CWD=run_dir (`rpc.py`), so the
+    fallback is still the run, never /tmp. A non-str value fails loud
+    (issue 118 discipline); the dir is created here so `mkdtemp(dir=...)`
+    never races a missing parent.
+    """
+    from voyage import paths as voyage_paths
+
+    raw = stored_scratch_dir if stored_scratch_dir is not None else payload.get("scratch_dir")
+    if raw is None:
+        parent = Path.cwd() / voyage_paths.SCRATCH_DIRNAME
+    else:
+        if not isinstance(raw, str) or not raw.strip():
+            raise TypeError(f"payload field 'scratch_dir' must be a non-empty str, got {raw!r}")
+        parent = Path(raw)
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
 T = TypeVar("T")
 """Element type for `_strict_element` (issue 118)."""
 

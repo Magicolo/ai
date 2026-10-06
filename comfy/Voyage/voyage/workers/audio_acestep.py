@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from voyage import paths
 from voyage.audio.acestep import (
     AceStepStack,
     evict,
@@ -46,10 +47,12 @@ __all__ = ["BYTES_PER_GIB", "validate_sample_rate", "validate_channels"]
 _stack: AceStepStack | None = None
 _models_dir = "/models"
 _device = "cuda:0"
+_scratch_dir: str | None = None
+"""Run scratch root for take/bench staging (`init` payload, boba /tmp-quota incident)."""
 _upstream_cache_dir: Path | None = None
 """Dedicated CWD for upstream ACE-Step relative writes (DESIGN §37, below)."""
 
-_INIT_STR_KEYS = ("models_dir", "device")
+_INIT_STR_KEYS = ("models_dir", "device", "scratch_dir")
 """`init` fields this worker records (issue 127).
 
 Anything else is a caller typo — reject it before any side effect
@@ -63,16 +66,18 @@ def _redirect_upstream_writes() -> Path:
     Upstream ACE-Step writes `.cache/acestep/progress_estimates.json`
     relative to the worker process CWD, and workers spawn with CWD=run_dir —
     every music render littered the run directory. Redirecting CWD to a fresh
-    tmp dir (created once per process, reused across re-inits) moves those
-    writes out of the run. All voyage paths are absolute (payload
-    `output_path` invariant, `TemporaryDirectory` staging, absolute
-    `models_dir`), so the chdir is side-effect free — the `video_causvid`
-    `_enter_causvid_tree` precedent. Runs before any ACE-Step
-    library call; idempotent.
+    dir under the run scratch (created once per process, reused across
+    re-inits) moves those writes out of the run while keeping them off
+    host /tmp (boba /tmp-quota incident). All voyage paths are absolute
+    (payload `output_path` invariant, `TemporaryDirectory` staging,
+    absolute `models_dir`), so the chdir is side-effect free — the
+    `video_causvid` `_enter_causvid_tree` precedent. Runs before any
+    ACE-Step library call; idempotent.
     """
     global _upstream_cache_dir
     if _upstream_cache_dir is None:
-        _upstream_cache_dir = Path(tempfile.mkdtemp(prefix="voyage-acestep-cwd-"))
+        parent = paths.staging_parent(_scratch_dir)
+        _upstream_cache_dir = Path(tempfile.mkdtemp(prefix="voyage-acestep-cwd-", dir=parent))
     os.chdir(_upstream_cache_dir)
     return _upstream_cache_dir
 
@@ -174,16 +179,22 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(payload) - set(_INIT_STR_KEYS))
     if unknown:
         raise TypeError(f"init got unknown field(s) {unknown} (known: {sorted(_INIT_STR_KEYS)})")
-    _redirect_upstream_writes()
-    global _models_dir, _device
+    global _models_dir, _device, _scratch_dir
     if "models_dir" in payload and not isinstance(payload["models_dir"], str):
         raise TypeError(
             f"init field 'models_dir' must be str, got {type(payload['models_dir']).__name__}"
         )
     if "device" in payload and not isinstance(payload["device"], str):
         raise TypeError(f"init field 'device' must be str, got {type(payload['device']).__name__}")
+    if "scratch_dir" in payload and not isinstance(payload["scratch_dir"], str):
+        raise TypeError(
+            f"init field 'scratch_dir' must be str, got {type(payload['scratch_dir']).__name__}"
+        )
     _models_dir = str(payload.get("models_dir", "/models"))
     _device = str(payload.get("device", "cuda:0"))
+    if "scratch_dir" in payload:
+        _scratch_dir = str(payload["scratch_dir"])
+    _redirect_upstream_writes()
     return {"status": "READY", "backend": "acestep", "device": _device, "loaded": False}
 
 
@@ -285,7 +296,9 @@ def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("output_path must be non-empty")
     output = Path(output_raw)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="voyage-take-") as staging:
+    with tempfile.TemporaryDirectory(
+        prefix="voyage-take-", dir=paths.staging_parent(_scratch_dir)
+    ) as staging:
         rendered = render_take(
             _require_stack(),
             caption=str(payload["style"]),
@@ -335,7 +348,9 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
     walls: list[float] = []
     peaks: list[float] = []
     cuda_available = _cuda_available()
-    with tempfile.TemporaryDirectory(prefix="voyage-bench-") as staging_directory:
+    with tempfile.TemporaryDirectory(
+        prefix="voyage-bench-", dir=paths.staging_parent(_scratch_dir)
+    ) as staging_directory:
         for take_index in range(warmup + measured):
             _reset_peak_stats()
             started = time.monotonic()

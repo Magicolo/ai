@@ -6,10 +6,13 @@ run/
   concepts.jsonl
   segments/
   logs/
+  tmp/            (generation scratch — worker session dirs, mux/assembly
+                   staging; disposable, never checksummed or validated)
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from voyage.errors import MediaError
@@ -32,7 +35,25 @@ STATE_FILENAME = "state.json"
 CONCEPTS_FILENAME = "concepts.jsonl"
 SEGMENTS_DIRNAME = "segments"
 LOGS_DIRNAME = "logs"
+#: Generation scratch dir (boba /tmp-quota incident): every temp file a run
+#: produces — worker session work_roots, mux/assembly staging — lives under
+#: `run_dir/tmp/`, never on the host /tmp tmpfs (31G with usrquota; a
+#: 12-segment LTX25 run exhausted it mid-mux). Disposable: evict paths
+#: remove their session dirs, and `ensure_scratch_dir` prunes stale
+#: `voyage-*` session leftovers from killed runs. Invisible to
+#: `validate_run`: the orphan scan only covers segments/novelty/audio/
+#: augment plus run-root `voyage-final-*`/`*.partial`, so `tmp/` never
+#: flags — and nothing under it is checksummed or referenced by stored
+#: paths (resolve_stored_path never needs a `tmp` anchor).
+SCRATCH_DIRNAME = "tmp"
 DONE_MARKER = "DONE"
+
+#: Session-dir prefixes pruned as stale by `ensure_scratch_dir` (crashed
+#: runs strand them — evict-time `rmtree` only runs on clean shutdown).
+#: Popup-bench prefixes (`voyage-bench-`, `voyage-sfx-bench-`, mux dirs)
+#: are `TemporaryDirectory`-owned and self-cleaning, so only the
+#: never-removed session roots are listed.
+STALE_SCRATCH_PREFIXES = frozenset({"voyage-ltx25-", "voyage-ltx23-", "voyage-acestep-cwd-"})
 
 # Layout dirnames usable as re-anchor points for legacy absolute entries
 # (issue 016): a moved run's stale absolute path still names the layout
@@ -42,6 +63,50 @@ _LAYOUT_ANCHORS = frozenset({"segments", "audio", "novelty", "logs"})
 
 def segment_dir(run_dir: Path, segment_id: str) -> Path:
     return run_dir / SEGMENTS_DIRNAME / segment_id
+
+
+def scratch_dir(run_dir: Path) -> Path:
+    """Generation scratch dir for a run (never on host /tmp)."""
+    return run_dir / SCRATCH_DIRNAME
+
+
+def ensure_scratch_dir(run_dir: Path) -> Path:
+    """Create `run_dir/tmp/` and prune stale session leftovers (best-effort).
+
+    Stale `voyage-*` session dirs only exist after a kill/crash (clean
+    evict paths `rmtree` their work_root); pruning here is safe because
+    no worker is running yet when the supervisor starts workers. A
+    concurrent holder of the run would fail on the fcntl run lock
+    anyway. Never raises for prune failures — leftover scratch only
+    costs disk, never correctness.
+    """
+    scratch = scratch_dir(run_dir)
+    scratch.mkdir(parents=True, exist_ok=True)
+    try:
+        for child in sorted(scratch.iterdir()):
+            if child.is_dir() and any(
+                child.name.startswith(prefix) for prefix in STALE_SCRATCH_PREFIXES
+            ):
+                shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        pass
+    return scratch
+
+
+def staging_parent(scratch_dir_value: str | None) -> Path | None:
+    """Parent for worker staging dirs, or None for the TMPDIR default.
+
+    Production init payloads always carry the run scratch
+    (`run_dir/tmp/`); legacy and bench-only callers without one fall back
+    to the process TMPDIR (which the supervisor points at the run
+    scratch — the backstop covers them). The dir is created here so
+    `TemporaryDirectory(dir=...)` never races a missing parent.
+    """
+    if scratch_dir_value is None:
+        return None
+    parent = Path(scratch_dir_value)
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
 
 
 def format_segment_id(number: int) -> str:

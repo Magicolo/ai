@@ -2143,6 +2143,21 @@ If an implementation requires a replacement, create a new attempt and update the
 > As-built (all-deferred-2026-10-04): per-segment file count 5 → 4 —
 > `audio.wav` is gone (all backends deferred, takes render at
 > finalize), so commit-time audio slices no longer exist either.
+> As-built (run-scratch-2026-10-06): every temp file a run produces
+> lives under `run_dir/tmp/` (`paths.SCRATCH_DIRNAME`), never on host
+> /tmp — the supervisor creates it at construction, passes it explicitly
+> (`scratch_dir` init field) to the session-owning workers (ltx25/ltx23
+> work_roots incl. ComfyUI folder_paths dirs + mux PNG staging; ACE
+> upstream-CWD redirect + take staging; MMAudio window staging;
+> finalize-time ACE/SFX spawns; sfx-final + assemble staging), and
+> points process TMPDIR at it in `start_workers` as a backstop for
+> bench harnesses, bare `TemporaryDirectory` calls, and third-party
+> libs (workers inherit the env via `rpc._spawn_env`). `validate_run`
+> ignores `tmp/` (orphan scan covers segments/novelty/audio/augment +
+> run-root `voyage-final-*`/`*.partial` only); stale `voyage-*`
+> session dirs from killed runs are pruned at supervisor construction
+> (single generate path builds it; evict paths already rmtree live
+> sessions). The `run.sh` /tmp mount stays (torchinductor + HF cache).
 
 ---
 
@@ -8702,3 +8717,10 @@ Audio fit: mechanism proven (repaints on Qwen caption change, anchor holds); qua
 - Gates: full `gates.sh` green (exit 0: ruff + format + mypy strict clean, 2129 passed / 26 skipped). Uncommitted (per-commit approval required).
 - Self-healing finalize inputs, same day (user report: kaolin finalize aborted INVALID — `upscaled_01` ledgered but output missing after a manual heal deleted mixed-geometry dirs, plus `make generate self-healing`): root cause was adoption propagating a mixed-geometry donor (frames 0-6 at 1024x576 hardlink-copied in ~6ms vs 7+ rendered at 2048x1152; the render path is whole-chunk atomic into `.partial` so only adoption's non-atomic final-dir write could do it; all 9 output-truth gates were count-only). Fix: new `augment.chunk_frames_match_size` (PIL header-only reads, fail-open without PIL so slim/fakes are unaffected, fail-closed on OSError/unparseable) hardening every gate (upscale missing loop, adopt post-copy, interp inputs + own outputs, seam cache-hit, parallel combined condition, sidecar donor pre-copy) + new `sidecar.heal_augment_ledgers` (strips any-stage records failing output count-truth mirrored on the validator, plus geometry via the record's own out_width/out_height, atomic rewrite, never raises) wired into `_heal_safe_transients` (both generate gates) and the media.py finalize-start prune site (bare `voyage finalize` verb; `validate_run` stays read-only). Healed kaolin live (validator→heal→validator in-container: 2 findings → 2 strips → 0 findings; next `generate kaolin` passes validation and the pollers re-render those chunks). Tests: 3 heal tests (count-strip/reheal = the kaolin case, healthy-keep, geometry-strip PIL-guarded) with validator-agreement pins.
 - Parallel-driver progress bar, same day (user report: the kaolin log went silent after the sfx windows — `run_parallel_model_pass` rendered hundreds of chunks with zero console output): the driver now opens one `model pass chunks` bar (total = queued tasks) and advances it per finished task under the existing `timing_lock` (BarTracker._done is not thread-safe); the advance sits outside the `timings is not None` gate (user-facing progress must not depend on timings collection — the new test caught it nested inside). Test: stub-progress trio asserting total == done == queued tasks.
+
+## Run-scoped generation scratch: /tmp must not be used (2026-10-06)
+- User directive (verbatim): "/tmp was heavily in use during generation. /tmp must not be used. Use the output folder of the generation for all files, including temporary ones." Trigger: `run.sh generate boba` failed at segment 12 with `circuit breaker open for video/generate_blocks: 3 restarts exhausted (WORKER_ERROR: [Errno 122] Disk quota exceeded)` — LTX25 session work_root + mux PNG staging on the host /tmp tmpfs (31G, usrquota).
+- Implementation: `paths.SCRATCH_DIRNAME = "tmp"` + `scratch_dir()`/`ensure_scratch_dir()` (mkdir + best-effort prune of stale `voyage-ltx25-*`/`voyage-ltx23-*`/`voyage-acestep-cwd-*` session dirs; only `cli_generate` constructs Supervisor so prune runs on the generate path only); `video_common.session_scratch_parent()` (explicit payload field honored, `CWD/tmp` fallback — workers spawn with CWD=run_dir); supervisor `__init__` passes `scratch_dir` in streaming-video + acestep init payloads and `start_workers` calls new `point_temp_at_run_scratch()` (TMPDIR env for spawned workers + `tempfile.tempdir` reset for self — covers bench harnesses, fake workers, and third-party libs); ltx25/ltx23 `handle_init`/`handle_rebuild` route `mkdtemp` under it (recorded in `_INIT_PARAMS` for rebuild) and `_save_mp4` gains keyword-only `staging_parent` (session work_root at both call sites); acestep/sfx `handle_init` accept + record `scratch_dir` (added to `_INIT_STR_KEYS`), take/window/bench staging + the upstream-CWD redirect parent to it (None = TMPDIR default); finalize-time ACE/SFX spawns pass it; `sfx-final` staging under run scratch; `assemble_segment_audio` gains `staging_parent` (caller passes the run-scoped finalize tmpdir). `run.sh` /tmp mount kept (torchinductor + HF model cache); `validate_run` untouched (`tmp/` invisible to the orphan scan by construction).
+- Drive-by fix (same lines): ltx23 `generate_blocks` referenced undefined `profile.tail_frames` at the tail mux (NameError on every ltx23 commit — dormant backend, no test coverage) → `CONDITIONING_TAIL_FRAMES` (same value used 13 lines above).
+- Tests: new `tests/test_run_scratch.py` (11: layout/ensure/prune, payload honored/fallback/reject, supervisor video+audio pins, TMPDIR backstop incl. bare-TemporaryDirectory landing, acestep/sfx init record + reject + fallbacks); `test_ltxv` payload pin extended; `test_audio_acestep_cwd` hardened with `_scratch_dir` save/restore.
+- Gates: full `gates.sh` green (exit 0: ruff + format + mypy strict clean, 2144 passed / 26 skipped). Uncommitted (per-commit approval required).

@@ -24,6 +24,7 @@ def test_audio_acestep_init_redirects_cwd_away_from_run_dir(tmp_path: Path) -> N
     previous_device = audio_acestep_worker._device
     previous_stack = audio_acestep_worker._stack
     previous_cache_dir = audio_acestep_worker._upstream_cache_dir
+    previous_scratch_dir = audio_acestep_worker._scratch_dir
     os.chdir(run_dir)
     try:
         result = audio_acestep_worker.handle_init({"models_dir": "/models", "device": "cuda:0"})
@@ -37,6 +38,7 @@ def test_audio_acestep_init_redirects_cwd_away_from_run_dir(tmp_path: Path) -> N
         audio_acestep_worker._device = previous_device
         audio_acestep_worker._stack = previous_stack
         audio_acestep_worker._upstream_cache_dir = previous_cache_dir
+        audio_acestep_worker._scratch_dir = previous_scratch_dir
 
 
 def test_audio_acestep_init_redirect_is_idempotent(tmp_path: Path) -> None:
@@ -47,6 +49,7 @@ def test_audio_acestep_init_redirect_is_idempotent(tmp_path: Path) -> None:
     previous_device = audio_acestep_worker._device
     previous_stack = audio_acestep_worker._stack
     previous_cache_dir = audio_acestep_worker._upstream_cache_dir
+    previous_scratch_dir = audio_acestep_worker._scratch_dir
     os.chdir(run_dir)
     try:
         audio_acestep_worker.handle_init({})
@@ -60,3 +63,4 @@ def test_audio_acestep_init_redirect_is_idempotent(tmp_path: Path) -> None:
         audio_acestep_worker._device = previous_device
         audio_acestep_worker._stack = previous_stack
         audio_acestep_worker._upstream_cache_dir = previous_cache_dir
+        audio_acestep_worker._scratch_dir = previous_scratch_dir

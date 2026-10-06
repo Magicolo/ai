@@ -345,6 +345,7 @@ def assemble_segment_audio(
     joint_fade: float | None = None,
     *,
     blend_timings: list[float] | None = None,
+    staging_parent: Path | None = None,
 ) -> Path:
     """Join take slices into one segment audio.wav (§35).
 
@@ -360,6 +361,10 @@ def assemble_segment_audio(
     passes the fade it used, so assembly consumes exactly what was added
     and the window tiles its nominal range. Without it the fade is derived
     from the slices as before.
+
+    The two-stage join's intermediate lands under `staging_parent`
+    (`build_final_audio` passes its run-scoped tmpdir — never bare /tmp,
+    boba /tmp-quota incident); None keeps the TMPDIR default.
     """
     if not slices:
         raise MediaError("no slices to assemble")
@@ -406,7 +411,7 @@ def assemble_segment_audio(
     # s32 barriers replay the fold byte-for-byte in one spawn (each slice
     # decoded once). The old left-fold pairwise loop is gone; durations
     # probed above thread through so the join adds zero re-probes.
-    with tempfile.TemporaryDirectory(prefix="voyage-assemble-") as staging:
+    with tempfile.TemporaryDirectory(prefix="voyage-assemble-", dir=staging_parent) as staging:
         joined = Path(staging) / "joined.wav"
         _join_audio_single_graph(
             slices,
@@ -934,7 +939,9 @@ def build_final_audio(
                         channels,
                     )
                     slices[-1] = tail_slice
-            assemble_segment_audio(slices, window_path, overlap, joint_fade=fade)
+            assemble_segment_audio(
+                slices, window_path, overlap, joint_fade=fade, staging_parent=tmpdir
+            )
         windows.append(window_path)
     # Single window needs no join (single-segment runs land here: the
     # window is real music re-sliced from rendered takes, so convert and

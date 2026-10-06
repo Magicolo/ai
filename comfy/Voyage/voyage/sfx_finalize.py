@@ -662,6 +662,7 @@ def render_sfx_bed(
                         "models_dir": models_dir,
                         "device": devices[slot],
                         "model_size": sizes[slot],
+                        "scratch_dir": str(paths.ensure_scratch_dir(run_dir)),
                     },
                     # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
                     # stack is isolated from the LTX freeze; unset (video
@@ -1137,7 +1138,9 @@ def finalize_sfx_pass(
     # shipped duration so captions stay aligned. Identical timelines are
     # returned untouched (byte-identical legacy path).
     bounds = _scale_bounds_to_timeline(bounds, timeline)
-    with tempfile.TemporaryDirectory(prefix="voyage-sfx-final-") as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix="voyage-sfx-final-", dir=paths.ensure_scratch_dir(run_dir)
+    ) as tmp:
         tmpdir = Path(tmp)
         bed = render_sfx_bed(
             run_dir,
