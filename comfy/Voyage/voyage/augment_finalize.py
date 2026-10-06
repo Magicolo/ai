@@ -14,13 +14,19 @@ and ffmpeg enter through injected seams or function-local lazy imports.
 
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from voyage.augment_seam import render_seam_once, seam_endpoints, seam_plan_dir
+from voyage.augment_seam import (
+    maybe_render_seam_joint,
+    render_seam_once,
+    seam_endpoints,
+    seam_plan_dir,
+)
 from voyage.augment_sidecar import plan_dir_for_segment
 from voyage.console import optional_bar, optional_stage
 from voyage.errors import MediaError
@@ -36,16 +42,55 @@ _MAX_POLL_PASSES = 10
 """Poll-loop cap: each pass must finish chunks or the run is stuck (fail-loud)."""
 
 
-def weights_key_for(weights: Any) -> str:
-    """Ledger key covering both model legs (any leg change misses old records)."""
-    film = weights.film
+def weights_key_for(weights: Any, interp_backend: str = "rife") -> str:
+    """Ledger key covering both model legs, legacy `sha|sha` shape.
+
+    The key intentionally carries NO backend prefix: the interp-leg sha
+    differs between backends (FILM and RIFE weights are different files),
+    so a backend switch already misses old records by construction --
+    while pre-backend runs (e.g. kaolin's FILM ledgers) keep hitting
+    with zero re-render. Final freshness across a backend switch rides
+    the skip-key backend component instead.
+    """
+    from voyage.workers import augment_worker
+
+    backend = augment_worker.validate_interp_backend(interp_backend)
+    # Legacy fakes carry the FILM leg as `.film` (no `interp_leg` method).
+    interp = weights.interp_leg(backend) if hasattr(weights, "interp_leg") else weights.film
     realesrgan = weights.realesrgan
-    if film is None or realesrgan is None:
+    if interp is None or realesrgan is None:
         raise ValueError(
-            "durable model pass needs both legs provisioned "
-            f"(film={film!r}, realesrgan={realesrgan!r})"
+            "durable model pass needs the interp leg and the upscale leg provisioned "
+            f"(backend={backend}, interp={interp!r}, realesrgan={realesrgan!r})"
         )
-    return f"{sha256_file(film)}|{sha256_file(realesrgan)}"
+    return f"{sha256_file(interp)}|{sha256_file(realesrgan)}"
+
+
+def _interp_weights_path(weights: Any, interp_backend: str) -> Path | None:
+    """Active interp-leg weights path for `interp_backend`.
+
+    Delegates to the typed `augment.interp_leg_path` (backend validated
+    inside; legacy fakes fall back to `.film`).
+    """
+    from voyage.augment import interp_leg_path
+
+    return interp_leg_path(weights, interp_backend)
+
+
+def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    """True when `func` declares keyword `name` (injected-fake tolerance).
+
+    Production pollers accept the backend keyword; older injected test
+    doubles may not — probing keeps them working instead of TypeErroring.
+    Mirrors the `_supports_on_pair` probe in `augment_interp_poller`.
+    """
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
 
 
 def _require_run_dir(value: Path) -> Path:
@@ -149,30 +194,36 @@ def _poll_to_completion(
     interp_device: str | None = None,
     include_interp: bool = True,
     include_upscale: bool = True,
+    interp_backend: str = "rife",
+    seam_early: bool = True,
+    seam_interp_fn: Callable[..., Any] | None = None,
 ) -> None:
-    """Run both pollers until a full pass finishes nothing (fail-loud when stuck).
+    """Run both pollers segment-interleaved until a pass finishes nothing.
 
-    DESIGN §140 A/V stream: the upscale sweep runs on `upscale_device`
-    (the 2060, cuda:1) while the interp sweep runs on `interp_device`
-    (the 4060, cuda:0) — the interpolator picks up the ledgered upscale
-    chunks the 2060 published, and the two legs never share a card. Both
-    default to `device` (the legacy single-device behavior) so existing
-    callers keep today's pinning. `include_interp=False` runs the
-    upscale sweep only (the finalize Phase A + generation-time pre-warm:
-    interpolation happens at finalize time, never during generation).
-    `include_upscale=False` runs the interp sweep only (the finalize
-    Phase C: the 4060 picks up the Phase A upscale ledger after the
-    music takes and the SFX bed finished).
+    Each pass enumerates the committed segments once, then runs every
+    segment's upscale immediately followed by its interp — interp starts
+    on committed frames instead of waiting for the full upscale sweep
+    (the old full-sweep-then-full-sweep stalls long finalizes by ~1h).
+    Both legs default to `device` (legacy single-device behavior);
+    `upscale_device`/`interp_device` pin legs to cards (interp moved to
+    the 2060, cuda:1, sharing the card with upscale — RIFE's 0.65 GiB
+    peak fits beside the llama sidecar). `include_interp=False` runs the
+    upscale leg only; `include_upscale=False` runs the interp leg only.
 
-    `progress` renders one leg bar per sweep (`upscale frames`, then
+    `progress` renders one leg bar per segment (`upscale frames`, then
     `interp frames` — sequential, never two concurrent Live displays).
     Bars count source frames, so both legs share one comparable unit
-    (not the multiplied interp output); totals are set upfront from the
-    committed segments (elapsed + ETA from the first second) and
-    reconciled at pass end, rendered chunks advance live via the
-    pollers' `on_chunk_frames` callbacks, and interp chunks additionally
-    advance per finished FILM pair via `on_pair_frames`. Counts still
-    accumulate into `timings` for the elapsed-time report.
+    (not the multiplied interp output); totals come from each segment
+    (elapsed + ETA from the first second) and reconcile at scoped-call
+    end, rendered chunks advance live via the pollers' `on_chunk_frames`
+    callbacks, and interp chunks additionally advance per finished
+    interp pair via `on_pair_frames`. Counts still accumulate into
+    `timings` for the elapsed-time report. After each non-first
+    segment's interp, `seam_early` attempts its left boundary joint
+    (idempotent with the drain fallback; skipped when `multiplier < 2`
+    or `seam_early=False`, e.g. morph-cut timelines). The joint is
+    routed through `seam_interp_fn` when given (tests stub it), else
+    the resident interp leg.
     """
     if upscale_poll_fn is None:
         from voyage.augment_upscale_poller import upscale_poll_once
@@ -191,145 +242,191 @@ def _poll_to_completion(
     )
     for _ in range(_MAX_POLL_PASSES):
         up_done = 0
-        up_per_segment: dict[str, list[int]] = {}
-        if include_upscale:
-            upscale_start = time.monotonic()
-            with optional_bar(progress, "upscale frames", expected_source or None) as up_tracker:
-
-                def _up_chunk(
-                    segment_id: str,
-                    index: int,
-                    _total: int,
-                    _into: dict[str, list[int]] = up_per_segment,
-                ) -> None:
-                    _into.setdefault(segment_id, []).append(index)
-
-                def _up_frames(segment_id: str, frames: int) -> None:
-                    del segment_id
-                    if up_tracker is not None:
-                        up_tracker.update(frames)
-
-                upscale_result = upscale_poll_fn(
-                    run_dir,
-                    weights_path=weights.realesrgan,
-                    weights_key=weights_key,
-                    out_width=out_width,
-                    out_height=out_height,
-                    out_fps=source_fps_key,
-                    upscale_factor=upscale_factor,
-                    chunk_frames=chunk_frames,
-                    device=up_dev,
-                    crf=crf,
-                    preset=preset,
-                    on_chunk=_up_chunk,
-                    on_chunk_frames=_up_frames,
-                )
-                upscale_seconds = time.monotonic() - upscale_start
-                up_done = int(getattr(upscale_result, "chunks_done", 0) or 0)
-                up_frames_done = int(getattr(upscale_result, "frames_done", 0) or 0)
-                up_frames_skipped = int(getattr(upscale_result, "frames_skipped", 0) or 0)
-                if up_tracker is not None:
-                    up_total = up_frames_done + up_frames_skipped
-                    if up_total > 0:
-                        up_tracker.set_total(up_total)
-                    if up_frames_skipped > 0:
-                        up_tracker.update(up_frames_skipped)
-                    if up_frames_done > 0 and upscale_seconds > 0:
-                        up_tracker.set_extra(f"{up_frames_done / upscale_seconds:.1f} frames/s")
-            if timings is not None:
-                timings["upscale_poll_s"] = timings.get("upscale_poll_s", 0.0) + upscale_seconds
-                timings["upscale_chunks_done"] = timings.get("upscale_chunks_done", 0.0) + float(
-                    up_done
-                )
-                timings["upscale_frames_done"] = timings.get("upscale_frames_done", 0.0) + float(
-                    up_frames_done
-                )
-            if verbose and up_per_segment and progress is not None:
-                for segment_id in sorted(up_per_segment):
-                    progress.info(
-                        f"upscale {segment_id}: chunks {_format_ranges(up_per_segment[segment_id])}"
-                    )
         ip_done = 0
-        if include_interp:
-            interp_start = time.monotonic()
-            ip_per_segment: dict[str, list[int]] = {}
-            with optional_bar(progress, "interp frames", expected_source or None) as ip_tracker:
-                _ip_carry: list[float] = [0.0]
+        ip_waiting = 0
+        up_per_segment: dict[str, list[int]] = {}
+        ip_per_segment: dict[str, list[int]] = {}
+        # Segment-interleaved pipeline: enumerate once per pass, then run
+        # each segment's upscale immediately followed by its interp, so
+        # interp starts on committed frames instead of waiting for the
+        # full upscale sweep. Pass totals below preserve the old settle
+        # semantics exactly (a pass that finishes nothing returns, unless
+        # interp chunks are still waiting on missing upscale outputs).
+        from voyage.augment_upscale_poller import committed_segment_sources
 
-                def _ip_chunk(
-                    segment_id: str,
-                    index: int,
-                    _total: int,
-                    _into: dict[str, list[int]] = ip_per_segment,
-                ) -> None:
-                    _into.setdefault(segment_id, []).append(index)
+        segment_sources, _skipped_sources = committed_segment_sources(run_dir)
+        ordered_sources = sorted(segment_sources, key=lambda source: source.segment_id)
+        up_takes_segments = _accepts_keyword(upscale_poll_fn, "segment_ids")
+        ip_takes_segments = _accepts_keyword(interp_poll_fn, "segment_ids")
+        interp_weights = _interp_weights_path(weights, interp_backend)
+        for position, source in enumerate(ordered_sources):
+            segment_id = source.segment_id
+            segment_frames = source.total_frames or None
+            if include_upscale:
+                upscale_start = time.monotonic()
+                with optional_bar(progress, "upscale frames", segment_frames) as up_tracker:
 
-                def _ip_pair(
-                    segment_id: str, frames: float, _carry: list[float] = _ip_carry
-                ) -> None:
-                    del segment_id
+                    def _up_chunk(
+                        segment_id: str,
+                        index: int,
+                        _total: int,
+                        _into: dict[str, list[int]] = up_per_segment,
+                    ) -> None:
+                        _into.setdefault(segment_id, []).append(index)
+
+                    def _up_frames(segment_id: str, frames: int) -> None:
+                        del segment_id
+                        if up_tracker is not None:
+                            up_tracker.update(frames)
+
+                    upscale_kwargs: dict[str, Any] = {
+                        "weights_path": weights.realesrgan,
+                        "weights_key": weights_key,
+                        "out_width": out_width,
+                        "out_height": out_height,
+                        "out_fps": source_fps_key,
+                        "upscale_factor": upscale_factor,
+                        "chunk_frames": chunk_frames,
+                        "device": up_dev,
+                        "crf": crf,
+                        "preset": preset,
+                        "on_chunk": _up_chunk,
+                        "on_chunk_frames": _up_frames,
+                    }
+                    if up_takes_segments:
+                        upscale_kwargs["segment_ids"] = [segment_id]
+                    upscale_result = upscale_poll_fn(run_dir, **upscale_kwargs)
+                    upscale_seconds = time.monotonic() - upscale_start
+                    scoped_done = int(getattr(upscale_result, "chunks_done", 0) or 0)
+                    scoped_frames = int(getattr(upscale_result, "frames_done", 0) or 0)
+                    scoped_skipped = int(getattr(upscale_result, "frames_skipped", 0) or 0)
+                    up_done += scoped_done
+                    if up_tracker is not None:
+                        scoped_total = scoped_frames + scoped_skipped
+                        if scoped_total > 0:
+                            up_tracker.set_total(scoped_total)
+                        if scoped_skipped > 0:
+                            up_tracker.update(scoped_skipped)
+                        if scoped_frames > 0 and upscale_seconds > 0:
+                            up_tracker.set_extra(f"{scoped_frames / upscale_seconds:.1f} frames/s")
+                if timings is not None:
+                    timings["upscale_poll_s"] = timings.get("upscale_poll_s", 0.0) + upscale_seconds
+                    timings["upscale_chunks_done"] = timings.get(
+                        "upscale_chunks_done", 0.0
+                    ) + float(scoped_done)
+                    timings["upscale_frames_done"] = timings.get(
+                        "upscale_frames_done", 0.0
+                    ) + float(scoped_frames)
+            if include_interp:
+                interp_start = time.monotonic()
+                with optional_bar(progress, "interp frames", segment_frames) as ip_tracker:
+                    _ip_carry: list[float] = [0.0]
+
+                    def _ip_chunk(
+                        segment_id: str,
+                        index: int,
+                        _total: int,
+                        _into: dict[str, list[int]] = ip_per_segment,
+                    ) -> None:
+                        _into.setdefault(segment_id, []).append(index)
+
+                    def _ip_pair(
+                        segment_id: str,
+                        fraction_done: float,
+                        _carry: list[float] = _ip_carry,
+                    ) -> None:
+                        del segment_id
+                        _carry[0] += fraction_done
+                        whole, _carry[0] = divmod(_carry[0], 1.0)
+                        if ip_tracker is not None and whole >= 1:
+                            ip_tracker.update(int(whole))
+
+                    interp_kwargs: dict[str, Any] = {
+                        "weights_path": interp_weights,
+                        "weights_key": weights_key,
+                        "out_width": out_width,
+                        "out_height": out_height,
+                        "out_fps": source_fps_key,
+                        "upscale_factor": upscale_factor,
+                        "chunk_frames": chunk_frames,
+                        "multiplier": multiplier,
+                        "device": ip_dev,
+                        "crf": crf,
+                        "preset": preset,
+                        "on_chunk": _ip_chunk,
+                        "on_pair_frames": _ip_pair,
+                    }
+                    if ip_takes_segments:
+                        interp_kwargs["segment_ids"] = [segment_id]
+                    if _accepts_keyword(interp_poll_fn, "interp_backend"):
+                        interp_kwargs["interp_backend"] = interp_backend
+                    interp_result = interp_poll_fn(run_dir, **interp_kwargs)
+                    interp_seconds = time.monotonic() - interp_start
+                    scoped_done = int(getattr(interp_result, "chunks_done", 0) or 0)
+                    scoped_frames = int(getattr(interp_result, "frames_done", 0) or 0)
+                    scoped_skipped = int(getattr(interp_result, "frames_skipped", 0) or 0)
+                    scoped_waiting = int(getattr(interp_result, "chunks_waiting", 0) or 0)
+                    ip_done += scoped_done
+                    ip_waiting += scoped_waiting
                     if ip_tracker is not None:
-                        # Fractional pair advances accumulate until a
-                        # whole frame is earned (the bar counts ints).
-                        _carry[0] += frames
-                        whole = int(_carry[0])
-                        if whole > 0:
-                            _carry[0] -= whole
-                            ip_tracker.update(whole)
-
-                interp_result = interp_poll_fn(
-                    run_dir,
-                    weights_path=weights.film,
-                    weights_key=weights_key,
-                    out_width=out_width,
-                    out_height=out_height,
-                    out_fps=source_fps_key,
-                    upscale_factor=upscale_factor,
-                    chunk_frames=chunk_frames,
-                    multiplier=multiplier,
-                    device=ip_dev,
-                    crf=crf,
-                    preset=preset,
-                    on_chunk=_ip_chunk,
-                    on_pair_frames=_ip_pair,
-                )
-                interp_seconds = time.monotonic() - interp_start
-                ip_done = int(getattr(interp_result, "chunks_done", 0) or 0)
-                ip_frames_done = int(getattr(interp_result, "frames_done", 0) or 0)
-                ip_frames_skipped = int(getattr(interp_result, "frames_skipped", 0) or 0)
-                ip_frames_waiting = int(getattr(interp_result, "frames_waiting", 0) or 0)
-                if ip_tracker is not None:
-                    ip_total = ip_frames_done + ip_frames_skipped + ip_frames_waiting
-                    if ip_total > 0:
-                        ip_tracker.set_total(ip_total)
-                    if ip_frames_skipped > 0:
-                        ip_tracker.update(ip_frames_skipped)
-                    if ip_frames_done > 0 and interp_seconds > 0:
-                        ip_tracker.set_extra(
-                            f"{ip_frames_done / interp_seconds:.1f} frames/s "
-                            f"({expected_output} out frames)"
-                        )
-                    elif expected_output > 0:
-                        ip_tracker.set_extra(f"{expected_output} out frames")
-            if timings is not None:
-                timings["interp_poll_s"] = timings.get("interp_poll_s", 0.0) + interp_seconds
-                timings["interp_chunks_done"] = timings.get("interp_chunks_done", 0.0) + float(
-                    ip_done
-                )
-                timings["interp_frames_done"] = timings.get("interp_frames_done", 0.0) + float(
-                    ip_frames_done
-                )
-            if verbose and ip_per_segment and progress is not None:
-                for segment_id in sorted(ip_per_segment):
-                    progress.info(
-                        f"interp {segment_id}: chunks {_format_ranges(ip_per_segment[segment_id])}"
+                        scoped_total = scoped_frames + scoped_skipped + scoped_waiting
+                        if scoped_total > 0:
+                            ip_tracker.set_total(scoped_total)
+                        advanced = scoped_skipped + scoped_waiting
+                        if advanced > 0:
+                            ip_tracker.update(advanced)
+                        if scoped_frames > 0 and interp_seconds > 0:
+                            ip_tracker.set_extra(
+                                f"{scoped_frames / interp_seconds:.1f} frames/s "
+                                f"({expected_output} out frames)"
+                            )
+                        else:
+                            ip_tracker.set_extra(f"{expected_output} out frames")
+                if timings is not None:
+                    timings["interp_poll_s"] = timings.get("interp_poll_s", 0.0) + interp_seconds
+                    timings["interp_chunks_done"] = timings.get("interp_chunks_done", 0.0) + float(
+                        scoped_done
                     )
+                    timings["interp_frames_done"] = timings.get("interp_frames_done", 0.0) + float(
+                        scoped_frames
+                    )
+                if seam_early and multiplier > 1 and position > 0:
+                    previous = ordered_sources[position - 1]
+                    joint_done = maybe_render_seam_joint(
+                        run_dir,
+                        key_a=previous.source_key,
+                        key_b=source.source_key,
+                        weights_key=weights_key,
+                        out_width=out_width,
+                        out_height=out_height,
+                        out_fps=source_fps_key,
+                        upscale_factor=upscale_factor,
+                        multiplier=multiplier,
+                        crf=crf,
+                        preset=preset,
+                        weights_path=interp_weights,
+                        device=ip_dev,
+                        interp_fn=seam_interp_fn,
+                        interp_backend=interp_backend,
+                    )
+                    if joint_done and progress is not None:
+                        progress.info(f"seam {previous.segment_id}|{segment_id} rendered early")
+        if verbose and up_per_segment and progress is not None:
+            for segment_id in sorted(up_per_segment):
+                progress.info(
+                    f"upscale {segment_id}: chunks {_format_ranges(up_per_segment[segment_id])}"
+                )
+        if verbose and ip_per_segment and progress is not None:
+            for segment_id in sorted(ip_per_segment):
+                progress.info(
+                    f"interp {segment_id}: chunks {_format_ranges(ip_per_segment[segment_id])}"
+                )
+        if include_interp:
             if up_done == 0 and ip_done == 0:
-                waiting = int(getattr(interp_result, "chunks_waiting", 0) or 0)
-                if waiting > 0:
+                if ip_waiting > 0:
                     raise MediaError(
-                        f"augment polling stuck: {waiting} chunks "
-                        "waiting with no progress (rerun the pollers, then finalize again)"
+                        f"augment polling stuck: {ip_waiting} chunks waiting "
+                        "with no progress (rerun the pollers, then finalize again)"
                     )
                 return
         elif up_done == 0:
@@ -372,6 +469,7 @@ def run_durable_model_pass(
     preset: str = "veryfast",
     device: str = "cuda:1",
     work_dir: Path,
+    interp_backend: str = "rife",
     upscale_device: str | None = None,
     interp_device: str | None = None,
     upscale_poll_fn: Callable[..., Any] | None = None,
@@ -402,7 +500,7 @@ def run_durable_model_pass(
     (ledger hits resume without re-rendering). Keys are zero-initialized
     on entry so miners never KeyError, even when a later stage fails.
 
-    Seams (`seam_interp_fn`, defaulting to the resident FILM leg):
+    Seams (`seam_interp_fn`, defaulting to the resident interp leg):
     every adjacent usable pair gains its `multiplier - 1` mids between
     A's last and B's first interpolated frames, interleaved as
     [A, seam, B] in the final concat — no hard cuts, no dropped or
@@ -413,14 +511,14 @@ def run_durable_model_pass(
     `A[-2:]+B[:2]` are replaced by 4 FILM bridge frames morphed between
     anchors `A[-3]` and `B[+2]` (see `voyage.augment_morph`). Frame total
     is unchanged so audio needs no work; `seam_interp_fn` is never called
-    in this mode. `morph_interp_fn` defaults to the resident FILM leg.
+    in this mode.     `morph_interp_fn` defaults to the resident interp leg.
 
-    DESIGN §140 A/V stream: `upscale_device` (the 2060, cuda:1) runs the
-    upscale sweep while `interp_device` (the 4060, cuda:0) runs the interp
-    sweep plus the seam/morph FILM work — the interpolator picks up the
-    ledgered upscale chunks the 2060 published, and the two legs never
-    share a card. Both default to `device` (the legacy single-device
-    behavior).
+    Interleaved pass (DESIGN §140): the driver runs each segment's
+    upscale immediately followed by its interp on one card — the
+    caller pins both `upscale_device` and `interp_device` to the 2060
+    (cuda:1; RIFE fits beside the llama sidecar), and the drain below
+    inherits the interp card. Both default to `device` (the legacy
+    single-device behavior).
     """
     if not isinstance(morph_joints, bool):
         raise TypeError(f"morph_joints must be a bool (got {type(morph_joints).__name__})")
@@ -453,7 +551,7 @@ def run_durable_model_pass(
             "morphs_done",
         ):
             timings.setdefault(key, 0.0)
-    weights_key = weights_key_for(weights)
+    weights_key = weights_key_for(weights, interp_backend)
     # Integer fps key shared by the pollers and the plan derivation below:
     # the hash formats it via str(), so float 24.0 vs int 24 would fork
     # plan dirs — one normalization keeps all three on the same dir.
@@ -477,6 +575,9 @@ def run_durable_model_pass(
         progress=progress,
         upscale_device=upscale_device,
         interp_device=interp_device,
+        interp_backend=interp_backend,
+        seam_early=not morph_joints,
+        seam_interp_fn=seam_interp_fn,
     )
     return _drain_to_intermediate(
         run_dir,
@@ -493,6 +594,7 @@ def run_durable_model_pass(
         preset=preset,
         device=interp_device or device,
         work_dir=work_dir,
+        interp_backend=interp_backend,
         drain_fn=drain_fn,
         concat_fn=concat_fn,
         seam_interp_fn=seam_interp_fn,
@@ -519,6 +621,7 @@ def _drain_to_intermediate(
     preset: str,
     device: str,
     work_dir: Path,
+    interp_backend: str = "rife",
     drain_fn: Callable[..., Any] | None = None,
     concat_fn: Callable[[list[Path], Path], Path] | None = None,
     seam_interp_fn: Callable[..., Any] | None = None,
@@ -527,12 +630,12 @@ def _drain_to_intermediate(
     timings: dict[str, float] | None = None,
     progress: VoyageConsole | None = None,
 ) -> tuple[Path, int]:
-    """Drain ledgered interp chunks (+ seam/morph FILM joints) into one intermediate.
+    """Drain ledgered interp chunks (+ seam/morph interp joints) into one intermediate.
 
-    Shared by `run_durable_model_pass` and `run_interp_phase`: consumes
+    Shared entry for `run_durable_model_pass`: consumes
     only `usable` in order, interleaving `multiplier - 1` seam mids (or
     count-preserving morph-cuts when `morph_joints=True`) between
-    adjacent pairs. All FILM work here runs on `device` — the caller
+    adjacent pairs. All interp work here runs on `device` — the caller
     passes the 4060 interp device, never the 2060 upscale card.
     """
     if drain_fn is None:
@@ -605,9 +708,10 @@ def _drain_to_intermediate(
                     upscale_factor=upscale_factor,
                     crf=crf,
                     preset=preset,
-                    weights_path=weights.film,
+                    weights_path=_interp_weights_path(weights, interp_backend),
                     device=device,
                     interp_fn=seam_interp_fn,
+                    interp_backend=interp_backend,
                 )
                 if timings is not None:
                     timings["seam_s"] += time.monotonic() - seam_start
@@ -643,9 +747,10 @@ def _drain_to_intermediate(
                 preset=preset,
                 pix_fmt="yuv420p",
                 interp_fn=morph_interp_fn,
-                weights=weights.film,
+                weights=_interp_weights_path(weights, interp_backend),
                 device=device,
                 concat_fn=concat_fn,
+                interp_backend=interp_backend,
             )
         if timings is not None:
             timings["morph_s"] += time.monotonic() - morph_start
@@ -660,176 +765,3 @@ def _drain_to_intermediate(
     if not final.exists() or final.stat().st_size == 0:
         raise MediaError(f"durable model pass produced empty output {final}")
     return (final, round(source_fps * multiplier))
-
-
-def run_upscale_phase(
-    run_dir: Path,
-    *,
-    weights: Any,
-    out_width: int,
-    out_height: int,
-    source_fps: float,
-    upscale_factor: int = 2,
-    chunk_frames: int = 32,
-    crf: int = 15,
-    preset: str = "veryfast",
-    device: str = "cuda:1",
-    upscale_poll_fn: Callable[..., Any] | None = None,
-    timings: dict[str, float] | None = None,
-    progress: VoyageConsole | None = None,
-) -> None:
-    """Poll the upscale leg to completion, never interpolating (A/V stream Phase A).
-
-    DESIGN §140 finalize Phase A: runs on the 2060 (cuda:1) overlapping
-    the 4060 music takes, publishing `upscaled_NN` chunk dirs plus ledger
-    records the Phase C interp sweep picks up on the 4060. Interpolation
-    (including seam/morph FILM work) happens only in the finalize interp
-    phase — never here, never during generation. Fail-loud when the
-    realesrgan leg is absent (the caller keeps the legacy flow then).
-    """
-    run_dir = _require_run_dir(run_dir)
-    out_width = _require_box("out_width", out_width)
-    out_height = _require_box("out_height", out_height)
-    source_fps = _require_fps("source_fps", source_fps)
-    upscale_factor = _require_factor(upscale_factor)
-    chunk_frames = _require_count("chunk_frames", chunk_frames)
-    device = _require_text("device", device)
-    preset = _require_text("preset", preset)
-    if weights is None or getattr(weights, "realesrgan", None) is None:
-        raise MediaError("upscale phase needs the provisioned realesrgan leg (got none)")
-    weights_key = weights_key_for(weights)
-    from voyage.augment_interp_poller import DEFAULT_INTERP_MULTIPLIER
-
-    _poll_to_completion(
-        run_dir,
-        weights=weights,
-        weights_key=weights_key,
-        out_width=out_width,
-        out_height=out_height,
-        source_fps=source_fps,
-        upscale_factor=upscale_factor,
-        multiplier=DEFAULT_INTERP_MULTIPLIER,
-        chunk_frames=chunk_frames,
-        device=device,
-        crf=crf,
-        preset=preset,
-        upscale_poll_fn=upscale_poll_fn,
-        interp_poll_fn=None,
-        timings=timings,
-        progress=progress,
-        include_interp=False,
-    )
-
-
-def run_interp_phase(
-    run_dir: Path,
-    usable: list[Path],
-    *,
-    weights: Any,
-    out_width: int,
-    out_height: int,
-    source_fps: float,
-    upscale_factor: int = 2,
-    multiplier: int = 4,
-    chunk_frames: int = 32,
-    crf: int = 15,
-    preset: str = "veryfast",
-    device: str = "cuda:0",
-    work_dir: Path,
-    interp_poll_fn: Callable[..., Any] | None = None,
-    drain_fn: Callable[..., Any] | None = None,
-    concat_fn: Callable[[list[Path], Path], Path] | None = None,
-    seam_interp_fn: Callable[..., Any] | None = None,
-    morph_joints: bool = False,
-    morph_interp_fn: Callable[..., Any] | None = None,
-    timings: dict[str, float] | None = None,
-    progress: VoyageConsole | None = None,
-) -> tuple[Path, int]:
-    """Poll the interp leg + drain, never upscaling (A/V stream Phase C).
-
-    DESIGN §140 finalize Phase C: runs on the 4060 (cuda:0) after the
-    music takes and the SFX bed finished, picking up the Phase A upscale
-    ledger the 2060 published — the 2060 card is free by now, and the
-    two legs never share a card. Includes the seam/morph FILM joints
-    (they render here on `device`, never on the upscale card). Returns
-    the final intermediate + its fps (`round(source_fps * multiplier)`),
-    matching the `run_durable_model_pass` contract. Fail-loud when the
-    film leg is absent (the caller keeps the legacy flow then).
-    """
-    if not isinstance(morph_joints, bool):
-        raise TypeError(f"morph_joints must be a bool (got {type(morph_joints).__name__})")
-    run_dir = _require_run_dir(run_dir)
-    segments = _require_usable(usable)
-    out_width = _require_box("out_width", out_width)
-    out_height = _require_box("out_height", out_height)
-    source_fps = _require_fps("source_fps", source_fps)
-    upscale_factor = _require_factor(upscale_factor)
-    multiplier = _require_multiplier(multiplier)
-    chunk_frames = _require_count("chunk_frames", chunk_frames)
-    device = _require_text("device", device)
-    preset = _require_text("preset", preset)
-    if not isinstance(work_dir, Path):
-        raise TypeError(f"work_dir must be a Path (got {type(work_dir).__name__})")
-    if weights is None or getattr(weights, "film", None) is None:
-        raise MediaError("interp phase needs the provisioned film leg (got none)")
-    if timings is not None:
-        for key in (
-            "upscale_poll_s",
-            "interp_poll_s",
-            "drain_s",
-            "concat_s",
-            "upscale_chunks_done",
-            "interp_chunks_done",
-            "upscale_frames_done",
-            "interp_frames_done",
-            "chunks_drained",
-            "seam_s",
-            "seams_done",
-            "morph_s",
-            "morphs_done",
-        ):
-            timings.setdefault(key, 0.0)
-    weights_key = weights_key_for(weights)
-    source_fps_key = int(round(source_fps))
-    _poll_to_completion(
-        run_dir,
-        weights=weights,
-        weights_key=weights_key,
-        out_width=out_width,
-        out_height=out_height,
-        source_fps=source_fps,
-        upscale_factor=upscale_factor,
-        multiplier=multiplier,
-        chunk_frames=chunk_frames,
-        device=device,
-        crf=crf,
-        preset=preset,
-        interp_poll_fn=interp_poll_fn,
-        timings=timings,
-        progress=progress,
-        interp_device=device,
-        include_upscale=False,
-    )
-    return _drain_to_intermediate(
-        run_dir,
-        segments,
-        weights=weights,
-        weights_key=weights_key,
-        out_width=out_width,
-        out_height=out_height,
-        source_fps=source_fps,
-        source_fps_key=source_fps_key,
-        upscale_factor=upscale_factor,
-        multiplier=multiplier,
-        crf=crf,
-        preset=preset,
-        device=device,
-        work_dir=work_dir,
-        drain_fn=drain_fn,
-        concat_fn=concat_fn,
-        seam_interp_fn=seam_interp_fn,
-        morph_joints=morph_joints,
-        morph_interp_fn=morph_interp_fn,
-        timings=timings,
-        progress=progress,
-    )

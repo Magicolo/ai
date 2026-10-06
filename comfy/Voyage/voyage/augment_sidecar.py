@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from voyage.atomic import fsync_dir
-from voyage.hashing import sha256_text
+from voyage.hashing import sha256_file, sha256_text
 
 AUGMENT_DIRNAME = "augment"
 """Run-relative dir holding one subdir per finalize plan hash."""
@@ -310,4 +310,193 @@ def prune_stale_partials(target: Path) -> int:
                     else:
                         partial.unlink()
                     pruned += 1
+    return pruned
+
+
+def _interp_sha_from_weights_key(weights_key: object) -> str | None:
+    """Interp-leg sha from a ledger weights_key (both wild shapes; else None).
+
+    Legacy records carry `sha(interp)|sha(esrgan)`; newer records carry a
+    `backend|` prefix (`film|sha|sha` / `rife|sha|sha`). Anything else is
+    unknown provenance and must never drive deletion.
+    """
+    if not isinstance(weights_key, str):
+        return None
+    parts = weights_key.split("|")
+    if len(parts) == 2 and all(parts):
+        return parts[0]
+    if len(parts) == 3 and parts[0] in ("film", "rife") and all(parts):
+        return parts[1]
+    return None
+
+
+def _esrgan_sha_from_weights_key(weights_key: object) -> str | None:
+    """Esrgan-leg sha from a ledger weights_key (both wild shapes; else None).
+
+    Legacy records carry `sha(interp)|sha(esrgan)`; newer records carry a
+    `backend|` prefix (`film|sha|sha` / `rife|sha|sha`). Anything else is
+    unknown provenance and must never drive adoption.
+    """
+    if not isinstance(weights_key, str):
+        return None
+    parts = weights_key.split("|")
+    if len(parts) == 2 and all(parts):
+        return parts[1]
+    if len(parts) == 3 and parts[0] in ("film", "rife") and all(parts):
+        return parts[2]
+    return None
+
+
+def find_upscaled_donor(
+    run_dir: Path,
+    *,
+    exclude_dir: Path,
+    source_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    chunk_frames: int,
+    chunk_index: int,
+    start_frame: int,
+    source_frames: int,
+    esrgan_sha: str,
+) -> dict[str, Any] | None:
+    """First adoptable upscaled record from another plan dir, else None.
+
+    A donor is an `upscaled`-stage record in a DIFFERENT plan dir whose
+    window tuple + source + geometry + recipe match this chunk and whose
+    record weights_key carries the same esrgan sha (backend switches
+    change only the interp leg, so cross-backend upscaled PNGs are
+    reusable). Donor outputs must be complete on disk. Records with
+    unparseable keys skip silently (never adopt unknown provenance).
+    """
+    if not isinstance(run_dir, Path):
+        raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
+    if not esrgan_sha:
+        return None
+    try:
+        candidates = sorted((run_dir / AUGMENT_DIRNAME).iterdir())
+    except OSError:
+        return None
+    for candidate in candidates:
+        if candidate == exclude_dir:
+            continue
+        try:
+            records = load_chunk_ledger(candidate / CHUNKS_LEDGER_FILENAME)
+        except OSError:
+            continue
+        for record in records:
+            if record.get("stage") != STAGE_UPSCALED:
+                continue
+            if record.get("chunk_index") != chunk_index:
+                continue
+            if record.get("start_frame") != start_frame:
+                continue
+            if record.get("source_frames") != source_frames:
+                continue
+            if record.get("chunk_frames", chunk_frames) != chunk_frames:
+                continue
+            if record.get("source_key") != source_key:
+                continue
+            if record.get("out_width") != out_width:
+                continue
+            if record.get("out_height") != out_height:
+                continue
+            if record.get("out_fps") != out_fps:
+                continue
+            if record.get("upscale_factor") != upscale_factor:
+                continue
+            if record.get("expected_frames") != source_frames:
+                continue
+            if _esrgan_sha_from_weights_key(record.get("weights_key")) != esrgan_sha:
+                continue
+            rel = record.get("path")
+            if not isinstance(rel, str) or not rel:
+                continue
+            if rel.startswith("/") or ".." in rel.split("/"):
+                continue
+            if not chunk_output_complete(run_dir / rel, source_frames):
+                continue
+            return record
+    return None
+
+
+def prune_stale_interp_plans(
+    run_dir: Path, *, interp_backend: str, weights: Any, whole_dir: bool = False
+) -> int:
+    """Prune stale interp outputs from known-other-backend plan dirs.
+
+    Selector: the dir holds at least one `interpolated`-stage
+    ledger record and every interpolated record keys to the
+    non-active backend's current weights-file sha
+    (`_interp_sha_from_weights_key` handles both wild shapes;
+    unparseable or unknown shas never match). Upscale-only dirs
+    never match (upscale pixels are backend-independent), and
+    dirs with current-backend records never match either.
+
+    Two modes: with `whole_dir=False` (default) only the
+    `interpolated_*` output subdirs are deleted (the ledger,
+    the upscaled pixels and the dir itself stay — the dir
+    remains a valid upscale donor for cross-key adoption and
+    the interp leg re-renders into it); with `whole_dir=True`
+    the whole plan dir goes. Use False at finalize start
+    (frees the bulk under disk pressure while keeping donors)
+    and True pre-publish once every poll and drain on every
+    path has finished.
+
+    Skips silently (returns 0) when the non-active leg file is
+    missing or unreadable — never deletes blind. Best-effort
+    per dir, mirroring `prune_stale_partials`.
+    """
+    if not isinstance(run_dir, Path):
+        raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
+    if interp_backend not in ("film", "rife"):
+        raise ValueError(f"interp_backend must be 'film' or 'rife' (got {interp_backend!r})")
+    if not isinstance(whole_dir, bool):
+        raise TypeError(f"whole_dir must be a bool (got {type(whole_dir).__name__})")
+    other = "film" if interp_backend == "rife" else "rife"
+    leg_path = getattr(weights, other, None)
+    try:
+        other_sha: str | None = sha256_file(leg_path) if leg_path is not None else None
+    except (AttributeError, OSError, TypeError, ValueError):
+        other_sha = None
+    if not other_sha:
+        return 0
+    pruned = 0
+    try:
+        candidates = sorted((run_dir / AUGMENT_DIRNAME).iterdir())
+    except OSError:
+        return 0
+    for plan_dir in candidates:
+        if not plan_dir.is_dir() or plan_dir.is_symlink():
+            continue
+        records = load_chunk_ledger(plan_dir / CHUNKS_LEDGER_FILENAME)
+        shas = [
+            _interp_sha_from_weights_key(record.get("weights_key"))
+            for record in records
+            if record.get("stage") == STAGE_INTERPOLATED
+        ]
+        if not shas or any(sha is None or sha != other_sha for sha in shas):
+            continue
+        if whole_dir:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(plan_dir)
+                pruned += 1
+        else:
+            # Free the bulk now, keep the dir: the ledger stays (so the
+            # dir remains a valid upscale donor for cross-key adoption)
+            # and the upscaled pixels stay (backend-independent).
+            removed_any = False
+            for child in sorted(plan_dir.iterdir()):
+                if (
+                    child.is_dir()
+                    and not child.is_symlink()
+                    and child.name.startswith(f"{STAGE_INTERPOLATED}_")
+                ):
+                    with contextlib.suppress(OSError):
+                        shutil.rmtree(child)
+                        removed_any = True
+            if removed_any:
+                pruned += 1
     return pruned

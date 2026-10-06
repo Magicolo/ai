@@ -423,20 +423,21 @@ def interp_pass_devices(
     *,
     devices: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Devices for the finalize interp leg: cuda:0 whenever it shows.
+    """Devices for the finalize interp leg: cuda:1 alone when two GPUs show.
 
-    DESIGN §140 A/V stream: FILM interpolation joins the sequential 4060
-    (cuda:0) stream after the music takes and the SFX bed, picking up the
-    ledgered upscale chunks the 2060 published. At upscaled geometry FILM
-    needs ~5.9 GiB alone, so sharing the 6 GB 2060 with the upscale leg
-    is structurally unsafe — the 16 GB 4060 is the only 2-GPU home for
-    it. One visible GPU keeps the `augment_devices` selection untouched
-    (cuda:0, or empty). The `devices` seam takes an explicit visibility
-    tuple so tests pin the branch without a GPU.
+    DESIGN §140 RIFE era: RIFE interpolation joins the 2060 (cuda:1) stream
+    after the upscale leg, picking up the ledgered upscale chunks the same
+    card published. At the 2048x1152 working size RIFE peaks at ~0.65 GiB,
+    so it shares the 6 GB card with the resident llama director sidecar
+    (~3.2 GiB) and the staggered SRVGG pass. (The FILM era needed ~5.9 GiB
+    alone, which is why this used to pin the 16 GB primary card.) One
+    visible GPU keeps the `augment_devices` selection untouched (cuda:0,
+    or empty). The `devices` seam takes an explicit visibility tuple so
+    tests pin the branch without a GPU.
     """
     visible = augment_devices() if devices is None else devices
-    if AUGMENT_DEVICE_PRIMARY in visible:
-        return (AUGMENT_DEVICE_PRIMARY,)
+    if len(visible) >= MAX_PARALLEL_DEVICES:
+        return (AUGMENT_DEVICE_SECONDARY,)
     return visible
 
 
@@ -469,15 +470,41 @@ class AugmentWeights:
     """Resolved model-pass weight paths for one finalize (issue 166).
 
     DESIGN §§56-57: the production seam between the registry (pinned
-    FILM + Real-ESRGAN weights) and the torch loaders in
+    RIFE/FILM + Real-ESRGAN weights) and the torch loaders in
     `voyage.workers.augment_worker`. Each leg is a loader-ready path or
     `None` when the weights are absent — the caller keeps the ffmpeg
     fallback then (default-off unless provisioned), so a missing stack
-    reads as "skip the model pass", never as an error.
+    reads as "skip the model pass", never as an error. The interp leg
+    is selected per backend via `interp_leg` (`film` = legacy FILM,
+    `rife` = default RIFE v4.25).
     """
 
     film: Path | None
     realesrgan: Path | None
+    rife: Path | None = None
+
+    def interp_leg(self, backend: str) -> Path | None:
+        """Return the active interp-leg path for `backend` (torch-free)."""
+        from voyage.workers import augment_worker
+
+        augment_worker.validate_interp_backend(backend)
+        return self.film if backend == "film" else self.rife
+
+
+def interp_leg_path(weights: AugmentWeights, backend: str = "rife") -> Path | None:
+    """Return the active interp-leg path, tolerating legacy fakes (torch-free).
+
+    Production `AugmentWeights` carry `interp_leg`; older test fakes expose
+    only `film`/`realesrgan` — those read as film-backend weights so existing
+    single-backend tests keep passing unmodified.
+    """
+    getter = getattr(weights, "interp_leg", None)
+    if callable(getter):
+        leg = getter(backend)
+        if leg is None or isinstance(leg, Path):
+            return leg
+        raise TypeError(f"interp_leg() must return a Path or None (got {type(leg).__name__})")
+    return weights.film
 
 
 def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
@@ -507,6 +534,7 @@ def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
         REALESRGAN_ANIME_MIN_BYTES,
         REALESRGAN_SUBDIR,
     )
+    from voyage.registry_rife import RIFE_MIN_BYTES, RIFE_REPO_PATH
 
     def _present(relative: str, floor_bytes: int) -> Path | None:
         candidate = base / relative
@@ -522,6 +550,7 @@ def resolve_augment_weights(models_dir: Path | str) -> AugmentWeights:
         realesrgan=_present(
             f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}", REALESRGAN_ANIME_MIN_BYTES
         ),
+        rife=_present(RIFE_REPO_PATH, RIFE_MIN_BYTES),
     )
 
 
@@ -541,7 +570,7 @@ def _require_upscale_factor(upscale_factor: int) -> int:
 
 
 def _require_interp_multiplier(multiplier: int) -> int:
-    """Validate the FILM interpolation multiplier: ints only, at least 1 (1 = no mids)."""
+    """Validate the interpolation multiplier: ints only, at least 1 (1 = no mids)."""
     if isinstance(multiplier, bool) or not isinstance(multiplier, int):
         raise TypeError(f"multiplier must be an int (got {type(multiplier).__name__})")
     if multiplier < 1:
@@ -556,6 +585,7 @@ def enhance_frames(
     device: str,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    interp_backend: str = "rife",
 ) -> list[Any]:
     """Upscale then interpolate one chunk's frames via the provisioned legs (issue 166).
 
@@ -565,11 +595,13 @@ def enhance_frames(
     interpolate > 1); with no provisioned leg it returns the input frames
     unchanged without importing torch. Each non-None leg runs on `device`
     device — the cuda:0/cuda:1 SFX pairing): Real-ESRGAN upscales first (the
-    2x video-export recipe), then FILM interpolates `(multiplier - 1)` mids
-    per adjacent pair at evenly spaced moments (`multiplier=4` gives
-    0.25/0.5/0.75, matching `(n-1)*m+1`). Chunks whose device reports under
-    8 GiB free reverse the legs (interp at 1x first — FILM at the upscaled
-    size would OOM small GPUs; DESIGN §140 GPU defaults). Absent legs skip
+    2x video-export recipe), then the `interp_backend` engine interpolates
+    `(multiplier - 1)` mids per adjacent pair at evenly spaced moments
+    (`multiplier=4` gives 0.25/0.5/0.75, matching `(n-1)*m+1`). On the
+    `film` backend, chunks whose device reports under 8 GiB free reverse
+    the legs (interp at 1x first — FILM at the upscaled size would OOM
+    small GPUs; DESIGN §140 GPU defaults); the `rife` backend never
+    reverses (0.65 GiB peak at 2048x1152 fits everywhere). Absent legs skip
     (same frames out), so a half-provisioned stack still runs the
     available leg.
     """
@@ -581,12 +613,14 @@ def enhance_frames(
     interp_factor = _require_interp_multiplier(multiplier)
     if not isinstance(frames, list) or not frames:
         raise ValueError(f"enhance_frames needs at least one frame (got {frames!r})")
-    if weights.film is None and weights.realesrgan is None:
-        return list(frames)
     from voyage.workers import augment_worker
 
+    augment_worker.validate_interp_backend(interp_backend)
+    interp_weights = weights.interp_leg(interp_backend)
+    if interp_weights is None and weights.realesrgan is None:
+        return list(frames)
+
     esrgan_weights = weights.realesrgan
-    film_weights = weights.film
 
     def _run_upscale(source: list[Any]) -> list[Any]:
         if esrgan_weights is None:
@@ -596,10 +630,17 @@ def enhance_frames(
         )
 
     def _run_interp(source: list[Any]) -> list[Any]:
-        if film_weights is None or len(source) <= 1 or interp_factor <= 1:
+        if interp_weights is None or len(source) <= 1 or interp_factor <= 1:
             return source
         moments = [(position + 1) / interp_factor for position in range(interp_factor - 1)]
-        mids = augment_worker.interpolate_mids(source, film_weights, moments=moments, device=device)
+        if interp_backend == "film":
+            mids = augment_worker.interpolate_mids(
+                source, interp_weights, moments=moments, device=device
+            )
+        else:
+            mids = augment_worker.interpolate_rife_mids(
+                source, interp_weights, moments=moments, device=device
+            )
         blended: list[Any] = []
         step = len(moments)
         for position in range(len(source) - 1):
@@ -611,16 +652,20 @@ def enhance_frames(
     working: list[Any] = list(frames)
     both_legs = (
         esrgan_weights is not None
-        and film_weights is not None
+        and interp_weights is not None
         and len(working) > 1
         and interp_factor > 1
     )
-    if both_legs and augment_worker.interp_first_for_small_device(device):
-        # Small GPU (DESIGN §140 GPU defaults): FILM pairs at the upscaled
-        # size would OOM (measured ~5.9 GiB at 2432x1408 on the 6 GB 2060),
-        # so chunks interpolate at 1x first and upscale after (the
-        # established interp-then-upscale pipeline; the tiled upscale leg
-        # keeps every frame servable).
+    if (
+        both_legs
+        and interp_backend == "film"
+        and augment_worker.interp_first_for_small_device(device)
+    ):
+        # Small GPU on the FILM backend (DESIGN §140 GPU defaults): FILM
+        # pairs at the upscaled size would OOM (measured ~5.9 GiB at
+        # 2432x1408 on the 6 GB 2060), so chunks interpolate at 1x first
+        # and upscale after (the established interp-then-upscale pipeline;
+        # the tiled upscale leg keeps every frame servable).
         working = _run_upscale(_run_interp(working))
     else:
         working = _run_interp(_run_upscale(working))
@@ -633,6 +678,7 @@ def make_enhance_chunk_worker(
     *,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    interp_backend: str = "rife",
 ) -> Callable[[AugmentChunk, str], list[Any]]:
     """Build the `run_augment_chunks` worker that enhances one chunk's frames.
 
@@ -667,6 +713,7 @@ def make_enhance_chunk_worker(
             device=chunk.device,
             upscale_factor=target_scale,
             multiplier=interp_factor,
+            interp_backend=interp_backend,
         )
 
     return _worker
@@ -679,6 +726,7 @@ def run_model_augment_chunks(
     *,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    interp_backend: str = "rife",
 ) -> list[list[Any]]:
     """Run chunk enhancement through `run_augment_chunks`, preserving chunk order.
 
@@ -699,6 +747,7 @@ def run_model_augment_chunks(
         weights,
         upscale_factor=target_scale,
         multiplier=interp_factor,
+        interp_backend=interp_backend,
     )
     return run_augment_chunks(chunks, worker)
 
@@ -714,7 +763,9 @@ def model_pass_active(weights: AugmentWeights) -> bool:
     """
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
-    return bool(weights.film is not None or weights.realesrgan is not None)
+    film_present = weights.film is not None
+    rife_present = getattr(weights, "rife", None) is not None
+    return bool(film_present or rife_present or weights.realesrgan is not None)
 
 
 def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
@@ -837,6 +888,7 @@ def run_finalize_model_pass(
     source_fps: float,
     upscale_factor: int = DEFAULT_UPSCALE_FACTOR,
     multiplier: int = DEFAULT_INTERP_MULTIPLIER,
+    interp_backend: str = "rife",
     crf: int = CHUNK_CRF_DEFAULT,
     preset: str = CHUNK_PRESET_DEFAULT,
     work_dir: Path,
@@ -848,12 +900,12 @@ def run_finalize_model_pass(
     DESIGN §§56-57: the present-legs tensor path `finalize_run` selects via
     `model_pass_active` — decode (ffmpeg, per segment in order) to PNGs,
     tensors via the load bridge, `run_model_augment_chunks` (upscale via
-    SRVGG + FILM mids on each chunk's device, OOM-halving preserved,
-    VRAM-flat via `chunk_frames` windows), PNGs via the write bridge,
-    `ffmpeg_encode_chunk` per chunk at `round(source_fps * multiplier)`,
+    SRVGG + configured-backend mids on each chunk's device, OOM-halving
+    preserved, VRAM-flat via `chunk_frames` windows), PNGs via the write
+    bridge, `ffmpeg_encode_chunk` per chunk at `round(source_fps * multiplier)`,
     concat-demuxer stream copy to one intermediate. Returns the intermediate
     video + its fps; the caller applies the presentation vf
-    (scale/pad/fps, no minterpolate — FILM already interpolated) so the
+    (scale/pad/fps, no minterpolate — the backend already interpolated) so the
     shipped box still matches `plan_augmentation` exactly. Callers without
     work or legs never reach here (they keep the single vf encode).
     """
@@ -866,7 +918,11 @@ def run_finalize_model_pass(
             raise MediaError(f"segment video missing: {segment_video}")
     if not isinstance(weights, AugmentWeights):
         raise TypeError(f"weights must be AugmentWeights (got {type(weights).__name__})")
-    if weights.film is None and weights.realesrgan is None:
+    if (
+        weights.film is None
+        and getattr(weights, "rife", None) is None
+        and weights.realesrgan is None
+    ):
         raise MediaError("model pass needs at least one provisioned leg (got none)")
     rate = _require_fps("source_fps", source_fps)
     if rate is None or rate <= 0.0:
@@ -928,6 +984,7 @@ def run_finalize_model_pass(
         source_by_chunk,
         upscale_factor=target_scale,
         multiplier=interp_factor,
+        interp_backend=interp_backend,
     )
     chunk_videos: list[Path] = []
     for chunk, enhanced in zip(plan, enhanced_by_chunk, strict=True):

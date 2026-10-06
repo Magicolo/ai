@@ -25,6 +25,7 @@ from voyage import paths
 from voyage.atomic import atomic_copy
 from voyage.augment import CRF_MAXIMUM as _AUGMENT_CRF_MAXIMUM
 from voyage.augment import CRF_MINIMUM as _AUGMENT_CRF_MINIMUM
+from voyage.augment import interp_leg_path as _interp_leg_path
 from voyage.augment import interpolated_frame_count as interpolated_frame_count
 from voyage.console import ParallelFinalizeDisplay, optional_stage
 from voyage.errors import MediaError, StateError
@@ -526,6 +527,13 @@ class FinalizeOptions:
     shipped frame rate instead of the interpolate rule — 24fps x2 content
     presented at 32fps stretches the timeline 1.5x (slow motion).
     `None` (default) keeps the interpolate behavior.
+
+    Interpolation backend (`interp_backend`): which frame-interpolation
+    engine renders the interp leg — `"rife"` (default: RIFE v4.25 IFNet,
+    ~16.8x faster per pair at 2048x1152, eyeball-identical on line art)
+    or `"film"` (full FILM port for hero/archival renders). The backend
+    rides the sidecar weights key, so switching re-renders the interp
+    leg by design.
     """
 
     skip_bad: bool = False
@@ -536,6 +544,7 @@ class FinalizeOptions:
     joint_style: JointStyle = "blend"
     upscale: int = 1
     interpolate: int = 1
+    interp_backend: str = "rife"
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
     presentation_fps: int | None = None
@@ -553,6 +562,14 @@ class FinalizeOptions:
             raise ValueError(f"upscale must be 1, 2, or 4 (got {self.upscale!r})")
         if self.interpolate < 1:
             raise ValueError(f"interpolate must be >= 1 (got {self.interpolate!r})")
+        # Literal check, not the worker validator: `media` must not import
+        # the torch-coupled worker module at scope (supervisor GPU ban), so
+        # the canonical `INTERP_BACKENDS` in `workers.augment_worker` is
+        # mirrored here and pinned by `tests/test_media_augment_unified_083.py`.
+        if self.interp_backend not in ("film", "rife"):
+            raise ValueError(
+                f"interp_backend must be 'film' or 'rife' (got {self.interp_backend!r})"
+            )
         if self.presentation_fps is not None and self.presentation_fps < 1:
             raise ValueError(f"presentation_fps must be >= 1 (got {self.presentation_fps!r})")
         validate_crf(self.crf)
@@ -605,6 +622,7 @@ class ResolvedFinalizeSettings:
     settings: FinalizeOptions
     upscale: int
     interpolate: int
+    interp_backend: str
     crf: int
     preset: str
     presentation_fps: int | None
@@ -620,6 +638,7 @@ def resolve_finalize_settings(
     overlap_cap_seconds: float | None = None,
     upscale: int | None,
     interpolate: int | None,
+    interp_backend: str | None = None,
     crf: int | None,
     preset: str | None,
     presentation_fps: int | None = None,
@@ -645,6 +664,7 @@ def resolve_finalize_settings(
             joint_style="hard-splice" if effective_overlap <= 0 else "blend",
             upscale=1 if upscale is None else upscale,
             interpolate=1 if interpolate is None else interpolate,
+            interp_backend="rife" if interp_backend is None else interp_backend,
             crf=FINALIZE_CRF_DEFAULT if crf is None else crf,
             preset=FINALIZE_PRESET_DEFAULT if preset is None else preset,
             presentation_fps=presentation_fps,
@@ -665,12 +685,15 @@ def resolve_finalize_settings(
             settings = replace(settings, upscale=upscale)
         if interpolate is not None:
             settings = replace(settings, interpolate=interpolate)
+        if interp_backend is not None:
+            settings = replace(settings, interp_backend=interp_backend)
         if presentation_fps is not None:
             settings = replace(settings, presentation_fps=presentation_fps)
     return ResolvedFinalizeSettings(
         settings=settings,
         upscale=upscale if upscale is not None else settings.upscale,
         interpolate=interpolate if interpolate is not None else settings.interpolate,
+        interp_backend=interp_backend if interp_backend is not None else settings.interp_backend,
         crf=validate_crf(crf if crf is not None else settings.crf),
         preset=validate_preset(preset if preset is not None else settings.preset),
         presentation_fps=(
@@ -838,6 +861,7 @@ def finalize_run(
     crf: int | None = None,
     preset: str | None = None,
     presentation_fps: int | None = None,
+    interp_backend: str | None = None,
     models_dir: Path | str | None = None,
     options: FinalizeOptions | None = None,
     seed: int = 0,
@@ -921,10 +945,11 @@ def finalize_run(
     1/1 sources skip it for the stream-copy fast path. Absent legs (or no
     `models_dir`) with demanded work fall back to the ffmpeg vf path
     (scale/minterpolate), never an error. Both legs provisioned splits
-    the pass into Phase A (upscale-only on cuda:1, overlapping the
-    deferred music takes on cuda:0) and Phase C (SFX bed, then FILM
-    interp on cuda:0, then publish) — the 4060 runs music -> SFX ->
-    interp sequentially and the 2060 never shares a card.
+    the pass into two streams (DESIGN section 59): Thread-A runs the
+    2060 model legs sequential (upscale then interp, one "model pass"
+    bar) while Thread-B renders ACE takes then the SFX bed sequential
+    on the 4060 — join, then mix, then publish. The 1-GPU and legacy
+    paths stay sequential as before.
 
     `no_music` (generate-only `--no-music`): skips the deferred ACE takes
     render and the ledger mix entirely — finalize ships silent AAC sized
@@ -943,6 +968,7 @@ def finalize_run(
         crf=crf,
         preset=preset,
         presentation_fps=presentation_fps,
+        interp_backend=interp_backend,
     )
     settings = resolved.settings
     effective_upscale = resolved.upscale
@@ -950,6 +976,7 @@ def finalize_run(
     effective_crf = resolved.crf
     effective_preset = resolved.preset
     effective_presentation_fps = resolved.presentation_fps
+    effective_interp_backend = resolved.interp_backend
     resolved_weights = None
     model_selected = False
     if (effective_upscale > 1 or effective_interpolate > 1) and models_dir is not None:
@@ -959,6 +986,30 @@ def finalize_run(
         # fall back to the ffmpeg paths (same vf encode).
         resolved_weights = resolve_augment_weights(models_dir)
         model_selected = model_pass_active(resolved_weights)
+        # Backend-switch pruning: a changed interpolation backend orphans
+        # whole sidecar plan dirs (the plan hash covers the interp-leg
+        # sha), so drop other-backend interp outputs now — finalize is
+        # the run's single writer — before the model pass re-renders
+        # them. Only when this run renders interp itself
+        # (effective_interpolate > 1 with legs present): otherwise there
+        # is nothing that would replace pruned outputs. Conservative by
+        # construction: dirs with current-backend, unknown-sha, or
+        # upscale-only records are kept, and an unresolvable other leg
+        # prunes nothing.
+        if model_selected and effective_interpolate > 1:
+            from voyage.augment_sidecar import prune_stale_interp_plans
+
+            pruned_stale_plans = prune_stale_interp_plans(
+                run_dir,
+                interp_backend=effective_interp_backend,
+                weights=resolved_weights,
+                whole_dir=False,
+            )
+            if pruned_stale_plans and progress is not None:
+                progress.info(
+                    f"pruned stale interp outputs in {pruned_stale_plans} plan dir(s) "
+                    "from the previous interpolation backend"
+                )
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
     # §56 steps 4-6 per segment, before any encoding work. skip_bad is
@@ -1159,52 +1210,36 @@ def finalize_run(
         music_rendered = False
         branch_progress: VoyageConsole | None = progress
         music_branch_progress: VoyageConsole | None = progress
+        thread_music_digest: str | None = None
 
-        # DESIGN §140 A/V stream: both legs provisioned splits the model
-        # pass into Phase A (upscale-only on the 2060, overlapping the
-        # music takes on the 4060) and Phase C (FILM interp on the 4060
-        # after the SFX bed, picking up the Phase A upscale ledger).
+        # DESIGN §140 A/V stream: both legs provisioned runs two
+        # parallel streams — Thread-A one interleaved upscale→interp
+        # pass on the 2060 (RIFE fits the llama-share budget) and
+        # Thread-B deferred music then the SFX bed on the 4060.
         # Partial legs keep the legacy all-or-nothing flow (unchanged).
         both_legs = (
             resolved_weights is not None
-            and resolved_weights.film is not None
+            and _interp_leg_path(resolved_weights, effective_interp_backend) is not None
             and resolved_weights.realesrgan is not None
         )
         phased = bool(tensor_path and both_legs and upscale_devices and interp_devices)
 
-        def _do_upscale_phase() -> None:
-            if not phased or resolved_weights is None or not upscale_devices:
-                return
-            # Phase A (2060, cuda:1): upscale sweep only — publishes
-            # `upscaled_NN` chunk dirs + ledger records, never
-            # interpolating (interp + seam/morph FILM work is Phase C).
-            from voyage.augment_finalize import run_upscale_phase
-
-            run_upscale_phase(
-                run_dir,
-                weights=resolved_weights,
-                out_width=out_w,
-                out_height=out_h,
-                source_fps=source_fps,
-                upscale_factor=effective_upscale,
-                crf=effective_crf,
-                preset=effective_preset,
-                device=upscale_devices[0],
-                timings=model_pass_timings,
-                progress=branch_progress,
-            )
-
-        def _do_interp_phase() -> None:
+        def _do_interleaved_model_pass() -> None:
             nonlocal tensor_intermediate
-            if not phased or resolved_weights is None or not interp_devices:
+            if not phased or resolved_weights is None or not upscale_devices or not interp_devices:
                 return
-            # Phase C (4060, cuda:0): the SFX bed finished, so FILM owns
-            # the card alone — interp sweep over the Phase A ledger, then
-            # drain (+ seam/morph joints, same device) to one intermediate.
-            from voyage.augment_finalize import run_interp_phase
+            # Thread-A (2060, fork) or sequential: one interleaved pass —
+            # each segment's upscale immediately followed by its interp
+            # on the same card (RIFE's 0.65 GiB peak fits beside the
+            # llama sidecar), seams attempted early per boundary, then
+            # drain (+ seam/morph joints) to one intermediate. Both legs
+            # pin cuda:1; the drain inherits the interp card. Report on
+            # the shared "model pass" branch view (sequential bars, one
+            # Live).
+            from voyage.augment_finalize import run_durable_model_pass
 
             model_work = tmpdir / "model_pass"
-            tensor_intermediate, _ = run_interp_phase(
+            tensor_intermediate, _ = run_durable_model_pass(
                 run_dir,
                 usable,
                 weights=resolved_weights,
@@ -1213,14 +1248,15 @@ def finalize_run(
                 source_fps=source_fps,
                 upscale_factor=effective_upscale,
                 multiplier=effective_interpolate,
+                interp_backend=effective_interp_backend,
                 crf=effective_crf,
                 preset=effective_preset,
                 device=interp_devices[0],
+                upscale_device=upscale_devices[0],
+                interp_device=interp_devices[0],
                 work_dir=model_work,
                 timings=model_pass_timings,
-                # The Phase A fork display closed at the join — Phase C
-                # reports on the main progress (sequential bars, one Live).
-                progress=progress,
+                progress=branch_progress,
             )
             if tensor_intermediate is not None:
                 final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
@@ -1234,7 +1270,10 @@ def finalize_run(
             # change the branch outcome.
             if tensor_path and resolved_weights is not None and tensor_devices:
                 model_work = tmpdir / "model_pass"
-                if resolved_weights.film is not None and resolved_weights.realesrgan is not None:
+                if (
+                    _interp_leg_path(resolved_weights, effective_interp_backend) is not None
+                    and resolved_weights.realesrgan is not None
+                ):
                     # Durable sidecar path (independent workers): poll the
                     # upscale + interp workers to completion under
                     # run_dir/augment/<plan-hash>/, drain one intermediate
@@ -1254,6 +1293,7 @@ def finalize_run(
                         weights=resolved_weights,
                         upscale_factor=effective_upscale,
                         multiplier=effective_interpolate,
+                        interp_backend=effective_interp_backend,
                         crf=effective_crf,
                         preset=effective_preset,
                         device=tensor_devices[0],
@@ -1263,7 +1303,7 @@ def finalize_run(
                     )
                 else:
                     # Partial legs keep the legacy all-or-nothing tmpdir
-                    # flow (unchanged behavior for film-only/ESRGAN-only).
+                    # flow (unchanged behavior for interp-only/ESRGAN-only).
                     from voyage.augment import run_finalize_model_pass
 
                     tensor_intermediate, _ = run_finalize_model_pass(
@@ -1272,6 +1312,7 @@ def finalize_run(
                         source_fps=source_fps,
                         upscale_factor=effective_upscale,
                         multiplier=effective_interpolate,
+                        interp_backend=effective_interp_backend,
                         crf=effective_crf,
                         preset=effective_preset,
                         work_dir=model_work,
@@ -1282,12 +1323,15 @@ def finalize_run(
 
         def _do_music_takes() -> None:
             # Always-deferred music (DESIGN §140): segments commit video
-            # only, so the takes render here — overlapping the upscale
-            # Phase A on two cards (upscale on cuda:1, music on cuda:0)
-            # or after it on one — and BEFORE the mix below. With
-            # `no_music` this is a no-op (silent AAC ships instead).
-            nonlocal music_rendered
+            # only, so the takes render here — overlapping Thread-A's
+            # 2060 model legs on two cards (upscale then interp, music on
+            # cuda:0) or after them on one — and BEFORE the mix below.
+            # The thread digest lets the mix and the SFX bed share one
+            # fingerprint. With `no_music` this is a no-op (silent AAC
+            # ships instead).
+            nonlocal music_rendered, thread_music_digest
             if no_music:
+                thread_music_digest = "silent"
                 return
             music_start = time.monotonic()
             music_rendered = ensure_deferred_for_finalize(
@@ -1308,8 +1352,125 @@ def finalize_run(
                 channels=music_channels,
                 progress=music_branch_progress,
             )
+            from voyage.final_mix_cache import music_fingerprint
+
+            thread_music_digest = music_fingerprint(
+                run_dir,
+                usable,
+                sample_rate=settings.sample_rate,
+                channels=settings.channels,
+                overlap_fraction=settings.effective_overlap_fraction(),
+                overlap_cap_seconds=settings.overlap_cap_seconds,
+                audio_stretch=audio_stretch,
+                audio_fps=float(audio_fps),
+            )
             if music_rendered:
                 final_stages["music takes"] = time.monotonic() - music_start
+
+        # Audio fps for the stretched timeline (pure function of the probed
+        # source fps and the presentation rate — hoisted pre-fork so the
+        # finalize threads and the mix below share one value).
+        audio_fps = int(source_fps) if source_fps > 0 else out_fps
+        # Snapshot the SFX request pre-fork so Thread-B (music→bed) sees
+        # the same value the post-mix setup assigns (identical — kept in
+        # setup as a harmless duplicate for the sequential path).
+        sfx_request_snapshot = sfx_request
+
+        def _do_sfx_bed() -> None:
+            armed_request = sfx_request_snapshot
+            if armed_request is None:
+                raise MediaError("SFX bed needs an armed SFX request (got none)")
+            try:
+                from voyage.final_mix_cache import (
+                    bed_fingerprint,
+                    load_bed_cache,
+                    store_bed_cache,
+                )
+                from voyage.sfx_finalize import (
+                    SFX_CONDITIONING_PROXY,
+                    build_proxy_reference,
+                    render_sfx_bed,
+                    segment_sfx_bounds,
+                )
+
+                # Durable single-slot bed cache (DESIGN §56): a
+                # no-change resume reuses the last bed instead of
+                # re-rendering stems and re-joining. Overwrites the
+                # same slot on a miss, so the cache never grows.
+                # Thread-B (fork) digest when set, else the mix value: the
+                # fingerprint inputs are identical, so the cache keys match
+                # across the fork and sequential paths. The lazy conditional
+                # never evaluates music_digest pre-mix (short-circuit).
+                _bed_music_digest = (
+                    thread_music_digest if thread_music_digest is not None else music_digest
+                )
+                bed_digest = bed_fingerprint(
+                    run_dir,
+                    usable,
+                    sample_rate=settings.sample_rate,
+                    channels=settings.channels,
+                    backend=armed_request.backend,
+                    model_size=armed_request.model_size,
+                    seed=seed,
+                    caption_override=armed_request.caption_override,
+                    music_digest=_bed_music_digest,
+                )
+                cached_bed = load_bed_cache(run_dir, bed_digest)
+                if cached_bed is not None:
+                    cached_wav, cached_seconds = cached_bed
+                    bed = tmpdir / "sfx_bed.wav"
+                    shutil.copyfile(cached_wav, bed)
+                    bed_outcome["bed"] = bed
+                    bed_outcome["source_seconds"] = cached_seconds
+                    if bed_view is not None:
+                        bed_view.info(f"sfx: cache hit — reusing last bed ({len(usable)} segments)")
+                    return
+                proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
+                bounds = segment_sfx_bounds(
+                    run_dir,
+                    usable,
+                    armed_request.fps,
+                    armed_request.caption_override,
+                )
+                bed = render_sfx_bed(
+                    run_dir,
+                    proxy_ref,
+                    source_seconds,
+                    bounds,
+                    tmpdir,
+                    armed_request.backend,
+                    armed_request.models_dir,
+                    armed_request.device,
+                    armed_request.model_size,
+                    seed,
+                    settings.sample_rate,
+                    settings.channels,
+                    armed_request.num_workers,
+                    progress=bed_view,
+                    conditioning_source=SFX_CONDITIONING_PROXY,
+                    conditioning_timeline=source_seconds,
+                )
+                bed_outcome["bed"] = bed
+                bed_outcome["source_seconds"] = source_seconds
+                store_bed_cache(run_dir, bed_digest, bed, source_seconds=source_seconds)
+            except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
+                bed_outcome["error"] = exc
+
+        def _do_music_then_bed() -> None:
+            # Thread-B (4060): ACE takes then the SFX bed, sequential — the
+            # same music→bed order as the old sequential flow (minus the
+            # CPU-only mix), so GPU-state transitions are unchanged.
+            _do_music_takes()
+            if fork_sfx_armed:
+                bed_start_thread = time.monotonic()
+                _do_sfx_bed()
+                final_stages["sfx bed"] = time.monotonic() - bed_start_thread
+
+        fork_ran = False
+        bed_outcome: dict[str, Any] = {}
+        # Pure predicate of the request: Thread-B renders the bed only when
+        # the request is armed (mirrors the post-mix setup computation).
+        fork_sfx_armed = sfx_parallel_armed(sfx_request)
 
         if model_music_parallel_armed(
             tensor_path=tensor_path,
@@ -1319,14 +1480,15 @@ def finalize_run(
             # the whole model pass, exactly as before.
             model_devices=upscale_devices if phased else tensor_devices,
         ):
-            # Two cards: the upscale leg owns cuda:1 while ACE renders
-            # takes on cuda:0 — one outer stage, with the two branches
-            # sharing one N-stream display so upscale (model leg)
-            # and ACE takes (music leg) report live bars concurrently
-            # (DESIGN §59). The display degrades to plain lines when
-            # progress is None or the console is not a TTY. The blend
-            # clock covers the whole fork-join: upscale and music overlap,
-            # so this is fork-to-mix, not music+mix.
+            # Two streams (phased 2-GPU; see DESIGN section 59):
+            # Thread-A runs one interleaved upscale→interp pass on the
+            # 2060 on one 'model pass' bar (RIFE fits beside the llama
+            # sidecar) — while Thread-B renders ACE takes
+            # then the SFX bed sequential on the 4060. One N-stream
+            # display carries model, interp, takes and bed bars
+            # concurrently (plain lines when headless). The blend
+            # clock covers the whole fork-join: model and music
+            # overlap, so this is fork-to-mix, not music+mix.
             audio_start = time.monotonic()
             model_music_display: ParallelFinalizeDisplay | None = None
             span_progress: VoyageConsole | None = progress
@@ -1335,21 +1497,24 @@ def finalize_run(
                 span_progress = model_music_display.stream_view("model pass + music takes")
                 branch_progress = model_music_display.stream_view("model pass")
                 music_branch_progress = model_music_display.stream_view("music takes")
+                bed_view = model_music_display.stream_view("sfx bed")
             else:
                 branch_progress = None
                 music_branch_progress = None
+                bed_view = None
             try:
                 with optional_stage(span_progress, "model pass + music takes"):
                     run_model_pass_and_music_parallel(
-                        model_work=_do_upscale_phase if phased else _do_model_pass,
-                        music_work=_do_music_takes,
+                        model_work=(_do_interleaved_model_pass if phased else _do_model_pass),
+                        music_work=(_do_music_then_bed if phased else _do_music_takes),
                     )
             finally:
                 if model_music_display is not None:
                     model_music_display.close()
+            fork_ran = True
         else:
             if phased:
-                _do_upscale_phase()
+                _do_interleaved_model_pass()
             else:
                 _do_model_pass()
             # Sequential keeps the historical music+mix meaning of
@@ -1360,12 +1525,12 @@ def finalize_run(
         mix_cm = optional_stage(progress, "mix final audio")
         mix_start = time.monotonic()
         with mix_cm:
-            # The audio timeline stays on the probed source fps (frame
-            # counts / source fps = seconds); an unprobable fps falls back
-            # to the pinned presentation rate (plan_augmentation refuses to
-            # plan without one of the two).
-            audio_fps = int(source_fps) if source_fps > 0 else out_fps
-            music_digest = "silent"
+            # The audio timeline stays on the hoisted pre-fork audio
+            # fps (frame counts / source fps = seconds). The digest
+            # prefers Thread-B's post-takes value when the fork ran -
+            # it is the exact fingerprint the mix would recompute, so
+            # the recompute below only fires where no takes ran.
+            music_digest = thread_music_digest if thread_music_digest is not None else "silent"
             if no_music:
                 # Silent AAC sized to the stretched timeline (same
                 # frame-count math as the ledger mix, no takes needed).
@@ -1405,16 +1570,17 @@ def finalize_run(
                 # resume reuses the last published mix instead of re-slicing
                 # the takes ledger and re-joining. A later publish
                 # overwrites the same slot, so the cache never grows.
-                music_digest = music_fingerprint(
-                    run_dir,
-                    usable,
-                    sample_rate=settings.sample_rate,
-                    channels=settings.channels,
-                    overlap_fraction=settings.effective_overlap_fraction(),
-                    overlap_cap_seconds=settings.overlap_cap_seconds,
-                    audio_stretch=audio_stretch,
-                    audio_fps=float(audio_fps),
-                )
+                if thread_music_digest is None:
+                    music_digest = music_fingerprint(
+                        run_dir,
+                        usable,
+                        sample_rate=settings.sample_rate,
+                        channels=settings.channels,
+                        overlap_fraction=settings.effective_overlap_fraction(),
+                        overlap_cap_seconds=settings.overlap_cap_seconds,
+                        audio_stretch=audio_stretch,
+                        audio_fps=float(audio_fps),
+                    )
                 cached_music = load_music_cache(run_dir, music_digest)
                 if cached_music is not None:
                     final_audio = tmpdir / "final_audio.wav"
@@ -1439,23 +1605,20 @@ def finalize_run(
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # DESIGN §140 A/V stream: on the phased path the 4060 runs
-        # music takes -> SFX bed -> FILM interp sequentially, while the
-        # 2060 owned Phase A upscale only. The bed therefore renders
-        # synchronously here (before Phase C interp), not overlapped
-        # with the publish below. The legacy path keeps the two-stream
-        # bed∥publish overlap exactly as before.
-        #
-        # Two-stream SFX (legacy): the bed conditions on a
-        # stream-copy proxy of the committed segments, so it needs
-        # nothing from the mix or the publish — start it now (cuda:0 is
-        # free: the ACE worker stopped at take-render end) and let it
-        # overlap the publish encode below. The main thread dubs after
-        # the join; a bed failure ships music-only and the caller falls
-        # back to the legacy shipped-pixels pass.
+        # Two streams (phased, DESIGN section 59): Thread-A runs one
+        # interleaved upscale→interp pass on the 2060 (one "model
+        # pass" bar) while Thread-B renders ACE takes then the SFX bed
+        # sequential on the 4060 - the two branches share one N-stream
+        # display so model, interp, takes and bed report live bars
+        # concurrently. The display degrades to plain lines when
+        # progress is None or the console is not a TTY.
         sfx_armed = sfx_parallel_armed(sfx_request)
         sfx_display: ParallelFinalizeDisplay | None = None
         publish_progress = progress
-        bed_outcome: dict[str, Any] = {}
+        if not fork_ran:
+            # Fresh outcome for the sequential path; the fork path
+            # keeps Thread-B's outcome (written pre-mix by _do_music_then_bed).
+            bed_outcome = {}
         bed_start = 0.0
         bed_thread: threading.Thread | None = None
         bed_done_sync = False
@@ -1467,91 +1630,19 @@ def finalize_run(
             # its live BarTracker progress instead of plain lines.
             if progress is not None:
                 sfx_display = ParallelFinalizeDisplay(progress)
-                bed_view: VoyageConsole | None = sfx_display.stream_view("sfx bed")
+                bed_view = sfx_display.stream_view("sfx bed")
                 publish_progress = sfx_display.stream_view("publish")
             else:
                 bed_view = None
 
-            def _do_sfx_bed() -> None:
-                try:
-                    from voyage.final_mix_cache import (
-                        bed_fingerprint,
-                        load_bed_cache,
-                        store_bed_cache,
-                    )
-                    from voyage.sfx_finalize import (
-                        SFX_CONDITIONING_PROXY,
-                        build_proxy_reference,
-                        render_sfx_bed,
-                        segment_sfx_bounds,
-                    )
-
-                    # Durable single-slot bed cache (DESIGN §56): a
-                    # no-change resume reuses the last bed instead of
-                    # re-rendering stems and re-joining. Overwrites the
-                    # same slot on a miss, so the cache never grows.
-                    bed_digest = bed_fingerprint(
-                        run_dir,
-                        usable,
-                        sample_rate=settings.sample_rate,
-                        channels=settings.channels,
-                        backend=sfx_request_snapshot.backend,
-                        model_size=sfx_request_snapshot.model_size,
-                        seed=seed,
-                        caption_override=sfx_request_snapshot.caption_override,
-                        music_digest=music_digest,
-                    )
-                    cached_bed = load_bed_cache(run_dir, bed_digest)
-                    if cached_bed is not None:
-                        cached_wav, cached_seconds = cached_bed
-                        bed = tmpdir / "sfx_bed.wav"
-                        shutil.copyfile(cached_wav, bed)
-                        bed_outcome["bed"] = bed
-                        bed_outcome["source_seconds"] = cached_seconds
-                        if bed_view is not None:
-                            bed_view.info(
-                                f"sfx: cache hit — reusing last bed ({len(usable)} segments)"
-                            )
-                        return
-                    proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
-                    bounds = segment_sfx_bounds(
-                        run_dir,
-                        usable,
-                        sfx_request_snapshot.fps,
-                        sfx_request_snapshot.caption_override,
-                    )
-                    bed = render_sfx_bed(
-                        run_dir,
-                        proxy_ref,
-                        source_seconds,
-                        bounds,
-                        tmpdir,
-                        sfx_request_snapshot.backend,
-                        sfx_request_snapshot.models_dir,
-                        sfx_request_snapshot.device,
-                        sfx_request_snapshot.model_size,
-                        seed,
-                        settings.sample_rate,
-                        settings.channels,
-                        sfx_request_snapshot.num_workers,
-                        progress=bed_view,
-                        conditioning_source=SFX_CONDITIONING_PROXY,
-                        conditioning_timeline=source_seconds,
-                    )
-                    bed_outcome["bed"] = bed
-                    bed_outcome["source_seconds"] = source_seconds
-                    store_bed_cache(run_dir, bed_digest, bed, source_seconds=source_seconds)
-                except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
-                    bed_outcome["error"] = exc
-
-            if phased:
-                # Sequential 4060 stream: the bed owns the card alone,
-                # then Phase C interp picks it up.
+            if phased and not fork_ran:
+                # Sequential 4060 stream (fork did not run): the bed owns
+                # the card alone; the interleaved model pass ran earlier.
                 bed_start = time.monotonic()
                 _do_sfx_bed()
                 bed_done_sync = True
                 final_stages["sfx bed"] = time.monotonic() - bed_start
-            else:
+            elif not fork_ran:
                 bed_start = time.monotonic()
                 bed_thread = threading.Thread(
                     target=_do_sfx_bed, name="voyage-sfx-bed", daemon=True
@@ -1559,10 +1650,11 @@ def finalize_run(
                 bed_thread.start()
         else:
             bed_thread = None
-        if phased:
-            # Phase C runs after the mix AND the SFX bed (both 4060
-            # residents finished) — publish below consumes its output.
-            _do_interp_phase()
+        if fork_ran:
+            # Thread-B already rendered the bed pre-mix (and Thread-A the
+            # interleaved model pass): mark the outcome consumable and
+            # skip the sequential bed/thread below.
+            bed_done_sync = True
         # Issue 031 fast path: every committed video already matches the
         # presentation geometry/pix_fmt/fps, so concat the originals with a
         # stream copy and mux the final audio — zero video re-encodes. The
@@ -1584,6 +1676,21 @@ def finalize_run(
             if native
             else "encode presentation video"
         )
+        if model_selected and effective_interpolate > 1:
+            # Stage 2 of the backend-switch prune (stage 1 ran pre-poll):
+            # every poll and drain on every path is finished, so the
+            # remaining known-other-backend plan dirs can go entirely.
+            pruned_whole_dirs = prune_stale_interp_plans(
+                run_dir,
+                interp_backend=effective_interp_backend,
+                weights=resolved_weights,
+                whole_dir=True,
+            )
+            if pruned_whole_dirs and progress is not None:
+                progress.info(
+                    f"pruned {pruned_whole_dirs} stale interp plan dir(s) "
+                    "from the previous interpolation backend"
+                )
         publish_cm = optional_stage(
             publish_progress, publish_label, f"{out_w}x{out_h}@{out_fps}fps"
         )
@@ -1635,16 +1742,16 @@ def finalize_run(
                 )
 
                 # Always-on morph-cut leg (ltx25/ltx23): count-preserving 2+2
-                # FILM joints replace the hard cuts between committed segments.
+                # interp joints replace the hard cuts between committed segments.
                 # Frame total is unchanged, so the audio timeline below needs no
                 # work. Any missing precondition (foreign backend, single
-                # segment, no FILM leg) keeps the plain stream-copy concat.
+                # segment, no interp leg) keeps the plain stream-copy concat.
                 morph_video: Path | None = None
                 if (
                     morph_backend_for_run(run_dir) is not None
                     and len(usable) > 1
                     and resolved_weights is not None
-                    and resolved_weights.film is not None
+                    and _interp_leg_path(resolved_weights, effective_interp_backend) is not None
                 ):
                     morph_start = time.monotonic()
                     morph_video = assemble_morphed_timeline(
@@ -1655,10 +1762,12 @@ def finalize_run(
                         preset=effective_preset,
                         pix_fmt="yuv420p",
                         interp_fn=None,
-                        weights=resolved_weights.film,
-                        # DESIGN §140 A/V stream: all FILM work owns the
-                        # 4060 (cuda:0) — even the tiny native-path joints,
-                        # so the 2060 stays upscale-only.
+                        weights=_interp_leg_path(resolved_weights, effective_interp_backend),
+                        interp_backend=effective_interp_backend,
+                        # Two streams (phased, DESIGN section 59): the interp
+                        # device owns every interp call site, including these
+                        # tiny native-path joints (RIFE fits the 2060
+                        # alongside the llama sidecar).
                         device=resolve_morph_device(
                             interp_devices[0]
                             if interp_devices
@@ -1768,8 +1877,8 @@ def finalize_run(
                     if sfx_display is not None:
                         sfx_display.close()
                     final_stages["sfx bed"] = time.monotonic() - bed_start
-                # Phased path: the bed already rendered (and timed) before
-                # Phase C interp — join/dub only.
+                # Phased path: the bed already rendered (and timed)
+                # alongside Thread-A interp — join/dub only.
                 bed_error = bed_outcome.get("error")
                 if bed_error is None:
                     staged_info = probe(staged)

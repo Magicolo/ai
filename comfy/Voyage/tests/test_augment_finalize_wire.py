@@ -54,13 +54,20 @@ def _make_segment(
     return segment_dir
 
 
-def _make_weights(work: Path, *, film_bytes: bytes = b"film-weights") -> AugmentWeights:
+def _make_weights(
+    work: Path,
+    *,
+    film_bytes: bytes = b"film-weights",
+    rife_bytes: bytes = b"rife-weights",
+) -> AugmentWeights:
     work.mkdir(parents=True, exist_ok=True)
     film = work / "film.safetensors"
     film.write_bytes(film_bytes)
+    rife = work / "rife.safetensors"
+    rife.write_bytes(rife_bytes)
     esrgan = work / "esrgan.pth"
     esrgan.write_bytes(b"esrgan-weights")
-    return AugmentWeights(film=film, realesrgan=esrgan)
+    return AugmentWeights(film=film, rife=rife, realesrgan=esrgan)
 
 
 def _durable_kwargs(weights: AugmentWeights, work_dir: Path, **overrides):  # type: ignore[no-untyped-def]
@@ -77,18 +84,38 @@ def _durable_kwargs(weights: AugmentWeights, work_dir: Path, **overrides):  # ty
     return params
 
 
-def test_weights_key_needs_both_legs(tmp_path: Path) -> None:
+def test_weights_key_legacy_shape_and_active_leg(tmp_path: Path) -> None:
+    """Ledger keys stay `sha|sha`; the backend selects the interp leg.
+
+    No backend prefix rides the key: the interp-leg sha differs between
+    backends, so a switch already misses by construction — while
+    pre-backend FILM ledgers (e.g. kaolin's) keep hitting with zero
+    re-render. Final freshness across a switch rides the skip-key
+    backend component instead.
+    """
     weights = _make_weights(tmp_path)
     key = weights_key_for(weights)
     assert isinstance(key, str) and key
+    assert len(key.split("|")) == 2  # legacy shape, no backend prefix
     assert weights_key_for(weights) == key  # stable
-    changed = _make_weights(tmp_path / "other", film_bytes=b"other-film")
-    mixed = AugmentWeights(film=changed.film, realesrgan=weights.realesrgan)
-    assert weights_key_for(mixed) != key  # any leg change misses
-    with pytest.raises(ValueError):
-        weights_key_for(AugmentWeights(film=None, realesrgan=weights.realesrgan))
-    with pytest.raises(ValueError):
-        weights_key_for(AugmentWeights(film=weights.film, realesrgan=None))
+    changed = _make_weights(tmp_path / "other", rife_bytes=b"other-rife")
+    mixed = AugmentWeights(film=weights.film, rife=changed.rife, realesrgan=weights.realesrgan)
+    assert weights_key_for(mixed) != key  # active-leg change misses
+    film_changed = _make_weights(tmp_path / "filmdiff", film_bytes=b"other-film")
+    inert = AugmentWeights(film=film_changed.film, rife=weights.rife, realesrgan=weights.realesrgan)
+    assert weights_key_for(inert) == key  # inactive leg is invisible
+    film_key = weights_key_for(weights, "film")
+    assert len(film_key.split("|")) == 2
+    assert film_key != key  # backend selects the interp leg
+    with pytest.raises(ValueError, match="backend=rife"):
+        weights_key_for(AugmentWeights(film=weights.film, realesrgan=weights.realesrgan))
+    with pytest.raises(ValueError, match="backend=film"):
+        weights_key_for(
+            AugmentWeights(film=None, rife=weights.rife, realesrgan=weights.realesrgan),
+            "film",
+        )
+    with pytest.raises(ValueError, match="backend=rife"):
+        weights_key_for(AugmentWeights(film=weights.film, rife=weights.rife, realesrgan=None))
 
 
 def test_plan_dir_matches_poller_derivation(tmp_path: Path) -> None:
@@ -182,14 +209,14 @@ def test_polls_then_drains_each_usable_segment(tmp_path: Path) -> None:
     assert final_fps == round(24.0 * 1)
     assert final.read_bytes() == b"fake-intermediatefake-intermediate"
     # Both pollers share one key over both legs, the segment (source) fps,
-    # and the finalize geometry; the upscale leg feeds upscale, FILM interp.
+    # and the finalize geometry; the upscale leg feeds upscale, configured-backend interp.
     upscale_kwargs = calls["upscale"][0]
     assert isinstance(upscale_kwargs, dict)
     assert upscale_kwargs["weights_path"] == weights.realesrgan
     assert upscale_kwargs["out_fps"] == pytest.approx(24.0)
     interp_kwargs = calls["interp"][0]
     assert isinstance(interp_kwargs, dict)
-    assert interp_kwargs["weights_path"] == weights.film
+    assert interp_kwargs["weights_path"] == weights.rife
     assert interp_kwargs["weights_key"] == upscale_kwargs["weights_key"]
     assert interp_kwargs["out_fps"] == pytest.approx(24.0)
     # One drain per usable segment, in segment order, at the lifted fps.
@@ -367,6 +394,7 @@ def test_poll_to_completion_reports_per_leg_frame_bars(tmp_path: Path) -> None:
     weights = _make_weights(tmp_path / "work")
     stream = io.StringIO()
     console = VoyageConsole(stream=stream)
+    _make_segment(tmp_path)
     calls = {"upscale": 0, "interp": 0}
 
     def stub_upscale(run_dir: Path, **kwargs: Any) -> Any:
@@ -420,6 +448,8 @@ def test_poll_bar_tolerates_legacy_done_only_fakes(tmp_path: Path) -> None:
     weights = _make_weights(tmp_path / "work")
     stream = io.StringIO()
     console = VoyageConsole(stream=stream)
+
+    _make_segment(tmp_path)
 
     def stub_upscale(run_dir: Path, **kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
         del run_dir, kwargs

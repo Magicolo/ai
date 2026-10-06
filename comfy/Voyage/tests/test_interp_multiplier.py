@@ -75,13 +75,13 @@ def test_finalize_options_carries_interpolate() -> None:
 def test_finalize_run_forwards_multiplier_to_durable_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interpolate-2 finalize reaches the interp phase with multiplier 2 (DESIGN §56).
+    """Interpolate-2 finalize reaches the durable pass with multiplier 2 (DESIGN §56).
 
     Same fake-commit harness as the issue-166 selection test: one real
     fake-backend segment, both legs stubbed present, timer on the
-    phased entries asserting the forwarded multiplier. The A/V stream
-    splits the old durable pass into Phase A (upscale-only, 2060) and
-    Phase C (interp, 4060) — the multiplier rides Phase C.
+    interleaved durable entry asserting the forwarded multiplier.
+    Thread-A runs one interleaved pass on the 2060 — the multiplier
+    rides that call.
     """
     import shutil
 
@@ -105,28 +105,12 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
 
     def _fake_resolve(base: Path | str) -> AugmentWeights:
         return AugmentWeights(
-            film=Path(str(base) + "/film"), realesrgan=Path(str(base) + "/esrgan")
+            film=Path(str(base) + "/film"),
+            realesrgan=Path(str(base) + "/esrgan"),
+            rife=Path(str(base) + "/rife"),
         )
 
-    def _fake_upscale_phase(
-        run_dir_arg: Path,
-        *,
-        weights: AugmentWeights,
-        out_width: int,
-        out_height: int,
-        source_fps: float,
-        upscale_factor: int = 2,
-        chunk_frames: int = 32,
-        crf: int = 15,
-        preset: str = "veryfast",
-        device: str = "cuda:1",
-        upscale_poll_fn: Any = None,
-        timings: dict[str, float] | None = None,
-        progress: Any = None,
-    ) -> None:
-        seen["upscale_device"] = device
-
-    def _fake_interp_phase(
+    def _fake_durable_pass(
         run_dir_arg: Path,
         usable: list[Path],
         *,
@@ -139,19 +123,17 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
         chunk_frames: int = 32,
         crf: int = 15,
         preset: str = "veryfast",
-        device: str = "cuda:0",
+        device: str = "cuda:1",
         work_dir: Path,
-        interp_poll_fn: Any = None,
-        drain_fn: Any = None,
-        concat_fn: Any = None,
-        seam_interp_fn: Any = None,
-        morph_joints: bool = False,
-        morph_interp_fn: Any = None,
+        interp_backend: str = "rife",
+        upscale_device: str | None = None,
+        interp_device: str | None = None,
         timings: dict[str, float] | None = None,
         progress: Any = None,
     ) -> tuple[Path, int]:
         seen["multiplier"] = multiplier
-        seen["interp_device"] = device
+        seen["upscale_device"] = upscale_device or device
+        seen["interp_device"] = interp_device or device
         intermediate = work_dir / "model_intermediate.mp4"
         work_dir.mkdir(parents=True, exist_ok=True)
         first = usable[0] / "video.mp4"
@@ -159,8 +141,7 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
         return (intermediate, round(source_fps * multiplier))
 
     monkeypatch.setattr(augment_module, "resolve_augment_weights", _fake_resolve)
-    monkeypatch.setattr(finalize_module, "run_upscale_phase", _fake_upscale_phase)
-    monkeypatch.setattr(finalize_module, "run_interp_phase", _fake_interp_phase)
+    monkeypatch.setattr(finalize_module, "run_durable_model_pass", _fake_durable_pass)
     # `media` imports these lazily from `voyage.augment`, so the source
     # module (not `voyage.media`) is the patch target.
     monkeypatch.setattr(augment_module, "augment_devices", lambda: ("cuda:0", "cuda:1"))
@@ -175,7 +156,7 @@ def test_finalize_run_forwards_multiplier_to_durable_pass(
     )
     assert seen["multiplier"] == 2
     assert seen["upscale_device"] == "cuda:1"
-    assert seen["interp_device"] == "cuda:0"
+    assert seen["interp_device"] == "cuda:1"
     assert output.exists()
 
 
@@ -231,13 +212,15 @@ def test_durable_pass_records_phase_timings(
         dest.write_bytes(b"\x00")
         return dest
 
-    # `weights_key_for` hashes real files — stand in two tiny legs so the
+    # `weights_key_for` hashes real files — stand in three tiny legs so the
     # key derives, then the source lookup (not the hash) is what fails.
     film = tmp_path / "film.safetensors"
     esrgan = tmp_path / "esrgan.pth"
+    rife = tmp_path / "rife.safetensors"
     film.write_bytes(b"film")
     esrgan.write_bytes(b"esrgan")
-    weights = AugmentWeights(film=film, realesrgan=esrgan)
+    rife.write_bytes(b"rife")
+    weights = AugmentWeights(film=film, realesrgan=esrgan, rife=rife)
     timings: dict[str, float] = {}
     with pytest.raises(MediaError, match="has no pollable source"):
         run_durable_model_pass(

@@ -67,6 +67,14 @@ hzwer/Practical-RIFE (MIT), hence the `mit-and-apache-2.0` tag. Weights
 land in `<models>/frame_interpolation/` (ComfyUI layout); leaf deps in
 `worker/Dockerfile.video`.
 
+## Finalize augmentation — RIFE interpolation (`models download rife`, ~87 MB)
+
+| File under `~/.cache/voyage-models/...` | Origin | Size | License |
+|---|---|---|---|
+| `frame_interpolation/rife_v4.25_heavy.safetensors` | `Comfy-Org/frame_interpolation` (same pinned revision as FILM) | 86.7 MB | MIT |
+
+RIFE v4.25-heavy fp16 is the DEFAULT interp backend (`interp_backend = "rife"`): the 2026-10-06 probe measured it sharpest and closest-to-FILM of all variants (0.05-0.10 s/pair vs FILM 0.85 s/pair at 2048x1152, identical 0.65 GiB peak, clean line-art eyeball). FILM stays for hero/archival renders via `--interp-backend film`. The repack ships the same way as the FILM file (single-file safetensors, floor-checked + sha-verified by the registry).
+
 ## Finalize augmentation — realesr-animevideov3 (`models download realesrgan-anime`, ~2.5 MB)
 
 | Artifact | Repo / file | Revision |

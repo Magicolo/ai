@@ -112,9 +112,10 @@ def test_chunk_worker_forwards_chunk_device(
         return [frames[0]] * (pairs * len(list(moments)))
 
     monkeypatch.setattr(augment_worker, "upscale_frames", _fake_upscale)
-    monkeypatch.setattr(augment_worker, "interpolate_mids", _fake_interpolate)
+    monkeypatch.setattr(augment_worker, "interpolate_rife_mids", _fake_interpolate)
     weights = AugmentWeights(
         film=Path("/models/frame_interpolation/film_net_fp16.safetensors"),
+        rife=Path("/models/frame_interpolation/rife_v4.25_heavy.safetensors"),
         realesrgan=Path("/models/realesrgan/realesr-animevideov3.pth"),
     )
     worker = augment_module.make_enhance_chunk_worker(

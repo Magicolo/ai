@@ -57,6 +57,7 @@ from voyage.registry_records import (
     EXPECTED_LTXV_DIT_SHA256,
     EXPECTED_LTXV_UPSC_SHA256,
     EXPECTED_REALESRGAN_SHA256,
+    EXPECTED_RIFE_SHA256,
     FILM_FILE,
     FILM_HF_REPO,
     FILM_HF_REVISION,
@@ -178,6 +179,14 @@ from voyage.registry_records import (
     REALESRGAN_LICENSE_URL,
     REALESRGAN_SUBDIR,
     REALESRGAN_UPSTREAM_URL,
+    RIFE_FILE,
+    RIFE_HF_REPO,
+    RIFE_HF_REVISION,
+    RIFE_LICENSE,
+    RIFE_LICENSE_URL,
+    RIFE_MIN_BYTES,
+    RIFE_REPO_PATH,
+    RIFE_SUBDIR,
     WAN21_ALLOW,
     WAN21_DIT_MIN_BYTES,
     WAN21_HF_REPO,
@@ -197,6 +206,7 @@ from voyage.registry_records import (
     _describe_ltx25,
     _describe_ltxv,
     _describe_realesrgan,
+    _describe_rife,
     _describe_sfx,
     _record_audio,
     _record_causvid,
@@ -208,6 +218,7 @@ from voyage.registry_records import (
     _record_ltx25,
     _record_ltxv,
     _record_realesrgan,
+    _record_rife,
     _record_sfx,
 )
 
@@ -255,6 +266,7 @@ __all__ = [
     "EXPECTED_LTXV_DIT_SHA256",
     "EXPECTED_LTXV_UPSC_SHA256",
     "EXPECTED_REALESRGAN_SHA256",
+    "EXPECTED_RIFE_SHA256",
     "ExpectedHash",
     "FILM_FILE",
     "FILM_HF_REPO",
@@ -387,6 +399,14 @@ __all__ = [
     "REALESRGAN_LICENSE_URL",
     "REALESRGAN_SUBDIR",
     "REALESRGAN_UPSTREAM_URL",
+    "RIFE_FILE",
+    "RIFE_HF_REPO",
+    "RIFE_HF_REVISION",
+    "RIFE_LICENSE",
+    "RIFE_LICENSE_URL",
+    "RIFE_MIN_BYTES",
+    "RIFE_REPO_PATH",
+    "RIFE_SUBDIR",
     "RequiredFile",
     "RequiredGlob",
     "ShardFloor",
@@ -415,6 +435,7 @@ __all__ = [
     "_describe_ltx25",
     "_describe_ltxv",
     "_describe_realesrgan",
+    "_describe_rife",
     "_describe_sfx",
     "_manifest_hash_mismatches",
     "_merge_manifest_record",
@@ -429,6 +450,7 @@ __all__ = [
     "_record_ltx25",
     "_record_ltxv",
     "_record_realesrgan",
+    "_record_rife",
     "_record_sfx",
     "_require_spec",
     "_run_spec_downloads",
@@ -443,6 +465,7 @@ __all__ = [
     "download_ltxv_models",
     "download_model",
     "download_realesrgan_models",
+    "download_rife_models",
     "download_sfx_models",
     "models_dir_layout",
     "resolve_snapshot",
@@ -459,6 +482,7 @@ __all__ = [
     "verify_ltxv_models",
     "verify_model",
     "verify_realesrgan_models",
+    "verify_rife_models",
     "verify_sfx_models",
 ]
 
@@ -1130,6 +1154,17 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         expected_hashes=(ExpectedHash(FILM_REPO_PATH, EXPECTED_FILM_SHA256),),
         manifest_checkpoint=FILM_REPO_PATH,
     ),
+    "rife": ModelSpec(
+        name="rife",
+        manifest_key="rife",
+        snapshots=(),
+        files=(FileSpec(RIFE_HF_REPO, RIFE_HF_REVISION, RIFE_REPO_PATH, "", ""),),
+        record_builder=_record_rife,
+        checks=(RequiredFile(RIFE_REPO_PATH, RIFE_MIN_BYTES),),
+        success_message=_describe_rife,
+        expected_hashes=(ExpectedHash(RIFE_REPO_PATH, EXPECTED_RIFE_SHA256),),
+        manifest_checkpoint=RIFE_REPO_PATH,
+    ),
     "realesrgan-anime": ModelSpec(
         name="realesrgan-anime",
         manifest_key="realesrgan",
@@ -1555,6 +1590,21 @@ def download_film_models(models_dir: Path) -> dict[str, JsonValue]:
 def verify_film_models(models_dir: Path) -> tuple[bool, str]:
     """Check presence (+ size sanity) of the FILM weights."""
     return verify_model(models_dir, "film")
+
+
+def download_rife_models(models_dir: Path) -> dict[str, JsonValue]:
+    """Explicit download of the RIFE interpolation weights (Phase 1 RIFE port).
+
+    Single fp16 file into <models>/frame_interpolation/ (ComfyUI layout).
+    Merges into the shared manifest; returns the merged record. Backs the
+    `models download rife` CLI target.
+    """
+    return download_model(models_dir, "rife")
+
+
+def verify_rife_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the RIFE weights."""
+    return verify_model(models_dir, "rife")
 
 
 def download_realesrgan_models(models_dir: Path) -> dict[str, JsonValue]:

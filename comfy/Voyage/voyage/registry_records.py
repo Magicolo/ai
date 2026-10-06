@@ -502,6 +502,39 @@ from voyage.registry_realesrgan import (
 from voyage.registry_realesrgan import (
     _record_realesrgan as _record_realesrgan,
 )
+from voyage.registry_rife import (
+    EXPECTED_RIFE_SHA256 as EXPECTED_RIFE_SHA256,
+)
+from voyage.registry_rife import (
+    RIFE_FILE as RIFE_FILE,
+)
+from voyage.registry_rife import (
+    RIFE_HF_REPO as RIFE_HF_REPO,
+)
+from voyage.registry_rife import (
+    RIFE_HF_REVISION as RIFE_HF_REVISION,
+)
+from voyage.registry_rife import (
+    RIFE_LICENSE as RIFE_LICENSE,
+)
+from voyage.registry_rife import (
+    RIFE_LICENSE_URL as RIFE_LICENSE_URL,
+)
+from voyage.registry_rife import (
+    RIFE_MIN_BYTES as RIFE_MIN_BYTES,
+)
+from voyage.registry_rife import (
+    RIFE_REPO_PATH as RIFE_REPO_PATH,
+)
+from voyage.registry_rife import (
+    RIFE_SUBDIR as RIFE_SUBDIR,
+)
+from voyage.registry_rife import (
+    _describe_rife as _describe_rife,
+)
+from voyage.registry_rife import (
+    _record_rife as _record_rife,
+)
 from voyage.registry_sfx import (
     MMAUDIO_CLIP_ALLOW as MMAUDIO_CLIP_ALLOW,
 )
@@ -620,15 +653,19 @@ from voyage.registry_sfx import (
 # SFX effects-stack pins live in `voyage.registry_sfx` (issue 082;
 # re-exported at the top so existing importers keep working).
 
-# Finalize-stage augmentation weights (Track C): FILM frame interpolation +
-# Real-ESRGAN anime upscaler. Inference-only weights fetched at runtime via
-# `voyage models download film/realesrgan-anime` (or pulled automatically by
-# `generate`'s ensure step on CUDA backends) — the video image carries only
-# the torch-native loaders (safetensors/Pillow leaf deps in
-# worker/Dockerfile.video), never retraining code.
+# Finalize-stage augmentation weights (Track C + Phase 1 RIFE port): RIFE
+# v4.25 / FILM frame interpolation + Real-ESRGAN anime upscaler.
+# Inference-only weights fetched at runtime via
+# `voyage models download rife/film/realesrgan-anime` (or pulled
+# automatically by `generate`'s ensure step on CUDA backends) — the video
+# image carries only the torch-native loaders (safetensors/Pillow leaf
+# deps in worker/Dockerfile.video), never retraining code.
 #
 # FILM pins live in `voyage.registry_film` (issue 082; re-exported at the
 # top so existing importers keep working).
+#
+# RIFE pins live in `voyage.registry_rife` (Phase 1 RIFE port;
+# re-exported at the top so existing importers keep working).
 #
 
 # Real-ESRGAN pins live in `voyage.registry_realesrgan` (issue 082;
@@ -638,7 +675,9 @@ from voyage.registry_sfx import (
 # merging the manifest record, so a poisoned first fetch can never become the
 # attested baseline. Provenance per row: the LTXV/FILM/Real-ESRGAN hashes
 # were measured live 2026-09-30 from the provisioned volume (all FileSpec
-# pinned-revision fetches). No constant exists for the CausVid DMD checkpoint:
+# pinned-revision fetches); the RIFE hash was measured live 2026-10-05 from
+# the /tmp download at the pinned revision, before volume provisioning.
+# No constant exists for the CausVid DMD checkpoint:
 # its manifest record carries no sha and the weight file was pruned
 # 2026-09-24 — re-provision, measure, and add it here (residual).
 # (A removed video backend's generator hash lived here until issue
@@ -660,6 +699,9 @@ from voyage.registry_sfx import (
 
 # EXPECTED_REALESRGAN_SHA256 lives in `voyage.registry_realesrgan`
 # (issue 082; re-exported at the top so existing importers keep working).
+
+# EXPECTED_RIFE_SHA256 lives in `voyage.registry_rife` (Phase 1 RIFE
+# port; re-exported at the top so existing importers keep working).
 
 # _ACE_* derived relatives live in `voyage.registry_audio` (issue 082;
 # re-exported at the top so existing importers keep working).
@@ -745,9 +787,17 @@ from voyage.registry_sfx import (
 # (issue 082; re-exported at the top so existing importers keep working).
 
 
+# RIFE record builder lives in `voyage.registry_rife` (Phase 1 RIFE
+# port; re-exported at the top so existing importers keep working).
+
+
 # FILM describe helper lives in `voyage.registry_film` (issue 082;
 # re-exported at the top so existing importers keep working).
 
 
 # Real-ESRGAN describe helper lives in `voyage.registry_realesrgan`
 # (issue 082; re-exported at the top so existing importers keep working).
+
+
+# RIFE describe helper lives in `voyage.registry_rife` (Phase 1 RIFE
+# port; re-exported at the top so existing importers keep working).

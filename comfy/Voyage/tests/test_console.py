@@ -626,11 +626,11 @@ def test_prewarm_report_announces_new_frames_with_seconds(tmp_path: Path) -> Non
     assert sink.notes == [
         "pre-warm ledgered +96f upscale in 12.5s, +64f interp in 9.0s (total 96/64f)"
     ]
-    # Persistent bar opened once; upscale frames advanced through it (interp
-    # renders at finalize, never in the generation pre-warm).
+    # Persistent bar opened once; both legs advance through it (the pre-warm
+    # interleaves upscale then interp per segment).
     assert [label for label, _tracker in sink.bars] == ["model-pass frames"]
     _label, tracker = sink.bars[0]
-    assert tracker.updates == [96]
+    assert tracker.updates == [160]
     # Nothing new since the last report: silent.
     supervisor._report_background_prewarm()
     assert len(sink.notes) == 1

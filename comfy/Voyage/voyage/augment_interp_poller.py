@@ -99,23 +99,38 @@ def _default_interp_pngs(
     *,
     weights_path: Path,
     device: str,
+    interp_backend: str = "rife",
     on_pair: Callable[[int, int], None] | None = None,
 ) -> list[Path]:
-    """Interpolate PNGs via the resident FILM leg (lazy torch import).
+    """Interpolate PNGs via the resident interp leg (lazy torch import).
 
-    `on_pair`, when given, fires after each finished frame pair with
-    `(pair_index, pair_count)` so the finalize bar advances live inside
-    long chunks instead of jumping once per chunk at the end.
+    `interp_backend` selects the worker (`film` → `interpolate_mids`,
+    `rife` → `interpolate_rife_mids`); `on_pair`, when given, fires after
+    each finished frame pair with `(pair_index, pair_count)` so the
+    finalize bar advances live inside long chunks instead of jumping once
+    per chunk at the end.
     """
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_mids
+    from voyage.workers.augment_worker import (
+        interpolate_mids,
+        interpolate_rife_mids,
+        validate_interp_backend,
+    )
 
+    validate_interp_backend(interp_backend)
     frames = load_png_frames_as_tensors(frame_paths)
     if len(frames) <= 1 or multiplier <= 1:
         return write_tensors_as_png_frames(frames, dest_dir)
     moments = [(position + 1) / multiplier for position in range(multiplier - 1)]
     pair_count = len(frames) - 1
-    mids = interpolate_mids(frames, weights_path, moments=moments, device=device, on_pair=on_pair)
+    if interp_backend == "rife":
+        mids = interpolate_rife_mids(
+            frames, weights_path, moments=moments, device=device, on_pair=on_pair
+        )
+    else:
+        mids = interpolate_mids(
+            frames, weights_path, moments=moments, device=device, on_pair=on_pair
+        )
     step = len(moments)
     blended: list[object] = []
     for position in range(pair_count):
@@ -160,9 +175,11 @@ def interp_poll_once(
     crf: int = 15,
     preset: str = "veryfast",
     interp_fn: Callable[[list[Path], Path, int], list[Path]] | None = None,
+    interp_backend: str = "rife",
     on_chunk: Callable[[str, int, int], None] | None = None,
     on_chunk_frames: Callable[[str, int], None] | None = None,
     on_pair_frames: Callable[[str, float], None] | None = None,
+    segment_ids: list[str] | None = None,
 ) -> InterpPollResult:
     """Interpolate every upscaled-but-not-interpolated chunk (one pass).
 
@@ -173,24 +190,35 @@ def interp_poll_once(
     dir; interp ledger keys record `out_fps * multiplier` (the actual
     output fps). Returns counts; raises `MediaError` on a failed chunk
     (fail-loud, retry re-renders only the missing chunks). `weights_key`
-    must cover both legs (ESRGAN + FILM): any leg change must miss old
+    must cover the active interp leg (ESRGAN + FILM or
+    ESRGAN + RIFE per `interp_backend`): any leg change must miss old
     records. `on_chunk`, when given, fires after each rendered chunk
     with `(segment_id, chunk_index, chunk_count)`. `on_chunk_frames`,
     when given, fires alongside with `(segment_id, source_frames)` so
-    progress bars can count frames instead of chunks. `on_pair_frames`,
-    when given, fires per finished FILM pair with `(segment_id,
+    progress bars can count frames instead of chunks.
+    `on_pair_frames`,
+    when given, fires per finished interp pair with `(segment_id,
     fractional_source_frames)` so long chunks advance the finalize bar
     live instead of jumping once at the end. An injected `interp_fn`
     that takes an `on_pair` keyword gets it (probed via
     `inspect.signature`, with a try-and-fall-back for unintrospectable
     callables); a legacy 3-arg `interp_fn` renders the whole chunk
-    before the single `on_pair_frames` advance at chunk end.
+    before the single `on_pair_frames` advance at chunk end. When
+    `segment_ids` is given, only those committed segments are polled
+    (segment-interleaved pipeline); None (default) polls every segment.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
     if not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier < 1:
         raise ValueError(f"multiplier must be an int >= 1 (got {multiplier!r})")
     sources, skipped = committed_segment_sources(run_dir)
+    if segment_ids is not None:
+        if not isinstance(segment_ids, list) or not all(
+            isinstance(item, str) for item in segment_ids
+        ):
+            raise TypeError("segment_ids must be a list of str or None")
+        wanted = set(segment_ids)
+        sources = [source for source in sources if source.segment_id in wanted]
     chunks_done = 0
     chunks_skipped = 0
     chunks_waiting = 0
@@ -317,6 +345,7 @@ def interp_poll_once(
                     multiplier,
                     weights_path=weights_path,
                     device=device,
+                    interp_backend=interp_backend,
                     on_pair=_fire_pair if on_pair_frames is not None else None,
                 )
             elif _supports_on_pair(interp_fn) is False:

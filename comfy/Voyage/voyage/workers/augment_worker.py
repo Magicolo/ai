@@ -174,6 +174,9 @@ drops both caches (GPU hand-off, DESIGN §40).
 _FILM_CACHE: dict[tuple[str, str], Any] = {}
 """Resident FILM nets keyed by (weights path, device) — issue 047."""
 
+_RIFE_CACHE: dict[tuple[str, str], Any] = {}
+"""Resident RIFE nets keyed by (weights path, device) — same issue-047 rationale."""
+
 
 def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
     """Cache identity for a resident net: stringified weights path + device."""
@@ -182,9 +185,10 @@ def _model_cache_key(weights_path: Path, device: str) -> tuple[str, str]:
 
 def evict_augment_models() -> int:
     """Drop all resident augment nets; return the evicted entry count."""
-    count = len(_ESRGAN_CACHE) + len(_FILM_CACHE)
+    count = len(_ESRGAN_CACHE) + len(_FILM_CACHE) + len(_RIFE_CACHE)
     _ESRGAN_CACHE.clear()
     _FILM_CACHE.clear()
+    _RIFE_CACHE.clear()
     return count
 
 
@@ -1648,6 +1652,367 @@ def interpolate_mids(
             if on_pair is not None:
                 for pair_index in range(window_start, window_end):
                     on_pair(pair_index, pair_count)
+    if timings is not None:
+        timings["load_ms"] = load_ms
+        timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0
+    return mids
+
+
+# ---------------------------------------------------------------------------
+# RIFE interpolation (Practical-RIFE IFNet, Comfy-layout port).
+# ---------------------------------------------------------------------------
+
+RIFE_PAD_ALIGN = 64
+"""Reflect-pad alignment for RIFE inference (upstream `pad_align`)."""
+
+RIFE_MIN_SIDE = 8
+"""Minimum RIFE input side — mirrors `FILM_MIN_SIDE`.
+
+Sides below this fail loud instead of hitting torch's reflect-pad limits.
+"""
+
+INTERP_BACKENDS = ("film", "rife")
+"""Selectable interpolation backends (`AugmentConfig.interp_backend`)."""
+
+
+def validate_interp_backend(backend: str) -> str:
+    """Validate an interpolation backend name, returning it unchanged."""
+    if not isinstance(backend, str):
+        raise TypeError(f"interp backend must be a string (got {type(backend).__name__})")
+    if backend not in INTERP_BACKENDS:
+        raise ValueError(f"unknown interp backend {backend!r} (expected one of {INTERP_BACKENDS})")
+    return backend
+
+
+def _build_rife_net(
+    head_channels: int = 4,
+    block_channels: tuple[int, ...] = (192, 128, 96, 64, 32),
+) -> Any:
+    """Comfy-layout RIFE IFNet (hzwer Practical-RIFE 4.x — RIFE backend).
+
+    Plain-torch port of `Comfy/comfy_extras/frame_interpolation_models/ifnet.py`
+    (`Head` / `ResConv` / `IFBlock` / `IFNet` + warp grids), so the submodule
+    nesting reproduces the pinned `rife_v4.25_heavy.safetensors` key layout exactly
+    (`encode.cnn{0..3}.*`, `blocks.{0..4}.conv0/convblock/lastconv.*`) and
+    `_load_rife_net` strict-loads it. No Comfy imports (worker images carry
+    no ComfyUI tree): `comfy.ops` wrappers are plain `nn.Conv2d` here, which
+    register identical state-dict keys. Math mirrors upstream exactly
+    (addcmul residual, flow div_/add_ accumulation, lerp output blend, fp32
+    border warp with align_corners=True). One deliberate deviation: warp
+    grids are keyed by (height, width, device) instead of shape alone, so one
+    resident net can serve both cards without stale-device grids.
+
+    Why RIFE alongside FILM: per-pair RIFE is ~16.8x faster than FILM at
+    2048x1152 on the 4060 Ti (0.051s vs 0.851s per forward, issue-166 probe)
+    at ~0.65 GiB peak vs ~5.6 GiB, and the line-art A/B shows no ghosting
+    or thin-line shimmer (see docs/AUGMENT.md). Each timestep needs its own
+    flow (no flow-once factorization), so multi-moment pairs cost one
+    forward per moment — still far cheaper than FILM's single flow+fuse.
+    """
+    import torch
+    from torch import nn
+    from torch.nn import functional as functional
+
+    # NOTE (mypy strict): same `# type: ignore[misc]` idiom as the FILM/RRDB
+    # builders above — torch resolves to Any in the slim gates image.
+    class _RifeHead(nn.Module):  # type: ignore[misc]
+        """4-level feature head (3px in, `out_channels` feature maps out)."""
+
+        def __init__(self, out_channels: int) -> None:
+            super().__init__()
+            self.cnn0 = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1)
+            self.cnn1 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
+            self.cnn2 = nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1)
+            self.cnn3 = nn.ConvTranspose2d(16, out_channels, kernel_size=4, stride=2, padding=1)
+            self.relu = nn.LeakyReLU(0.2, inplace=True)
+
+        def forward(self, value: Any) -> Any:
+            value = self.relu(self.cnn0(value))
+            value = self.relu(self.cnn1(value))
+            value = self.relu(self.cnn2(value))
+            # NOTE: no relu after cnn3 (upstream layout — raw feature maps).
+            return self.cnn3(value)
+
+    class _RifeResConv(nn.Module):  # type: ignore[misc]
+        """Residual conv with a learned per-channel gate (`beta`)."""
+
+        def __init__(self, channels: int) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+            self.beta = nn.Parameter(torch.ones((1, channels, 1, 1)), requires_grad=False)
+            self.relu = nn.LeakyReLU(0.2, inplace=True)
+
+        def forward(self, value: Any) -> Any:
+            return self.relu(torch.addcmul(value, self.conv(value), self.beta))
+
+    class _RifeBlock(nn.Module):  # type: ignore[misc]
+        """One IFBlock: 4x down, 8x ResConv, transpose+shuffle back up."""
+
+        def __init__(self, in_planes: int, channels: int) -> None:
+            super().__init__()
+            self.conv0 = nn.Sequential(
+                nn.Sequential(
+                    nn.Conv2d(in_planes, channels // 2, kernel_size=3, stride=2, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(channels // 2, channels, kernel_size=3, stride=2, padding=1),
+                    nn.LeakyReLU(0.2, inplace=True),
+                ),
+            )
+            self.convblock = nn.Sequential(*[_RifeResConv(channels) for _ in range(8)])
+            self.lastconv = nn.Sequential(
+                nn.ConvTranspose2d(channels, 4 * 13, kernel_size=4, stride=2, padding=1),
+                nn.PixelShuffle(2),
+            )
+
+        def forward(self, value: Any, flow: Any = None, scale: int = 1) -> Any:
+            value = functional.interpolate(value, scale_factor=1.0 / scale, mode="bilinear")
+            if flow is not None:
+                flow = functional.interpolate(flow, scale_factor=1.0 / scale, mode="bilinear")
+                flow = flow.div_(scale)
+                value = torch.cat((value, flow), 1)
+            feat = self.convblock(self.conv0(value))
+            tmp = functional.interpolate(self.lastconv(feat), scale_factor=scale, mode="bilinear")
+            return tmp[:, :4] * scale, tmp[:, 4:5], tmp[:, 5:]
+
+    class _RifeNet(nn.Module):  # type: ignore[misc]
+        """5-block IFNet cascade over the shared feature head."""
+
+        def __init__(self, head_ch: int, channels: tuple[int, ...]) -> None:
+            super().__init__()
+            self.encode = _RifeHead(head_ch)
+            block_in = [7 + 2 * head_ch] + [8 + 4 + 8 + 2 * head_ch] * 4
+            self.blocks = nn.ModuleList(
+                [_RifeBlock(block_in[index], channels[index]) for index in range(5)]
+            )
+            self.scale_list = [16, 8, 4, 2, 1]
+            self.warp_grids: dict[Any, Any] = {}
+
+        def _grids_for(self, height: int, width: int, device: Any) -> Any:
+            """Base grid + flow divisors for a frame geometry (cached per device)."""
+            key = (height, width, str(device))
+            if key not in self.warp_grids:
+                self.warp_grids.clear()
+                grid_y, grid_x = torch.meshgrid(
+                    torch.linspace(-1.0, 1.0, height, device=device, dtype=torch.float32),
+                    torch.linspace(-1.0, 1.0, width, device=device, dtype=torch.float32),
+                    indexing="ij",
+                )
+                self.warp_grids[key] = (
+                    torch.stack((grid_x, grid_y), dim=0).unsqueeze(0),
+                    torch.tensor(
+                        [(width - 1.0) / 2.0, (height - 1.0) / 2.0],
+                        dtype=torch.float32,
+                        device=device,
+                    ),
+                )
+            return self.warp_grids[key]
+
+        def warp(self, image: Any, flow: Any) -> Any:
+            batch, _, height, width = image.shape
+            base_grid, flow_div = self._grids_for(height, width, image.device)
+            flow_norm = torch.cat(
+                [flow[:, 0:1] / flow_div[0], flow[:, 1:2] / flow_div[1]], 1
+            ).float()
+            grid = (base_grid.expand(batch, -1, -1, -1) + flow_norm).permute(0, 2, 3, 1)
+            return functional.grid_sample(
+                image.float(), grid, mode="bilinear", padding_mode="border", align_corners=True
+            ).to(image.dtype)
+
+        def forward(self, first: Any, second: Any, timestep: Any = 0.5, cache: Any = None) -> Any:
+            if not isinstance(timestep, torch.Tensor):
+                timestep = torch.full(
+                    (first.shape[0], 1, first.shape[2], first.shape[3]),
+                    timestep,
+                    device=first.device,
+                    dtype=first.dtype,
+                )
+            batch = first.shape[0]
+            if cache and "img0" in cache:
+                feat0 = cache["img0"].expand(batch, -1, -1, -1)
+            else:
+                feat0 = self.encode(first)
+            if cache and "img1" in cache:
+                feat1 = cache["img1"].expand(batch, -1, -1, -1)
+            else:
+                feat1 = self.encode(second)
+            flow = mask = feat = None
+            warped0, warped1 = first, second
+            for index, block in enumerate(self.blocks):
+                if flow is None:
+                    flow, mask, feat = block(
+                        torch.cat((first, second, feat0, feat1, timestep), 1),
+                        None,
+                        scale=self.scale_list[index],
+                    )
+                else:
+                    flow_delta, mask, feat = block(
+                        torch.cat(
+                            (
+                                warped0,
+                                warped1,
+                                self.warp(feat0, flow[:, :2]),
+                                self.warp(feat1, flow[:, 2:4]),
+                                timestep,
+                                mask,
+                                feat,
+                            ),
+                            1,
+                        ),
+                        flow,
+                        scale=self.scale_list[index],
+                    )
+                    flow = flow.add_(flow_delta)
+                warped0 = self.warp(first, flow[:, :2])
+                warped1 = self.warp(second, flow[:, 2:4])
+            return torch.lerp(warped1, warped0, torch.sigmoid(mask))
+
+    return _RifeNet(head_channels, tuple(block_channels))
+
+
+def _remap_rife_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Strip Practical-RIFE prefixes to the Comfy key layout (torch-free).
+
+    Drops `module.` / `flownet.`, rewrites `block{i}.` to `blocks.{i}.`,
+    and drops `teacher.` / `caltime.` distillation keys Comfy never loads.
+    """
+    remapped: dict[str, Any] = {}
+    for key, value in state.items():
+        short = key.replace("module.", "").replace("flownet.", "")
+        for index in range(5):
+            prefix = f"block{index}."
+            if short.startswith(prefix):
+                short = f"blocks.{index}." + short[len(prefix) :]
+                break
+        if short.startswith("teacher.") or short.startswith("caltime."):
+            continue
+        remapped[short] = value
+    return remapped
+
+
+def _detect_rife_config(state: dict[str, Any]) -> tuple[int, tuple[int, ...]]:
+    """Read (head channels, block channels) from Comfy-layout RIFE keys (torch-free)."""
+    head_channels = int(state["encode.cnn3.weight"].shape[1])
+    block_channels = tuple(
+        int(state[f"blocks.{index}.conv0.1.0.weight"].shape[0]) for index in range(5)
+    )
+    return head_channels, block_channels
+
+
+_RIFE_LOAD_ERRORS: tuple[type[BaseException], ...] = (*_LOAD_ERRORS, KeyError)
+"""Except-tuple for the RIFE loader (module-level so mypy verifies it)."""
+
+
+def _load_rife_net(weights_path: Path) -> Any:
+    """Build the Comfy-layout IFNet and load `weights_path` (failures map below)."""
+    from voyage.model_registry import RIFE_MIN_BYTES
+
+    _verify_weights_size(weights_path, "RIFE", RIFE_MIN_BYTES)
+    _verify_weights_manifest(weights_path)
+
+    try:
+        state = _remap_rife_state(_load_state_dict(weights_path))
+        head_channels, block_channels = _detect_rife_config(state)
+        model = _build_rife_net(head_channels, block_channels)
+        model.load_state_dict(state, strict=True)
+    except _RIFE_LOAD_ERRORS as exc:
+        raise ModelCompatibilityError(
+            f"RIFE weights at {weights_path} do not match the Comfy IFNet layout "
+            f"(encode + blocks.0-4, v4.25 pin): {exc}"
+        ) from exc
+    return model
+
+
+def interpolate_rife_mids(
+    frames: list[Any],
+    weights: Path | str,
+    *,
+    moments: list[float] | tuple[float, ...],
+    device: str = "cuda:0",
+    timings: dict[str, float] | None = None,
+    on_pair: Callable[[int, int], None] | None = None,
+) -> list[Any]:
+    """Mid frames for every adjacent pair at each moment (RIFE IFNet).
+
+    Pair-major output with the same contract as `interpolate_mids`: for pair
+    `i`, the mids at `moments` in order, so the caller interleaves
+    `frames[i]` + that slice exactly like the FILM loop. Outputs are
+    float32 CPU tensors. Differences from the FILM path: one forward per
+    pair x moment (RIFE has no flow-once factorization — each timestep needs
+    its own flow), so there is no `pair_batch`; the per-pair feature encode
+    is shared across moments instead (3 forwards share 1 encode pair at
+    m=4). Inputs reflect-pad to `RIFE_PAD_ALIGN` and crop back, so sizes
+    that are not multiples of 64 (e.g. 832x480) just work. OOM propagates —
+    a single pair is already the minimal unit (measured peaks 0.65 GiB at
+    2x on the 4060 Ti, 0.17 GiB at 1x), so there is nothing to halve to.
+    `on_pair`, when given, fires per finished pair with
+    `(pair_index, pair_count)`.
+
+    Validation order (before any torch import): moments, frame count
+    (>= 2 — a bare length check, so it stays torch-free), weights, then
+    torch, then frame shapes and the `RIFE_MIN_SIDE` floor.
+    """
+    if isinstance(moments, (str, bytes)) or not isinstance(moments, (list, tuple)):
+        raise TypeError(
+            f"moments must be a list or tuple of blend times (got {type(moments).__name__})"
+        )
+    if not moments:
+        raise ValueError("interpolate_rife_mids needs at least one blend moment (got none)")
+    blends = [validate_blend_time(moment) for moment in moments]
+    if on_pair is not None and not callable(on_pair):
+        raise TypeError(f"on_pair must be callable or None (got {type(on_pair).__name__})")
+    if not isinstance(frames, list) or len(frames) < 2:
+        count = len(frames) if isinstance(frames, list) else type(frames).__name__
+        raise ValueError(f"interpolate_rife_mids needs at least two frames (got {count})")
+    weights_path = _require_weights(weights, "RIFE")
+    _require_torch()
+    _require_frame_batch(frames)
+    for frame in frames:
+        height, width = int(frame.shape[1]), int(frame.shape[2])
+        if min(height, width) < RIFE_MIN_SIDE:
+            raise ValueError(
+                f"RIFE needs frame sides >= {RIFE_MIN_SIDE}px (got {height}x{width}): "
+                "torch reflect padding needs smaller pads than the input sides"
+            )
+    import torch
+    from torch.nn import functional as functional
+
+    load_started = time.monotonic()
+    key = _model_cache_key(weights_path, device)
+    model = _RIFE_CACHE.get(key)
+    if model is None:
+        model = _load_rife_net(weights_path)
+        _RIFE_CACHE[key] = model
+    load_ms = (time.monotonic() - load_started) * 1000.0
+    torch_device, dtype = _prepare_model(model, device)
+    model.eval()
+    pair_count = len(frames) - 1
+    mids: list[Any] = []
+    infer_started = time.monotonic()
+    with torch.no_grad():
+        for pair_index in range(pair_count):
+            first = torch.as_tensor(frames[pair_index], dtype=torch.float32).unsqueeze(0)
+            second = torch.as_tensor(frames[pair_index + 1], dtype=torch.float32).unsqueeze(0)
+            height, width = int(first.shape[2]), int(first.shape[3])
+            pad_right = -width % RIFE_PAD_ALIGN
+            pad_bottom = -height % RIFE_PAD_ALIGN
+            if pad_right or pad_bottom:
+                first = functional.pad(first, (0, pad_right, 0, pad_bottom), mode="reflect")
+                second = functional.pad(second, (0, pad_right, 0, pad_bottom), mode="reflect")
+            first = first.to(torch_device, dtype=dtype)
+            second = second.to(torch_device, dtype=dtype)
+            try:
+                # One encode per pair, shared across moments (the RIFE
+                # feature-cache win — moments only re-run the flow cascade).
+                cache = {"img0": model.encode(first), "img1": model.encode(second)}
+                for blend in blends:
+                    mid = model(first, second, timestep=float(blend), cache=cache)
+                    mids.append(mid[:, :, :height, :width].float().cpu().squeeze(0))
+            finally:
+                del first, second
+            if on_pair is not None:
+                on_pair(pair_index, pair_count)
     if timings is not None:
         timings["load_ms"] = load_ms
         timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0

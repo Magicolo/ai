@@ -131,6 +131,13 @@ def read_effective_config(run_dir: Path) -> ProjectConfig:
                 f"augment keys ({sorted(legacy_keys)}) — re-configure the run "
                 "with --upscale/--interpolate; no legacy format is read"
             )
+    augment_section = manifest.get("augment")
+    if isinstance(augment_section, dict):
+        # Runs configured before the interp_backend knob existed rendered
+        # with FILM (RIFE never existed) — backfill truthfully so those
+        # ledgers keep hitting. Runs without an augment section never
+        # rendered a model pass; the rife default stands.
+        augment_section.setdefault("interp_backend", "film")
     try:
         return ProjectConfig.model_validate(manifest)
     except Exception as exc:

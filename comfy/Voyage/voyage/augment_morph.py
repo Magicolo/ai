@@ -151,10 +151,11 @@ def morph_counts(counts: list[int]) -> tuple[int, int]:
 def resolve_morph_device(
     explicit: str | None = None, *, visible: tuple[str, ...] | None = None
 ) -> str:
-    """Device for the FILM bridge render (explicit wins, else augment order, else CPU).
+    """Device for the interp bridge render (explicit wins, else augment order, else CPU).
 
-    Mirrors the finalize interp pinning (cuda:0 on the 2-GPU box, leaving
-    the 2060 upscale-only) via `interp_pass_devices`; a box with no CUDA
+    Mirrors the finalize interp pinning (cuda:1 on the 2-GPU box, sharing
+    the 2060 with the upscale leg and the llama sidecar) via
+    `interp_pass_devices`; a box with no CUDA
     falls back to CPU (slow but working) instead of failing the finalize.
     """
     if explicit:
@@ -396,14 +397,28 @@ def _default_concat(pieces: list[Path], dest: Path) -> Path:
 
 
 def _default_morph_pngs(
-    a_anchor: Path, b_anchor: Path, joint_dir: Path, *, weights_path: Path, device: str
+    a_anchor: Path,
+    b_anchor: Path,
+    joint_dir: Path,
+    *,
+    weights_path: Path,
+    device: str,
+    interp_backend: str = "rife",
 ) -> list[Path]:
-    """Render the 4 bridge PNGs via the resident FILM leg (lazy torch import)."""
+    """Render the 4 bridge PNGs via the resident interp leg (lazy torch import)."""
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_mids
+    from voyage.workers.augment_worker import (
+        interpolate_mids,
+        interpolate_rife_mids,
+        validate_interp_backend,
+    )
 
+    validate_interp_backend(interp_backend)
     frames = load_png_frames_as_tensors([a_anchor, b_anchor])
-    tensors = interpolate_mids(frames, weights_path, moments=MORPH_MOMENTS, device=device)
+    if interp_backend == "rife":
+        tensors = interpolate_rife_mids(frames, weights_path, moments=MORPH_MOMENTS, device=device)
+    else:
+        tensors = interpolate_mids(frames, weights_path, moments=MORPH_MOMENTS, device=device)
     written = write_tensors_as_png_frames(tensors, joint_dir / "tensors")
     renamed = []
     for position, tensor_png in enumerate(written):
@@ -512,6 +527,7 @@ def render_morph_once(
     interp_fn: InterpFn | None = None,
     weights: Any = None,
     device: str = "cpu",
+    interp_backend: str = "rife",
 ) -> MorphRender:
     """Render one joint's 4 bridge PNGs (fresh work) or resume the ledger hit.
 
@@ -525,7 +541,7 @@ def render_morph_once(
     or unreadable ledger heals the same way — the interrupted joint has
     no valid record and is simply redone. Never raises for a healable
     mismatch; only genuine render failures (wrong bridge count, empty
-    output, missing FILM weights) fail loud.
+    output, missing interp weights) fail loud.
     """
     if not isinstance(joint_dir, Path):
         raise TypeError(f"joint_dir must be a Path (got {type(joint_dir).__name__})")
@@ -547,10 +563,18 @@ def render_morph_once(
         # drop stale bridges plus the record and fall through to re-render.
         _drop_morph_outputs(joint_dir)
     if interp_fn is None:
+        from voyage.workers import augment_worker
+
+        backend = augment_worker.validate_interp_backend(interp_backend)
         if weights is None:
-            raise ValueError("morph default render needs weights (FILM leg)")
+            raise ValueError("morph default render needs weights (interp leg)")
         written = _default_morph_pngs(
-            a_anchor, b_anchor, joint_dir, weights_path=weights, device=device
+            a_anchor,
+            b_anchor,
+            joint_dir,
+            weights_path=weights,
+            device=device,
+            interp_backend=backend,
         )
     else:
         written = []
@@ -583,6 +607,7 @@ def assemble_morphed_timeline(
     weights: Any = None,
     device: str = "cpu",
     concat_fn: ConcatFn | None = None,
+    interp_backend: str = "rife",
 ) -> Path:
     """Assemble a count-preserving morphed timeline over segment mp4s.
 
@@ -598,6 +623,9 @@ def assemble_morphed_timeline(
     """
     if not isinstance(segment_mp4s, list) or not segment_mp4s:
         raise ValueError(f"morph needs at least one segment mp4 (got {segment_mp4s!r})")
+    from voyage.workers import augment_worker
+
+    backend = augment_worker.validate_interp_backend(interp_backend)
     if (
         isinstance(fps, bool)
         or not isinstance(fps, (int, float))
@@ -680,12 +708,16 @@ def assemble_morphed_timeline(
             anchor_b_png = joint_dir / "anchor_b.png"
             rendered = True
             ledger_path = joint_dir / MORPH_RECORD_FILENAME
+            # The bridge pixels depend on the interp backend, so the key
+            # carries it — switching backends re-renders instead of
+            # reusing the other backend's bridges.
+            joint_key = f"{backend}|{key}"
             if ledger_path.is_file():
                 try:
                     record = json.loads(ledger_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     record = {}
-                rendered = record.get("source_key") != key
+                rendered = record.get("source_key") != joint_key
             if rendered:
                 _extract_frame_png(video, anchor_a, anchor_a_png)
                 _extract_frame_png(other, anchor_b, anchor_b_png)
@@ -693,10 +725,11 @@ def assemble_morphed_timeline(
                 joint_dir=joint_dir,
                 a_anchor=anchor_a_png,
                 b_anchor=anchor_b_png,
-                source_key=key,
+                source_key=joint_key,
                 interp_fn=interp_fn,
                 weights=weights,
                 device=device,
+                interp_backend=backend,
             )
             bridge = joint_dir / MORPH_BRIDGE_FILENAME
             if not (bridge.exists() and bridge.stat().st_size > 0):

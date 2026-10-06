@@ -84,19 +84,23 @@ def generate_skip_key(
     manifest_no_sfx: bool,
     stored_upscale: int,
     stored_interpolate: int,
+    stored_interp_backend: str = "rife",
 ) -> str:
     """Canonical freshness key for the current generate finalize behavior.
 
     Combines the generate skips with the stored manifest policy so the
     'nothing to do' gate re-finalizes when the behavior differs from the
-    stamped coverage (e.g. same segments but music-only diff).
+    stamped coverage (e.g. same segments but music-only diff). The interp
+    backend rides the key because it changes interp pixels: switching
+    backends re-finalizes by design (the sidecar weights key misses too).
     """
     effective_sfx_off = bool(manifest_no_sfx or skips.get("skip_sfx", False))
     effective_up = 1 if skips.get("force_upscale_1", False) else stored_upscale
     effective_interp = 1 if skips.get("force_interpolate_1", False) else stored_interpolate
     music = int(bool(skips.get("skip_music", False)))
     sfx = int(effective_sfx_off)
-    return f"music={music},sfx={sfx},up={effective_up},interp={effective_interp}"
+    backend = stored_interp_backend if effective_interp > 1 else "-"
+    return f"music={music},sfx={sfx},up={effective_up},interp={effective_interp},backend={backend}"
 
 
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -117,4 +121,7 @@ def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:
     presentation_fps = getattr(args, "presentation_fps", None)
     if is_provided(presentation_fps):
         overrides["presentation_fps"] = presentation_fps
+    interp_backend = getattr(args, "interp_backend", None)
+    if is_provided(interp_backend):
+        overrides["interp_backend"] = interp_backend
     return overrides

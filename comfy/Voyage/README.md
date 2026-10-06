@@ -43,7 +43,7 @@ in `docs/MODELS.md`); `--no-download` verifies without fetching:
 - director-qwen8b ~16 GB LLM; director-qwen4b-awq ~2.6 GB GPU decider;
   director-qwen35-gguf ~3 GB llama-server sidecar GGUF
 - audio-acestep checkpoints; sfx-mmaudio ~13 GB (CC-BY-NC-4.0);
-  film ~66 MB (MIT + Apache-2.0); realesrgan-anime ~18 MB (BSD-3-Clause);
+  rife ~87 MB RIFE v4.25-heavy (MIT, default interp); film ~66 MB (MIT + Apache-2.0); realesrgan-anime ~18 MB (BSD-3-Clause);
   inspector-qwen35 ~19 GB VLM (optional)
 
 ## Basic run

@@ -92,7 +92,7 @@ def required_specs(
     `sfx_enabled` mirrors the finalize gate (`not no_sfx and backend is
     mmaudio`): the SFX stack downloads only when the pass will run. A
     fake video backend needs the empty set (weight-free offline runs).
-    `augment_enabled` gates the finalize-stage model pass (FILM
+    `augment_enabled` gates the finalize-stage model pass (configured-backend
     interpolation + Real-ESRGAN anime upscaler): CUDA backends include
     them when the multipliers demand work, `False` restores the
     pre-augmentation set (tests, weight-free probes). ACE-Step is required whenever the effective
@@ -116,10 +116,11 @@ def required_specs(
         )
     ]
     if augment_enabled:
+        interp_spec = "rife" if config.augment.interp_backend == "rife" else "film"
         required.extend(
             [
                 RequiredModel(
-                    spec="film",
+                    spec=interp_spec,
                     models_dir=_resolve_dir(models_root, config.video.models_dir),
                 ),
                 RequiredModel(

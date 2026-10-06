@@ -1,7 +1,7 @@
 """Live generation/finalize progress: pre-warm callbacks, shared display, pump.
 
 The console must show video plus concurrent director/upscale progress
-during generation (interpolation runs at finalize time), and
+during generation (both legs pre-warm during generation), and
 upscale/interp/sfx/music during finalize (DESIGN §59). The background pre-warm
 forwards per-chunk/per-frames events
 from the pollers; the supervisor pump drains them into the persistent
@@ -34,12 +34,34 @@ from voyage.persistence import read_effective_config
 from voyage.supervisor import Supervisor
 
 
+def _commit_segment(run_dir: Path, segment_id: str = "000000") -> Path:
+    """Committed segment dir the prewarm enumeration picks up."""
+    import json
+
+    segment_dir = run_dir / "segments" / segment_id
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    (segment_dir / "video.mp4").write_bytes(b"fake-video")
+    manifest = {
+        "format": 1,
+        "transition": {},
+        "prompt_plan": {},
+        "audio_state": {},
+        "world_state": {},
+        "metrics": {"frames": 8},
+        "checksums": {"video.mp4": "ck"},
+    }
+    (segment_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (segment_dir / "DONE").write_text("done\n", encoding="utf-8")
+    return segment_dir
+
+
 def _background_plan() -> SimpleNamespace:
     """Stand-in for the resolved background plan (geometry + ledger keys)."""
     return SimpleNamespace(
         device="cuda:1",
         realesrgan_path="/models/realesrgan-anime.pth",
-        film_path="/models/film_net_fp16.safetensors",
+        interp_path="/models/film_net_fp16.safetensors",
+        interp_backend="rife",
         weights_key="weights-test",
         out_width=768,
         out_height=512,
@@ -93,6 +115,7 @@ def test_prewarm_once_forwards_chunk_callbacks_to_pollers(
     upscale_frames: list[tuple[str, int]] = []
     interp_events: list[tuple[str, int, int]] = []
     interp_frames: list[tuple[str, int]] = []
+    _commit_segment(tmp_path)
     result = prewarm_once(
         tmp_path,
         SimpleNamespace(),
@@ -138,9 +161,9 @@ def test_background_driver_default_path_forwards_callbacks(
 ) -> None:
     """The default driver path carries upscale callbacks into `prewarm_once`.
 
-    Interpolation runs at finalize time (another agent's scope), so the
-    generation-time driver never forwards interp callbacks — it passes
-    `include_interp=False` instead.
+    Both legs pre-warm on the 2060 during generation (RIFE interp fits the
+    llama-share VRAM budget), so the generation-time driver forwards the
+    interp callbacks too — it passes `include_interp=True`.
     """
     seen: dict[str, Any] = {}
 
@@ -161,7 +184,9 @@ def test_background_driver_default_path_forwards_callbacks(
     driver._prewarm_fn(tmp_path, SimpleNamespace())
     assert seen["on_upscale_frames"] is _record_upscale_frames
     assert seen["on_upscale_chunk"] is None
-    assert seen["include_interp"] is False
+    assert seen["on_interp_chunk"] is None
+    assert seen["on_interp_frames"] is None
+    assert seen["include_interp"] is True
 
 
 def test_background_driver_custom_fn_owns_pass_without_callbacks(
@@ -397,6 +422,7 @@ def test_prewarm_once_include_interp_false_skips_interp_poller(
         lambda run_dir, config: _background_plan(),
     )
     monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda device: None)
+    _commit_segment(tmp_path)
     result = prewarm_once(
         tmp_path,
         SimpleNamespace(),
@@ -411,10 +437,10 @@ def test_prewarm_once_include_interp_false_skips_interp_poller(
     assert calls == ["upscale"]
 
 
-def test_prewarm_upscale_only_leg_at_low_vram(
+def test_prewarm_runs_both_legs_at_low_vram(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """2 GiB free: SRVGG upscale runs, FILM interp waits for finalize."""
+    """2 GiB free: both legs prewarm — RIFE interp (0.65 GiB peak) fits the llama-share budget."""
     calls: list[str] = []
 
     def _fake_upscale(_run_dir: Path, **kwargs: Any) -> SimpleNamespace:
@@ -431,6 +457,7 @@ def test_prewarm_upscale_only_leg_at_low_vram(
     )
     # Resident llama sidecar leaves ~2.8 GiB: upscale fits, interp does not.
     monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda device: 2.0)
+    _commit_segment(tmp_path)
     result = prewarm_once(
         tmp_path,
         SimpleNamespace(),
@@ -439,9 +466,9 @@ def test_prewarm_upscale_only_leg_at_low_vram(
     )
     assert result is not None
     assert result.upscale_frames_done == 5
-    assert result.interp_frames_done == 0
-    assert "interp skipped" in result.skip_reason
-    assert calls == ["upscale"]
+    assert result.interp_frames_done == 7
+    assert result.skip_reason == ""
+    assert calls == ["upscale", "interp"]
 
 
 def test_background_loop_waits_for_idle_instead_of_dropping_pass(

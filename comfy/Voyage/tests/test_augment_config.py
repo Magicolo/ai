@@ -37,6 +37,7 @@ def test_augment_defaults() -> None:
         "upscale": 1,
         "interpolate": 1,
         "presentation_fps": None,
+        "interp_backend": "rife",
     }
     assert _base_config().augment == AugmentConfig()
 

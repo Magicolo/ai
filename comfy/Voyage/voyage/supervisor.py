@@ -645,6 +645,12 @@ class Supervisor:
                 on_upscale_frames=lambda segment, frames: self._enqueue_prewarm_event(
                     ("upscale_frames", segment, frames)
                 ),
+                on_interp_chunk=lambda segment, index, total: self._enqueue_prewarm_event(
+                    ("interp_chunk", segment, index, total)
+                ),
+                on_interp_frames=lambda segment, frames: self._enqueue_prewarm_event(
+                    ("interp_frames", segment, frames)
+                ),
             )
             driver.start()
             self._background = driver
@@ -722,6 +728,15 @@ class Supervisor:
         if driver is not seen_driver:
             seen_upf, seen_ipf, seen_ups, seen_ips = 0, 0, 0.0, 0.0
         self._reported_prewarm = (driver, _up, _ip, upf, ipf, ups, ips)
+        latest = getattr(driver, "last_result", None)
+        if (
+            latest is not None
+            and latest is not getattr(self, "_reported_prewarm_result", None)
+            and int(getattr(latest, "seams_done", 0) or 0) > 0
+        ):
+            progress.note(
+                f"pre-warm seams: {int(getattr(latest, 'seams_done', 0) or 0)} rendered early"
+            )
         new_upf, new_ipf = upf - seen_upf, ipf - seen_ipf
         new_ups, new_ips = ups - seen_ups, ips - seen_ips
         # Frames already advanced live during the render (pump) must not
@@ -730,6 +745,7 @@ class Supervisor:
         # `getattr` guards keep doubles built without `__init__` (which
         # never pump) working — live instances always carry the counters.
         pumped_up = int(getattr(self, "_pumped_upscale_frames", 0) or 0)
+        pumped_ip = int(getattr(self, "_pumped_interp_frames", 0) or 0)
         if hasattr(self, "_pumped_upscale_frames"):
             self._pumped_upscale_frames = 0
         if hasattr(self, "_pumped_interp_frames"):
@@ -737,12 +753,13 @@ class Supervisor:
         if hasattr(self, "_prewarm_queue"):
             self._clear_prewarm_queue()
         unreported_up = max(0, new_upf - pumped_up)
+        unreported_ip = max(0, new_ipf - pumped_ip)
         if new_upf > 0 or new_ipf > 0:
             try:
                 total = read_state(self._run_dir).timeline_frames
             except Exception:  # noqa: BLE001 - unreadable state still reports deltas
                 total = None
-            self._advance_model_pass_bar(unreported_up, total)
+            self._advance_model_pass_bar(unreported_up + unreported_ip, total)
             if isinstance(total, int) and not isinstance(total, bool):
                 scope = f" (total {upf}/{ipf}f of {total}f committed)"
             else:
@@ -785,9 +802,10 @@ class Supervisor:
     def _advance_model_pass_bar(self, new_frames: int, total: int | None) -> None:
         """Advance the persistent model-pass bar, opening it lazily.
 
-        The bar counts upscale source frames against the committed
-        frames (interpolation runs at finalize time, so the bar never
-        sees the interp leg). No-op when augmentation is not demanded.
+        The bar counts source frames per leg against the committed
+        frames (upscale and interp share one comparable unit — interp
+        advances live during generation and at finalize). No-op when
+        augmentation is not demanded.
         """
         progress = self._progress
         if progress is None or not self._model_pass_demanded():

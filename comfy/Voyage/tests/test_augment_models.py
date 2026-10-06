@@ -96,7 +96,7 @@ def test_cuda_backends_include_augmentation_by_default(backend: VideoBackendName
 
     config = with_video_backend(_base_config(), backend)
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert {"film", "realesrgan-anime"} <= specs
+    assert {"rife", "realesrgan-anime"} <= specs
 
 
 def test_fake_backend_stays_empty_with_augment_enabled() -> None:
@@ -113,6 +113,7 @@ def test_augment_disabled_excludes_film_and_realesrgan() -> None:
     config = with_video_backend(_base_config(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False, augment_enabled=False)}
     assert "film" not in specs
+    assert "rife" not in specs
     assert "realesrgan-anime" not in specs
     assert "ltxv-2b" in specs
 
@@ -122,4 +123,4 @@ def test_augment_specs_share_video_models_dir() -> None:
 
     config = with_video_backend(_base_config(), "ltxv")
     entries = {item.spec: item.models_dir for item in required_specs(config, sfx_enabled=False)}
-    assert entries["film"] == entries["realesrgan-anime"] == Path(config.video.models_dir)
+    assert entries["rife"] == entries["realesrgan-anime"] == Path(config.video.models_dir)

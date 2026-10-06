@@ -1,8 +1,8 @@
-"""Doctor covers all 10 default-CUDA registry stacks (issue 195).
+"""Doctor covers all 11 default-CUDA registry stacks (issue 195).
 
 Why this module exists: `check_models` hardcoded six verifiers while
 `MODEL_SPECS` + `models verify` + `models_ensure.required_specs` all
-cover ten — the four newest default-CUDA stacks (film, realesrgan-anime,
+cover ten — the five newest default-CUDA stacks (film, realesrgan-anime, rife,
 sfx-mmaudio, director-qwen4b-awq) were invisible, so `doctor` reported
 `models_ok: true` on a box missing ~16 GB of default-path weights.
 """
@@ -19,6 +19,7 @@ from voyage.doctor import check_models
 _EXPECTED_NEW_STACKS = (
     "film",
     "realesrgan-anime",
+    "rife",
     "sfx-mmaudio",
     "director-qwen4b-awq",
 )
@@ -27,7 +28,7 @@ _EXPECTED_NEW_STACKS = (
 def test_check_models_covers_new_default_stacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """All four post-Qwen default stacks appear as named checks."""
+    """All five post-Qwen default stacks appear as named checks."""
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     monkeypatch.setenv(doctor.MODELS_DIR_ENVIRONMENT_VARIABLE, str(models_dir))

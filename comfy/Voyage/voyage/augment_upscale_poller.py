@@ -28,6 +28,7 @@ from voyage.augment_sidecar import (
     ChunkKey,
     append_chunk_record,
     chunk_output_complete,
+    find_upscaled_donor,
     load_chunk_ledger,
     missing_chunk_indexes,
     plan_dir_for_segment,
@@ -35,6 +36,7 @@ from voyage.augment_sidecar import (
     stage_indexes_matching,
 )
 from voyage.errors import MediaError
+from voyage.hashing import sha256_file
 from voyage.segment_manifest import load_segment_manifest
 
 UPSCALE_STAGE = STAGE_UPSCALED
@@ -191,6 +193,91 @@ def _chunk_output_dir(plan_dir: Path, index: int) -> Path:
     return plan_dir / f"upscaled_{index:02d}"
 
 
+def _adopt_upscaled_chunk(
+    *,
+    run_dir: Path,
+    plan_dir: Path,
+    ledger_path: Path,
+    source_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    chunk_frames: int,
+    weights_key: str,
+    esrgan_sha: str,
+    index: int,
+    start: int,
+    count: int,
+    crf: int,
+    preset: str,
+) -> bool:
+    """Copy a donor plan's upscaled PNGs for one missing chunk (else False).
+
+    Cross-backend resume: the sidecar plan dir is keyed on BOTH weight
+    legs, so a backend switch orphans byte-identical upscaled PNGs under
+    another dir. The esrgan leg is backend-independent, so a donor whose
+    record carries the same esrgan sha is adopted (hardlink, copy
+    fallback) and recorded under the CURRENT key — the interp poller
+    then proceeds without a re-render. Records with unparseable keys
+    never adopt (unknown provenance). The interp leg never adopts.
+    """
+    donor = find_upscaled_donor(
+        run_dir,
+        exclude_dir=plan_dir,
+        source_key=source_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        chunk_frames=chunk_frames,
+        chunk_index=index,
+        start_frame=start,
+        source_frames=count,
+        esrgan_sha=esrgan_sha,
+    )
+    if donor is None:
+        return False
+    output_dir = _chunk_output_dir(plan_dir, index)
+    if output_dir.exists():
+        # Mirror the render path: unledgered output is incomplete — drop it.
+        if output_dir.is_dir() and not output_dir.is_symlink():
+            shutil.rmtree(output_dir)
+        else:
+            output_dir.unlink()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    donor_dir = run_dir / str(donor["path"])
+    try:
+        for frame in sorted(donor_dir.glob("frame_*.png")):
+            try:
+                os.link(frame, output_dir / frame.name)
+            except OSError:
+                shutil.copy2(frame, output_dir / frame.name)
+    except OSError:
+        return False
+    if not chunk_output_complete(output_dir, count):
+        return False
+    key = ChunkKey(
+        chunk_index=index,
+        start_frame=start,
+        source_frames=count,
+        expected_frames=count,
+        upscale_factor=upscale_factor,
+        multiplier=1,
+        crf=crf,
+        preset=preset,
+        source_key=source_key,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        chunk_frames=chunk_frames,
+    )
+    relative = os.path.relpath(output_dir, run_dir).replace(os.sep, "/")
+    append_chunk_record(ledger_path, key, stage=STAGE_UPSCALED, path=relative)
+    return True
+
+
 def upscale_poll_once(
     run_dir: Path,
     *,
@@ -208,6 +295,7 @@ def upscale_poll_once(
     upscale_fn: Callable[..., list[Path]] | None = None,
     on_chunk: Callable[[str, int, int], None] | None = None,
     on_chunk_frames: Callable[[str, int], None] | None = None,
+    segment_ids: list[str] | None = None,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -220,13 +308,28 @@ def upscale_poll_once(
     chunk_count)` — the finalize model-pass bar advances on it (main
     thread only; the background pre-warm passes None). `on_chunk_frames`,
     when given, fires alongside with `(segment_id, source_frames)` so
-    progress bars can count frames instead of chunks.
+    progress bars can count frames instead of chunks. When
+    `segment_ids` is given, only those committed segments are polled
+    (segment-interleaved pipeline); None (default) polls every segment.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
     decode = decode_fn or _default_decode_fn
     upscale = upscale_fn
+    try:
+        esrgan_sha = sha256_file(weights_path)
+    except (OSError, TypeError, ValueError):
+        # Unresolvable esrgan file: donor adoption skips silently for
+        # this poll (the render path fail-louds on missing weights).
+        esrgan_sha = ""
     sources, skipped = committed_segment_sources(run_dir)
+    if segment_ids is not None:
+        if not isinstance(segment_ids, list) or not all(
+            isinstance(item, str) for item in segment_ids
+        ):
+            raise TypeError("segment_ids must be a list of str or None")
+        wanted = set(segment_ids)
+        sources = [source for source in sources if source.segment_id in wanted]
     chunks_done = 0
     chunks_skipped = 0
     frames_done = 0
@@ -280,6 +383,32 @@ def upscale_poll_once(
         for index in missing:
             start, count = windows[index]
             output_dir = _chunk_output_dir(plan_dir, index)
+            if _adopt_upscaled_chunk(
+                run_dir=run_dir,
+                plan_dir=plan_dir,
+                ledger_path=ledger_path,
+                source_key=source.source_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=out_fps,
+                upscale_factor=upscale_factor,
+                chunk_frames=chunk_frames,
+                weights_key=weights_key,
+                esrgan_sha=esrgan_sha,
+                index=index,
+                start=start,
+                count=count,
+                crf=crf,
+                preset=preset,
+            ):
+                records = load_chunk_ledger(ledger_path)
+                chunks_done += 1
+                frames_done += count
+                if on_chunk is not None:
+                    on_chunk(source.segment_id, index, len(windows))
+                if on_chunk_frames is not None:
+                    on_chunk_frames(source.segment_id, count)
+                continue
             if output_dir.exists():
                 # Ledger-truth rule: unledgered output is incomplete — drop it.
                 if output_dir.is_dir() and not output_dir.is_symlink():

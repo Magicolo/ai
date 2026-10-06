@@ -169,3 +169,122 @@ def test_poll_result_counts_source_frames(tmp_path: Path) -> None:
     assert rerun.chunks_done == 0
     assert rerun.frames_done == 0
     assert rerun.frames_skipped == 10
+
+
+def _tiny_esrgan(work: Path) -> Path:
+    work.mkdir(parents=True, exist_ok=True)
+    path = work / "esrgan.pth"
+    path.write_bytes(b"tiny-esrgan-weights")
+    return path
+
+
+def _keyed_dirs(run_dir: Path, weights_key: str) -> list[Path]:
+    """Plan dirs holding at least one record with `weights_key`."""
+    found = []
+    for plan in sorted((run_dir / "augment").iterdir()):
+        if not plan.is_dir():
+            continue
+        ledger = plan / "chunks.jsonl"
+        if not ledger.is_file():
+            continue
+        if any(r.get("weights_key") == weights_key for r in load_chunk_ledger(ledger)):
+            found.append(plan)
+    return found
+
+
+def test_adopt_upscaled_chunks_across_weights_keys(tmp_path: Path) -> None:
+    """Cross-backend resume: same esrgan leg, new interp leg → adopt, no render."""
+    from voyage.hashing import sha256_file
+
+    _make_segment(tmp_path, frames=8)
+    esrgan = _tiny_esrgan(tmp_path / "weights")
+    esrgan_sha = sha256_file(esrgan)
+    donor_key = f"donor-interp|{esrgan_sha}"
+    current_key = f"current-interp|{esrgan_sha}"
+    first = upscale_poll_once(tmp_path, **_poll_kwargs(weights_path=esrgan, weights_key=donor_key))
+    assert first.chunks_done == 2
+
+    def _must_not_run(frame_paths: list[Path], dest_dir: Path) -> list[Path]:
+        raise AssertionError("adopted chunks must not re-render")
+
+    second = upscale_poll_once(
+        tmp_path,
+        **_poll_kwargs(weights_path=esrgan, weights_key=current_key, upscale_fn=_must_not_run),
+    )
+    assert second.chunks_done == 2
+    assert second.chunks_skipped == 0
+    plans = _keyed_dirs(tmp_path, current_key)
+    assert len(plans) == 1
+    for chunk in ("upscaled_00", "upscaled_01"):
+        pngs = sorted((plans[0] / chunk).glob("frame_*.png"))
+        assert len(pngs) == 4
+        assert all(p.stat().st_size > 0 for p in pngs)
+
+
+def test_incomplete_donor_falls_through_to_render(tmp_path: Path) -> None:
+    """A donor missing PNGs adopts nothing for that chunk (renders instead)."""
+    from voyage.hashing import sha256_file
+
+    _make_segment(tmp_path, frames=8)
+    esrgan = _tiny_esrgan(tmp_path / "weights")
+    esrgan_sha = sha256_file(esrgan)
+    donor_key = f"donor-interp|{esrgan_sha}"
+    current_key = f"current-interp|{esrgan_sha}"
+    first = upscale_poll_once(tmp_path, **_poll_kwargs(weights_path=esrgan, weights_key=donor_key))
+    assert first.chunks_done == 2
+    donor_plans = _keyed_dirs(tmp_path, donor_key)
+    assert len(donor_plans) == 1
+    victim = sorted((donor_plans[0] / "upscaled_00").glob("frame_*.png"))[0]
+    victim.unlink()
+
+    calls: list[int] = []
+
+    def _recording_upscale(frame_paths: list[Path], dest_dir: Path) -> list[Path]:
+        calls.append(len(frame_paths))
+        return _stub_upscale(frame_paths, dest_dir)
+
+    second = upscale_poll_once(
+        tmp_path,
+        **_poll_kwargs(weights_path=esrgan, weights_key=current_key, upscale_fn=_recording_upscale),
+    )
+    assert second.chunks_done == 2
+    assert calls == [4]
+
+
+def test_unknown_sha_donor_is_ignored(tmp_path: Path) -> None:
+    """Donor records with unparseable keys never adopt (unknown provenance)."""
+    from voyage.hashing import sha256_file
+
+    _make_segment(tmp_path, frames=8)
+    first = upscale_poll_once(tmp_path, **_poll_kwargs(weights_key="weights-abc"))
+    assert first.chunks_done == 2
+    esrgan = _tiny_esrgan(tmp_path / "weights")
+    esrgan_sha = sha256_file(esrgan)
+    current_key = f"current-interp|{esrgan_sha}"
+
+    calls: list[int] = []
+
+    def _recording_upscale(frame_paths: list[Path], dest_dir: Path) -> list[Path]:
+        calls.append(len(frame_paths))
+        return _stub_upscale(frame_paths, dest_dir)
+
+    second = upscale_poll_once(
+        tmp_path,
+        **_poll_kwargs(weights_path=esrgan, weights_key=current_key, upscale_fn=_recording_upscale),
+    )
+    assert second.chunks_done == 2
+    assert calls == [4, 4]
+
+
+def test_esrgan_sha_from_weights_key_shapes() -> None:
+    """Unit: both wild key shapes parse; anything else is None (never adopt)."""
+    from voyage.augment_sidecar import _esrgan_sha_from_weights_key
+
+    assert _esrgan_sha_from_weights_key("aaa|bbb") == "bbb"
+    assert _esrgan_sha_from_weights_key("rife|aaa|bbb") == "bbb"
+    assert _esrgan_sha_from_weights_key("film|aaa|bbb") == "bbb"
+    assert _esrgan_sha_from_weights_key("weights-abc") is None
+    assert _esrgan_sha_from_weights_key("") is None
+    assert _esrgan_sha_from_weights_key(None) is None
+    assert _esrgan_sha_from_weights_key("a|b|c|d") is None
+    assert _esrgan_sha_from_weights_key("rife||bbb") is None

@@ -297,6 +297,7 @@ def check_models(present_dir: Path | None = None) -> dict[str, Any]:
         ("audio-acestep", model_registry.verify_audio_models),
         ("sfx-mmaudio", model_registry.verify_sfx_models),
         ("film", model_registry.verify_film_models),
+        ("rife", model_registry.verify_rife_models),
         ("realesrgan-anime", model_registry.verify_realesrgan_models),
         ("inspector-qwen35", model_registry.verify_inspector_models),
     )

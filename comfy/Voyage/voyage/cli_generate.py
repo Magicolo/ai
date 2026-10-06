@@ -119,6 +119,7 @@ def _expected_skip_key(
         manifest_no_sfx=bool(manifest.get("no_sfx", False)),
         stored_upscale=int(getattr(augment, "upscale", 1)),
         stored_interpolate=int(getattr(augment, "interpolate", 1)),
+        stored_interp_backend=str(getattr(augment, "interp_backend", "rife")),
     )
 
 
@@ -155,6 +156,7 @@ def _finalize_run_dir(
             sfx_workers=1,
             upscale=1 if skips["force_upscale_1"] else None,
             interpolate=1 if skips["force_interpolate_1"] else None,
+            interp_backend=None,
             verbose=bool(getattr(args, "verbose", False)),
             no_color=bool(getattr(args, "no_color", False)),
             quiet=bool(getattr(args, "quiet", False)),

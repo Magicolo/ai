@@ -23,6 +23,7 @@ EXPECTED_SPEC_KEYS = (
     "ltx25",
     "ltx23",
     "film",
+    "rife",
     "realesrgan-anime",
 )
 
@@ -37,6 +38,7 @@ RECORD_BUILDERS = (
     "_record_ltx23",
     "_record_sfx",
     "_record_film",
+    "_record_rife",
     "_record_realesrgan",
 )
 
@@ -51,6 +53,7 @@ DESCRIBE_HELPERS = (
     "_describe_ltx25",
     "_describe_ltx23",
     "_describe_film",
+    "_describe_rife",
     "_describe_realesrgan",
 )
 
@@ -133,6 +136,7 @@ def spec_key(model_key: str) -> str:
         "ltx25": "ltx25",
         "ltx23": "ltx23",
         "film": "film",
+        "rife": "rife",
         "realesrgan-anime": "realesrgan",
     }
     return mapping[model_key]

@@ -36,7 +36,7 @@ def test_ltxv_requires_own_spec_plus_audio_and_director() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen35-gguf", "film", "realesrgan-anime"}
+    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen35-gguf", "rife", "realesrgan-anime"}
 
 
 def test_video_backends_map_to_their_own_spec_only() -> None:
@@ -48,7 +48,7 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
         "ltxv-2b",
         "audio-acestep",
         "director-qwen35-gguf",
-        "film",
+        "rife",
         "realesrgan-anime",
     }
 
@@ -58,7 +58,7 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
         "causvid",
         "audio-acestep",
         "director-qwen35-gguf",
-        "film",
+        "rife",
         "realesrgan-anime",
     }
 
@@ -83,7 +83,7 @@ def test_deterministic_director_needs_no_director_models() -> None:
     config = with_video_backend(_config_with_style(), "ltxv")
     config.director.backend = "deterministic"
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "film", "realesrgan-anime"}
+    assert specs == {"ltxv-2b", "audio-acestep", "rife", "realesrgan-anime"}
 
 
 def test_sfx_is_opt_in_and_inspector_is_never_required() -> None:
@@ -111,7 +111,7 @@ def test_cuda_backends_include_augmentation_by_default() -> None:
     for backend in ("ltxv", "causvid"):
         config = with_video_backend(_config_with_style(), backend)
         specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-        assert {"film", "realesrgan-anime"} <= specs
+        assert {"rife", "realesrgan-anime"} <= specs
 
 
 def test_ltx_backends_require_own_spec_with_acestep() -> None:
@@ -139,14 +139,14 @@ def test_ltx_backends_require_own_spec_with_acestep() -> None:
         assert specs == {
             spec,
             "director-qwen4b-awq",
-            "film",
+            "rife",
             "realesrgan-anime",
             "sfx-mmaudio",
             "audio-acestep",
         }
 
 
-def test_augment_disabled_excludes_film_and_realesrgan() -> None:
+def test_augment_disabled_excludes_rife_and_realesrgan() -> None:
     from voyage.models_ensure import required_specs
 
     config = with_video_backend(_config_with_style(), "ltxv")
@@ -166,7 +166,7 @@ def test_augment_specs_share_video_models_dir() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     entries = {item.spec: item.models_dir for item in required_specs(config, sfx_enabled=False)}
-    assert entries["film"] == entries["realesrgan-anime"] == Path(config.video.models_dir)
+    assert entries["rife"] == entries["realesrgan-anime"] == Path(config.video.models_dir)
 
 
 def test_ensure_no_download_flag_reports_augment_specs(
@@ -186,7 +186,7 @@ def test_ensure_no_download_flag_reports_augment_specs(
     config = with_video_backend(_config_with_style(), "ltxv")
     assert ensure_models(config, False, console, str(tmp_path), allow_download=False) == 1
     output = stream.getvalue()
-    assert "film" in output
+    assert "rife" in output
     assert "realesrgan-anime" in output
 
 
@@ -241,7 +241,7 @@ def test_ensure_downloads_only_missing_specs(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen35-gguf", "film", "realesrgan-anime"}
+    present = {"audio-acestep", "director-qwen35-gguf", "rife", "realesrgan-anime"}
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")

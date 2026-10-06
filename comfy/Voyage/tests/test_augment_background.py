@@ -92,9 +92,11 @@ def test_plan_matches_finalize_derivation(tmp_path: Path, monkeypatch: Any) -> N
     realesrgan = tmp_path / "realesrgan.pth"
     film.write_bytes(b"f" * 64)
     realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
     monkeypatch.setattr(
         "voyage.augment.resolve_augment_weights",
-        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan),
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
     )
     monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr(
@@ -132,9 +134,11 @@ def test_prewarm_polls_with_finalize_params(tmp_path: Path, monkeypatch: Any) ->
     realesrgan = tmp_path / "realesrgan.pth"
     film.write_bytes(b"f" * 64)
     realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
     monkeypatch.setattr(
         "voyage.augment.resolve_augment_weights",
-        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan),
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
     )
     monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda _device: 5.0)
@@ -199,9 +203,11 @@ def test_resume_skips_ledgered_chunks(tmp_path: Path, monkeypatch: Any) -> None:
     realesrgan = tmp_path / "realesrgan.pth"
     film.write_bytes(b"f" * 64)
     realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
     monkeypatch.setattr(
         "voyage.augment.resolve_augment_weights",
-        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan),
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
     )
     monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda _device: 5.0)
@@ -422,9 +428,11 @@ def test_prewarm_skips_sweeps_when_device_full(tmp_path: Path, monkeypatch: Any)
     realesrgan = tmp_path / "realesrgan.pth"
     film.write_bytes(b"f" * 64)
     realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
     monkeypatch.setattr(
         "voyage.augment.resolve_augment_weights",
-        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan),
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
     )
     monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr(
@@ -464,9 +472,11 @@ def test_prewarm_runs_when_headroom(tmp_path: Path, monkeypatch: Any) -> None:
     realesrgan = tmp_path / "realesrgan.pth"
     film.write_bytes(b"f" * 64)
     realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
     monkeypatch.setattr(
         "voyage.augment.resolve_augment_weights",
-        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan),
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
     )
     monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
     monkeypatch.setattr(

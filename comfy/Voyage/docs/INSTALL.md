@@ -92,6 +92,7 @@ never leave root-owned `__pycache__` in the bind mount.
 ./scripts/run.sh models download audio-acestep    # audio checkpoints
 ./scripts/run.sh models download sfx-mmaudio      # video-synced SFX (~13 GB, CC-BY-NC-4.0)
 ./scripts/run.sh models download film             # finalize interpolation (~66 MB, MIT + Apache-2.0)
+./scripts/run.sh models download rife             # finalize interpolation, RIFE v4.25-heavy fp16 (~87 MB, MIT, default)
 ./scripts/run.sh models download realesrgan-anime # finalize upscaler (~2.5 MB, BSD-3-Clause)
 ./scripts/run.sh models download inspector-qwen35 # VLM (~19 GB, optional)
 ./scripts/run.sh models verify                    # presence + size checks

@@ -60,6 +60,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
         "upscale": config.augment.upscale,
         "interpolate": config.augment.interpolate,
+        "interp_backend": config.augment.interp_backend,
         "presentation_fps": config.augment.presentation_fps,
         "models_dir": config.video.models_dir,
         "audio_config": config.audio,
@@ -151,6 +152,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             manifest_no_sfx=bool(getattr(args, "no_sfx", False)),
             stored_upscale=config.augment.upscale,
             stored_interpolate=config.augment.interpolate,
+            stored_interp_backend=config.augment.interp_backend,
         )
         record_final_coverage(
             run_dir,

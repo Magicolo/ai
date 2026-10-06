@@ -50,6 +50,27 @@ def test_bar_without_extra_keeps_historical_format() -> None:
     assert "frames/s" not in line
 
 
+def _commit_segment(run_dir: Path, segment_id: str = "000000") -> Path:
+    """Committed segment dir the prewarm enumeration picks up."""
+    import json
+
+    segment_dir = run_dir / "segments" / segment_id
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    (segment_dir / "video.mp4").write_bytes(b"fake-video")
+    manifest = {
+        "format": 1,
+        "transition": {},
+        "prompt_plan": {},
+        "audio_state": {},
+        "world_state": {},
+        "metrics": {"frames": 8},
+        "checksums": {"video.mp4": "ck"},
+    }
+    (segment_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (segment_dir / "DONE").write_text("done\n", encoding="utf-8")
+    return segment_dir
+
+
 def test_prewarm_once_times_sweeps_and_counts_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -59,7 +80,8 @@ def test_prewarm_once_times_sweeps_and_counts_frames(
     ip_result = InterpPollResult(1, 0, 2, 0, 0, 0, frames_done=64, frames_skipped=0)
     plan = SimpleNamespace(
         realesrgan_path=tmp_path / "esrgan.pth",
-        film_path=tmp_path / "film.safetensors",
+        interp_path=tmp_path / "film.safetensors",
+        interp_backend="rife",
         weights_key="test-key",
         out_width=1216,
         out_height=704,
@@ -76,6 +98,7 @@ def test_prewarm_once_times_sweeps_and_counts_frames(
         augment=SimpleNamespace(upscale=2, interpolate=2),
         video=SimpleNamespace(models_dir=tmp_path / "models"),
     )
+    _commit_segment(tmp_path)
     result = prewarm_once(
         tmp_path,
         config,

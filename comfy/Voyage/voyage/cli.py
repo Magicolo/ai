@@ -193,8 +193,15 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
         "--interpolate",
         type=int,
         default=None,
-        help="frame-count multiplier at finalize via FILM "
-        "(default: [augment] interpolate 1; 2 doubles the frame count)",
+        help="frame-count multiplier at finalize via the configured interpolation "
+        "backend (default: [augment] interpolate 1; 2 doubles the frame count)",
+    )
+    parser.add_argument(
+        "--interp-backend",
+        default=None,
+        choices=["film", "rife"],
+        help="interpolation backend at finalize: rife (default, ~16.8x faster "
+        "than film at 2048x1152, eyeball-identical) or film (hero/archival)",
     )
     parser.add_argument(
         "--presentation-fps",

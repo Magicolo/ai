@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, TypeGuard, TypeVar
+from typing import Literal, TypeGuard, TypeVar, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -30,6 +30,12 @@ SfxBackendName = Literal["fake", "mmaudio"]
 
 SfxModelSize = Literal["small_44k", "medium_44k", "large_44k_v2"]
 """MMAudio 44 kHz variant vocabulary (mirrors audio.mmaudio_sfx)."""
+
+InterpBackendName = Literal["film", "rife"]
+"""Interpolation backend vocabulary: FILM (flow-once per pair, 7-level
+pyramid) vs RIFE v4.25 (per-moment IFNet forward, ~5.7x less activation
+memory). RIFE is the default (Phase-0 A/B: ~16.8x per-pair at 2048x1152,
+eyeball-identical on line art); FILM stays for hero/archival renders."""
 
 StateMode = Literal["persistent_kv", "reconstructable_prefix", "independent_clip"]
 """Continuation-state vocabulary (DESIGN §5.1): how a backend resumes work.
@@ -524,11 +530,17 @@ class AugmentConfig(BaseModel):
     frame count the same way FILM always has (`(n-1)*m+1`). Both
     default to `1` (ship the source geometry as-is, ffmpeg only).
 
-    The model pass (Real-ESRGAN upscale + FILM interpolate via
+    The model pass (Real-ESRGAN upscale + interpolate via
     `resolve_augment_weights` when provisioned) runs exactly when the
     multipliers demand work — `upscale > 1 or interpolate > 1` — and
     the legs are present; otherwise finalize ships via ffmpeg. There
     is no `use_model_pass` / `--no-augment` knob: `1/1` means no work.
+
+    `interp_backend` selects the interpolation engine: `"rife"` (default,
+    RIFE v4.25 — ~16.8x faster per pair than FILM at 2048x1152, identical
+    eyeball on line art) or `"film"` (legacy FILM port, kept for
+    hero/archival renders). The backend rides the sidecar weights key,
+    so switching backends re-renders the interp leg by design.
 
     `presentation_fps` pins the shipped frame rate: with
     `interpolate=2` on 24fps content presented at 32fps, the timeline
@@ -538,6 +550,7 @@ class AugmentConfig(BaseModel):
 
     upscale: int = 1
     interpolate: int = 1
+    interp_backend: InterpBackendName = "rife"
     presentation_fps: int | None = Field(default=None, ge=1)
 
     @field_validator("upscale", "interpolate")
@@ -750,6 +763,7 @@ def resolve_config(
     upscale: int | None | UnsetType = Unset,
     interpolate: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
+    interp_backend: InterpBackendName | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issue 022): backend preset,
     then targeted overrides — in that order, so explicit flags always
@@ -810,20 +824,34 @@ def resolve_config(
     if is_provided(prompt_enhance):
         video = VideoConfig(**{**video.model_dump(), "prompt_enhance": prompt_enhance})
     augment = config.augment
-    if is_provided(upscale) or is_provided(interpolate) or is_provided(presentation_fps):
+    if (
+        is_provided(upscale)
+        or is_provided(interpolate)
+        or is_provided(presentation_fps)
+        or is_provided(interp_backend)
+    ):
         resolved_upscale = augment.upscale
         resolved_interpolate = augment.interpolate
         resolved_presentation = augment.presentation_fps
+        resolved_backend = augment.interp_backend
         if is_provided(upscale):
             resolved_upscale = upscale
         if is_provided(interpolate):
             resolved_interpolate = interpolate
         if is_provided(presentation_fps):
             resolved_presentation = presentation_fps
+        if is_provided(interp_backend):
+            if interp_backend in ("film", "rife"):
+                resolved_backend = cast(InterpBackendName, interp_backend)
+            else:
+                raise ValueError(
+                    f"unknown interp backend {interp_backend!r} (expected 'film' or 'rife')"
+                )
         augment = AugmentConfig(
             upscale=resolved_upscale,
             interpolate=resolved_interpolate,
             presentation_fps=resolved_presentation,
+            interp_backend=resolved_backend,
         )
     return config.model_copy(
         update={

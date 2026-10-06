@@ -124,14 +124,23 @@ def _default_seam_pngs(
     *,
     weights_path: Path,
     device: str,
+    interp_backend: str = "rife",
 ) -> list[Path]:
-    """Render the seam mids via the resident FILM leg (lazy torch import)."""
+    """Render the seam mids via the resident interp leg (lazy torch import)."""
     from voyage.augment import load_png_frames_as_tensors, write_tensors_as_png_frames
-    from voyage.workers.augment_worker import interpolate_mids
+    from voyage.workers.augment_worker import (
+        interpolate_mids,
+        interpolate_rife_mids,
+        validate_interp_backend,
+    )
 
+    validate_interp_backend(interp_backend)
     frames = load_png_frames_as_tensors([before_png, after_png])
     moments = [(position + 1) / multiplier for position in range(multiplier - 1)]
-    mids = interpolate_mids(frames, weights_path, moments=moments, device=device)
+    if interp_backend == "rife":
+        mids = interpolate_rife_mids(frames, weights_path, moments=moments, device=device)
+    else:
+        mids = interpolate_mids(frames, weights_path, moments=moments, device=device)
     return write_tensors_as_png_frames(mids, dest_dir)
 
 
@@ -152,6 +161,7 @@ def render_seam_once(
     preset: str,
     weights_path: Path | None = None,
     device: str = "cuda:1",
+    interp_backend: str = "rife",
     interp_fn: SeamInterpFn | None = None,
 ) -> bool:
     """Render one seam's mids (True) or skip the ledger hit (False).
@@ -217,7 +227,7 @@ def render_seam_once(
     partial_dir = seam_dir / f"interpolated_{SEAM_CHUNK_INDEX:02d}.partial"
     if interp_fn is None:
         if weights_path is None:
-            raise ValueError("seam default render needs weights_path (FILM leg)")
+            raise ValueError("seam default render needs weights_path (interp leg)")
         written = _default_seam_pngs(
             before_png,
             after_png,
@@ -225,6 +235,7 @@ def render_seam_once(
             multiplier,
             weights_path=weights_path,
             device=device,
+            interp_backend=interp_backend,
         )
     else:
         written = interp_fn(before_png, after_png, partial_dir, multiplier)
@@ -245,3 +256,89 @@ def render_seam_once(
 # Pair wiring lives in `augment_finalize.run_durable_model_pass`, which
 # already holds both sides' source keys and plan dirs and calls
 # `seam_plan_dir` + `seam_endpoints` + `render_seam_once` directly.
+
+
+def maybe_render_seam_joint(
+    run_dir: Path,
+    *,
+    key_a: str,
+    key_b: str,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    multiplier: int,
+    crf: int,
+    preset: str,
+    weights_path: Path | None = None,
+    device: str = "cuda:1",
+    interp_fn: SeamInterpFn | None = None,
+    interp_backend: str = "rife",
+) -> bool:
+    """Attempt one segment-boundary joint early (True) or wait (False).
+
+    Same derivation as the drain's per-boundary wiring (`seam_plan_dir` +
+    `render_seam_once` with identical args), so an early render and the
+    drain's later attempt share one ledger identity: the drain skips via
+    ledger hit. Returns False while either side's interp is incomplete
+    (`seam_endpoints` None — the caller waits, it never fails loud here;
+    the drain still fail-louds on genuinely stuck boundaries).
+    """
+    plan_a = plan_dir_for_segment(
+        run_dir,
+        source_key=key_a,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+    )
+    plan_b = plan_dir_for_segment(
+        run_dir,
+        source_key=key_b,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+    )
+    endpoints = seam_endpoints(plan_a, plan_b)
+    if endpoints is None:
+        return False
+    before_png, after_png = endpoints
+    seam_dir = seam_plan_dir(
+        run_dir,
+        key_a=key_a,
+        key_b=key_b,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+    )
+    return render_seam_once(
+        run_dir,
+        seam_dir,
+        before_png=before_png,
+        after_png=after_png,
+        multiplier=multiplier,
+        source_key=f"{key_a}|{key_b}",
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+        weights_path=weights_path,
+        device=device,
+        interp_fn=interp_fn,
+        interp_backend=interp_backend,
+    )

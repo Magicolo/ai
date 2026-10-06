@@ -40,8 +40,8 @@ from voyage.media import (
 #: Source frames per pre-warm chunk (mirrors the poller/finalize default).
 BACKGROUND_CHUNK_FRAMES = 32
 
-#: Pre-warm runs one upscale sweep then one interp sweep per pass (same
-#: stagger as finalize: the legs share `cuda:1`, never co-resident).
+#: Pre-warm runs one segment-interleaved upscale→interp pass (same
+#: pipeline as finalize: the legs share `cuda:1`, never co-resident).
 BACKGROUND_DEVICE_FALLBACK = "cuda:1"
 
 #: Minimum free VRAM (GiB) on the pre-warm device for the upscale
@@ -53,13 +53,12 @@ BACKGROUND_DEVICE_FALLBACK = "cuda:1"
 UPSCALE_MIN_FREE_GIB = 1.0
 
 #: Minimum free VRAM (GiB) on the pre-warm device for the interp sweep.
-#: FILM at 2x needs ~5.9 GiB alone, so it can never run alongside the
-#: resident llama sidecar on the 6 GB 2060 — interp waits for finalize
-#: (sidecar stopped, device free), and the post-commit report says so
-#: instead of staying silent. Unknown (no nvidia-smi / parse failure)
-#: allows the sweep: the pre-warm must never go quiet on an unprobable
-#: box.
-PREWARM_MIN_FREE_GIB = 3.0
+#: RIFE at 2x peaks ~0.65 GiB, so 1.0 leaves headroom while letting interp
+#: progress run alongside the resident llama sidecar on the 6 GB 2060 —
+#: the same llama-share budget the upscale sweep already runs under.
+#: Unknown (no nvidia-smi / parse failure) allows the sweep: the pre-warm
+#: must never go quiet on an unprobable box.
+PREWARM_MIN_FREE_GIB = 1.0
 
 #: How long a notified pass waits for the director to go idle before
 #: giving up the pass. Prefetch decides hold `cuda:1` for ~10-30s, so a
@@ -122,16 +121,20 @@ class BackgroundPlan:
     preset: str
     weights_key: str
     device: str
-    film_path: Path
+    interp_path: Path
     realesrgan_path: Path
+    interp_backend: str = "rife"
 
 
 @dataclass(frozen=True)
 class PrewarmResult:
     """Counts from one pre-warm pass (advisory; the ledger is the truth).
 
-    Frame counts are source frames per leg; seconds are per-sweep wall
-    time (upscale sweep, then interp sweep — never co-resident).
+    Frame counts are source frames per leg; seconds are per-leg wall time
+    summed across the segment-interleaved pass (legs still run
+    sequentially — never co-resident). `seams_done` counts
+    boundary joints rendered early during the pass (surfaced on
+    the verbose sweep line; the ledger stays frame-shaped).
     `skip_reason` is empty when both legs swept: it names the leg the
     VRAM guard held back (upscale or interp alone) or a busy-device pass
     the idle wait gave up on. Moot passes (no plan) return None instead —
@@ -150,6 +153,7 @@ class PrewarmResult:
     upscale_seconds: float = 0.0
     interp_seconds: float = 0.0
     skip_reason: str = ""
+    seams_done: int = 0
 
 
 PREWARM_NOTHING_LOUD_NOTE = "pre-warm did nothing — everything defers to finalize"
@@ -268,7 +272,9 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
         weights = augment_module.resolve_augment_weights(models_dir)
     except (TypeError, ValueError, OSError):
         return None
-    if weights.film is None or weights.realesrgan is None:
+    interp_backend = getattr(config.augment, "interp_backend", "rife") or "rife"
+    active_leg = augment_module.interp_leg_path(weights, interp_backend)
+    if active_leg is None or weights.realesrgan is None:
         return None
     try:
         devices = model_pass_devices()
@@ -295,8 +301,8 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
     try:
         from voyage.augment_finalize import weights_key_for
 
-        weights_key = weights_key_for(weights)
-    except (ValueError, OSError):
+        weights_key = weights_key_for(weights, interp_backend)
+    except (TypeError, ValueError, OSError):
         return None
     return BackgroundPlan(
         out_width=plan.out_w,
@@ -310,8 +316,9 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
         preset=FINALIZE_PRESET_DEFAULT,
         weights_key=weights_key,
         device=devices[0],
-        film_path=weights.film,
+        interp_path=active_leg,
         realesrgan_path=weights.realesrgan,
+        interp_backend=interp_backend,
     )
 
 
@@ -322,32 +329,42 @@ def prewarm_once(
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    seam_interp_fn: Callable[..., Any] | None = None,
     on_upscale_chunk: Callable[[str, int, int], None] | None = None,
     on_upscale_frames: Callable[[str, int], None] | None = None,
     on_interp_chunk: Callable[[str, int, int], None] | None = None,
     on_interp_frames: Callable[[str, int], None] | None = None,
     include_interp: bool = True,
 ) -> PrewarmResult | None:
-    """Run one upscale sweep + (unless disabled) one interp sweep.
+    """Run one segment-interleaved upscale + interp pass (unless disabled).
 
-    The generation-time driver passes `include_interp=False`: interp runs
-    only at finalize time, so the background never spends the 6GB card's
-    headroom on FILM (nor shows interp progress) during generation. Direct
-    callers (and their tests) keep the default True path.
+    Each pass enumerates the committed segments once, then runs every
+    segment's upscale immediately followed by its interp — interp starts
+    on committed frames instead of waiting for the full upscale sweep
+    (mirrors the finalize driver). Direct callers keep the default
+    `include_interp=True` path; `include_interp=False` runs the upscale
+    leg only (upscale-only by design — never a skip, never interp
+    progress).
 
     Returns None when pre-warm is moot (see `resolve_background_plan`)
-    or when `should_stop` fires between the sweeps (lets `stop()` abandon
-    a pass without racing a live CUDA sweep at interpreter exit). Raises
-    `MediaError` on a failed chunk (fail-loud like finalize — the
-    background thread catches it; direct callers such as tests see it).
+    or when `should_stop` fires after a segment's upscale (lets `stop()`
+    abandon a pass without racing a live CUDA sweep at interpreter
+    exit — accumulated counts are discarded, same as the old
+    between-sweeps check). Raises `MediaError` on a failed chunk
+    (fail-loud like finalize — the background thread catches it; direct
+    callers such as tests see it).
 
-    VRAM gating is per leg: the upscale sweep needs `UPSCALE_MIN_FREE_GIB`
-    (SRVGG fits beside the resident sidecar), the interp sweep re-probes
-    and needs `PREWARM_MIN_FREE_GIB` (FILM never fits beside it — interp
-    then waits for finalize). A held-back leg yields a zero-count result
-    carrying `skip_reason` instead of None, so the post-commit report can
-    say what waited and why; both legs held back means no poller runs at
-    all. Unknown free space stays fail-open on both legs.
+    VRAM gating is per leg: the pass needs `UPSCALE_MIN_FREE_GIB` to
+    start (SRVGG fits beside the resident sidecar), the interp leg
+    probes once before the loop and needs `PREWARM_MIN_FREE_GIB` (RIFE
+    fits beside it too). A held-back leg yields a zero-count result
+    carrying `skip_reason` instead of None, so the post-commit report
+    can say what waited and why; both legs held back means no poller
+    runs at all. Unknown free space stays fail-open on both legs.
+
+    After each non-first segment's interp, the pass attempts its left
+    boundary seam joint early (idempotent with the finalize drain's
+    fallback; skipped when `multiplier < 2`).
 
     The `on_*` callbacks forward to the pollers' `on_chunk` /
     `on_chunk_frames` (fired per rendered chunk on the calling thread —
@@ -382,82 +399,130 @@ def prewarm_once(
                 f"{UPSCALE_MIN_FREE_GIB:.1f} GiB needed"
             ),
         )
-    upscale_started = time.monotonic()
-    upscale_result = upscale_poll_fn(
-        run_dir,
-        weights_path=plan.realesrgan_path,
-        weights_key=plan.weights_key,
-        out_width=plan.out_width,
-        out_height=plan.out_height,
-        out_fps=plan.source_fps_key,
-        upscale_factor=plan.upscale_factor,
-        chunk_frames=BACKGROUND_CHUNK_FRAMES,
-        device=plan.device,
-        crf=plan.crf,
-        preset=plan.preset,
-        on_chunk=on_upscale_chunk,
-        on_chunk_frames=on_upscale_frames,
-    )
-    if should_stop is not None and should_stop():
-        return None
-    upscale_seconds = time.monotonic() - upscale_started
+    upscale_seconds = 0.0
     skip_reason = ""
-    interp_chunks_done = 0
-    interp_chunks_skipped = 0
-    interp_chunks_waiting = 0
-    interp_frames_done = 0
-    interp_seconds = 0.0
-    if not include_interp or interp_poll_fn is None:
-        # Generation-time path (or no interp poller): interp runs only at
-        # finalize time, so the background pass is upscale-only by design —
-        # never a skip, never interp progress during generation.
-        pass
-    elif (interp_free := device_free_gib(plan.device)) is not None and (
-        interp_free < PREWARM_MIN_FREE_GIB
+    interp_armed = bool(include_interp and interp_poll_fn is not None)
+    if (
+        interp_armed
+        and (interp_free := device_free_gib(plan.device)) is not None
+        and (interp_free < PREWARM_MIN_FREE_GIB)
     ):
         skip_reason = (
             f"interp skipped: {interp_free:.1f} GiB free on {plan.device} < "
             f"{PREWARM_MIN_FREE_GIB:.1f} GiB needed (waits for finalize)"
         )
-        interp_chunks_done = 0
-        interp_chunks_skipped = 0
-        interp_chunks_waiting = 0
-        interp_frames_done = 0
-        interp_seconds = 0.0
-    else:
-        interp_started = time.monotonic()
-        interp_result = interp_poll_fn(
-            run_dir,
-            weights_path=plan.film_path,
-            weights_key=plan.weights_key,
-            out_width=plan.out_width,
-            out_height=plan.out_height,
-            out_fps=plan.source_fps_key,
-            upscale_factor=plan.upscale_factor,
-            chunk_frames=BACKGROUND_CHUNK_FRAMES,
-            multiplier=plan.multiplier,
-            device=plan.device,
-            crf=plan.crf,
-            preset=plan.preset,
-            on_chunk=on_interp_chunk,
-            on_chunk_frames=on_interp_frames,
-        )
-        interp_chunks_done = interp_result.chunks_done
-        interp_chunks_skipped = interp_result.chunks_skipped
-        interp_chunks_waiting = interp_result.chunks_waiting
-        interp_frames_done = interp_result.frames_done
-        interp_seconds = time.monotonic() - interp_started
+        interp_armed = False
+    # Segment-interleaved pipeline (mirrors the finalize driver): enumerate
+    # once per pass, then run each segment's upscale immediately followed
+    # by its interp, so interp starts on committed frames instead of
+    # waiting for the full upscale sweep. `should_stop` is honored after
+    # each segment's upscale (same discard-on-stop shape as the old
+    # between-sweeps check, but responsive mid-pass).
+    from voyage.augment_finalize import _accepts_keyword
+    from voyage.augment_seam import maybe_render_seam_joint
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    segment_sources, _skipped_sources = committed_segment_sources(run_dir)
+    ordered_sources = sorted(segment_sources, key=lambda source: source.segment_id)
+    up_takes_segments = _accepts_keyword(upscale_poll_fn, "segment_ids")
+    ip_takes_segments = (
+        _accepts_keyword(interp_poll_fn, "segment_ids") if interp_poll_fn is not None else False
+    )
+    segments_seen = 0
+    up_chunks_done = 0
+    up_chunks_skipped = 0
+    up_frames_done = 0
+    ip_chunks_done = 0
+    ip_chunks_skipped = 0
+    ip_chunks_waiting = 0
+    ip_frames_done = 0
+    seams_early = 0
+    ip_seconds = 0.0
+    for position, source in enumerate(ordered_sources):
+        segment_id = source.segment_id
+        up_kwargs: dict[str, Any] = {
+            "weights_path": plan.realesrgan_path,
+            "weights_key": plan.weights_key,
+            "out_width": plan.out_width,
+            "out_height": plan.out_height,
+            "out_fps": plan.source_fps_key,
+            "upscale_factor": plan.upscale_factor,
+            "chunk_frames": BACKGROUND_CHUNK_FRAMES,
+            "device": plan.device,
+            "crf": plan.crf,
+            "preset": plan.preset,
+            "on_chunk": on_upscale_chunk,
+            "on_chunk_frames": on_upscale_frames,
+        }
+        if up_takes_segments:
+            up_kwargs["segment_ids"] = [segment_id]
+        up_started = time.monotonic()
+        up_result = upscale_poll_fn(run_dir, **up_kwargs)
+        upscale_seconds += time.monotonic() - up_started
+        segments_seen += int(getattr(up_result, "segments_seen", 0) or 0)
+        up_chunks_done += int(getattr(up_result, "chunks_done", 0) or 0)
+        up_chunks_skipped += int(getattr(up_result, "chunks_skipped", 0) or 0)
+        up_frames_done += int(getattr(up_result, "frames_done", 0) or 0)
+        if should_stop is not None and should_stop():
+            return None
+        if interp_armed and interp_poll_fn is not None:
+            ip_kwargs: dict[str, Any] = {
+                "weights_path": plan.interp_path,
+                "weights_key": plan.weights_key,
+                "out_width": plan.out_width,
+                "out_height": plan.out_height,
+                "out_fps": plan.source_fps_key,
+                "upscale_factor": plan.upscale_factor,
+                "chunk_frames": BACKGROUND_CHUNK_FRAMES,
+                "multiplier": plan.multiplier,
+                "device": plan.device,
+                "crf": plan.crf,
+                "preset": plan.preset,
+                "interp_backend": plan.interp_backend,
+                "on_chunk": on_interp_chunk,
+                "on_chunk_frames": on_interp_frames,
+            }
+            if ip_takes_segments:
+                ip_kwargs["segment_ids"] = [segment_id]
+            ip_started = time.monotonic()
+            ip_result = interp_poll_fn(run_dir, **ip_kwargs)
+            ip_seconds += time.monotonic() - ip_started
+            ip_chunks_done += int(getattr(ip_result, "chunks_done", 0) or 0)
+            ip_chunks_skipped += int(getattr(ip_result, "chunks_skipped", 0) or 0)
+            ip_chunks_waiting += int(getattr(ip_result, "chunks_waiting", 0) or 0)
+            ip_frames_done += int(getattr(ip_result, "frames_done", 0) or 0)
+            if plan.multiplier > 1 and position > 0:
+                previous = ordered_sources[position - 1]
+                if maybe_render_seam_joint(
+                    run_dir,
+                    key_a=previous.source_key,
+                    key_b=source.source_key,
+                    weights_key=plan.weights_key,
+                    out_width=plan.out_width,
+                    out_height=plan.out_height,
+                    out_fps=plan.source_fps_key,
+                    upscale_factor=plan.upscale_factor,
+                    multiplier=plan.multiplier,
+                    crf=plan.crf,
+                    preset=plan.preset,
+                    weights_path=plan.interp_path,
+                    device=plan.device,
+                    interp_fn=seam_interp_fn,
+                    interp_backend=plan.interp_backend,
+                ):
+                    seams_early += 1
     return PrewarmResult(
-        segments_seen=upscale_result.segments_seen,
-        upscale_chunks_done=upscale_result.chunks_done,
-        upscale_chunks_skipped=upscale_result.chunks_skipped,
-        interp_chunks_done=interp_chunks_done,
-        interp_chunks_skipped=interp_chunks_skipped,
-        interp_chunks_waiting=interp_chunks_waiting,
-        upscale_frames_done=upscale_result.frames_done,
-        interp_frames_done=interp_frames_done,
+        segments_seen=segments_seen,
+        upscale_chunks_done=up_chunks_done,
+        upscale_chunks_skipped=up_chunks_skipped,
+        interp_chunks_done=ip_chunks_done,
+        interp_chunks_skipped=ip_chunks_skipped,
+        interp_chunks_waiting=ip_chunks_waiting,
+        upscale_frames_done=up_frames_done,
+        interp_frames_done=ip_frames_done,
         upscale_seconds=round(upscale_seconds, 3),
-        interp_seconds=round(interp_seconds, 3),
+        interp_seconds=round(ip_seconds, 3),
+        seams_done=seams_early,
         skip_reason=skip_reason,
     )
 
@@ -477,9 +542,10 @@ class BackgroundPrewarm:
     behavior) forward per-rendered-chunk upscale events on THIS thread —
     they must never touch display code. The generation loop supplies
     queue-appending callbacks and drains them into progress bars on the
-    main thread while the video render blocks. There are no interp
-    callbacks: interp runs only at finalize time, so the background pass
-    is upscale-only by design.
+    main thread while the video render blocks. The `on_interp_*` callbacks
+    (also None by default) forward per-rendered-chunk interp events the
+    same way. The background pass runs both legs when VRAM allows and is
+    silent unless the caller passes callbacks.
     """
 
     def __init__(
@@ -491,6 +557,8 @@ class BackgroundPrewarm:
         idle_fn: Callable[[], bool] | None = None,
         on_upscale_chunk: Callable[[str, int, int], None] | None = None,
         on_upscale_frames: Callable[[str, int], None] | None = None,
+        on_interp_chunk: Callable[[str, int, int], None] | None = None,
+        on_interp_frames: Callable[[str, int], None] | None = None,
     ) -> None:
         self._run_dir = run_dir
         self._config = config
@@ -507,7 +575,9 @@ class BackgroundPrewarm:
                 should_stop=self._is_stopping,
                 on_upscale_chunk=on_upscale_chunk,
                 on_upscale_frames=on_upscale_frames,
-                include_interp=False,
+                on_interp_chunk=on_interp_chunk,
+                on_interp_frames=on_interp_frames,
+                include_interp=True,
             )
         self._idle_fn = idle_fn or (lambda: True)
         self._condition = threading.Condition()
