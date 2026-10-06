@@ -27,7 +27,7 @@ def test_augment_defaults_are_explicit_unity() -> None:
 
 
 def test_ltx25_native_passes_through_at_unity() -> None:
-    """ltx25 native 1216x704@24 ships untouched at 1/1 (stream-copy fast path)."""
+    """ltx25 native 1216x704@24 plans no work at 1/1 (native encode branch)."""
     plan = plan_augmentation(1216, 704, 24.0)
     assert (plan.out_w, plan.out_h, plan.out_fps) == (1216, 704, 24)
     assert plan.needs_minterpolate is False
@@ -102,7 +102,7 @@ def test_model_interpolate_suppresses_minterpolate() -> None:
 
 
 def test_unprobable_dims_always_raise() -> None:
-    """Unprobable dims can never take the stream-copy fast path (fail loud)."""
+    """Unprobable dims can never take the native branch (fail loud)."""
     with pytest.raises(MediaError, match="unprobable source dims"):
         plan_augmentation(0, 0, 24.0)
     with pytest.raises(MediaError, match="unprobable source dims"):

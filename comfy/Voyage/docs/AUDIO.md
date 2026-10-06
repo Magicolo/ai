@@ -45,8 +45,10 @@ shortest slice; every assembly step verifies non-empty outputs.
 side) from the takes ledger and blends pairwise with manual fades
 (`voyage/media.py: _blend_pair` — afade out/in + adelay + amix,
 2 inputs per ffmpeg call, never `acrossfade`: a 31-input chain
-deadlocks the filter scheduler and long-first pairs collapse), then
-concats the segment videos with a stream copy and muxes the mix
-(`-shortest` safety; AAC 256k at 48 kHz) with checksum, frame-range,
+  deadlocks the filter scheduler and long-first pairs collapse), then
+  encodes the concatenated segment videos in one libx264 pass
+  (defaults `-preset slow -crf 30`, 2026-10-06 compression change —
+  the old stream-copy publish is gone) and muxes the mix
+  (`-shortest` safety; AAC 128k at 48 kHz) with checksum, frame-range,
 and A/V-alignment checks (§56 steps 4–6). Config: 48 kHz stereo
 throughout.

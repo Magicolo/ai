@@ -1,9 +1,13 @@
-"""Issue 031: finalize concat-copy fast path + take-slice cache.
+"""Issue 031 (retired): finalize always encodes + take-slice cache.
 
-Native-geometry runs stream-copy committed videos (zero video re-encodes);
-the slice cache memos identical (take, start, duration) windows across the
-overlap blend. Real ffmpeg throughout (slim image ships it); segments come
-from the fake-backend commit path like the existing finalize tests.
+The old native-geometry stream copy (~600MB/min) is retired for
+compression: every publish now runs one libx264 encode at the effective
+crf/preset (defaults crf 30 / preset slow) with AAC 128k audio, even when
+segments already match the presentation geometry. This module pins the
+no-copy behavior; the slice cache memos identical (take, start, duration)
+windows across the overlap blend. Real ffmpeg throughout (slim image
+ships it); segments come from the fake-backend commit path like the
+existing finalize tests.
 """
 
 from __future__ import annotations
@@ -138,18 +142,18 @@ def test_segment_video_matches_native_fake_segments(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_finalize_native_geometry_validates_without_reencode(tmp_path: Path) -> None:
+def test_finalize_native_geometry_encodes_without_copy(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     _commit_two(run_dir)
-    out = tmp_path / "final-copy.mp4"
-    # Explicit-quality default 1/1 ships 768x432@24 fake segments natively
-    # (stream-copy fast path).
+    out = tmp_path / "final-encoded.mp4"
+    # Explicit-quality default 1/1 still matches 768x432@24 fake segments
+    # natively — but the copy path is retired, so this must encode.
     assert finalize_run(run_dir, out).exists()
     probed = validate_video(out, 768, 432, 24)
     assert probed["fps"] == pytest.approx(24.0, abs=0.5)
     duration = float(probe(out).get("format", {}).get("duration", 0.0))
-    # 2 fake segments x 48f @24fps = 4.0s of content, carried losslessly.
+    # 2 fake segments x 48f @24fps = 4.0s of content, carried through.
     assert duration == pytest.approx(4.0, abs=0.15)
 
 
@@ -185,10 +189,15 @@ def test_build_final_audio_slice_cache_wired(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_fastpath_skips_part_reencodes_but_keeps_audio(
+def test_native_publish_encodes_and_never_copies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The copy path still blends audio and muxes AAC (video copy only)."""
+    """Native-geometry finalize encodes once and never stream-copies.
+
+    Regression pin for the copy-path retirement: the publish must carry
+    exactly one libx264 encode (with the effective -crf/-preset and a
+    -vf reshape), zero `-c:v copy` calls, and still mux AAC audio.
+    """
     run_dir = tmp_path / "run"
     _init_run(run_dir)
     _commit_two(run_dir)
@@ -205,9 +214,13 @@ def test_fastpath_skips_part_reencodes_but_keeps_audio(
     out = tmp_path / "final-rec.mp4"
     assert finalize_run(run_dir, out).exists()
     video_encodes = [argv for argv in calls if "-c:v" in argv and "libx264" in argv]
-    assert video_encodes == []
+    assert len(video_encodes) == 1, f"expected one encode, got {len(video_encodes)}: {calls!r}"
+    only = video_encodes[0]
+    assert "-crf" in only and "30" in only
+    assert "-preset" in only and "slow" in only
+    assert "-vf" in only
     copy_calls = [argv for argv in calls if "-c:v" in argv and "copy" in argv]
-    assert len(copy_calls) == 1
+    assert copy_calls == []
     audio = next(
         s
         for s in probe(out).get("streams", [])

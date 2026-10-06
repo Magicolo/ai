@@ -3087,7 +3087,7 @@ Capture stderr and include the relevant last lines in `MediaError`.
 > As-built (final-2026-10-01, issue 166): CLOSED+PROVEN — present-legs tensor encode selected on knob-on via `resolve_augment_weights` → `augment.py` chunk worker (cuda:1 fp16 numerics + eyeball + flat VRAM proof).
 > As-built (batch-2026-10-01, issue 152): parity mechanism found — `afade` runs in its input's native sample format, so s16-fed fades truncate to the s16 grid while s32-fed (fold blends 2+) keep precision (≤1 s16 LSB, second-and-later overlaps only); chained pairwise stages with an `aformat=s32` barrier per stage == production fold byte-for-byte (N=4 and N=8, max=0). Recorded NOT landed — needs the pin owner's 31-input-scale no-hang proof + ≤2-input pin relaxation first; the pairwise probe-memo fold stands.
 
-> As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_*` aliases the augment CRF ladder; `resolve_finalize_settings()` is the single scalar/options= contract (768/432/24 defaults retained for the zero-floor stream-copy fast path); `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`).
+> As-built (batch-7-2026-09-30): frame-count math single-homed in `voyage.augment.interpolated_frame_count` (`media` re-exports); `FINALIZE_CRF_MINIMUM/MAXIMUM` alias the augment CRF ladder (the DEFAULT diverged 2026-10-06: finalize 30/slow vs chunk 15/veryfast — intermediates are re-encoded at publish, so their quality setting is transient); `resolve_finalize_settings()` is the single scalar/options= contract; `workers/augment_worker.py` is a quarantined spike (official weights raise `ModelCompatibilityError`). (The old "768/432/24 defaults retained for the zero-floor stream-copy fast path" clause died with the 2026-10-06 compression change — there is no stream-copy publish anymore.)
 > As-built (batch-8-2026-09-30, issue 138): `finalize --skip-bad` is input triage with a record — missing artifacts, checksum/metrics/alignment failures, and numbering gaps are each skipped with a `finalize: skipping ...` warning naming the segment; the post-assembly presentation check stays strict, so a corrupt stage still aborts the finalize.
 > As-built (batch-8-2026-09-30, issue 152): finalize audio joins are single-graph — each stem/window is read once through one chained adelay+amix filter invocation (O(N) I/O, one spawn), never re-encoded N−1 times through a left fold; soak trends join wall-clock vs timeline length to prove the scaling (residual: SFX-pass owner).
 > As-built (batch-12-2026-09-30, issue 152): correction — the batch-8 single-graph note never landed in code: joins stay pairwise by the pinned ≤2-input invariant (`test_final_blend_scale.py`, live 31-segment deadlock). Batch 9 landed probe-memo (O(N²)→O(N) probes) + per-blend timings; batch 12 proved a wide MANUAL-fade graph hangs never but is not bit-identical (≤1 s16 LSB generational ordering), so the fold stays pairwise until parity is proven + the pin owner relaxes it with a 31-input-scale GPU-long-run proof.
@@ -3126,6 +3126,7 @@ Finalizer steps:
 > helper — read-only error strings on the validate side.
 > As-built (§56-staging-2026-09-30, issue 102): staging uses `TemporaryDirectory(prefix="voyage-final-", dir=run_dir)` — preflighted filesystem, greppable names.
 > As-built (§56-single-pass-finalize-2026-09-30, issue 050): single concat-demuxer + vf libx264 pass over originals (`-preset`/`-crf` from FinalizeOptions, defaults veryfast/15); no intermediate parts; native runs stream-copy; every finalize appends `finalize_completed` (`parts_encode_ms` schema-stable 0.0 + `audio_blend_ms` + `final_encode_ms` + effective crf/preset/geometry) to `logs/metrics.jsonl`.
+> As-built (finalize-compression-2026-10-06): the native branch no longer stream-copies — every publish encodes libx264 (`-preset slow -crf 30` defaults, AAC `-b:a 128k`), so a default finalize shrinks segments ~60× (measured 1024×576@24 line-art: ~20MB/min source → 6.1MB/min final, SSIM 0.967 / PSNR ~37dB vs source, ~10× realtime CPU); the stream-copy fast path is dead (gate still computes `native`, `fast_path` metric reads False).
 
 Never mutate the source segment files during finalization.
 
@@ -6512,7 +6513,9 @@ re-applied `timezone.utc` + `noqa: UP017` guard so gates stop flagging it.
   canonical s16le WAV) + `assemble_segment_audio` (single slice copied through,
   crossfade chain otherwise with the fade clamped to half the shortest slice,
   concat fallback <0.1 s); `AudioConfig` defaults take 45 s / ahead 20 s /
-  crossfade 2.0 s / 48 kHz; finalize muxes AAC `-b:a 256k`;
+   crossfade 2.0 s / 48 kHz; finalize muxes AAC `-b:a 128k` (2026-10-06
+   compression change — was 256k; video budget then has ~9MB/min of the
+   10MB/min target);
   `audio_buffer_seconds` = coverage ahead of the committed timeline.
 - **Repaint anchoring (bug caught by live audio forensics):** repaint output is
   **timeline-aligned with its source** (head before `repainting_start`

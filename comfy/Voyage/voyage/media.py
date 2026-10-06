@@ -127,8 +127,9 @@ def plan_augmentation(
     x2 content at 32fps stretches the timeline (slow motion) instead
     of synthesizing more frames.
     `needs_reencode` covers any pixel/timing change (dims differ, fps
-    differs past 0.5 either way, lift, or unknown source fps) and gates
-    the stream-copy fast path off.
+    differs past 0.5 either way, lift, or unknown source fps) and feeds
+    the native-vs-presentation publish label — both encode since the
+    2026-10-06 compression change retired the stream-copy fast path.
     """
     if upscale not in (1, 2, 4):
         raise ValueError(f"upscale must be 1, 2, or 4 (got {upscale})")
@@ -416,11 +417,15 @@ replaces the old `overlap_fraction=0` encoding, so call sites state the
 intent instead of smuggling it through a zero.
 """
 
-#: Default h264 quality for the finalize encode (issues 050). Matches the
-#: validated Comfy `video_export.json` recipe (crf 15) and the chunk
-#: encoder in `voyage.augment.ffmpeg_encode_chunk` (same default), so the
-#: shipped video never silently uses ffmpeg's default CRF 23.
-FINALIZE_CRF_DEFAULT = 15
+#: Default h264 quality for the finalize encode. Sized for small shipped
+#: files (<=10MB/min target): CRF 30 at the `slow` preset measures ~6MB/min
+#: on medium-tier line-art (SSIM 0.967, near-transparent) with headroom for
+#: high-tier pixel counts; CRF 28 measured ~8.8MB/min at medium tier and
+#: projects over budget at 1216x704, so 30 is the default.
+#: Best-effort (CRF, not a capped bitrate) — busy content may overshoot.
+#: Chunk intermediates (`voyage.augment.ffmpeg_encode_chunk`) keep their own
+#: cheaper default; they are always re-encoded here before shipping.
+FINALIZE_CRF_DEFAULT = 30
 
 #: Lowest/highest h264 CRF (issues 050, 083). Single ladder home is
 #: `voyage.augment` (`CRF_MINIMUM`/`CRF_MAXIMUM`); these aliases keep the
@@ -430,9 +435,10 @@ FINALIZE_CRF_DEFAULT = 15
 FINALIZE_CRF_MINIMUM = _AUGMENT_CRF_MINIMUM
 FINALIZE_CRF_MAXIMUM = _AUGMENT_CRF_MAXIMUM
 
-#: Default x264 speed/quality trade-off (issues 050). Keeps the validated
-#: `veryfast` recipe; slower presets are opt-in via `FinalizeOptions`.
-FINALIZE_PRESET_DEFAULT = "veryfast"
+#: Default x264 speed/quality trade-off. `slow` buys ~10-30% smaller files
+#: over `veryfast` at the cost of slower final encodes; explicit
+#: `FinalizeOptions(preset=...)` still overrides per run.
+FINALIZE_PRESET_DEFAULT = "slow"
 
 #: Allowed x264 presets (issues 050). The full ffmpeg `-preset` vocabulary
 #: for libx264, so validation rejects typos before an ffmpeg spawn fails.
@@ -581,11 +587,11 @@ class FinalizeOptions:
 
 
 def _segment_video_matches_target(segment: Path, width: int, height: int, fps: int) -> bool:
-    """True when a committed segment video can stream-copy into the final (031).
+    """True when a committed segment video matches the final target (031).
 
     Probe-only, never raises: any mismatch or probe failure falls back to
-    the re-encode path. Requires h264 + yuv420p + matching WxH/fps so
-    `ffmpeg -f concat -c copy` yields a valid final without touching pixels.
+    the presentation re-encode path. Requires h264 + yuv420p + matching
+    WxH/fps so the native branch can encode with a no-op vf reshape.
     """
     try:
         info = probe(segment / "video.mp4")
@@ -885,9 +891,10 @@ def finalize_run(
     `overlap_fraction=0` behaves as a hard splice (the blend falls back
     to concat below the audibility floor).
 
-    Native-geometry runs (presentation already matches) stream-copy the
-    committed videos with zero video re-encodes (issue 031 fast path);
-    anything the plan flags (`needs_reencode`) takes a single
+    Native-geometry runs (presentation already matches) still encode
+    every publish at the effective crf/preset (the issue-031 stream copy
+    is retired for compression — it shipped ~600MB/min); anything the plan
+    flags (`needs_reencode`) takes a single
     concat-demuxer + vf encode (issues 050: minterpolate-when-lifting +
     scale/pad/fps, one libx264 pass over the originals — no intermediate
     per-segment parts). Then mux audio, validate against the presentation
@@ -903,9 +910,10 @@ def finalize_run(
     runs the §53 preflight first so a full disk fails fast instead of
     mid-encode.
 
-    Native-geometry runs (presentation already matches) stream-copy the
-    committed videos with zero video re-encodes (issue 031 fast path);
-    anything the plan flags (`needs_reencode`) takes a single
+    Native-geometry runs (presentation already matches) still encode
+    every publish at the effective crf/preset (the issue-031 stream copy
+    is retired for compression — it shipped ~600MB/min); anything the plan
+    flags (`needs_reencode`) takes a single
     concat-demuxer + vf encode (issues 050: minterpolate-when-lifting +
     scale/pad/fps, one libx264 pass over the originals — no intermediate
     per-segment parts). Then mux audio, validate against the presentation
@@ -942,7 +950,7 @@ def finalize_run(
     (SRVGG upscale + FILM mids chunked, then the presentation vf without
     minterpolate) only when work is demanded (`upscale > 1 or
     interpolate > 1`) and the augment plan flags work (`needs_reencode`);
-    1/1 sources skip it for the stream-copy fast path. Absent legs (or no
+    1/1 sources skip it for the native encode publish. Absent legs (or no
     `models_dir`) with demanded work fall back to the ffmpeg vf path
     (scale/minterpolate), never an error. Both legs provisioned splits
     the pass into two streams (DESIGN section 59): Thread-A runs the
@@ -1084,8 +1092,8 @@ def finalize_run(
         # Trigger rule: the tensor pass only runs when the augment plan
         # flags work (`needs_reencode` — a geometry/fps lift). Sources
         # already meeting the presentation box/fps skip it even when legs
-        # are present, so ltx25 native 1216x704@24 takes the stream-copy
-        # fast path instead of a no-op enhance.
+        # are present, so ltx25 native 1216x704@24 takes the native
+        # encode branch instead of a no-op enhance.
         tensor_intermediate: Path | None = None
         # Phase timings for the elapsed-time report (DESIGN §56): the
         # durable entry fills this in; the legacy flow and the no-model
@@ -1754,10 +1762,12 @@ def finalize_run(
             # consumable and skip the sequential bed/thread below.
             bed_done_sync = True
         # Issue 031 fast path: every committed video already matches the
-        # presentation geometry/pix_fmt/fps, so concat the originals with a
-        # stream copy and mux the final audio — zero video re-encodes. The
-        # augment plan gates it off whenever an upscale or fps lift is
-        # required (needs_reencode covers both, plus any fps mismatch).
+        # presentation geometry/pix_fmt/fps, so the concat input needs only
+        # a no-op vf reshape before the crf/preset encode below — the old
+        # stream copy is gone (compression: the copy shipped ~600MB/min).
+        # The augment plan still gates the tensor pass off whenever no
+        # upscale or fps lift is required (needs_reencode covers both,
+        # plus any fps mismatch).
         native = (
             lift == ""
             and not plan.needs_reencode
@@ -1770,7 +1780,7 @@ def finalize_run(
         publish_label = (
             "encode model-pass video"
             if tensor_intermediate is not None
-            else "concat native video"
+            else "encode native video"
             if native
             else "encode presentation video"
         )
@@ -1824,7 +1834,7 @@ def finalize_run(
                         "-c:a",
                         "aac",
                         "-b:a",
-                        "256k",
+                        "128k",
                         "-shortest",
                         str(staged),
                     ]
@@ -1843,7 +1853,7 @@ def finalize_run(
                 # interp joints replace the hard cuts between committed segments.
                 # Frame total is unchanged, so the audio timeline below needs no
                 # work. Any missing precondition (foreign backend, single
-                # segment, no interp leg) keeps the plain stream-copy concat.
+                # segment, no interp leg) keeps the plain concat encode.
                 morph_video: Path | None = None
                 if (
                     morph_backend_for_run(run_dir) is not None
@@ -1883,6 +1893,15 @@ def finalize_run(
                         [segment / "video.mp4" for segment in usable], tmpdir / "concat.txt"
                     )
                     video_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
+                # Compression: native geometry still re-encodes at the
+                # effective crf/preset (no stream copy) so the shipped
+                # final stays within the size budget. The vf below is a
+                # no-op reshape (same WxH/fps) — the size win comes from
+                # the crf/preset encode, not from resampling.
+                native_vf = (
+                    f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                    f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
+                )
                 final_start = time.monotonic()
                 proc = run_capture(
                     [
@@ -1893,23 +1912,31 @@ def finalize_run(
                         *video_inputs,
                         "-i",
                         str(final_audio),
+                        "-vf",
+                        native_vf,
                         "-map",
                         "0:v:0",
                         "-map",
                         "1:a:0",
                         "-c:v",
-                        "copy",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-preset",
+                        effective_preset,
+                        "-crf",
+                        str(effective_crf),
                         "-c:a",
                         "aac",
                         "-b:a",
-                        "256k",
+                        "128k",
                         "-shortest",
                         str(staged),
                     ]
                 )
                 final_encode_ms = (time.monotonic() - final_start) * 1000.0
                 if proc.returncode != 0:
-                    raise MediaError(f"final concat copy failed: {proc.stderr[-2000:]}")
+                    raise MediaError(f"final native encode failed: {proc.stderr[-2000:]}")
             else:
                 # Single vf encode over the concat demuxer (issues 050): the
                 # originals feed `scale/pad/fps/minterpolate` once — the old
@@ -1955,7 +1982,7 @@ def finalize_run(
                         "-c:a",
                         "aac",
                         "-b:a",
-                        "256k",
+                        "128k",
                         "-shortest",
                         str(staged),
                     ]
@@ -2057,7 +2084,9 @@ def finalize_run(
                     "parts_encode_ms": round(parts_encode_ms, 1),
                     "audio_blend_ms": round(audio_blend_ms, 1),
                     "final_encode_ms": round(final_encode_ms, 1),
-                    "fast_path": native and tensor_intermediate is None,
+                    # The stream-copy fast path is retired (compression):
+                    # every publish encodes, so fast_path stays False.
+                    "fast_path": False,
                     "upscale": effective_upscale,
                     "interpolate": effective_interpolate,
                     "presentation_fps": effective_presentation_fps,

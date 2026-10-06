@@ -59,16 +59,20 @@ out box = source × upscale per axis (exact integer multiply — the
 out fps = presentation_fps, else round(source_fps × interpolate)
 ```
 
-- Multipliers only ever scale up from the probed source: 1/1 ships
-  the source untouched ("native ship").
+- Multipliers only ever scale up from the probed source: 1/1 keeps
+  the source geometry ("native" — since the 2026-10-06 compression
+  change publish still encodes it in one libx264 pass, `-preset slow
+  -crf 30` by default; the old stream-copy publish is gone).
 - `needs_minterpolate` is True only for an fps lift the model pass
   did not already produce (`model_interpolate <= 1` and source + 0.5
   < out — ffmpeg motion interpolation); an fps drop uses the plain
   fps filter. When the model pass interpolates, the lift is measured
   against the interpolated rate.
 - `needs_reencode` covers any pixel/timing change (dims differ, fps
-  differs past 0.5 either way, lift, or unknown source fps) and gates
-  the stream-copy fast path off. Unprobable dims fail loud
+  differs past 0.5 either way, lift, or unknown source fps) and feeds
+  the native-vs-presentation publish label — both encode since the
+  2026-10-06 compression change retired the stream-copy fast path.
+  Unprobable dims fail loud
   (`MediaError`); unprobable fps fails loud unless
   `presentation_fps` is set.
 - The model pass (Real-ESRGAN upscale + configured-backend interpolate via
@@ -81,11 +85,11 @@ out fps = presentation_fps, else round(source_fps × interpolate)
 Examples (live `plan_augmentation`):
 
 - ltx25 native 1216×704 @ 24, 1/1 → out 1216×704 @ 24
-  (`needs_reencode=False` — stream-copy fast path);
+  (`needs_reencode=False` — single libx264 encode at publish, no vf work);
 - same source, `--upscale 2` → out 2432×1408 @ 24;
 - same source, `--interpolate 2` → 24fps ×2 content (model mids),
   shipped at 48fps unless `--presentation-fps 32` pins slow motion;
-- CausVid native 832×480 @ 16, 1/1 → out 832×480 @ 16 (ships native).
+- CausVid native 832×480 @ 16, 1/1 → out 832×480 @ 16 (native geometry, encoded at publish).
 
 ## Chunked runner and 2-GPU pairing
 

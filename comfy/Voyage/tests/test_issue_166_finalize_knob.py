@@ -160,7 +160,7 @@ def test_cli_flag_parity_and_mapping() -> None:
 
 
 def test_finalize_one_one_byte_identical_to_explicit(tmp_path: Path) -> None:
-    """Default 1/1 ships the same bytes as explicit 1/1 (ffmpeg-only fast path)."""
+    """Default 1/1 ships the same bytes as explicit 1/1 (same native encode)."""
     from voyage.media import finalize_run
 
     run_dir = tmp_path / "run"

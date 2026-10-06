@@ -67,8 +67,8 @@ def test_finalize_options_exposes_crf_preset_defaults() -> None:
     from voyage.media import FinalizeOptions
 
     options = FinalizeOptions()
-    assert options.crf == 15
-    assert options.preset == "veryfast"
+    assert options.crf == 30
+    assert options.preset == "slow"
 
 
 def test_finalize_options_rejects_bad_crf_preset() -> None:
@@ -190,8 +190,8 @@ def test_finalize_emits_stage_timings(tmp_path: Path) -> None:
         value = event.get(key)
         assert isinstance(value, (int, float)), key
         assert float(value) >= 0.0, key
-    assert event.get("crf") == 15
-    assert event.get("preset") == "veryfast"
+    assert event.get("crf") == 30
+    assert event.get("preset") == "slow"
 
 
 def test_finalize_adversarial_path_with_quote(tmp_path: Path) -> None:

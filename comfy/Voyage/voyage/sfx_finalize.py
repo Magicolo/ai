@@ -929,7 +929,7 @@ def demux_music_audio(source_video: Path, dest_wav: Path) -> Path:
 
 
 def remux_video_with_audio(source_video: Path, mixed_audio: Path, dest_mp4: Path) -> Path:
-    """Mux `source_video` (stream copy) + `mixed_audio` (AAC 256k) to `dest_mp4`.
+    """Mux `source_video` (stream copy) + `mixed_audio` (AAC 128k) to `dest_mp4`.
 
     Single home for the SFX dub's publish encode (sequential and parallel
     paths remux identically — video is never re-encoded here).
@@ -953,7 +953,7 @@ def remux_video_with_audio(source_video: Path, mixed_audio: Path, dest_mp4: Path
             "-c:a",
             "aac",
             "-b:a",
-            "256k",
+            "128k",
             "-shortest",
             str(dest_mp4),
         ]
