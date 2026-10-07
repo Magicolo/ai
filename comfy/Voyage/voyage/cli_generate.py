@@ -459,11 +459,21 @@ def _pre_finalize_errors(
     staging) would otherwise abort generate before finalize's own prune
     ever runs. `_heal_safe_transients` removes exactly that set here, so
     both pre-finalize gates are self-healing without `--skip-bad`.
+
+    Advisory lines (`warning:` / `note:` prefixes) are hygiene info, never
+    INVALID: the tmp/ scratch note and stranded-dir warnings print as-is
+    and never abort the run (asporgue 2026-10-07: a 1 GB disposable
+    scratch note aborted generate before finalize). Same filter as the
+    configure trim gate.
     """
     from voyage.sfx_finalize import is_healable_sfx_shortfall
 
     _heal_safe_transients(run_dir)
     errors = validate_run(run_dir)
+    for advisory in errors:
+        if advisory.startswith(("warning:", "note:")):
+            print(advisory)
+    errors = [error for error in errors if not error.startswith(("warning:", "note:"))]
     generate_skip_sfx = bool(args is not None and resolve_generate_skips(args)["skip_sfx"])
     sfx_enabled = (
         not bool(manifest.get("no_sfx", False))

@@ -89,3 +89,38 @@ def test_pre_finalize_errors_keeps_shortfall_when_sfx_disabled(
     )
     assert fake_effective.sfx.backend == "fake"
     assert generate_module._pre_finalize_errors(tmp_path, {}, fake_effective) == [shortfall]
+
+
+def test_pre_finalize_errors_passes_advisory_lines_through_without_abort(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """Asporgue 2026-10-07: a `note:` scratch line must never abort generate.
+
+    Advisory lines (`warning:` stranded-dir hints, `note:` disposable
+    scratch size) print as-is and stay out of the returned hard errors —
+    same filter as the configure trim gate.
+    """
+    import voyage.cli_generate as generate_module
+
+    note = "note: run tmp/ scratch holds 1000809116 bytes (disposable, not an error)"
+    warning = "warning: 000007 numeric dir without DONE (stranded commit attempt?)"
+    hard = "timeline frames 242 != sum of segment frames 121"
+    monkeypatch.setattr(generate_module, "validate_run", lambda _run_dir: [note, warning, hard])
+    kept = generate_module._pre_finalize_errors(tmp_path, {}, _mmaudio_effective())
+    assert kept == [hard]
+    printed = capsys.readouterr().out
+    assert note in printed
+    assert warning in printed
+    assert hard not in printed
+
+
+def test_pre_finalize_errors_clean_on_advisories_only(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """Advisories alone mean a clean gate (empty list, no INVALID)."""
+    import voyage.cli_generate as generate_module
+
+    note = "note: run tmp/ scratch holds 1000809116 bytes (disposable, not an error)"
+    monkeypatch.setattr(generate_module, "validate_run", lambda _run_dir: [note])
+    assert generate_module._pre_finalize_errors(tmp_path, {}, _mmaudio_effective()) == []
+    assert note in capsys.readouterr().out
