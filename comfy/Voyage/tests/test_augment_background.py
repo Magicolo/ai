@@ -543,3 +543,74 @@ def test_driver_accumulates_ledgered_totals(tmp_path: Path) -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+def test_prewarm_resident_nets_bypass_cold_floor(tmp_path: Path, monkeypatch: Any) -> None:
+    """Resident nets gate on working set, not the cold-load floor (boba held-back).
+
+    0.9 GiB free holds back a cold pass (1.0 GiB floor), but once the
+    nets are resident in this process the H2D load already happened —
+    the same 0.9 GiB must let the pass through.
+    """
+    from voyage import augment_background
+    from voyage.augment import AugmentWeights
+    from voyage.workers import augment_worker
+
+    _make_segment(tmp_path)
+    config = _enabled_config()
+    film = tmp_path / "film.safetensors"
+    realesrgan = tmp_path / "realesrgan.pth"
+    film.write_bytes(b"f" * 64)
+    realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
+    monkeypatch.setattr(
+        "voyage.augment.resolve_augment_weights",
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
+    )
+    monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cuda:1",))
+    monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda _device: 0.9)
+    monkeypatch.setattr(
+        "voyage.augment_background.probe_segment_source",
+        lambda _video: (1216, 704, 24.0),
+    )
+
+    def _upscale_stub(run_dir: Path, **kwargs: Any) -> Any:
+        from voyage.augment_upscale_poller import UpscalePollResult
+
+        return UpscalePollResult(1, 0, 2, 0, 0)
+
+    def _interp_stub(run_dir: Path, **kwargs: Any) -> Any:
+        from voyage.augment_interp_poller import InterpPollResult
+
+        return InterpPollResult(1, 0, 2, 0, 0, 0)
+
+    cold = augment_background.prewarm_once(
+        tmp_path,
+        config,
+        upscale_poll_fn=_upscale_stub,
+        interp_poll_fn=_interp_stub,
+    )
+    assert cold is not None
+    assert cold.skip_reason.startswith("upscale skipped")
+    assert cold.upscale_chunks_done == 0
+    monkeypatch.setattr(
+        augment_worker,
+        "_ESRGAN_CACHE",
+        {augment_worker._model_cache_key(realesrgan, "cuda:1"): object()},
+    )
+    monkeypatch.setattr(
+        augment_worker,
+        "_RIFE_CACHE",
+        {augment_worker._model_cache_key(rife, "cuda:1"): object()},
+    )
+    warm = augment_background.prewarm_once(
+        tmp_path,
+        config,
+        upscale_poll_fn=_upscale_stub,
+        interp_poll_fn=_interp_stub,
+    )
+    assert warm is not None
+    assert warm.skip_reason == ""
+    assert warm.upscale_chunks_done == 2
+    assert warm.interp_chunks_done == 2

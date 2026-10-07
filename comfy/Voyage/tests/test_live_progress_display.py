@@ -214,9 +214,9 @@ def test_parallel_display_serves_three_streams_concurrently() -> None:
     stream = io.StringIO()
     display = ParallelFinalizeDisplay(VoyageConsole(stream=stream))
     try:
-        model_view = display.stream_view("model pass")
+        model_view = display.stream_view("upscale + interpolate")
         music_view = display.stream_view("music takes")
-        span_view = display.stream_view("model pass + music takes")
+        span_view = display.stream_view("upscale + interpolate + music takes")
         errors: list[BaseException] = []
 
         def _run_bar(view: VoyageConsole, label: str) -> None:
@@ -231,7 +231,7 @@ def test_parallel_display_serves_three_streams_concurrently() -> None:
         music_thread = threading.Thread(target=_run_bar, args=(music_view, "ace takes"))
         model_thread.start()
         music_thread.start()
-        with span_view.stage("model pass + music takes"):
+        with span_view.stage("upscale + interpolate + music takes"):
             pass
         model_thread.join()
         music_thread.join()
@@ -239,7 +239,7 @@ def test_parallel_display_serves_three_streams_concurrently() -> None:
     finally:
         display.close()
     output = stream.getvalue()
-    for label in ("upscale frames", "ace takes", "model pass + music takes"):
+    for label in ("upscale frames", "ace takes", "upscale + interpolate + music takes"):
         assert label in output
 
 
@@ -293,7 +293,7 @@ def _live_supervisor(
 def test_prewarm_queue_drain_advances_model_pass_bar_live(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Drained frame events advance the bar while the render blocks."""
+    """Drained frame events advance the per-leg bars while the render blocks."""
     stream = io.StringIO()
     supervisor = _live_supervisor(tmp_path, stream, monkeypatch)
     try:
@@ -303,8 +303,8 @@ def test_prewarm_queue_drain_advances_model_pass_bar_live(
         supervisor._drain_prewarm_queue(block=False)
         assert supervisor._pumped_upscale_frames == 6
         assert supervisor._pumped_interp_frames == 4
-        assert supervisor._model_pass_tracker is not None
-        assert supervisor._model_pass_tracker._done == 10
+        assert supervisor._prewarm_bars["upscale"][1]._done == 6
+        assert supervisor._prewarm_bars["interpolate"][1]._done == 4
     finally:
         supervisor._close_model_pass_bar()
 
@@ -319,8 +319,8 @@ def test_post_commit_report_does_not_double_count_pumped_frames(
         supervisor._enqueue_prewarm_event(("upscale_frames", "000000", 6))
         supervisor._enqueue_prewarm_event(("interp_frames", "000000", 4))
         supervisor._drain_prewarm_queue(block=False)
-        assert supervisor._model_pass_tracker is not None
-        assert supervisor._model_pass_tracker._done == 10
+        assert supervisor._prewarm_bars["upscale"][1]._done == 6
+        assert supervisor._prewarm_bars["interpolate"][1]._done == 4
         supervisor._background = SimpleNamespace(
             ledgered_frames=lambda: (1, 0, 0, 6, 4, 1.0, 2.0),
             last_result=None,
@@ -328,7 +328,7 @@ def test_post_commit_report_does_not_double_count_pumped_frames(
         supervisor._report_background_prewarm()
         assert supervisor._pumped_upscale_frames == 0
         assert supervisor._pumped_interp_frames == 0
-        assert supervisor._model_pass_tracker._done == 10
+        assert supervisor._prewarm_bars == {}
         assert "pre-warm ledgered +6f upscale in 1.0s, +4f interp in 2.0s" in (stream.getvalue())
     finally:
         supervisor._close_model_pass_bar()

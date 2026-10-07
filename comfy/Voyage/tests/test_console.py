@@ -87,8 +87,11 @@ def test_default_console_hides_prompts_behind_verbose() -> None:
     out = stream.getvalue()
     assert "SEGMENT 000003" in out
     assert "neon reef at dusk" in out
-    assert "120 BPM" in out
-    assert "take_000000" in out
+    # Audio progress (takes, beats/BPM, energy) is verbose-only: no audio
+    # generates during video generation (takes render at finalize).
+    assert "120 BPM" not in out
+    assert "take_000000" not in out
+    assert "audio 0.4s" not in out
     assert "a neon reef at dusk, glowing polyps" not in out
     assert "slow ambient electronic composition" not in out
     verbose_stream = io.StringIO()
@@ -96,14 +99,21 @@ def test_default_console_hides_prompts_behind_verbose() -> None:
     verbose_out = verbose_stream.getvalue()
     assert "a neon reef at dusk, glowing polyps" in verbose_out
     assert "slow ambient electronic composition" in verbose_out
+    verbose_done = io.StringIO()
+    VoyageConsole(verbose=True, stream=verbose_done).segment_done(_done_info())
+    verbose_done_out = verbose_done.getvalue()
+    assert "take_000000" in verbose_done_out
+    assert "120 BPM" in verbose_done_out
+    assert "audio 0.4s" in verbose_done_out
 
 
 def test_deferred_done_shows_no_take_with_action() -> None:
-    """All-deferred pin: empty take_ids renders as no-take + deferred action.
+    """All-deferred pin: compact shows frames only; take action is verbose.
 
     New deferred commits carry no per-segment takes (finalize renders
-    from `run/audio/takes.jsonl`); the console keeps showing the
-    take action/reason so the deferral itself stays visible.
+    from `run/audio/takes.jsonl`); the compact console shows frames and
+    the video timing only, while --verbose keeps the take action/reason
+    so the deferral itself stays visible.
     """
     stream = io.StringIO()
     console = VoyageConsole(stream=stream)
@@ -127,8 +137,10 @@ def test_deferred_done_shows_no_take_with_action() -> None:
         }
     )
     out = stream.getvalue()
-    assert "no take" in out
-    assert "deferred" in out
+    assert "SEGMENT 000003 committed · 48f" in out
+    assert "no take" not in out
+    assert "deferred" not in out
+    assert "beats" not in out
     verbose = io.StringIO()
     VoyageConsole(verbose=True, stream=verbose).segment_done(
         {
@@ -142,7 +154,9 @@ def test_deferred_done_shows_no_take_with_action() -> None:
             "bpm": 120.0,
         }
     )
+    assert "no take (deferred)" in verbose.getvalue()
     assert "deferred-audio" in verbose.getvalue()
+    assert "4 beats @ 120 BPM" in verbose.getvalue()
 
 
 def test_verbose_console_adds_seeds_transitions_notes() -> None:
@@ -483,8 +497,9 @@ def test_supervisor_reports_each_segment_once(tmp_path: Path) -> None:
     assert supervisor.run_segments(1) == ["000000"]
     assert progress.starts == [(0, "000000")]
     # Tail match: worker-startup stages may prefix the per-commit stages
-    # (owned by the supervisor lifecycle track, not pinned here).
-    assert progress.stages[-5:] == ["director", "video", "audio", "validate", "commit"]
+    # (owned by the supervisor lifecycle track, not pinned here). The
+    # audio cover records metrics timing silently — no console stage.
+    assert progress.stages[-4:] == ["director", "video", "validate", "commit"]
     assert len(progress.plans) == 1
     plan = progress.plans[0]
     assert plan["video_prompts"] and all(plan["video_prompts"])
@@ -583,8 +598,7 @@ def _prewarm_supervisor(tmp_path: Path, sink: _RecordingProgress) -> Supervisor:
     supervisor._config = config
     supervisor._run_dir = tmp_path / "no-state-here"
     supervisor._reported_prewarm = (None, 0, 0, 0, 0, 0.0, 0.0)
-    supervisor._model_pass_bar = None
-    supervisor._model_pass_tracker = None
+    supervisor._prewarm_bars = {}
     return supervisor
 
 
@@ -626,11 +640,12 @@ def test_prewarm_report_announces_new_frames_with_seconds(tmp_path: Path) -> Non
     assert sink.notes == [
         "pre-warm ledgered +96f upscale in 12.5s, +64f interp in 9.0s (total 96/64f)"
     ]
-    # Persistent bar opened once; both legs advance through it (the pre-warm
-    # interleaves upscale then interp per segment).
-    assert [label for label, _tracker in sink.bars] == ["model-pass frames"]
-    _label, tracker = sink.bars[0]
-    assert tracker.updates == [160]
+    # One bar per leg; both legs advance through their own bar (the
+    # pre-warm interleaves upscale then interp per segment).
+    assert [label for label, _tracker in sink.bars] == ["upscale frames", "interpolate frames"]
+    bars = dict(sink.bars)
+    assert bars["upscale frames"].updates == [96]
+    assert bars["interpolate frames"].updates == [64]
     # Nothing new since the last report: silent.
     supervisor._report_background_prewarm()
     assert len(sink.notes) == 1

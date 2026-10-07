@@ -60,6 +60,16 @@ UPSCALE_MIN_FREE_GIB = 1.0
 #: must never go quiet on an unprobable box.
 PREWARM_MIN_FREE_GIB = 1.0
 
+#: Minimum free VRAM (GiB) when the leg's nets are already resident.
+#: A cold pass needs the full floors above (H2D load + first-forward
+#: workspace), but a pass whose nets are already prepared only needs
+#: forward working set (~0.65 GiB RIFE peak, ~0.34 GiB SRVGG peak) —
+#: without this carve-out the second pass probes cold, loads the nets,
+#: and every later pass sees free net of its own resident footprint and
+#: holds back forever (boba: 0.9 GiB free < 1.0 GiB needed on every
+#: segment after the first successful sweep).
+RESIDENT_MIN_FREE_GIB = 0.75
+
 #: How long a notified pass waits for the director to go idle before
 #: giving up the pass. Prefetch decides hold `cuda:1` for ~10-30s, so a
 #: single-shot idle check at notify time loses the whole pass (kaolin:
@@ -322,6 +332,37 @@ def resolve_background_plan(run_dir: Path, config: Any) -> BackgroundPlan | None
     )
 
 
+def _prewarm_resident_ready(plan: BackgroundPlan) -> tuple[bool, bool]:
+    """Whether each leg's nets are already resident on the plan device.
+
+    Reads the in-process augment-worker caches (no torch import, no
+    weights touched — cache keys are (weights path, device) strings).
+    A resident leg skips the cold-load floor in `prewarm_once` and is
+    gated on `RESIDENT_MIN_FREE_GIB` instead: the H2D load already
+    happened, so only forward working set must fit. Any lookup failure
+    reads as not-resident (fail-safe toward the full floor).
+    """
+    try:
+        from voyage.workers.augment_worker import (
+            _ESRGAN_CACHE,
+            _FILM_CACHE,
+            _RIFE_CACHE,
+            _model_cache_key,
+        )
+    except Exception:  # noqa: BLE001 - worker module shape is not this gate's contract
+        return (False, False)
+    try:
+        up_ready = _model_cache_key(plan.realesrgan_path, plan.device) in _ESRGAN_CACHE
+    except Exception:  # noqa: BLE001 - key shape failure reads as not-resident
+        up_ready = False
+    try:
+        interp_cache = _FILM_CACHE if plan.interp_backend == "film" else _RIFE_CACHE
+        ip_ready = _model_cache_key(plan.interp_path, plan.device) in interp_cache
+    except Exception:  # noqa: BLE001 - key shape failure reads as not-resident
+        ip_ready = False
+    return (up_ready, ip_ready)
+
+
 def prewarm_once(
     run_dir: Path,
     config: Any,
@@ -357,10 +398,15 @@ def prewarm_once(
     VRAM gating is per leg: the pass needs `UPSCALE_MIN_FREE_GIB` to
     start (SRVGG fits beside the resident sidecar), the interp leg
     probes once before the loop and needs `PREWARM_MIN_FREE_GIB` (RIFE
-    fits beside it too). A held-back leg yields a zero-count result
-    carrying `skip_reason` instead of None, so the post-commit report
-    can say what waited and why; both legs held back means no poller
-    runs at all. Unknown free space stays fail-open on both legs.
+    fits beside it too). Legs whose nets are already resident in this
+    process gate on the smaller `RESIDENT_MIN_FREE_GIB` instead — the
+    H2D load already happened, so only forward working set must fit
+    (without this, the first pass loads the nets and every later pass
+    holds back on free net of its own resident footprint). A held-back
+    leg yields a zero-count result carrying `skip_reason` instead of
+    None, so the post-commit report can say what waited and why; both
+    legs held back means no poller runs at all. Unknown free space
+    stays fail-open on both legs.
 
     After each non-first segment's interp, the pass attempts its left
     boundary seam joint early (idempotent with the finalize drain's
@@ -385,8 +431,10 @@ def prewarm_once(
         from voyage.augment_interp_poller import interp_poll_once
 
         interp_poll_fn = interp_poll_once
+    up_ready, ip_ready = _prewarm_resident_ready(plan)
+    upscale_floor = RESIDENT_MIN_FREE_GIB if up_ready else UPSCALE_MIN_FREE_GIB
     upscale_free = device_free_gib(plan.device)
-    if upscale_free is not None and upscale_free < UPSCALE_MIN_FREE_GIB:
+    if upscale_free is not None and upscale_free < upscale_floor:
         return PrewarmResult(
             0,
             0,
@@ -396,20 +444,21 @@ def prewarm_once(
             0,
             skip_reason=(
                 f"upscale skipped: {upscale_free:.1f} GiB free on {plan.device} < "
-                f"{UPSCALE_MIN_FREE_GIB:.1f} GiB needed"
+                f"{upscale_floor:.1f} GiB needed"
             ),
         )
     upscale_seconds = 0.0
     skip_reason = ""
     interp_armed = bool(include_interp and interp_poll_fn is not None)
+    interp_floor = RESIDENT_MIN_FREE_GIB if ip_ready else PREWARM_MIN_FREE_GIB
     if (
         interp_armed
         and (interp_free := device_free_gib(plan.device)) is not None
-        and (interp_free < PREWARM_MIN_FREE_GIB)
+        and (interp_free < interp_floor)
     ):
         skip_reason = (
             f"interp skipped: {interp_free:.1f} GiB free on {plan.device} < "
-            f"{PREWARM_MIN_FREE_GIB:.1f} GiB needed (waits for finalize)"
+            f"{interp_floor:.1f} GiB needed (waits for finalize)"
         )
         interp_armed = False
     # Segment-interleaved pipeline (mirrors the finalize driver): enumerate

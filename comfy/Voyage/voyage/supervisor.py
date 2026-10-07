@@ -361,13 +361,13 @@ class Supervisor:
             0.0,
             0.0,
         )
-        # Persistent model-pass bar for the run loop (source frames
-        # ledgered vs committed). Opened lazily after the first commit
-        # when augmentation is demanded; the background thread never
-        # touches it — this post-commit call advances it on the main
-        # thread. Held as the entered context plus its tracker.
-        self._model_pass_bar: Any | None = None
-        self._model_pass_tracker: Any | None = None
+        # Per-leg pre-warm bars for the run loop (source frames ledgered
+        # vs committed, one bar per leg). Opened lazily when a leg first
+        # reports frames; closed after every post-commit report so no
+        # Live display is held open across segment stages. The background
+        # thread never touches them — pump/report advance them on the
+        # main thread. Held as entered contexts plus their trackers.
+        self._prewarm_bars: dict[str, tuple[Any, Any]] = {}
         # Latest background pass already announced on the verbose sweep
         # line (object identity — the driver only ever replaces it).
         self._reported_prewarm_result: Any = None
@@ -719,11 +719,12 @@ class Supervisor:
 
         The background thread never touches display code — it only
         accumulates `ledgered_frames()`, and this post-commit call (main
-        thread) announces the delta since the last report, advances the
-        persistent model-pass bar, and (verbose only) logs the latest
-        sweep breakdown. Silent when nothing new ledgered, so the log
-        stays clean on idle passes. Frame counts are source frames per
-        leg, so upscale and interp share one comparable unit.
+        thread) announces the delta since the last report, advances one
+        per-leg bar per leg (`upscale frames`, `interpolate frames`),
+        and (verbose only) logs the latest sweep breakdown. Silent when
+        nothing new ledgered, so the log stays clean on idle passes.
+        Frame counts are source frames per leg. Bars close before return
+        so no Live is held across segment stages.
         """
         driver = self._background
         progress = self._progress
@@ -788,7 +789,8 @@ class Supervisor:
                 total = read_state(self._run_dir).timeline_frames
             except Exception:  # noqa: BLE001 - unreadable state still reports deltas
                 total = None
-            self._advance_model_pass_bar(unreported_up + unreported_ip, total)
+            self._advance_prewarm_leg_bar("upscale", unreported_up, total)
+            self._advance_prewarm_leg_bar("interp", unreported_ip, total)
             if isinstance(total, int) and not isinstance(total, bool):
                 scope = f" (total {upf}/{ipf}f of {total}f committed)"
             else:
@@ -827,46 +829,68 @@ class Supervisor:
                 if skip_reason:
                     progress.note(f"pre-warm held back: {skip_reason}")
             self._reported_prewarm_result = last
+        # Never hold a bar Live across segment stages: per-segment bars
+        # close here (finish lines print), and the next segment reopens
+        # them lazily on its first pump/report event.
+        self._close_model_pass_bar()
 
-    def _advance_model_pass_bar(self, new_frames: int, total: int | None) -> None:
-        """Advance the persistent model-pass bar, opening it lazily.
+    def _advance_prewarm_leg_bar(self, leg: str, new_frames: int, total: int | None) -> None:
+        """Advance one per-leg pre-warm bar, opening it lazily.
 
-        The bar counts source frames per leg against the committed
-        frames (upscale and interp share one comparable unit — interp
-        advances live during generation and at finalize). No-op when
-        augmentation is not demanded.
+        `leg` is `upscale` (`upscale frames`) or `interp`
+        (`interpolate frames`). Each leg counts its own source frames
+        against committed frames, so upscale and interp never share one
+        X/Y total. Dict keys use the display spelling (`upscale` /
+        `interpolate`). No-op when augmentation is not demanded.
         """
         progress = self._progress
         if progress is None or not self._model_pass_demanded():
             return
-        try:
-            if self._model_pass_bar is None:
-                bar_cm = progress.bar("model-pass frames")
-                tracker = bar_cm.__enter__()
-                self._model_pass_bar = bar_cm
-                self._model_pass_tracker = tracker
-            if (
-                isinstance(total, int)
-                and not isinstance(total, bool)
-                and self._model_pass_tracker is not None
-            ):
-                self._model_pass_tracker.set_total(total)
-            if new_frames > 0 and self._model_pass_tracker is not None:
-                self._model_pass_tracker.update(new_frames)
-        except Exception:  # noqa: BLE001 - display must never fail a commit
-            self._model_pass_bar = None
-            self._model_pass_tracker = None
-
-    def _close_model_pass_bar(self) -> None:
-        """Close the persistent model-pass bar (best-effort, idempotent)."""
-        bar_cm, self._model_pass_bar = self._model_pass_bar, None
-        self._model_pass_tracker = None
-        if bar_cm is None:
+        if leg == "upscale":
+            label = "upscale frames"
+            key = "upscale"
+        elif leg == "interp":
+            label = "interpolate frames"
+            key = "interpolate"
+        else:
             return
         try:
-            bar_cm.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001 - display must never fail teardown
-            pass
+            bars = getattr(self, "_prewarm_bars", None)
+            if not isinstance(bars, dict):
+                bars = {}
+                self._prewarm_bars = bars
+            entry = bars.get(key)
+            if entry is None:
+                bar_cm = progress.bar(label)
+                tracker = bar_cm.__enter__()
+                bars[key] = (bar_cm, tracker)
+            else:
+                _bar_cm, tracker = entry
+            if isinstance(total, int) and not isinstance(total, bool) and tracker is not None:
+                tracker.set_total(total)
+            if new_frames > 0 and tracker is not None:
+                tracker.update(new_frames)
+        except Exception:  # noqa: BLE001 - display must never fail a commit
+            bars = getattr(self, "_prewarm_bars", None)
+            if isinstance(bars, dict):
+                bars.pop(key, None)
+
+    def _close_model_pass_bar(self) -> None:
+        """Close all per-leg pre-warm bars (best-effort, idempotent)."""
+        bars = getattr(self, "_prewarm_bars", None)
+        if isinstance(bars, dict):
+            entries = list(bars.items())
+            bars.clear()
+        else:
+            entries = []
+            self._prewarm_bars = {}
+        for _leg, (bar_cm, _tracker) in entries:
+            if bar_cm is None:
+                continue
+            try:
+                bar_cm.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001 - display must never fail teardown
+                pass
 
     def _enqueue_prewarm_event(self, event: tuple[Any, ...]) -> None:
         """Append one background pre-warm event (pre-warm thread, never raises).
@@ -904,12 +928,12 @@ class Supervisor:
                     frames = int(event[2])
                     if frames > 0:
                         self._pumped_upscale_frames += frames
-                        self._advance_model_pass_bar(frames, None)
+                        self._advance_prewarm_leg_bar("upscale", frames, None)
                 elif kind == "interp_frames":
                     frames = int(event[2])
                     if frames > 0:
                         self._pumped_interp_frames += frames
-                        self._advance_model_pass_bar(frames, None)
+                        self._advance_prewarm_leg_bar("interp", frames, None)
             except Exception:  # noqa: BLE001 - display must never fail a render
                 pass
 
@@ -2308,16 +2332,17 @@ class Supervisor:
         finalize from the stored director decisions. For streaming
         backends the conditioning tail (`video_tail.mp4`) is derived so
         the next segment chains instead of going fresh; `fake` renders
-        statelessly and needs no tail. Records the `audio` stage timing.
+        statelessly and needs no tail. The `audio` stage timing is still
+        recorded for metrics, but generation never opens an audio
+        console stage: there is no audio generation during generation.
         This seam exists so the commit orchestration reads as four
         stages. `number`/`video_time`/`duration`/`decision`/
         `recovery_tape` stay in the signature for caller compatibility —
         only the backend name feeds the reason text.
         """
         audio_started = time.monotonic()
-        with self._stage("audio", f"{config.video.backend} deferred"):
-            if config.video.backend in STREAMING_VIDEO_BACKENDS:
-                derive_conditioning_tail(segment, deferred_tail_frames(config.video.backend))
+        if config.video.backend in STREAMING_VIDEO_BACKENDS:
+            derive_conditioning_tail(segment, deferred_tail_frames(config.video.backend))
         stage_seconds["audio"] = round(time.monotonic() - audio_started, 3)
         return CoveredAudio(
             audio_plan=AudioPlan(segment_id=segment_id),

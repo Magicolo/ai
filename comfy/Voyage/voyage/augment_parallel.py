@@ -247,6 +247,7 @@ def run_parallel_model_pass(
     timings: dict[str, float] | None = None,
     progress: VoyageConsole | None = None,
     task_builder: Callable[..., collections.deque[ParallelChunkTask]] | None = None,
+    second_worker_gate: threading.Event | None = None,
 ) -> None:
     """Render every queued chunk via two work-stealing workers, then settle.
 
@@ -257,9 +258,19 @@ def run_parallel_model_pass(
     fail-loud, never a silent short video. `timings` accumulates into
     the same keys the single driver uses (`upscale_poll_s`,
     `interp_poll_s`, chunk/frame counts), so the elapsed-time report
-    never KeyErrors on the parallel path. A `model pass chunks` bar
-    tracks every queued chunk (one advance per finished chunk), so the
-    default finalize path shows live model-pass progress.
+    never KeyErrors on the parallel path. Separate `upscale chunks` and
+    `interpolate chunks` bars track every queued chunk per leg (one advance
+    per finished chunk half), so finalize shows live upscale vs interpolate
+    progress.
+
+    `second_worker_gate` (finalize 2-stream only): when set, worker B
+    waits on it — re-checking errors/drained-tasks every second — before
+    preloading on `cuda:0`, so the model pass starts on `cuda:1`
+    alongside the audio and adds the 4060 once the audio frees it. A
+    drained queue or a worker-A error releases the wait (B returns
+    without starting); preloading after the wait keeps `cuda:0` VRAM
+    untouched while the audio owns it. None starts both workers
+    immediately (audio-first path, tests).
     """
     if upscale_poll_fn is None:
         from voyage.augment_upscale_poller import upscale_poll_once
@@ -315,6 +326,16 @@ def run_parallel_model_pass(
     started = time.monotonic()
 
     def _worker(device: str, from_front: bool, label: str) -> None:
+        if not from_front and second_worker_gate is not None:
+            # Late worker B (finalize 2-stream): cuda:0 is still rendering
+            # audio — wait for it to free before preloading there. A
+            # drained queue or a worker-A error releases the wait so this
+            # worker returns instead of starting pointlessly.
+            while not second_worker_gate.is_set():
+                with queue_lock:
+                    if errors or not tasks:
+                        return
+                second_worker_gate.wait(timeout=1.0)
         view: VoyageConsole | None = None
         stream_view = getattr(progress, "stream_view", None)
         if callable(stream_view):
@@ -405,24 +426,29 @@ def run_parallel_model_pass(
                         ip_frames
                     )
             with timing_lock:
-                if model_bar is not None:
-                    model_bar.update(1)
+                if up_bar is not None:
+                    up_bar.update(1)
+                if ip_bar is not None:
+                    ip_bar.update(1)
 
-    bar_ctx = optional_bar(progress, "model pass chunks", total=len(tasks))
-    model_bar = bar_ctx.__enter__()
+    up_bar_ctx = optional_bar(progress, "upscale chunks", total=len(tasks))
+    ip_bar_ctx = optional_bar(progress, "interpolate chunks", total=len(tasks))
+    up_bar = up_bar_ctx.__enter__()
+    ip_bar = ip_bar_ctx.__enter__()
     try:
         thread_a = threading.Thread(
-            target=_worker, args=(WORKER_A_DEVICE, True, "model pass A"), daemon=True
+            target=_worker, args=(WORKER_A_DEVICE, True, "upscale + interpolate A"), daemon=True
         )
         thread_b = threading.Thread(
-            target=_worker, args=(WORKER_B_DEVICE, False, "model pass B"), daemon=True
+            target=_worker, args=(WORKER_B_DEVICE, False, "upscale + interpolate B"), daemon=True
         )
         thread_a.start()
         thread_b.start()
         thread_a.join()
         thread_b.join()
     finally:
-        bar_ctx.__exit__(None, None, None)
+        ip_bar_ctx.__exit__(None, None, None)
+        up_bar_ctx.__exit__(None, None, None)
     if timings is not None:
         with timing_lock:
             timings["parallel_model_pass_s"] = timings.get("parallel_model_pass_s", 0.0) + (

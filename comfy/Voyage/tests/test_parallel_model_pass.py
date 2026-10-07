@@ -524,12 +524,13 @@ class _StubProgress:
 
     def __init__(self) -> None:
         self.trackers: list[_StubProgressTracker] = []
+        self.labels: list[str] = []
 
     def bar(self, label: str, total: int | None = None) -> _StubBarContext:
-        del label
         tracker = _StubProgressTracker()
         tracker.total = total
         self.trackers.append(tracker)
+        self.labels.append(label)
         return _StubBarContext(tracker)
 
     def info(self, message: str) -> None:
@@ -539,7 +540,7 @@ class _StubProgress:
 def test_parallel_driver_reports_chunk_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The parallel model-pass bar advances once per queued task (kaolin was silent)."""
+    """Per-leg chunk bars advance once per finished chunk half (kaolin was silent)."""
     import functools
 
     import voyage.augment_parallel as parallel_module
@@ -588,7 +589,152 @@ def test_parallel_driver_reports_chunk_progress(
         ),
         progress=progress,
     )
-    assert len(progress.trackers) == 1
-    bar = progress.trackers[0]
-    assert bar.total == 2
-    assert bar.done == 2
+    assert progress.labels == ["upscale chunks", "interpolate chunks"]
+    assert len(progress.trackers) == 2
+    for bar in progress.trackers:
+        assert bar.total == 2
+        assert bar.done == 2
+
+
+def test_drain_to_intermediate_initializes_timings(tmp_path):
+    """Regression (live kaolin `KeyError: 'drain_s'`, 2026-10-06).
+
+    The bidirectional parallel branch calls `_drain_to_intermediate`
+    directly with a timings dict the durable entry never initialized —
+    the drain must zero-init its own keys instead of assuming them.
+    """
+    import types
+
+    from voyage.augment_finalize import _drain_to_intermediate
+
+    segment_dir = _parallel_segment(tmp_path, frames=8)
+    weights = types.SimpleNamespace(
+        realesrgan=tmp_path / "esrgan.pth",
+        rife=tmp_path / "rife.safetensors",
+    )
+
+    def _stub_drain(plan_dir, *, out_fps):
+        del out_fps
+        return types.SimpleNamespace(
+            chunks_drained=2,
+            intermediate_mp4=plan_dir / "chunk_00.mp4",
+        )
+
+    def _stub_concat(parts, out):
+        assert len(parts) == 1
+        out.write_bytes(b"fake-intermediate")
+        return out
+
+    timings: dict[str, float] = {}
+    final, fps = _drain_to_intermediate(
+        tmp_path,
+        [segment_dir],
+        weights=weights,
+        weights_key="weights-abc",
+        out_width=1216,
+        out_height=704,
+        source_fps=24.0,
+        source_fps_key=24,
+        upscale_factor=2,
+        multiplier=1,
+        crf=15,
+        preset="veryfast",
+        device="cpu",
+        work_dir=tmp_path / "model_pass",
+        interp_backend="rife",
+        drain_fn=_stub_drain,
+        concat_fn=_stub_concat,
+        timings=timings,
+        progress=None,
+    )
+    assert fps == 24
+    assert final.name.endswith(".mp4")
+    assert timings["drain_s"] >= 0.0
+    assert timings["chunks_drained"] == 2.0
+    assert timings["concat_s"] >= 0.0
+
+
+def _gated_weights(tmp_path: Path) -> Any:
+    from voyage.augment import AugmentWeights
+
+    legs = tmp_path / "legs"
+    legs.mkdir(parents=True, exist_ok=True)
+    (legs / "film").write_bytes(b"film")
+    (legs / "esrgan").write_bytes(b"esrgan")
+    (legs / "rife").write_bytes(b"rife")
+    return AugmentWeights(
+        film=legs / "film",
+        realesrgan=legs / "esrgan",
+        rife=legs / "rife",
+    )
+
+
+def _run_gated_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gate: threading.Event,
+    preloads: list[str],
+) -> Any:
+    import functools
+
+    import voyage.augment_parallel as parallel_module
+    from voyage.augment_interp_poller import interp_poll_once
+    from voyage.augment_upscale_poller import upscale_poll_once
+
+    def _counting_preload(weights: Any, weights_key: str, interp_backend: str, device: str) -> None:
+        preloads.append(device)
+
+    monkeypatch.setattr(parallel_module, "_preload_worker_models", _counting_preload)
+    _parallel_segment(tmp_path, frames=8)
+    progress = _StubProgress()
+    parallel_module.run_parallel_model_pass(
+        tmp_path,
+        weights=_gated_weights(tmp_path),
+        weights_key="weights-abc",
+        out_width=1216,
+        out_height=704,
+        source_fps=24,
+        upscale_factor=2,
+        multiplier=4,
+        chunk_frames=4,
+        crf=15,
+        preset="veryfast",
+        interp_backend="rife",
+        upscale_poll_fn=functools.partial(
+            upscale_poll_once,
+            decode_fn=_parallel_decode,
+            upscale_fn=_parallel_upscale,
+        ),
+        interp_poll_fn=functools.partial(
+            interp_poll_once,
+            interp_fn=_parallel_interp,
+        ),
+        progress=progress,
+        second_worker_gate=gate,
+    )
+    return progress
+
+
+def test_second_worker_waits_for_audio_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Worker B holds cuda:0 until the audio gate releases it (2-stream fork)."""
+    preloads: list[str] = []
+    progress = _run_gated_pass(tmp_path, monkeypatch, threading.Event(), preloads)
+    # Worker A drained both tasks alone; worker B never preloaded on cuda:0.
+    assert preloads == ["cuda:1"]
+    assert progress.labels == ["upscale chunks", "interpolate chunks"]
+    for bar in progress.trackers:
+        assert bar.total == 2
+        assert bar.done == 2
+
+
+def test_second_worker_starts_when_gate_already_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A released gate starts both workers immediately (audio-first path)."""
+    gate = threading.Event()
+    gate.set()
+    preloads: list[str] = []
+    _run_gated_pass(tmp_path, monkeypatch, gate, preloads)
+    assert sorted(preloads) == ["cuda:0", "cuda:1"]

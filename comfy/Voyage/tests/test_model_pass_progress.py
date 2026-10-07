@@ -133,10 +133,10 @@ def test_driver_accumulates_frames_and_seconds(tmp_path: Path) -> None:
 
 def test_model_pass_stage_rows_split_legs_when_known() -> None:
     rows = _model_pass_stage_rows({"upscale_poll_s": 82.9, "interp_poll_s": 70.0}, model_start=0.0)
-    assert rows == {"model pass · upscale": 82.9, "model pass · interp": 70.0}
+    assert rows == {"upscale": 82.9, "interpolate": 70.0}
 
 
 def test_model_pass_stage_rows_fall_back_to_wall_time() -> None:
     rows = _model_pass_stage_rows({}, model_start=100.0)
-    assert list(rows) == ["model pass"]
-    assert rows["model pass"] >= 0.0
+    assert list(rows) == ["upscale + interpolate"]
+    assert rows["upscale + interpolate"] >= 0.0

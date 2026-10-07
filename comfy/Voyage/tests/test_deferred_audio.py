@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from voyage.audio_finalize import (
+    deferred_render_take_count,
     deferred_tail_frames,
     derive_conditioning_tail,
     ensure_deferred_takes,
@@ -831,3 +832,26 @@ def test_deferred_tail_frames_match_worker_resume_counts() -> None:
     assert deferred_tail_frames("causvid", overlap_frames=8) == 29
     with pytest.raises(MediaError):
         deferred_tail_frames("fake")
+
+
+def test_dry_walk_count_matches_rendered_takes(tmp_path: Path) -> None:
+    """The `ace takes` bar total equals the takes the render walk mints."""
+    captions = [f"dark ambient drone verse {index}" for index in range(6)]
+    segments = [_production_segment(tmp_path, index, 240, captions[index]) for index in range(6)]
+    expected = deferred_render_take_count(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        music_style="fallback style",
+    )
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_stub_render,
+        music_style="fallback style",
+    )
+    assert expected > 0
+    assert len(takes) == expected

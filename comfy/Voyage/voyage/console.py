@@ -334,17 +334,17 @@ class VoyageConsole:
             for stage_text in info.get("transition_stages", []):
                 self.line(f"     transition ({mechanism}): {stage_text}")
 
-        caption = str(info.get("audio_caption", ""))
-        energy = info.get("audio_energy", 0.0)
-        beats = info.get("audio_beats", 0)
-        bpm = info.get("audio_bpm", 0.0)
-        self.styled(
-            "🎵",
-            f"audio · {info.get('audio_backend')} · {beats} beats @ {bpm:.0f} BPM · "
-            f"energy {energy:.2f}",
-            "yellow",
-        )
         if self._verbose:
+            caption = str(info.get("audio_caption", ""))
+            energy = info.get("audio_energy", 0.0)
+            beats = info.get("audio_beats", 0)
+            bpm = info.get("audio_bpm", 0.0)
+            self.styled(
+                "🎵",
+                f"audio · {info.get('audio_backend')} · {beats} beats @ {bpm:.0f} BPM · "
+                f"energy {energy:.2f}",
+                "yellow",
+            )
             self.line(f"     music: {caption}")
         # Third caption family (issue 161): the SFX caption the director
         # computed is the only pre-finalize signal for what the MMAudio
@@ -370,15 +370,15 @@ class VoyageConsole:
         segment_id = str(info.get("segment_id", ""))
         frames = info.get("frames", 0)
         duration = info.get("duration", 0.0)
-        takes = info.get("take_ids", [])
-        take_action = str(info.get("take_action", "keep"))
-        takes_text = ", ".join(str(take) for take in takes) if takes else "no take"
-        beats = info.get("beats", 0)
-        bpm = info.get("bpm", 0.0)
-        self.ok(
-            f"SEGMENT {segment_id} committed · {frames}f ≈ {duration:.2f}s · "
-            f"{takes_text} ({take_action}) · {beats} beats @ {bpm:.0f} BPM"
-        )
+        summary = f"SEGMENT {segment_id} committed · {frames}f ≈ {duration:.2f}s"
+        if self._verbose:
+            takes = info.get("take_ids", [])
+            take_action = str(info.get("take_action", "keep"))
+            takes_text = ", ".join(str(take) for take in takes) if takes else "no take"
+            beats = info.get("beats", 0)
+            bpm = info.get("bpm", 0.0)
+            summary += f" · {takes_text} ({take_action}) · {beats} beats @ {bpm:.0f} BPM"
+        self.ok(summary)
         motion = info.get("motion_energy")
         sense_seconds = info.get("motion_seconds")
         if isinstance(motion, (int, float)) and not isinstance(motion, bool):
@@ -396,15 +396,20 @@ class VoyageConsole:
         if self._verbose:
             reason = str(info.get("take_reason", ""))
             if reason:
-                self.line(f"     take: {take_action} — {reason}")
+                self.line(f"     take: {str(info.get('take_action', 'keep'))} — {reason}")
             fraction = info.get("overlap_fraction", 0.0)
             cap = info.get("overlap_cap_seconds", 0.0)
             self.line(f"     finalize blend: {fraction} of shortest neighbor, cap {cap}s")
         stages = info.get("stage_seconds", {})
         prefetch = " · prefetch hit" if info.get("prefetch_hit") else ""
         if isinstance(stages, dict) and stages:
-            cells = " · ".join(f"{name} {seconds:.1f}s" for name, seconds in stages.items())
-            self.line(f"     ⏱ {cells}{prefetch} · total {info.get('elapsed', 0.0):.1f}s")
+            if not self._verbose:
+                stages = {name: seconds for name, seconds in stages.items() if name != "audio"}
+            if stages:
+                cells = " · ".join(f"{name} {seconds:.1f}s" for name, seconds in stages.items())
+                self.line(f"     ⏱ {cells}{prefetch} · total {info.get('elapsed', 0.0):.1f}s")
+            elif prefetch:
+                self.line(f"     ⏱{prefetch}")
         elif prefetch:
             self.line(f"     ⏱{prefetch}")
 

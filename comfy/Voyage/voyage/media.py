@@ -800,18 +800,18 @@ def presented_frames(video: Path) -> int | None:
 def _model_pass_stage_rows(
     model_pass_timings: dict[str, float], model_start: float
 ) -> dict[str, float]:
-    """Timing-table rows for the model pass: per-leg seconds when known.
+    """Timing-table rows for upscale/interpolate legs when known.
 
     The durable path records `upscale_poll_s` / `interp_poll_s`
-    separately, so the table shows upscale vs interp instead of one
-    aggregate. Legacy/tmpdir paths only know wall time — they keep the
-    single `model pass` row.
+    separately, so the table shows upscale vs interpolate instead of one
+    aggregate. Legacy/tmpdir paths only know wall time — they keep one
+    combined `upscale + interpolate` row.
     """
     up_seconds = float(model_pass_timings.get("upscale_poll_s", 0.0) or 0.0)
     ip_seconds = float(model_pass_timings.get("interp_poll_s", 0.0) or 0.0)
     if up_seconds > 0 or ip_seconds > 0:
-        return {"model pass · upscale": up_seconds, "model pass · interp": ip_seconds}
-    return {"model pass": time.monotonic() - model_start}
+        return {"upscale": up_seconds, "interpolate": ip_seconds}
+    return {"upscale + interpolate": time.monotonic() - model_start}
 
 
 FINALIZE_TMPDIR_PREFIX = "voyage-final-"
@@ -1284,7 +1284,9 @@ def finalize_run(
             if tensor_intermediate is not None:
                 final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))
 
-        def _do_parallel_model_pass() -> None:
+        def _do_parallel_model_pass(
+            second_worker_gate: threading.Event | None = None,
+        ) -> None:
             nonlocal tensor_intermediate
             if not phased or resolved_weights is None or not upscale_devices or not interp_devices:
                 return
@@ -1293,7 +1295,8 @@ def finalize_run(
             # cuda:1 front-to-back, worker B on cuda:0 back-to-front),
             # then the same drain (+ seam/morph joints) as the single
             # driver emits one intermediate. No seam-early in workers —
-            # the drain fallback owns seams.
+            # the drain fallback owns seams. A set gate holds worker B
+            # until the audio frees cuda:0 (2-stream fork below).
             from voyage.augment_finalize import _drain_to_intermediate, weights_key_for
             from voyage.augment_parallel import run_parallel_model_pass
 
@@ -1316,6 +1319,7 @@ def finalize_run(
                 interp_backend=effective_interp_backend,
                 timings=model_pass_timings,
                 progress=branch_progress,
+                second_worker_gate=second_worker_gate,
             )
             tensor_intermediate, _ = _drain_to_intermediate(
                 run_dir,
@@ -1586,21 +1590,48 @@ def finalize_run(
             model_devices=upscale_devices if phased else tensor_devices,
         ):
             # Two streams (phased 2-GPU; see DESIGN section 59):
-            # Thread-A runs one interleaved upscale→interp pass on the
-            # 2060 on one 'model pass' bar (RIFE fits beside the llama
-            # sidecar) — while Thread-B renders ACE takes
-            # then the SFX bed sequential on the 4060. One N-stream
-            # display carries model, interp, takes and bed bars
+            # Thread-A runs the model pass starting on the 2060
+            # (bidirectional when RIFE + both cards visible: worker A
+            # front-to-back on cuda:1 immediately, worker B back-to-front
+            # on cuda:0 once the audio frees it; otherwise the
+            # interleaved pass on one card) — while Thread-B renders ACE
+            # takes then the SFX bed sequential on the 4060. One N-stream
+            # display carries upscale, interpolate, takes and bed bars
             # concurrently (plain lines when headless). The blend
             # clock covers the whole fork-join: model and music
             # overlap, so this is fork-to-mix, not music+mix.
             audio_start = time.monotonic()
+            # Late worker B (DESIGN §140): the model pass starts on cuda:1
+            # alongside the audio and adds cuda:0 once Thread-B's audio
+            # frees it — the gate is set even on audio failure (finally),
+            # so a failed audio still leaves a complete model pass behind.
+            fork_audio_done = threading.Event()
+
+            def _do_fork_music() -> None:
+                try:
+                    (_do_music_then_bed if phased else _do_music_takes)()
+                finally:
+                    fork_audio_done.set()
+
+            if phased and parallel_model_pass_armed(
+                interp_backend=effective_interp_backend,
+                devices=augment_devices(),
+            ):
+
+                def _do_fork_model() -> None:
+                    _do_parallel_model_pass(second_worker_gate=fork_audio_done)
+
+                fork_model_work = _do_fork_model
+            else:
+                fork_model_work = _do_interleaved_model_pass if phased else _do_model_pass
             model_music_display: ParallelFinalizeDisplay | None = None
             span_progress: VoyageConsole | None = progress
             if progress is not None:
                 model_music_display = ParallelFinalizeDisplay(progress)
-                span_progress = model_music_display.stream_view("model pass + music takes")
-                branch_progress = model_music_display.stream_view("model pass")
+                span_progress = model_music_display.stream_view(
+                    "upscale + interpolate + music takes"
+                )
+                branch_progress = model_music_display.stream_view("upscale + interpolate")
                 music_branch_progress = model_music_display.stream_view("music takes")
                 bed_view = model_music_display.stream_view("sfx bed")
             else:
@@ -1608,10 +1639,10 @@ def finalize_run(
                 music_branch_progress = None
                 bed_view = None
             try:
-                with optional_stage(span_progress, "model pass + music takes"):
+                with optional_stage(span_progress, "upscale + interpolate + music takes"):
                     run_model_pass_and_music_parallel(
-                        model_work=(_do_interleaved_model_pass if phased else _do_model_pass),
-                        music_work=(_do_music_then_bed if phased else _do_music_takes),
+                        model_work=fork_model_work,
+                        music_work=_do_fork_music,
                     )
             finally:
                 if model_music_display is not None:
@@ -1777,13 +1808,19 @@ def finalize_run(
                 _segment_video_matches_target(segment, out_w, out_h, out_fps) for segment in usable
             )
         )
-        publish_label = (
-            "encode model-pass video"
-            if tensor_intermediate is not None
-            else "encode native video"
-            if native
-            else "encode presentation video"
-        )
+        if tensor_intermediate is not None:
+            if effective_upscale > 1 and effective_interpolate > 1:
+                publish_label = "encode upscale + interpolate video"
+            elif effective_upscale > 1:
+                publish_label = "encode upscale video"
+            elif effective_interpolate > 1:
+                publish_label = "encode interpolate video"
+            else:
+                publish_label = "encode upscaled video"
+        elif native:
+            publish_label = "encode native video"
+        else:
+            publish_label = "encode presentation video"
         if model_selected and effective_interpolate > 1:
             # Stage 2 of the backend-switch prune (stage 1 ran pre-poll):
             # every poll and drain on every path is finished, so the

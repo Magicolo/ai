@@ -440,6 +440,95 @@ def deferred_render_pending(
     return False
 
 
+def deferred_render_take_count(
+    *,
+    run_dir: Path,
+    usable: list[Path],
+    source_fps: float,
+    run_seed: int,
+    music_style: str = "",
+    explicit_caption: str | None = None,
+    stretch: float = 1.0,
+    take_seconds: float = _TAKE_SECONDS,
+    ahead_seconds: float = _AHEAD_SECONDS,
+    chain_overlap_seconds: float = _CHAIN_OVERLAP_SECONDS,
+) -> int:
+    """Upfront take count for the `ace takes` bar (dry walk, never renders).
+
+    Replays the exact `ensure_deferred_takes` decision loop per segment —
+    same replay rows, seed formula, planner, orphan-adoption and
+    keep-missing-file rules, same skeleton-append order — but appends
+    skeleton takes instead of rendering, writing nothing. The count feeds
+    the bar total so finalize shows `ace takes X/Y`, not `X/?`. Orphan
+    adopts and keep-missing-file re-renders each count one (they mint /
+    rewrite output exactly like the real walk). Never raises: the same
+    iteration cap bounds the walk, and any unexpected shape just ends the
+    count early — the real walk stays the fail-loud authority, so a
+    miscount only ever skews the bar total, never the audio.
+    """
+    try:
+        takes = _load_existing_takes(run_dir)
+        replay = _replay_segments(usable, source_fps, stretch, music_style, explicit_caption)
+    except Exception:  # noqa: BLE001 - unreadable replay means "unknown total", not fatal
+        return 0
+    # Takes already ledgered at entry: only these get the keep-missing-file
+    # output-truth check below. Skeletons minted by this walk have no files
+    # by construction (nothing renders here) — checking them would count a
+    # phantom re-render on every keep.
+    ledgered_ids = {take.take_id for take in takes}
+    count = 0
+    for position, _segment in enumerate(usable):
+        try:
+            start, stretched, number, caption, _energy = replay[position]
+        except IndexError:
+            break
+        planner = AudioPlanner(
+            take_seconds=take_seconds,
+            ahead_seconds=ahead_seconds,
+            takes=list(takes),
+            segment_seconds=stretched,
+            chain_overlap_seconds=chain_overlap_seconds,
+        )
+        end = start + stretched
+        max_iterations = 4 + math.ceil(stretched / max(ahead_seconds, 1.0))
+        iterations = 0
+        while True:
+            iterations += 1
+            try:
+                seed = audio_seed(run_seed, number, len(takes))
+                plan = planner.plan(start, caption, seed, number)
+            except Exception:  # noqa: BLE001 - planner failure ends the count, never finalize
+                break
+            if plan.action == "keep":
+                keeping_take = plan.current
+                if (
+                    keeping_take is not None
+                    and keeping_take.take_id in ledgered_ids
+                    and not _take_output_complete(run_dir, keeping_take)
+                ):
+                    count += 1
+                break
+            if iterations > max_iterations:
+                break
+            take = plan.take
+            if take is None:
+                break
+            if plan.action == "repaint":
+                take.caption = caption
+            else:
+                take.caption, take.segment_index = _resolve_take_caption(replay, take.covers_from)
+            # No filesystem probe here: orphan-adopt and fresh-render
+            # append the identical skeleton take, so coverage evolves the
+            # same either way — the count cannot tell them apart (and
+            # must not, to stay equal to the real walk's minted takes).
+            planner.record(take)
+            takes.append(take)
+            count += 1
+            if planner.coverage_until() >= end - 1e-6:
+                break
+    return count
+
+
 def ensure_deferred_takes(
     *,
     run_dir: Path,
@@ -495,7 +584,22 @@ def ensure_deferred_takes(
     takes: list[AudioTake] = _load_existing_takes(run_dir)
     rendered: list[dict[str, Any]] = []
     replay = _replay_segments(usable, source_fps, stretch, music_style, explicit_caption)
-    take_bar = optional_bar(progress, "ace takes")
+    # Upfront total for the bar: the dry-walk count replays these same
+    # rows with the same planner/seed/append order, so it equals the
+    # takes minted below (0/unknown keeps the historical spinner form).
+    take_total = deferred_render_take_count(
+        run_dir=run_dir,
+        usable=usable,
+        source_fps=source_fps,
+        run_seed=run_seed,
+        music_style=music_style,
+        explicit_caption=explicit_caption,
+        stretch=stretch,
+        take_seconds=take_seconds,
+        ahead_seconds=ahead_seconds,
+        chain_overlap_seconds=chain_overlap_seconds,
+    )
+    take_bar = optional_bar(progress, "ace takes", total=take_total or None)
     with take_bar as tracker:
         for position, segment in enumerate(usable):
             start, stretched, number, caption, energy = replay[position]
