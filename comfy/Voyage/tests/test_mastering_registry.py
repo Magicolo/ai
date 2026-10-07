@@ -21,17 +21,21 @@ from tests.conftest import initialize_run_directory
 
 
 def test_spec_present() -> None:
-    """MODEL_SPECS carries the audio-sonicmaster row (two FileSpecs)."""
+    """MODEL_SPECS carries the audio-sonicmaster row (three FileSpecs)."""
     spec = model_registry.MODEL_SPECS["audio-sonicmaster"]
     assert spec.name == "audio-sonicmaster"
     assert spec.manifest_key == "sonicmaster"
-    assert len(spec.files) == 2
+    assert len(spec.files) == 3
     assert spec.files[0].repo_id == registry_mastering.SONICMASTER_HF_REPO
     assert spec.files[0].filename == registry_mastering.SONICMASTER_MODEL_FILE
     assert spec.files[1].repo_id == registry_mastering.SONICMASTER_VAE_REPO
     assert spec.files[1].filename == registry_mastering.SONICMASTER_VAE_FILE
-    assert len(spec.checks) == 2
-    assert len(spec.expected_hashes) == 2
+    assert spec.files[1].subfolder == registry_mastering.SONICMASTER_VAE_SUBFOLDER
+    assert spec.files[2].repo_id == registry_mastering.SONICMASTER_VAE_REPO
+    assert spec.files[2].filename == registry_mastering.SONICMASTER_VAE_CONFIG_FILE
+    assert spec.files[2].subfolder == registry_mastering.SONICMASTER_VAE_SUBFOLDER
+    assert len(spec.checks) == 3
+    assert len(spec.expected_hashes) == 3
     assert spec.record_builder is registry_mastering._record_mastering
     assert spec.success_message is registry_mastering._describe_mastering
 
@@ -51,8 +55,11 @@ def test_pins_are_single_sourced() -> None:
         "SONICMASTER_VAE_REVISION",
         "SONICMASTER_VAE_SUBFOLDER",
         "SONICMASTER_VAE_FILE",
+        "SONICMASTER_VAE_CONFIG_FILE",
         "SONICMASTER_VAE_REPO_PATH",
+        "SONICMASTER_VAE_CONFIG_REPO_PATH",
         "SONICMASTER_VAE_MIN_BYTES",
+        "SONICMASTER_VAE_CONFIG_MIN_BYTES",
         "SONICMASTER_VAE_LICENSE",
         "SONICMASTER_VAE_LICENSE_URL",
         "EXPECTED_SONICMASTER_MODEL_SHA256",
@@ -68,22 +75,25 @@ def test_pins_are_single_sourced() -> None:
 
 
 def test_expected_shas_are_64_lower_hex() -> None:
-    """Track A placeholder digests keep the ingest-gate shape (issue 207)."""
+    """Measured digests keep the ingest-gate shape (issue 207)."""
     import re
 
     for value in (
         registry_mastering.EXPECTED_SONICMASTER_MODEL_SHA256,
         registry_mastering.EXPECTED_SONICMASTER_VAE_SHA256,
+        registry_mastering.EXPECTED_SONICMASTER_VAE_CONFIG_SHA256,
     ):
         assert re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 def test_record_and_describe_builders(tmp_path: Path) -> None:
-    """Record carries both shas; describe is byte-stable."""
+    """Record carries all three shas; describe is byte-stable."""
     mastering_dir = tmp_path / registry_mastering.SONICMASTER_SUBDIR
-    mastering_dir.mkdir(parents=True)
+    vae_dir = mastering_dir / registry_mastering.SONICMASTER_VAE_SUBFOLDER
+    vae_dir.mkdir(parents=True)
     (mastering_dir / registry_mastering.SONICMASTER_MODEL_FILE).write_bytes(b"model-bytes")
-    (mastering_dir / registry_mastering.SONICMASTER_VAE_FILE).write_bytes(b"vae-bytes")
+    (vae_dir / registry_mastering.SONICMASTER_VAE_FILE).write_bytes(b"vae-bytes")
+    (vae_dir / registry_mastering.SONICMASTER_VAE_CONFIG_FILE).write_bytes(b"{}")
     record = registry_mastering._record_mastering(tmp_path)
     assert record["repo"] == registry_mastering.SONICMASTER_HF_REPO
     assert record["vae_repo"] == registry_mastering.SONICMASTER_VAE_REPO
@@ -92,6 +102,7 @@ def test_record_and_describe_builders(tmp_path: Path) -> None:
     assert set(shas) == {
         registry_mastering.SONICMASTER_MODEL_REPO_PATH,
         registry_mastering.SONICMASTER_VAE_REPO_PATH,
+        registry_mastering.SONICMASTER_VAE_CONFIG_REPO_PATH,
     }
     message = registry_mastering._describe_mastering(tmp_path)
     assert message.startswith("sonicmaster OK (model ")

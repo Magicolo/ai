@@ -3,7 +3,8 @@
 All pins live in code in `voyage/model_registry.py` (the single source of
 truth); this file mirrors them for humans. Most repos are **ungated** —
 no token required — except the LTX-2.5 text encoder, VAEs and upscaler
-(see below), which need a token with access. There is no `models` CLI
+(see below) and the Stable Audio Open VAE behind the mastering spec,
+which need a token with access. There is no `models` CLI
 verb (two-verb CLI: `configure` + `generate` only): `configure`
 verifies — and downloads when missing — only the stacks the effective
 config needs (programmatic entry
@@ -175,8 +176,8 @@ Code: [hkchengrex/MMAudio](https://github.com/hkchengrex/MMAudio) at
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
-| Mastering DiT (`sonicmaster/model.safetensors`, ~3.45 GB, public, Apache-2.0) | [nateraw/sonicmaster](https://huggingface.co/nateraw/sonicmaster) (mirror of [amaai-lab/SonicMaster](https://huggingface.co/amaai-lab/SonicMaster)) | `a1765134e0808a8fb45e1a92874327e01d07cd75` |
-| Mastering VAE (`sonicmaster/vae.safetensors`, **gated** — needs a token with access, Stability AI Community License) | [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) | `9612befb10cc9992a2f82558bbb4735efaba3297` |
+| Mastering DiT (`sonicmaster/model.safetensors`, ~3.45 GB, public, Apache-2.0) | [amaai-lab/SonicMaster](https://huggingface.co/amaai-lab/SonicMaster) | `93c7fa73c4dd446c9e656af34524b5f6a416afda` |
+| Mastering VAE (`sonicmaster/vae/diffusion_pytorch_model.safetensors` ~624 MB + `sonicmaster/vae/config.json`, **gated** — needs a token with access, Stability AI Community License) | [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) | `f21265c1e2710b3bd2386596943f0007f55f802e` |
 
 IDs above are the live-probe winners (`output/sonicmaster-ab/METRICS.md`):
 isolated `sonicmaster-probe` container (pytorch 2.4.0 cu124 + transformers
@@ -188,8 +189,10 @@ reclaims downstream). Full row: `MODEL_SPECS["audio-sonicmaster"]`
 (`voyage/registry_mastering.py`, pinned by Track A).
 
 Track D carries only the execution environment: the isolated
-`/opt/venvs/mastering` stack (torch 2.4.0/cu124 + transformers 4.44.0 +
-diffusers 0.30.0 + soundfile/safetensors/hub — the probe's exact core)
+`/opt/venvs/mastering` stack (torch 2.4.0/cu124 + torchaudio 2.4.0 +
+transformers 4.44.0 + diffusers 0.30.0 + datasets 3.6.0 +
+soundfile/safetensors/hub — the probe's exact core plus the repo's
+top-level `datasets`/`torchaudio` imports, proven by the GPU proof)
 baked into the `voyage-ltx` and `voyage-video` worker images and spawned
 via `VOYAGE_MASTERING_PYTHON` (unset on the slim image and on hosts falls
 back to the supervisor interpreter). The registry spec + ensure wiring

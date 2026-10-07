@@ -38,6 +38,7 @@ _MASTERING_VENV = "/opt/venvs/mastering"
 _MASTERING_INTERPRETER = "/opt/venvs/mastering/bin/python"
 _MASTERING_PINS = (
     "torch==2.4.0",
+    "torchaudio==2.4.0",
     "cu124",
     "transformers==4.44.0",
     "diffusers==0.30.0",
@@ -45,6 +46,7 @@ _MASTERING_PINS = (
     "safetensors==0.8.0",
     "huggingface_hub==0.36.2",
     "pydantic==2.10.6",
+    "datasets==3.6.0",
 )
 """Exact pip pins both images bake (hub<1.0 per transformers 4.44)."""
 

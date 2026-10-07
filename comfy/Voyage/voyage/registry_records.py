@@ -473,6 +473,9 @@ from voyage.registry_mastering import (
     EXPECTED_SONICMASTER_MODEL_SHA256 as EXPECTED_SONICMASTER_MODEL_SHA256,
 )
 from voyage.registry_mastering import (
+    EXPECTED_SONICMASTER_VAE_CONFIG_SHA256 as EXPECTED_SONICMASTER_VAE_CONFIG_SHA256,
+)
+from voyage.registry_mastering import (
     EXPECTED_SONICMASTER_VAE_SHA256 as EXPECTED_SONICMASTER_VAE_SHA256,
 )
 from voyage.registry_mastering import (
@@ -498,6 +501,15 @@ from voyage.registry_mastering import (
 )
 from voyage.registry_mastering import (
     SONICMASTER_SUBDIR as SONICMASTER_SUBDIR,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_CONFIG_FILE as SONICMASTER_VAE_CONFIG_FILE,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_CONFIG_MIN_BYTES as SONICMASTER_VAE_CONFIG_MIN_BYTES,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_CONFIG_REPO_PATH as SONICMASTER_VAE_CONFIG_REPO_PATH,
 )
 from voyage.registry_mastering import (
     SONICMASTER_VAE_FILE as SONICMASTER_VAE_FILE,

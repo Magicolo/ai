@@ -106,9 +106,11 @@ print('sfx venv ok')
 # proven by a GPU run, not the build).
 docker run --rm --entrypoint /opt/venvs/mastering/bin/python voyage-ltx:latest -c "
 import torch, transformers, diffusers, soundfile, safetensors, huggingface_hub
-import pydantic
+import pydantic, datasets, torchaudio
 assert torch.__version__.startswith('2.4.0'), torch.__version__
 assert transformers.__version__ == '4.44.0', transformers.__version__
 assert diffusers.__version__ == '0.30.0', diffusers.__version__
+assert datasets.__version__ == '3.6.0', datasets.__version__
+assert torchaudio.__version__.startswith('2.4.0'), torchaudio.__version__
 print('mastering venv ok')
 "

@@ -245,17 +245,28 @@ RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
 # huggingface_hub stays 0.36.2 (transformers 4.44 requires hub<1.0, so the
 # 1.33.0 used elsewhere would break resolution); pydantic mirrors the
 # other venvs (the future worker imports voyage over PYTHONPATH, which
-# needs it). The supervisor will spawn the mastering worker with this
+# needs it). GPU-proof lesson (2026-10-07, proven live in this image):
+# the SonicMaster repo needs two more import-time deps — model.py
+# imports `datasets` at top level, and utils.py (imported by model.py)
+# imports `torchaudio` + `pandas` at top level. datasets==3.6.0 is
+# pinned (datasets 5.x drags huggingface_hub>=2, which breaks the
+# diffusers 0.30 resolution); torchaudio==2.4.0 rides the cu124 index
+# with torch; pandas arrives via datasets (frozen by the datasets
+# pin). accelerate is deliberately absent — only the repo's
+# training/batch scripts import it, never the model.py/utils.py
+# inference path. yaml/tqdm/numpy arrive via transformers/torch (their
+# hard requirements). The supervisor will spawn the mastering worker with this
 # interpreter via VOYAGE_MASTERING_PYTHON below; unset (slim image,
 # tests) falls back to the supervisor interpreter. Placed after the slow
 # layers so only the fast user-setup layers rerun; the recursive chown
 # below covers the venv (it already covers /opt/venvs).
 RUN python3.11 -m venv /opt/venvs/mastering \
     && /opt/venvs/mastering/bin/pip install "pip==25.0.1" \
-    && /opt/venvs/mastering/bin/pip install torch==2.4.0 \
+    && /opt/venvs/mastering/bin/pip install torch==2.4.0 torchaudio==2.4.0 \
         --index-url https://download.pytorch.org/whl/cu124 \
     && /opt/venvs/mastering/bin/pip install "transformers==4.44.0" "diffusers==0.30.0" \
         "soundfile==0.14.0" "safetensors==0.8.0" "huggingface_hub==0.36.2" "pydantic==2.10.6" \
+        "datasets==3.6.0" \
     && test -x /opt/venvs/mastering/bin/python
 
 # Run as the invoking host user (same contract as the video image): the
