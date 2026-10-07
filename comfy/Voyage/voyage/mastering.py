@@ -169,7 +169,9 @@ def _resample_wav(source: Path, dest: Path, sample_rate: int, channels: int) -> 
             "-c:a",
             "pcm_s16le",
             str(dest),
-        ]
+        ],
+        # Unbounded: resamples full-timeline inputs (whole mix / joined windows).
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"mastering resample failed for {source}: {proc.stderr[-2000:]}")
@@ -512,7 +514,9 @@ def maybe_master_ship_audio(
             "-c:a",
             "pcm_s16le",
             str(demuxed),
-        ]
+        ],
+        # Unbounded: demuxes the full shipped timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"mastering demux failed for {ship}: {proc.stderr[-2000:]}")
@@ -541,7 +545,9 @@ def maybe_master_ship_audio(
             "128k",
             "-shortest",
             str(remuxed),
-        ]
+        ],
+        # Unbounded: remuxes the full shipped timeline.
+        timeout=None,
     )
     if mux.returncode != 0:
         raise MediaError(f"mastering remux failed for {ship}: {mux.stderr[-2000:]}")

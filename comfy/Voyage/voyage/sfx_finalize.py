@@ -23,6 +23,7 @@ loop; this module only plans, spawns, blends, and mixes.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -395,6 +396,11 @@ def append_sfx_window(
     probed_duration: float | None = None,
     conditioning_source: str = SFX_CONDITIONING_SHIPPED,
     conditioning_timeline: float | None = None,
+    *,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+    backend: str | None = None,
+    device: str | None = None,
 ) -> None:
     """Durably append one rendered window (flush + fsync + fsync_dir, takes pattern).
 
@@ -409,6 +415,14 @@ def append_sfx_window(
     bounds tiled (source duration for proxy beds, shipped duration for
     the legacy pass). Legacy lines carry neither and validate against
     the passed timeline exactly as before.
+
+    `sample_rate` / `channels` / `backend` / `device` are render
+    provenance recorded on new lines only (DESIGN §56 stage-skip): they
+    close the legacy-path stale-render hole for future beds (a later
+    gate can compare them without re-probing) and are never required on
+    read — `_stem_cache_hit` deliberately ignores them, so old lines
+    without them still hit. Recorded verbatim when given (provenance
+    must never break a render, so no validation here).
 
     File fsync persists content; the directory sync persists the namespace
     entry (issue 101 twin of `append_take`, in-tree contract in
@@ -434,6 +448,14 @@ def append_sfx_window(
         record["probed_duration"] = probed_duration
     if conditioning_timeline is not None:
         record["conditioning_timeline"] = conditioning_timeline
+    if sample_rate is not None:
+        record["sample_rate"] = sample_rate
+    if channels is not None:
+        record["channels"] = channels
+    if backend is not None:
+        record["backend"] = backend
+    if device is not None:
+        record["device"] = device
     with ledger.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
         handle.flush()
@@ -600,6 +622,274 @@ _SFX_SHORTFALL_RE = re.compile(r"^sfx(-right)? coverage \d+\.\d{2}s short of tim
 def is_healable_sfx_shortfall(error: str) -> bool:
     """Whether an sfx error line is the pure tail shortfall finalize heals."""
     return bool(_SFX_SHORTFALL_RE.match(error))
+
+
+SFX_TIMELINE_MS_PER_SECOND = 1000
+"""Milliseconds per second for the persisted SFX coverage marker (DESIGN §56).
+
+`stamp_sfx_coverage` quantizes the timeline to integer milliseconds so a
+float-dust re-finalize compares equal against the stamped value.
+"""
+
+SFX_BOUNDS_FINGERPRINT_DECIMALS = 3
+"""Bounds fingerprint rounds segment edges to milliseconds (DESIGN §56).
+
+Matches the M7 plan tiling quantum (`plan_sfx_windows` rounds the
+timeline to ms on entry): probe dust below this never forks the
+fingerprint, so a no-change resume keeps its skip.
+"""
+
+SFX_COVERAGE_KEYS = frozenset(
+    {
+        "timeline_ms",
+        "conditioning_source",
+        "dual_pan",
+        "bed_digest",
+        "ledger_digest",
+        "model_size",
+    }
+)
+"""Exact key set of the persisted SFX coverage marker (DESIGN §56).
+
+`validate_sfx_coverage` rejects anything else — missing, mistyped, or
+extra keys all fail loud. Schema evolution needs a versioned revision,
+never a silent seventh key: the orchestrator compares stored markers
+field-by-field, and a shape it cannot name must not pass.
+"""
+
+
+def sfx_bounds_fingerprint(segment_bounds: list[tuple[float, float, str]]) -> str:
+    """Stable identity of the caption tiling a bed plan covers (pure, DESIGN §56).
+
+    Segment edges round to milliseconds (same quantum as the plan tiling)
+    and captions ride verbatim in order — any caption, boundary, or
+    ordering change forks the fingerprint, while probe dust below a
+    millisecond does not. The stage-skip gate compares this before
+    re-tiling: a configuration change is the only thing that may trigger
+    re-evaluation of an otherwise complete bed.
+    """
+    normalized = [
+        {
+            "start": round(float(start), SFX_BOUNDS_FINGERPRINT_DECIMALS),
+            "end": round(float(end), SFX_BOUNDS_FINGERPRINT_DECIMALS),
+            "caption": caption,
+        }
+        for start, end, caption in segment_bounds
+    ]
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _track_windows_complete(
+    run_dir: Path,
+    expected: list[SfxWindow],
+    ledger_name: str,
+    model_size: str,
+    conditioning_source: str,
+) -> bool:
+    """Whether one track's expected windows all ledger-hit with stems on disk.
+
+    Reads the track ledger (torn-tail tolerant via `load_sfx_ledger`,
+    last-wins per key like the render path) and requires, per expected
+    window, a `_stem_cache_hit` record plus an existing stem file. No
+    worker spawn, no ffprobe, no manifest reads — existence only. Any
+    gap, mismatch, escape, or unreadable ledger returns False (fail-open:
+    the caller renders instead of trusting a half bed).
+    """
+    ledger_records = load_sfx_ledger(run_dir / "audio" / SFX_STEMS_DIRNAME / ledger_name)
+    indexed = {_sfx_ledger_key(record): record for record in ledger_records}
+    for window in expected:
+        record = indexed.get((conditioning_source, window.window_id))
+        if record is None:
+            return False
+        if not _stem_cache_hit(record, window, model_size, conditioning_source):
+            return False
+        try:
+            stem = resolve_stored_path(run_dir, str(record.get("path", "")))
+        except MediaError:
+            return False
+        if not stem.is_file():
+            return False
+    return True
+
+
+def sfx_bed_complete(
+    run_dir: Path,
+    timeline_seconds: float,
+    segment_bounds: list[tuple[float, float, str]],
+    seed_base: int,
+    model_size: str,
+    conditioning_source: str,
+    dual_pan: bool,
+    *,
+    bounds_fingerprint: str = "",
+) -> bool:
+    """Whether the SFX bed is fully rendered for this exact plan (DESIGN §56).
+
+    Re-tiles the expected windows via `plan_sfx_windows` (left track at
+    `seed_base`, right track at `seed_base + SFX_DUAL_SEED_OFFSET` when
+    `dual_pan`) and requires every window to ledger-hit with its stem
+    file on disk. The caller passes `segment_bounds` and the timeline in
+    — nothing here reads manifests, probes media, or spawns workers, so
+    a complete bed skips all of that. Any gap, caption/seed/model/source
+    mismatch, missing stem, unreadable ledger, or exception returns False
+    (fail-open: render instead of shipping a half bed). A `dual_pan`
+    run additionally requires the right ledger; with `dual_pan` false a
+    stale right track is inert and ignored. When `bounds_fingerprint` is
+    given it must equal `sfx_bounds_fingerprint(segment_bounds)` —
+    otherwise False without further I/O, so a bare configuration change
+    short-circuits before any folder scan.
+    """
+    try:
+        if bounds_fingerprint and bounds_fingerprint != sfx_bounds_fingerprint(segment_bounds):
+            return False
+        expected_left = plan_sfx_windows(timeline_seconds, segment_bounds, seed_base=seed_base)
+        if not _track_windows_complete(
+            run_dir, expected_left, SFX_LEDGER_NAME, model_size, conditioning_source
+        ):
+            return False
+        if dual_pan:
+            expected_right = plan_sfx_windows(
+                timeline_seconds,
+                segment_bounds,
+                seed_base=seed_base + SFX_DUAL_SEED_OFFSET,
+            )
+            if not _track_windows_complete(
+                run_dir,
+                expected_right,
+                SFX_RIGHT_LEDGER_NAME,
+                model_size,
+                conditioning_source,
+            ):
+                return False
+    except (OSError, ValueError, TypeError, StateError, MediaError):
+        return False
+    else:
+        return True
+
+
+def sfx_ledger_digest(run_dir: Path) -> str:
+    """Order-normalized digest over both SFX track ledgers (DESIGN §56).
+
+    Both ledgers' records sort by (conditioning_source, window_id) before
+    hashing, so completion-order appends never fork the digest (same
+    contract as the bed fingerprint's per-ledger normalization). A
+    missing ledger contributes no records (identical to an empty one);
+    a torn tail falls back the way `load_sfx_ledger` reads it. This is
+    the `ledger_digest` half of the `sfx_coverage` marker: any rendered,
+    adopted, or pruned window changes it, which is exactly when the
+    orchestrator must re-evaluate the skip.
+    """
+    records: list[dict[str, Any]] = []
+    sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
+    for ledger_name in (SFX_LEDGER_NAME, SFX_RIGHT_LEDGER_NAME):
+        try:
+            records.extend(load_sfx_ledger(sfx_dir / ledger_name))
+        except (OSError, ValueError, StateError):
+            continue
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            str(record.get("conditioning_source", SFX_CONDITIONING_SHIPPED)),
+            str(record.get("window_id", "")),
+        ),
+    )
+    canonical = json.dumps(ordered, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_sfx_coverage(marker: object) -> dict[str, object]:
+    """Validate a persisted SFX coverage marker against the schema (DESIGN §56).
+
+    Requires exactly `SFX_COVERAGE_KEYS` with `timeline_ms` a positive
+    non-bool int, `conditioning_source` / `bed_digest` / `ledger_digest` /
+    `model_size` non-empty strings, and `dual_pan` a real bool (a `0`/`1`
+    int is rejected — the flag's type is part of the contract). Returns
+    a fresh plain dict on success; raises `StateError` on any bad shape
+    so a corrupt or hand-edited marker fails loud instead of skipping a
+    bed that was never rendered.
+    """
+    if not isinstance(marker, dict):
+        raise StateError(f"sfx coverage marker must be an object (got {type(marker).__name__})")
+    if set(marker) != SFX_COVERAGE_KEYS:
+        raise StateError(
+            "sfx coverage marker keys must be exactly "
+            f"{sorted(SFX_COVERAGE_KEYS)} (got {sorted(str(key) for key in marker)})"
+        )
+    timeline_ms = marker["timeline_ms"]
+    if isinstance(timeline_ms, bool) or not isinstance(timeline_ms, int) or timeline_ms <= 0:
+        raise StateError(f"sfx coverage timeline_ms must be a positive int (got {timeline_ms!r})")
+    conditioning_source = marker["conditioning_source"]
+    if not isinstance(conditioning_source, str) or not conditioning_source:
+        raise StateError(
+            f"sfx coverage conditioning_source must be a non-empty string "
+            f"(got {conditioning_source!r})"
+        )
+    dual_pan = marker["dual_pan"]
+    if not isinstance(dual_pan, bool):
+        raise StateError(f"sfx coverage dual_pan must be a bool (got {dual_pan!r})")
+    bed_digest = marker["bed_digest"]
+    if not isinstance(bed_digest, str) or not bed_digest:
+        raise StateError("sfx coverage bed_digest must be a non-empty string")
+    ledger_digest = marker["ledger_digest"]
+    if not isinstance(ledger_digest, str) or not ledger_digest:
+        raise StateError("sfx coverage ledger_digest must be a non-empty string")
+    model_size = marker["model_size"]
+    if not isinstance(model_size, str) or not model_size:
+        raise StateError("sfx coverage model_size must be a non-empty string")
+    return {
+        "timeline_ms": timeline_ms,
+        "conditioning_source": conditioning_source,
+        "dual_pan": dual_pan,
+        "bed_digest": bed_digest,
+        "ledger_digest": ledger_digest,
+        "model_size": model_size,
+    }
+
+
+def stamp_sfx_coverage(
+    *,
+    run_dir: Path | None = None,
+    timeline_seconds: float,
+    conditioning_source: str,
+    dual_pan: bool,
+    bed_digest: str,
+    model_size: str,
+    ledger_digest: str | None = None,
+) -> dict[str, object]:
+    """Mint a validated `sfx_coverage` marker dict (constructor, DESIGN §56).
+
+    `ledger_digest` is the sha over the order-normalized both-track
+    records — pass it when already computed, otherwise `run_dir` is
+    required and it derives via `sfx_ledger_digest`. `bed_digest` always
+    comes from the caller (the orchestrator's `bed_fingerprint`, which
+    needs the usable-segment walk this module must not perform). The
+    timeline quantizes to integer milliseconds. The result always passes
+    `validate_sfx_coverage` (construction validates); schema only, never
+    persisted here — persistence owns the write path.
+    """
+    if ledger_digest is None:
+        if run_dir is None:
+            raise StateError("sfx coverage stamp needs run_dir or an explicit ledger_digest")
+        ledger_digest = sfx_ledger_digest(run_dir)
+    try:
+        timeline_ms = int(round(float(timeline_seconds) * SFX_TIMELINE_MS_PER_SECOND))
+    except (TypeError, ValueError) as exc:
+        raise StateError(
+            f"sfx coverage timeline must be numeric (got {timeline_seconds!r})"
+        ) from exc
+    return validate_sfx_coverage(
+        {
+            "timeline_ms": timeline_ms,
+            "conditioning_source": conditioning_source,
+            "dual_pan": dual_pan,
+            "bed_digest": bed_digest,
+            "ledger_digest": ledger_digest,
+            "model_size": model_size,
+        }
+    )
+
+
 def drop_sfx_beyond(run_dir: Path, end_seconds: float) -> int:
     """Prune SFX windows starting at or past `end_seconds` (M4 shrink helper).
 
@@ -677,6 +967,77 @@ def _sfx_worker_module(backend: str) -> str:
         raise MediaError(f"unknown sfx backend {backend!r} (known: {known})") from None
 
 
+def _sfx_pool_layout(num_workers: int, device: str, model_size: str) -> tuple[list[str], list[str]]:
+    """(sizes, devices) per pool slot — single home for the 1-vs-2 layout."""
+    sizes = [model_size] * num_workers
+    devices = [device] * num_workers
+    if num_workers == SFX_MAX_WORKERS:
+        sizes = [SFX_DUAL_MODEL_SIZE, SFX_DUAL_MODEL_SIZE]
+        devices = ["cuda:0", "cuda:1"]
+    return sizes, devices
+
+
+def _start_sfx_workers(
+    module: str,
+    run_dir: Path,
+    *,
+    models_dir: str,
+    sizes: list[str],
+    devices: list[str],
+    stem_suffix: str,
+    progress: VoyageConsole | None,
+    load_label: str,
+    num_workers: int,
+) -> list[Any]:
+    """Spawn one SFX worker per slot (shared-pool home for dual-pan).
+
+    Issue 255: `render_sfx_bed` builds this pool once and lends it to both
+    dual-pan tracks — a second `start()` is a full GBs model load, not a
+    handle. Single-track callers route through `_render_single_track`,
+    which owns teardown; the dual-pan path shares one pool and tears it
+    down once. The lazy `SubprocessWorker` import keeps the
+    monkeypatch seam (`voyage.rpc.SubprocessWorker`) intact.
+    """
+    from voyage.rpc import SubprocessWorker
+
+    workers: list[Any] = []
+    with optional_stage(progress, load_label, f"{num_workers} worker(s)"):
+        for slot in range(num_workers):
+            worker = SubprocessWorker(
+                module,
+                run_dir,
+                run_dir / "logs" / f"sfx{stem_suffix}-{slot}.log",
+                init_op="init",
+                init_payload={
+                    "models_dir": models_dir,
+                    "device": devices[slot],
+                    "model_size": sizes[slot],
+                    # Prune-free scratch (never `ensure_scratch_dir`
+                    # mid-run: that prunes `voyage-sfx-final-*`, which
+                    # is the LIVE finalize tmpdir when called from
+                    # inside `finalize_sfx_pass` — Track C STALE wiring
+                    # deletes it and the bed copy fails with ENOENT).
+                    "scratch_dir": str(_scratch_no_prune(run_dir)),
+                },
+                # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
+                # stack is isolated from the LTX freeze; unset (video
+                # image, tests) falls back to the supervisor interpreter.
+                executable=os.environ.get("VOYAGE_SFX_PYTHON"),
+            )
+            worker.start()
+            workers.append(worker)
+    return workers
+
+
+def _stop_sfx_workers(workers: list[Any]) -> None:
+    """Best-effort teardown for a pool from `_start_sfx_workers`."""
+    for worker in workers:
+        # Best-effort teardown: a stop failure must never mask the
+        # render result (same discipline as the audio GPU swap).
+        with contextlib.suppress(Exception):
+            worker.stop()
+
+
 def _scratch_no_prune(run_dir: Path) -> Path:
     """Run scratch dir without pruning (mid-run worker inits).
 
@@ -707,7 +1068,10 @@ def _stem_cache_hit(
     Legacy lines predate the key and read as `shipped`. Malformed
     durations miss. Stem reality (`probed_duration`) never participates:
     an honest encode shortfall (hundredths of a second) must not force a
-    re-render every finalize.
+    re-render every finalize. Render provenance (`sample_rate`,
+    `channels`, `backend`, `device`) never participates either: it is
+    recorded for future gates, and old lines predate it — requiring it
+    would invalidate every existing ledger.
     """
     if record.get("conditioning_source", SFX_CONDITIONING_SHIPPED) != conditioning_source:
         return False
@@ -837,7 +1201,9 @@ def mix_sfx_pair(
             "-c:a",
             "pcm_s16le",
             str(dest),
-        ]
+        ],
+        # Unbounded: both beds span the full timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx pair mix failed: {proc.stderr[-2000:]}")
@@ -864,6 +1230,8 @@ def render_sfx_bed(
     conditioning_source: str = SFX_CONDITIONING_SHIPPED,
     conditioning_timeline: float | None = None,
     dual_pan: bool = False,
+    should_stop: threading.Event | None = None,
+    spawn_workers: bool = True,
 ) -> Path:
     """Render every window (reusing ledger-matching stems) and join the bed.
 
@@ -886,9 +1254,20 @@ def render_sfx_bed(
     seeds (`seed_base + SFX_DUAL_SEED_OFFSET`, same captions) into
     `*_right.wav` stems under `sfx_right.jsonl`, and the two joined
     tracks pair-mix (±`SFX_PAN_POSITION`, constant-power) into the one
-    returned stereo bed. Legacy left stems/ledger cache-hit untouched,
+    returned stereo bed. Both tracks share one worker pool (issue 255 —
+    one model load, not two). Legacy left stems/ledger cache-hit untouched,
     so an old single-bed run resumes by rendering only the second
     channel. `dual_pan` false is the legacy single bed, byte-identical.
+
+    M7 tail dust: `timeline_seconds` is quantized to milliseconds on
+    entry (probe durations carry ms rounding; sub-ms dust would fork
+    window tiling between the plan and the re-finalize). Head windows
+    stay strict — the first window always starts at exactly 0.0.
+    `should_stop`, when set, is checked between windows inside each
+    track render (a stop raises `MediaError`; windows already completed
+    stay ledgered, so the next pass resumes instead of restarting).
+    `spawn_workers` false forwards spawn-free rendering to both tracks
+    (stage-skip: the caller proved completeness via `sfx_bed_complete`).
     """
     from voyage.logrotate import append_line
 
@@ -923,72 +1302,103 @@ def render_sfx_bed(
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     sfx_dir.mkdir(parents=True, exist_ok=True)
     _prune_stale_partials(sfx_dir)
-    bed_left = _render_single_track(
-        run_dir,
-        final_video,
-        windows,
-        tmpdir,
-        "sfx_bed.wav" if not dual_pan else "sfx_bed_left.wav",
-        backend,
-        models_dir,
-        device,
-        model_size,
-        sample_rate,
-        channels,
-        num_workers,
-        stem_suffix="",
-        ledger_name=SFX_LEDGER_NAME,
-        load_label="load sfx workers",
-        bar_label="sfx windows",
-        blend_timings=blend_timings,
-        progress=progress,
-        conditioning_source=conditioning_source,
-        ledger_timeline=ledger_timeline,
-    )
-    if not dual_pan:
-        bed_seconds = _audio_duration_seconds(bed_left)
+    # Shared pool (issue 255): one model load for both dual-pan tracks —
+    # each track renders different seeds through the same resident stack.
+    # Single-track and spawn-free runs keep today's behavior (None).
+    shared_workers: list[Any] | None = None
+    try:
+        if dual_pan and spawn_workers:
+            if should_stop is not None and should_stop.is_set():
+                raise MediaError("sfx render stopped before worker spawn")
+            pool_sizes, pool_devices = _sfx_pool_layout(num_workers, device, model_size)
+            shared_workers = _start_sfx_workers(
+                _sfx_worker_module(backend),
+                run_dir,
+                models_dir=models_dir,
+                sizes=pool_sizes,
+                devices=pool_devices,
+                stem_suffix="",
+                progress=progress,
+                load_label="load sfx workers",
+                num_workers=num_workers,
+            )
+        bed_left = _render_single_track(
+            run_dir,
+            final_video,
+            windows,
+            tmpdir,
+            "sfx_bed.wav" if not dual_pan else "sfx_bed_left.wav",
+            backend,
+            models_dir,
+            device,
+            model_size,
+            sample_rate,
+            channels,
+            num_workers,
+            stem_suffix="",
+            ledger_name=SFX_LEDGER_NAME,
+            load_label="load sfx workers",
+            bar_label="sfx windows",
+            blend_timings=blend_timings,
+            progress=progress,
+            conditioning_source=conditioning_source,
+            ledger_timeline=ledger_timeline,
+            should_stop=should_stop,
+            spawn_workers=spawn_workers,
+            shared_workers=shared_workers,
+        )
+        if not dual_pan:
+            bed_seconds = _audio_duration_seconds(bed_left)
+            if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+                raise MediaError(
+                    f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s"
+                )
+            _emit_sfx_pass_completed(
+                run_dir, windows, backend, device, model_size, started, append_line
+            )
+            return bed_left
+        right_windows = plan_sfx_windows(
+            timeline_seconds, bounds, seed_base=seed_base + SFX_DUAL_SEED_OFFSET
+        )
+        bed_right = _render_single_track(
+            run_dir,
+            final_video,
+            right_windows,
+            tmpdir,
+            "sfx_bed_right.wav",
+            backend,
+            models_dir,
+            device,
+            model_size,
+            sample_rate,
+            channels,
+            num_workers,
+            stem_suffix=SFX_RIGHT_STEM_SUFFIX,
+            ledger_name=SFX_RIGHT_LEDGER_NAME,
+            load_label="load sfx workers (right)",
+            bar_label="sfx windows (right)",
+            blend_timings=blend_timings,
+            progress=progress,
+            conditioning_source=conditioning_source,
+            ledger_timeline=ledger_timeline,
+            should_stop=should_stop,
+            spawn_workers=spawn_workers,
+            shared_workers=shared_workers,
+        )
+        bed = tmpdir / "sfx_bed.wav"
+        mix_sfx_pair(bed_left, bed_right, bed, sample_rate, channels)
+        bed_seconds = _audio_duration_seconds(bed)
         if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
             raise MediaError(
                 f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s"
             )
         _emit_sfx_pass_completed(
-            run_dir, windows, backend, device, model_size, started, append_line
+            run_dir, windows, backend, device, model_size, started, append_line, dual_pan=True
         )
-        return bed_left
-    right_windows = plan_sfx_windows(
-        timeline_seconds, bounds, seed_base=seed_base + SFX_DUAL_SEED_OFFSET
-    )
-    bed_right = _render_single_track(
-        run_dir,
-        final_video,
-        right_windows,
-        tmpdir,
-        "sfx_bed_right.wav",
-        backend,
-        models_dir,
-        device,
-        model_size,
-        sample_rate,
-        channels,
-        num_workers,
-        stem_suffix=SFX_RIGHT_STEM_SUFFIX,
-        ledger_name=SFX_RIGHT_LEDGER_NAME,
-        load_label="load sfx workers (right)",
-        bar_label="sfx windows (right)",
-        blend_timings=blend_timings,
-        progress=progress,
-        conditioning_source=conditioning_source,
-        ledger_timeline=ledger_timeline,
-    )
-    bed = tmpdir / "sfx_bed.wav"
-    mix_sfx_pair(bed_left, bed_right, bed, sample_rate, channels)
-    bed_seconds = _audio_duration_seconds(bed)
-    if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
-        raise MediaError(f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s")
-    _emit_sfx_pass_completed(
-        run_dir, windows, backend, device, model_size, started, append_line, dual_pan=True
-    )
-    return bed
+        return bed
+    finally:
+        if shared_workers is not None:
+            _stop_sfx_workers(shared_workers)
 
 
 def _render_single_track(
@@ -1013,6 +1423,9 @@ def _render_single_track(
     progress: VoyageConsole | None,
     conditioning_source: str,
     ledger_timeline: float,
+    should_stop: threading.Event | None = None,
+    spawn_workers: bool = True,
+    shared_workers: list[Any] | None = None,
 ) -> Path:
     """Render + join one dual-pan track (left or right) and return its bed.
 
@@ -1022,16 +1435,25 @@ def _render_single_track(
     `_right` suffixed ones), orphan-stem adoption for killed batches,
     then the single-graph join into `tmpdir / out_name`. Timeline
     verification and the pass metric stay with the caller — the pair
-    mix verifies the joined pair, not each leg.
+    mix verifies the joined pair, not each leg. `should_stop`, when set,
+    is checked before worker spawn and between windows (serial loop and
+    pool drain alike): a stop raises `MediaError` while completed
+    windows stay ledgered, so the next pass resumes. Worker RPC
+    semantics are untouched — the stop never reaches the worker, it
+    only stops scheduling further windows. `spawn_workers` false skips
+    `SubprocessWorker` creation entirely (stage-skip fast path: the
+    caller proved every window ledger-hits via `sfx_bed_complete`, so
+    no render can miss — a miss raises `MediaError` instead of
+    spawning); the join still runs, so the bed is rebuilt from stems.
+    `shared_workers`, when given, is a pool from `_start_sfx_workers`
+    owned by the caller (dual-pan: `render_sfx_bed` builds one pool for
+    both tracks — issue 255): this track renders through it and never
+    stops it.
     """
     from voyage.rpc import SubprocessWorker
 
     module = _sfx_worker_module(backend)
-    sizes = [model_size] * num_workers
-    devices = [device] * num_workers
-    if num_workers == SFX_MAX_WORKERS:
-        sizes = [SFX_DUAL_MODEL_SIZE, SFX_DUAL_MODEL_SIZE]
-        devices = ["cuda:0", "cuda:1"]
+    sizes, devices = _sfx_pool_layout(num_workers, device, model_size)
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     ledger = sfx_dir / ledger_name
     sfx_dir.mkdir(parents=True, exist_ok=True)
@@ -1094,6 +1516,10 @@ def _render_single_track(
             probed_duration=probed_duration,
             conditioning_source=conditioning_source,
             conditioning_timeline=ledger_timeline,
+            sample_rate=sample_rate,
+            channels=channels,
+            backend=backend,
+            device=devices[adopt_index % num_workers],
         )
         message = (
             f"sfx orphan adopted: {adopt_window.window_id}{stem_suffix} "
@@ -1115,37 +1541,40 @@ def _render_single_track(
             "conditioning_source": conditioning_source,
             "probed_duration": probed_duration,
             "conditioning_timeline": ledger_timeline,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "backend": backend,
+            "device": devices[adopt_index % num_workers],
         }
         claimed_window_ids.add(adopt_window.window_id)
+    if should_stop is not None and should_stop.is_set():
+        raise MediaError("sfx render stopped before worker spawn")
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     stems: list[Path] = []
     workers: list[Any] = []
+    own_workers = shared_workers is None
     try:
-        with optional_stage(progress, load_label, f"{num_workers} worker(s)"):
-            for slot in range(num_workers):
-                worker = SubprocessWorker(
-                    module,
-                    run_dir,
-                    run_dir / "logs" / f"sfx{stem_suffix}-{slot}.log",
-                    init_op="init",
-                    init_payload={
-                        "models_dir": models_dir,
-                        "device": devices[slot],
-                        "model_size": sizes[slot],
-                        # Prune-free scratch (never `ensure_scratch_dir`
-                        # mid-run: that prunes `voyage-sfx-final-*`, which
-                        # is the LIVE finalize tmpdir when called from
-                        # inside `finalize_sfx_pass` — Track C STALE wiring
-                        # deletes it and the bed copy fails with ENOENT).
-                        "scratch_dir": str(_scratch_no_prune(run_dir)),
-                    },
-                    # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
-                    # stack is isolated from the LTX freeze; unset (video
-                    # image, tests) falls back to the supervisor interpreter.
-                    executable=os.environ.get("VOYAGE_SFX_PYTHON"),
-                )
-                worker.start()
-                workers.append(worker)
+        if shared_workers is not None:
+            # Dual-pan shared pool (issue 255): owned by `render_sfx_bed`,
+            # used by both tracks, stopped once by the caller.
+            workers = shared_workers
+        elif not spawn_workers:
+            # Stage-skip fast path (no SubprocessWorker creation): every
+            # window must ledger-hit in `_render_one` below — a miss raises
+            # `MediaError` instead of rendering. The join still runs.
+            pass
+        else:
+            workers = _start_sfx_workers(
+                module,
+                run_dir,
+                models_dir=models_dir,
+                sizes=sizes,
+                devices=devices,
+                stem_suffix=stem_suffix,
+                progress=progress,
+                load_label=load_label,
+                num_workers=num_workers,
+            )
 
         def _render_one(index: int, window: SfxWindow) -> _RenderedWindow:
             """Render one window; the ledger line lands as it completes.
@@ -1171,6 +1600,14 @@ def _render_single_track(
             ):
                 hit = resolve_stored_path(run_dir, str(record["path"]))
                 return _RenderedWindow(hit, None, "", "", _audio_duration_seconds(hit))
+            if not spawn_workers:
+                # Stage-skip fast path: the pre-check proved every window
+                # hits, so a miss here is a race (ledger pruned mid-pass),
+                # never a render — fail loud instead of spawning.
+                raise MediaError(
+                    f"sfx {window.window_id}: stem missing with spawn_workers=False "
+                    "(re-run without the stage skip to render it)"
+                )
             # Render-to-temp + atomic replace (153): a failed render leaves
             # the old stem and ledger line intact — validate never sees a
             # half-written window, and the old stem stays the valid fallback.
@@ -1219,6 +1656,10 @@ def _render_single_track(
                     probed_duration=probed,
                     conditioning_source=conditioning_source,
                     conditioning_timeline=ledger_timeline,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    backend=backend,
+                    device=devices[slot],
                 )
             return _RenderedWindow(stem, None, "", "", probed)
 
@@ -1226,25 +1667,43 @@ def _render_single_track(
             if num_workers == 1:
                 pending = []
                 for index, window in enumerate(windows):
+                    if should_stop is not None and should_stop.is_set():
+                        raise MediaError("sfx render stopped")
                     pending.append(_render_one(index, window))
                     if tracker is not None:
                         tracker.update()
             else:
+                from concurrent.futures import as_completed
+
+                pending_by_index: dict[int, _RenderedWindow] = {}
+                collected_errors: list[BaseException] = []
                 with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                    pending = []
-                    for row in pool.map(_render_one, range(len(windows)), windows):
-                        pending.append(row)
+                    future_to_index = {
+                        pool.submit(_render_one, index, window): index
+                        for index, window in enumerate(windows)
+                    }
+                    for future in as_completed(future_to_index):
+                        if should_stop is not None and should_stop.is_set():
+                            for pending_future in future_to_index:
+                                pending_future.cancel()
+                            raise MediaError("sfx render stopped")
+                        index = future_to_index[future]
+                        try:
+                            pending_by_index[index] = future.result()
+                        except BaseException as exc:  # noqa: BLE001 - collect all, raise combined below
+                            collected_errors.append(exc)
                         if tracker is not None:
                             tracker.update()
+                if collected_errors:
+                    details = "; ".join(str(exc) for exc in collected_errors[:5])
+                    raise MediaError(f"sfx {len(collected_errors)} window(s) failed: {details}")
+                pending = [pending_by_index[index] for index in range(len(windows))]
         stems = []
         for row in pending:
             stems.append(row.stem)
     finally:
-        for worker in workers:
-            # Best-effort teardown: a stop failure must never mask the
-            # render result (same discipline as the audio GPU swap).
-            with contextlib.suppress(Exception):
-                worker.stop()
+        if own_workers:
+            _stop_sfx_workers(workers)
     bed = tmpdir / out_name
     if len(stems) == 1:
         proc = run_capture(
@@ -1287,7 +1746,9 @@ def _render_single_track(
             "-c:a",
             "pcm_s16le",
             str(bed),
-        ]
+        ],
+        # Unbounded: the joined bed spans the full timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx bed convert failed: {proc.stderr[-2000:]}")
@@ -1364,7 +1825,9 @@ def mix_music_and_sfx(
             "-c:a",
             "pcm_s16le",
             str(dest),
-        ]
+        ],
+        # Unbounded: the music + bed span the full timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx mix failed: {proc.stderr[-2000:]}")
@@ -1394,7 +1857,9 @@ def demux_music_audio(source_video: Path, dest_wav: Path) -> Path:
             "-c:a",
             "pcm_s16le",
             str(dest_wav),
-        ]
+        ],
+        # Unbounded: demuxes the full staged timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx pass music demux failed: {proc.stderr[-2000:]}")
@@ -1429,7 +1894,9 @@ def remux_video_with_audio(source_video: Path, mixed_audio: Path, dest_mp4: Path
             "128k",
             "-shortest",
             str(dest_mp4),
-        ]
+        ],
+        # Unbounded: remuxes the full shipped timeline.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx pass remux failed: {proc.stderr[-2000:]}")
@@ -1473,7 +1940,9 @@ def build_proxy_reference(run_dir: Path, usable: list[Path], tmpdir: Path) -> tu
             "-c:v",
             "copy",
             str(proxy),
-        ]
+        ],
+        # Unbounded: concats every committed segment.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx proxy concat failed: {proc.stderr[-2000:]}")
@@ -1564,7 +2033,9 @@ def stretch_and_dub_sfx_bed(
                 "-c:a",
                 "pcm_s16le",
                 str(stretched),
-            ]
+            ],
+            # Unbounded: retimes the full-timeline bed.
+            timeout=None,
         )
         if proc.returncode != 0:
             raise MediaError(f"sfx bed stretch failed: {proc.stderr[-2000:]}")
@@ -1626,6 +2097,20 @@ def finalize_sfx_pass(
     # shipped duration so captions stay aligned. Identical timelines are
     # returned untouched (byte-identical legacy path).
     bounds = _scale_bounds_to_timeline(bounds, timeline)
+    # Stage-skip pre-check (joints/sfx resume): the legacy post-pass
+    # never consults the bed cache, so a complete ledger would still
+    # spawn workers. When the ledger already covers this timeline,
+    # join stems spawn-free — a miss raises instead of rendering.
+    bed_precomplete = sfx_bed_complete(
+        run_dir,
+        timeline,
+        bounds,
+        seed,
+        model_size,
+        SFX_CONDITIONING_SHIPPED,
+        dual_pan,
+        bounds_fingerprint=sfx_bounds_fingerprint(bounds),
+    )
     with tempfile.TemporaryDirectory(
         prefix="voyage-sfx-final-", dir=paths.ensure_scratch_dir_no_prune(run_dir)
     ) as tmp:
@@ -1646,6 +2131,21 @@ def finalize_sfx_pass(
             num_workers,
             progress=progress,
             dual_pan=dual_pan,
+            spawn_workers=not bed_precomplete,
+        )
+        from voyage.hashing import sha256_file
+        from voyage.persistence import record_sfx_coverage
+
+        record_sfx_coverage(
+            run_dir,
+            stamp_sfx_coverage(
+                run_dir=run_dir,
+                timeline_seconds=timeline,
+                conditioning_source=SFX_CONDITIONING_SHIPPED,
+                dual_pan=dual_pan,
+                bed_digest=sha256_file(bed),
+                model_size=model_size,
+            ),
         )
         with optional_stage(progress, "dub sfx onto final"):
             music = tmpdir / "final_music.wav"
