@@ -54,3 +54,25 @@ refusal.
 ## Log
 
 - 2026-10-07: filed from read-only Track A sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Re-read `voyage/rpc.py:113-132` live: `_require_finite_positive_timeout`
+  still tests `isinstance(v, (int, float))` with no `bool` guard — NOT stale.
+- Live repro in-container (`voyage:latest`): `True ACCEPTED`, `False`
+  rejected, `1 ACCEPTED`, `0` rejected — bug confirmed (`True == 1` passes
+  as a 1 s deadline).
+- `voyage/workers/loop.py:169` (`checked_request` bool guard) confirmed as
+  the mirror precedent.
+
+## Progress log (2026-10-07)
+- Added explicit `isinstance(timeout_value, bool)` rejection to
+  `_require_finite_positive_timeout` (first disjunct, so `True`/`False`
+  both raise `RecoverableWorkerError` like every other bad timeout) +
+  docstring note citing issue 282 and the `loop.py` precedent.
+- Added `test_call_rejects_bool_timeout_282` (`True`/`False` pins) to
+  `tests/test_rpc_deadline_finite.py` (file existed as the issue predicted).
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `voyage/rpc.py`, `tests/test_rpc_deadline_finite.py`.
+  Scoped + neighbor pytest green in-container; ruff + format + mypy strict
+  clean on touched modules. Nothing left open.

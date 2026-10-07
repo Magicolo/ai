@@ -1,0 +1,89 @@
+# mypy exclusion list for scripts/gates.sh (issue 275).
+#
+# Contract: gates.sh typechecks `voyage` plus every TRACKED test module
+# (`git ls-files 'tests/test_*.py'`) EXCEPT the files named here. Each entry
+# below carries pre-existing errors that belong to its owning pass — delete
+# the line (not the rule) as the owning pass converts the file. Untracked /
+# in-flight test files stay out until committed (git ls-files never lists
+# them). Any newly tracked file is typechecked BY DEFAULT: adding it here
+# is the explicit, reviewable opt-out, so the gate can no longer rot
+# silently the way the old explicit 150-file list did.
+#
+# One `tests/test_*.py` path per line, sorted. `#` comments and blank lines
+# are ignored by the gates.sh filter.
+tests/test_atomic_mode_222.py
+tests/test_augment_background.py
+tests/test_augment_drain.py
+tests/test_augment_finalize_wire.py
+tests/test_augment_interp_poller.py
+tests/test_augment_joint_gc.py
+tests/test_augment_joints.py
+tests/test_augment_morph.py
+tests/test_augment_resume_hardening.py
+tests/test_augment_sidecar.py
+tests/test_augment_upscale_poller.py
+tests/test_boundary_metrics.py
+tests/test_chunk_mp4_cleanup.py
+tests/test_cli_two_verb.py
+tests/test_configure.py
+tests/test_deferred_audio.py
+tests/test_deferred_resume_hardening.py
+tests/test_definition_tiers.py
+tests/test_director_assisted.py
+tests/test_director_dark_direction.py
+tests/test_director_parallel_prefetch.py
+tests/test_film_batched_interp.py
+tests/test_final_coverage.py
+tests/test_final_mix_cache.py
+tests/test_finalize_av_stream.py
+tests/test_finalize_gpu_defaults.py
+tests/test_finalize_model_music_parallel.py
+tests/test_generate_extend.py
+tests/test_generate_reconcile.py
+tests/test_generate_self_heal_transients.py
+tests/test_generate_sfx_shortfall_gate.py
+tests/test_generate_skip_flags.py
+tests/test_interp_backend.py
+tests/test_interp_first_order.py
+tests/test_interp_multiplier.py
+tests/test_interp_progress_resume.py
+tests/test_issue_152_single_graph.py
+tests/test_issue_166_chunk_worker.py
+tests/test_issue_166_finalize_knob.py
+tests/test_issue_201_225_recoverable_embed.py
+tests/test_live_progress_display.py
+tests/test_llama_sidecar.py
+tests/test_ltx_always_continue.py
+tests/test_ltx_fast_profile.py
+tests/test_ltx_prefix_freeze.py
+tests/test_ltx_session_verify.py
+tests/test_ltx_strength.py
+tests/test_model_pass_interleave.py
+tests/test_model_pass_progress.py
+tests/test_models_manifest_atomic_202.py
+tests/test_motion_sense.py
+tests/test_native_skips_model_pass.py
+tests/test_parallel_model_pass.py
+tests/test_partial_leg_fail_loud.py
+tests/test_png_bridge_threads.py
+tests/test_presentation_fps.py
+tests/test_prompt_enhancer.py
+tests/test_reconcile_resume_gaps.py
+tests/test_run_scratch.py
+tests/test_scene_cut_cadence.py
+tests/test_scene_cut_config.py
+tests/test_seam_morph_resume_trim.py
+tests/test_sfx_configure_roundtrip.py
+tests/test_sfx_dual_pan.py
+tests/test_sfx_parallel.py
+tests/test_sfx_timeline_union.py
+tests/test_slowmo_retime.py
+tests/test_stage_c.py
+tests/test_upscale_factor.py
+tests/test_upscale_tiling.py
+tests/test_video_causvid_frames_split.py
+tests/test_video_continuation_across_invocations.py
+tests/test_video_ltx23.py
+tests/test_video_ltx25.py
+tests/test_video_ltxv_validators_split.py
+tests/test_video_session_refresh.py

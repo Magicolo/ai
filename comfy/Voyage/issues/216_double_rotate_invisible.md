@@ -59,3 +59,35 @@ see it; wait 31+ days → file still present (`_prune_siblings` glob
 
 ## Log
 - Track E sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation
+- Claim CONFIRMED live 2026-10-07: the `_ROTATED_SUFFIX` regex test from the
+  issue reproduces exactly, and a host probe (`PYTHONPATH=Voyage`,
+  stdlib-only) planting single + double (`metrics-2026-01-01-2026-01-02`)
+  + counter siblings showed `iter_metric_files` returning only
+  `[single, live]` — the compound files were invisible, and `_prune_siblings`
+  skips them by the same stem check. Single-date behavior was the only
+  working shape.
+
+## Progress log
+- 2026-10-07 (Group J): fixed in `voyage/logrotate.py` — new
+  `_ROTATED_MULTI_SUFFIX` (`base + (-YYYY-MM-DD)+ + optional -N`, lazy base)
+  with `_rotated_content_day(stem, base)` returning the FIRST date group
+  (content age; every group calendar-validated), now used by both
+  `iter_metric_files` (sort still by full name, live still last) and
+  `_prune_siblings`; `_unique_rotated` emits counter-only
+  (`<stem>-<day>-<N>`) and `rotate_log`'s collision path routes through it
+  (also gaining the missing counter loop — a third collision used to
+  overwrite). Old compound names stay readable; single-date emission and
+  matching are unchanged. Regression tests added to
+  `tests/test_observability.py` (compound surface + order + prune by content
+  day + counter-only emission). Gates: ruff check + format clean, mypy
+  strict clean, scoped pytest 67 passed (observability + ledger_rotation +
+  scoreboard + boundary_metrics + qualification).
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `Voyage/voyage/logrotate.py`,
+  `Voyage/tests/test_observability.py`. Name-order note: `-` (0x2D) sorts
+  before `.` (0x2E), so compounds precede their same-day single — all shapes
+  surface, order among same-content-day siblings is deterministic. Nothing
+  deliberately left open.

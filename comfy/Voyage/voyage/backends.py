@@ -38,7 +38,7 @@ from voyage.config import (
     VideoBackendName,
     VideoConfig,
 )
-from voyage.errors import ConfigurationError
+from voyage.errors import ConfigurationError, FatalWorkerError
 
 
 class VideoBackend(Protocol):
@@ -369,7 +369,7 @@ class VideoBackendAdapter:
         return payload
 
     def generate_segment(
-        self, request: VideoSegmentRequest, output_path: Path
+        self, request: VideoSegmentRequest, output_path: Path, *, strict: bool = True
     ) -> VideoSegmentResult:
         """Build the payload, call the worker, normalize the result.
 
@@ -381,6 +381,17 @@ class VideoBackendAdapter:
         was not built).
         Worker-reported fps wins so a future 16 fps backend is never
         relabeled (TASK §19.5).
+
+        Strict mode (issue 247, default): the adapter is the trust
+        boundary, so a present-but-malformed worker report (`frames: 0`,
+        `frames: "many"`, `fps: 0`, `novel_frames: "many"`, `True` for
+        any count) raises `FatalWorkerError` instead of silently
+        substituting request values — a lie must never commit as truth.
+        A missing `video` block or missing `frames` key also raises in
+        strict mode (the worker owes a frame count); absent optional
+        `fps`/`novel_frames`/`conditioning_frames` still fall back
+        (`request.fps` / `returned` / `0`). `strict=False` restores the
+        legacy lenient fallback for every shape (preview path only).
         """
         payload = self.build_payload(request, output_path)
         result = self._transport("generate_blocks", payload)
@@ -390,18 +401,74 @@ class VideoBackendAdapter:
         novel: int | None = None
         native_fps = request.fps
         video_block = result.get("video")
-        if isinstance(video_block, dict):
+
+        def _refuse(field: str, value: object) -> FatalWorkerError:
+            return FatalWorkerError(
+                f"backend {self._backend!r} reported malformed {field} "
+                f"{value!r} for segment {request.segment_id!r} "
+                f"(expected a positive int)"
+            )
+
+        if strict:
+            if not isinstance(video_block, dict):
+                raise _refuse("video block", video_block)
             reported_frames = video_block.get("frames")
-            if isinstance(reported_frames, int) and reported_frames > 0:
+            if isinstance(reported_frames, bool) or not isinstance(reported_frames, int):
+                raise _refuse("frames", reported_frames)
+            if reported_frames <= 0:
+                raise _refuse("frames", reported_frames)
+            returned = reported_frames
+            if "conditioning_frames" in video_block:
+                reported_conditioning = video_block.get("conditioning_frames")
+                if (
+                    isinstance(reported_conditioning, bool)
+                    or not isinstance(reported_conditioning, int)
+                    or reported_conditioning < 0
+                ):
+                    raise _refuse("conditioning_frames", reported_conditioning)
+                conditioning = reported_conditioning
+            if "novel_frames" in video_block:
+                reported_novel = video_block.get("novel_frames")
+                if isinstance(reported_novel, bool) or not isinstance(reported_novel, int):
+                    raise _refuse("novel_frames", reported_novel)
+                if reported_novel <= 0:
+                    raise _refuse("novel_frames", reported_novel)
+                novel = reported_novel
+            if "fps" in video_block:
+                reported_fps = video_block.get("fps")
+                if isinstance(reported_fps, bool) or not isinstance(reported_fps, int):
+                    raise _refuse("fps", reported_fps)
+                if reported_fps <= 0:
+                    raise _refuse("fps", reported_fps)
+                native_fps = reported_fps
+        elif isinstance(video_block, dict):
+            reported_frames = video_block.get("frames")
+            if (
+                isinstance(reported_frames, int)
+                and not isinstance(reported_frames, bool)
+                and reported_frames > 0
+            ):
                 returned = reported_frames
             reported_conditioning = video_block.get("conditioning_frames")
-            if isinstance(reported_conditioning, int) and reported_conditioning >= 0:
+            if (
+                isinstance(reported_conditioning, int)
+                and not isinstance(reported_conditioning, bool)
+                and reported_conditioning >= 0
+            ):
                 conditioning = reported_conditioning
             reported_novel = video_block.get("novel_frames")
-            if isinstance(reported_novel, int) and reported_novel > 0:
+            if (
+                isinstance(reported_novel, int)
+                and not isinstance(reported_novel, bool)
+                and reported_novel > 0
+            ):
                 novel = reported_novel
             reported_fps = video_block.get("fps")
-            if isinstance(reported_fps, int) and reported_fps > 0:
+            if (
+                isinstance(reported_fps, int)
+                and not isinstance(reported_fps, bool)
+                and reported_fps > 0
+            ):
                 native_fps = reported_fps
         return VideoSegmentResult(
             requested_frames=requested,

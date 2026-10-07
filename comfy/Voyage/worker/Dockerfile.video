@@ -221,6 +221,7 @@ RUN set -eux; \
     python3 -m pip install --no-cache-dir "cmake==4.1.3" && \
     python3 <<'PYEOF'
 import hashlib
+import os
 import tarfile
 import urllib.request
 url = "https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11146.tar.gz"
@@ -234,7 +235,22 @@ with open(archive_path, "rb") as archive:
 actual_sha256 = digest.hexdigest()
 if actual_sha256 != expected_sha256:
     raise SystemExit(f"llama.cpp source sha mismatch: {actual_sha256}")
+def _is_safe_member(member):
+    name = member.name
+    if not name or name.startswith("/") or os.path.isabs(name):
+        return False
+    if ".." in name.split("/"):
+        return False
+    if member.issym() or member.islnk():
+        return False
+    if member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+        return False
+    return True
 with tarfile.open(archive_path) as archive:
+    members = archive.getmembers()
+    unsafe = [m.name for m in members if not _is_safe_member(m)]
+    if unsafe:
+        raise SystemExit(f"llama.cpp source tarball has unsafe members: {unsafe[:10]}")
     archive.extractall("/tmp/llama-source")
 PYEOF
 # A heredoc terminator cannot carry a `\` continuation, so the RUN above

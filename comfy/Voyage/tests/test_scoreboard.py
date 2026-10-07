@@ -8,11 +8,13 @@ import time
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from tests.conftest import initialize_run_directory
 from voyage import paths
 from voyage.logrotate import append_line
 from voyage.persistence import read_effective_config
-from voyage.scoreboard import scoreboard_rows
+from voyage.scoreboard import main, scoreboard_rows
 from voyage.supervisor import Supervisor
 
 
@@ -140,3 +142,41 @@ def test_scoreboard_reads_stages_past_rotation(tmp_path: Path) -> None:
     by_id = {row["segment_id"]: row for row in rows}
     assert by_id["000000"]["stages"] == rotated_stages
     assert by_id["000001"]["stages"] == {"video": 1.0}
+
+
+def test_scoreboard_main_text_lists_rows_and_partial(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`python -m voyage.scoreboard` renders rows + the partial trailer (253)."""
+    run_dir = tmp_path / "run"
+    _write_committed_segment(run_dir, "000000")
+    (run_dir / paths.SEGMENTS_DIRNAME / "000001").mkdir(parents=True)
+    assert main(["--run", str(run_dir)]) == 0
+    out = capsys.readouterr().out
+    assert "segments: 1" in out
+    assert "000000" in out
+    assert "partial: ['000001']" in out
+
+
+def test_scoreboard_main_json_lists_rows_and_partial(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--json` prints the raw rows document (253)."""
+    run_dir = tmp_path / "run"
+    _write_committed_segment(run_dir, "000000")
+    assert main(["--run", str(run_dir), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"][0]["segment_id"] == "000000"
+    assert payload["partial"] == []
+
+
+def test_scoreboard_main_is_read_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The viewer writes nothing into the run."""
+    run_dir = tmp_path / "run"
+    _write_committed_segment(run_dir, "000000")
+    before = sorted(str(path) for path in run_dir.rglob("*"))
+    assert main(["--run", str(run_dir)]) == 0
+    capsys.readouterr()
+    assert main(["--run", str(run_dir), "--json"]) == 0
+    capsys.readouterr()
+    assert sorted(str(path) for path in run_dir.rglob("*")) == before

@@ -465,8 +465,66 @@ def test_missing_report_falls_back_to_requested() -> None:
     for worker_result in ({}, {"video": {}}, {"video": {"frames": 0}}, {"video": None}):
         transport, _ = _stub_transport(worker_result)
         adapter = VideoBackendAdapter(transport, "fake", _video_config())
-        result = adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+        result = adapter.generate_segment(
+            _request(segment_seconds=2.0), Path("seg/video.mp4"), strict=False
+        )
         assert result.returned_frames == 48
+
+
+def test_adapter_strict_rejects_non_positive_frames_247() -> None:
+    """Issue 247: `frames: 0` raises instead of substituting the request."""
+    from voyage.errors import FatalWorkerError
+
+    transport, _ = _stub_transport({"video": {"frames": 0}})
+    adapter = VideoBackendAdapter(transport, "fake", _video_config())
+    with pytest.raises(FatalWorkerError, match="malformed frames"):
+        adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+
+
+def test_adapter_strict_rejects_non_int_frames_247() -> None:
+    """Issue 247: `frames: "many"` and `frames: True` raise (bool is int)."""
+    from voyage.errors import FatalWorkerError
+
+    for bad_frames in ("many", True, False, None, 48.0):
+        transport, _ = _stub_transport({"video": {"frames": bad_frames}})
+        adapter = VideoBackendAdapter(transport, "fake", _video_config())
+        with pytest.raises(FatalWorkerError, match="malformed frames"):
+            adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+
+
+def test_adapter_strict_rejects_missing_video_block_247() -> None:
+    """Issue 247: a missing/non-dict `video` block raises (frames are owed)."""
+    from voyage.errors import FatalWorkerError
+
+    worker_result: dict[str, Any]
+    for worker_result in ({}, {"video": {}}, {"video": None}, {"video": "48"}):
+        transport, _ = _stub_transport(worker_result)
+        adapter = VideoBackendAdapter(transport, "fake", _video_config())
+        with pytest.raises(FatalWorkerError, match="malformed"):
+            adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+
+
+def test_adapter_strict_rejects_bad_fps_and_novel_247() -> None:
+    """Issue 247: present-but-bad `fps`/`novel_frames` raise; absent falls back."""
+    from voyage.errors import FatalWorkerError
+
+    for bad_report in (
+        {"frames": 48, "fps": 0},
+        {"frames": 48, "fps": "fast"},
+        {"frames": 48, "fps": True},
+        {"frames": 81, "fps": 16, "novel_frames": "many"},
+        {"frames": 81, "fps": 16, "novel_frames": 0},
+        {"frames": 81, "fps": 16, "conditioning_frames": -1},
+    ):
+        transport, _ = _stub_transport({"video": bad_report})
+        adapter = VideoBackendAdapter(transport, "fake", _video_config())
+        with pytest.raises(FatalWorkerError, match="malformed"):
+            adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+    # Absent optionals still fall back in strict mode (only frames are owed).
+    transport, _ = _stub_transport({"video": {"frames": 48}})
+    adapter = VideoBackendAdapter(transport, "fake", _video_config())
+    result = adapter.generate_segment(_request(segment_seconds=2.0), Path("seg/video.mp4"))
+    assert (result.returned_frames, result.native_fps, result.novel_frames) == (48, 24, 48)
 
 
 def test_reported_fps_wins_so_backends_are_never_relabeled() -> None:

@@ -17,7 +17,9 @@ never writes into the run directory, so running it over
 
 Invoke: `python -m voyage.boundary_metrics --run Voyage/output/<name>`
 (`--prompts` appends the prompt audit, `--json` prints the raw document).
-Exit 0 on PASS/N/A, 1 on FAIL verdict or tool error, 2 on CLI misuse.
+Exit 0 on PASS/N/A, 1 on FAIL verdict, 3 on tool error, 2 on CLI misuse
+(issue 242: FAIL and tool error used to share exit 1, so gate drivers
+could not tell a continuity cut from broken inputs).
 """
 
 from __future__ import annotations
@@ -377,7 +379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prompt_entries = audit_prompts(run_path) if args.prompts or args.json else []
     except (ValueError, FileNotFoundError, MediaError, OSError) as exc:
         sys.stderr.write(f"boundary_metrics: error: {exc}\n")
-        return 1
+        return 3
     if args.json:
         sys.stdout.write(json.dumps({"boundaries": summary, "prompts": prompt_entries}, indent=2))
         sys.stdout.write("\n")

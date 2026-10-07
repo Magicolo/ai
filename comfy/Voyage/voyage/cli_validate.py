@@ -7,13 +7,11 @@ share it as a library call.
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 from pathlib import Path
 
 from voyage import paths
-from voyage.cli_paths import resolve_run_ref
 from voyage.concepts import validate_concepts
 from voyage.errors import MediaError, StateError
 from voyage.persistence import read_effective_config, read_manifest, read_state
@@ -370,33 +368,3 @@ def validate_run(run_dir: Path) -> list[str]:
 
         errors.extend(validate_sfx_ledger(run_dir, timeline, expect_right=expect_right))
     return errors
-
-
-def cmd_validate(args: argparse.Namespace) -> int:
-    """Read-only consistency check (DESIGN §70). Never mutates the run."""
-    run_dir = resolve_run_ref(run=getattr(args, "run", None), name=getattr(args, "name", None))
-    if run_dir is None:
-        return 2
-    errors = validate_run(run_dir)
-    if errors:
-        print("INVALID:")
-        for error in errors:
-            print(f"  - {error}")
-        return 1
-    committed = (
-        len(
-            [
-                p
-                for p in (run_dir / paths.SEGMENTS_DIRNAME).iterdir()
-                if p.is_dir() and (p / paths.DONE_MARKER).exists()
-            ]
-        )
-        if (run_dir / paths.SEGMENTS_DIRNAME).exists()
-        else 0
-    )
-    try:
-        frames = read_state(run_dir).timeline_frames
-    except StateError:
-        frames = 0
-    print(f"VALID: {committed} committed segments, {frames} frames")
-    return 0

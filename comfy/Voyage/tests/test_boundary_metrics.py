@@ -254,8 +254,38 @@ def test_main_prompts_and_json(tmp_path: Path, capsys: pytest.CaptureFixture[str
 
 
 def test_main_missing_run_is_tool_error(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--run", "/nonexistent-run-dir"]) == 1
+    """Tool errors exit 3, distinct from a FAIL verdict's 1 (242)."""
+    assert main(["--run", "/nonexistent-run-dir"]) == 3
     assert "error" in capsys.readouterr().err
+
+
+def test_main_fail_verdict_prints_json_with_exit_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FAIL verdict exits 1 and still prints the JSON document (242)."""
+    failing = {
+        "run": str(tmp_path),
+        "segments": ["000000", "000001"],
+        "samples_per_segment": 3,
+        "decode_width": 160,
+        "per_segment_within": {},
+        "boundaries": [],
+        "within_mean": 0.01,
+        "boundary_mean": 0.10,
+        "boundary_ratio": 10.0,
+        "limit": 3.0,
+        "verdict": "FAIL",
+    }
+    monkeypatch.setattr(
+        boundary_metrics,
+        "summarize_boundaries",
+        lambda *args, **kwargs: failing,
+        raising=True,
+    )
+    monkeypatch.setattr(boundary_metrics, "audit_prompts", lambda *args, **kwargs: [], raising=True)
+    assert main(["--run", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["boundaries"]["verdict"] == "FAIL"
 
 
 def test_tool_is_read_only(tmp_path: Path) -> None:

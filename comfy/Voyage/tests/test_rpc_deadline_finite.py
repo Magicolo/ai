@@ -121,6 +121,21 @@ def test_read_response_line_rejects_non_finite_directly(hostile_value: float) ->
             os.close(read_end)
 
 
+@pytest.mark.parametrize("hostile_value", [True, False])
+def test_call_rejects_bool_timeout_282(hostile_value: bool) -> None:
+    """Issue 282: `True` must not pass as a 1 s deadline (bool is int subclass)."""
+    read_end, write_end = os.pipe()
+    worker = _pipe_worker("bool-timeout-probe", read_end)
+    try:
+        with pytest.raises(RecoverableWorkerError):
+            worker.call("health", {}, timeout=hostile_value)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(write_end)
+        with contextlib.suppress(OSError):
+            os.close(read_end)
+
+
 def test_nan_rpc_timeout_rejected_by_validator(tmp_path: Path) -> None:
     """Non-finite `rpc_timeout_seconds` is rejected by the validator."""
     with pytest.raises(ValidationError):

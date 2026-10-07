@@ -48,3 +48,27 @@ an intact run with ratio ≥ 3 (FAIL → 1) — identical exit codes. Also:
 
 - 2026-10-07: filed from read-only Tracks C + E sweeps (both tracks independently found
   it); no code touched.
+
+## Evaluation
+- Claim CONFIRMED live 2026-10-07: `main()` tail read at the cited lines —
+  the `except` branch returned 1 and the verdict line returned
+  `1 if FAIL else 0`, so a missing `video.mp4` and a ratio-gate FAIL were
+  indistinguishable. No `qualify.sh`/`test_qualification.py` pins assert the
+  old code (both drive `summarize_run`, never `main()`); the only pin was
+  `tests/test_boundary_metrics.py::test_main_missing_run_is_tool_error`.
+
+## Progress log
+- 2026-10-07 (Group J): `except` branch now returns 3 (tool error), FAIL
+  verdict stays 1, PASS/N/A stays 0, misuse stays 2 (argparse); module
+  docstring updated; `--json` already printed the document on the verdict
+  path (kept; stderr-only on the tool-error path — no envelope added, per
+  the smaller fix candidate). Test pins: `test_main_missing_run_is_tool_error`
+  now asserts 3; new `test_main_fail_verdict_prints_json_with_exit_one`
+  (monkeypatched FAIL summary) pins FAIL→1 plus JSON-on-FAIL. Live proof:
+  `python -m voyage.boundary_metrics --run /nonexistent` exits 3.
+  Gates: ruff + format + mypy strict clean on both touched files, scoped
+  pytest green.
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `Voyage/voyage/boundary_metrics.py`,
+  `Voyage/tests/test_boundary_metrics.py`. Nothing deliberately left open.

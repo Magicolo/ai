@@ -8,8 +8,7 @@
 # image, see worker/Dockerfile.video:39-45).
 #
 # NOT in this file: torch/torchvision/torchaudio (installed separately in
-# Dockerfile.ltx from the cu130 index) and textual (console/TUI parity
-# with the video image, pinned to the slim lockfile below).
+# Dockerfile.ltx from the cu130 index).
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
@@ -102,7 +101,6 @@ simpleeval==1.0.8
 spandrel==0.4.2
 SQLAlchemy==2.1.1
 sympy==1.14.0
-textual==8.2.8
 tokenizers==0.23.2
 torchsde==0.2.6
 tqdm==4.70.1

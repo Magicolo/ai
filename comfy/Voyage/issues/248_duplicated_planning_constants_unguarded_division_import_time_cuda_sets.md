@@ -50,3 +50,49 @@ Repro: `segments_for_duration(10.0, 24, 0)` → `ZeroDivisionError`; mutate
 ## Log
 
 - 2026-10-07: filed from read-only Track B sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Re-read `voyage/cli_planning.py:74-208` + `voyage/config.py:117-234`
+  live: all four pairs agree today (96/96, 72/72, 232/232, 96/96) by hand
+  with no pin — NOT stale. `segments_for_duration(10.0, 24, 0)` raises raw
+  `ZeroDivisionError` in-container (confirmed) — NOT stale. CUDA sets are
+  import-time frozensets over the mutable registry dict — live. The
+  `else config.video.backend` fallback is unreachable (`needs_cuda` true
+  implies non-empty offenders under the same sets) — live dead code.
+- Existing pins checked first: `test_backend_registry.py` pins geometry/
+  audio pairing + streaming derivation but NOT novel counts;
+  `test_generate.py` pins `_frames_per_segment` outputs (96/232/72) but not
+  their source; `test_single_source.py` pins epsilon/streaming/presets but
+  not novel counts or CUDA-set freshness. Derivation (not pin-only) is
+  safe: no test imports the four cli-local constants directly (grep proves
+  only `cli_planning.py` references them).
+
+## Progress log (2026-10-07)
+- `_frames_per_segment` now reads `BACKEND_REGISTRY[backend].segment_frames
+  * blocks_per_segment` at call time for the four streaming backends
+  (single source; the four cli-local constants deleted, provenance comments
+  folded into the docstring); `fake` still uses stored `segment_frames`.
+- `segments_for_duration` raises `ValueError` on `frames_per_segment <= 0`
+  (bool-safe) and `fps <= 0` — the `ZeroDivisionError` vector is gone.
+- CUDA sets: new `_cuda_video/audio/sfx_backends()` functions read the
+  registry fresh; `_cuda_offenders` + `_require_cuda_stack` consume them.
+  The `_CUDA_*` import-time frozensets stay as legacy snapshots for
+  `test_surface_rank2` compat (that file is outside this scope and pins
+  them directly) with docstrings pointing at the functions. Full removal
+  of the constants is a follow-up owned with that test.
+- Deleted the dead `else config.video.backend` fallback (comment records
+  why `offenders` is non-empty whenever reached).
+- `tests/test_backend_registry.py`: new `test_planning_novel_counts_derive_from_registry_248`
+  (per-backend `_frames_per_segment == registry row`, plus a 2-block pin)
+  and `test_segments_for_duration_rejects_non_positive_248`.
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `voyage/cli_planning.py`,
+  `tests/test_backend_registry.py`. Default planning outputs verified
+  unchanged in-container (fake 48 / ltxv 96 / causvid 72 / ltx25 232 /
+  ltx23 96 at blocks 1; sample `segments_for_duration` values identical
+  before/after). Scoped + neighbor pytest green; ruff + format + mypy
+  strict clean on touched modules.
+- Left open: full removal of the legacy `_CUDA_*` snapshots (needs a
+  `test_surface_rank2.py` update, outside this scope — that file still
+  pins the constants directly and passes).

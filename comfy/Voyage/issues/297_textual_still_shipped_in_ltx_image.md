@@ -51,3 +51,28 @@ pyproject.toml` → empty; `ls voyage/tui*.py` → No such file (no consumer).
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 TUI-remnant sweep; no code touched.
+
+## Evaluation
+
+- 2026-10-07 (Group L): re-read live — `worker/requirements-ltx.txt:105`
+  pinned `textual==8.2.8`, `worker/Dockerfile.ltx:53` cited console/TUI
+  parity; `ls voyage/tui*.py` → no such file, `rg textual voyage/` → only a
+  comment containing the English word "textually" plus removed-TUI notes,
+  zero imports. Slim side already clean. Issue is LIVE, not stale.
+
+## Progress log
+
+- 2026-10-07 (Group L): deleted the `textual==8.2.8` pin (freeze 106 → 105
+  rows), dropped the stale parity clause from the requirements header, and
+  reworded the `Dockerfile.ltx` comment to the video-image pattern
+  (TUI-removed note, rich-only console). No other pins touched, so the
+  `requirements-ltx.txt:3-8` re-freeze procedure does not trigger (pure row
+  deletion cannot skew remaining pins; rebuild-time `pip freeze` will
+  confirm). No image builds per mandate.
+
+## Resolution (2026-10-07)
+
+- RESOLVED. Files changed: `worker/requirements-ltx.txt`,
+  `worker/Dockerfile.ltx` (comment only). Verification: `grep -n textual`
+  shows no pin/install/import — only historical removed-TUI notes and one
+  English-word comment. Left open: nothing.

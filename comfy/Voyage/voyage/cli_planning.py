@@ -71,70 +71,95 @@ def parse_duration(raw: str) -> float:
     return total
 
 
-# Stream-A accounting (DESIGN §5.3, measured from the real tensors in
-# voyage/workers/video_ltxv.py): every clip renders 121 frames; fresh blocks
-# commit all 121, conditioned blocks drop the 25-frame prefix and commit 96
-# novel. Duration planning uses the steady-state minimum (96 per block) so
-# `generate --duration` never runs short however the fresh/extension mix
-# lands (worker-reported frames remain the timeline truth).
-_LTXV_NOVEL_BLOCK_FRAMES = 96
-
-# CausVid DMD rollout: 81 decoded frames per rollout, the last
-# 4*(overlap-1)+1 are the conditioning tail (9 at overlap 3) — 72 novel
-# committed per rollout, uniform including rollout 0 (upstream long-video
-# script parity). Duration planning uses the steady-state 72 so `generate
-# --duration` never runs short (worker-reported frames stay the truth).
-_CAUSVID_NOVEL_PER_ROLLOUT = 72
-
-
-# LTX-2.5 Mode A: 257-frame windows with a 25-frame frozen prefix
-# carry commit 232 novel per block (2026-10-06 GPU sweep: 257 is the
-# native ceiling and fits VRAM). ltx23 keeps its own 121f/96-novel
-# accounting below — same mechanism, shorter window, so the values must
-# never be assumed coupled.
-_LTX25_NOVEL_BLOCK_FRAMES = 232
-
-# LTX-2.3 Mode A: 121-frame windows with a 25-frame frozen prefix carry
-# commit 96 novel per block (Voyage/LTX2.md Phase-0 Spike A/B).
-_LTX_NOVEL_BLOCK_FRAMES = 96
-
-
 def _frames_per_segment(config: ProjectConfig) -> int:
-    """Committed frames per segment for duration math (backend-specific)."""
-    if config.video.backend == "ltxv":
-        return _LTXV_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
-    if config.video.backend == "causvid":
-        return _CAUSVID_NOVEL_PER_ROLLOUT * config.video.blocks_per_segment
-    if config.video.backend == "ltx25":
-        return _LTX25_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
-    if config.video.backend == "ltx23":
-        return _LTX_NOVEL_BLOCK_FRAMES * config.video.blocks_per_segment
+    """Committed frames per segment for duration math (backend-specific).
+
+    Steady-state novel counts come from `BACKEND_REGISTRY.segment_frames`
+    (issue 248 single source — the registry row IS the novel count at
+    `blocks_per_segment=1`, so no cli-local copy can drift). Provenance:
+    ltxv 96 = 121-frame clips minus the 25-frame conditioned prefix
+    (DESIGN §5.3, measured tensors in `workers/video_ltxv.py`);
+    causvid 72 = 81-frame DMD rollout minus the 9-frame conditioning
+    tail at overlap 3 (upstream long-video parity); ltx25 232 = 257-frame
+    Mode-A windows minus the 25-frame frozen prefix carry (2026-10-06 GPU
+    sweep: 257 is the native ceiling fitting VRAM); ltx23 96 = 121-frame
+    windows minus the 25-frame prefix (LTX2.md Phase-0 Spike A/B, never
+    assumed coupled to ltxv's 96). Duration planning uses the steady
+    state so `generate --duration` never runs short however the
+    fresh/extension mix lands (worker-reported frames stay the truth).
+    """
+    if config.video.backend in ("ltxv", "causvid", "ltx25", "ltx23"):
+        row_frames = BACKEND_REGISTRY[config.video.backend].segment_frames
+        return row_frames * config.video.blocks_per_segment
     return config.video.segment_frames
 
 
 def segments_for_duration(duration_seconds: float, fps: int, frames_per_segment: int) -> int:
     """Segments needed to reach at least duration_seconds (rounds up, min 1)."""
+    if isinstance(frames_per_segment, bool) or frames_per_segment <= 0:
+        raise ValueError(f"frames_per_segment must be positive (got {frames_per_segment!r})")
+    if isinstance(fps, bool) or fps <= 0:
+        raise ValueError(f"fps must be positive (got {fps!r})")
     return max(1, math.ceil(duration_seconds * fps / frames_per_segment - FLOAT_DUST_EPSILON))
+
+
+def _cuda_video_backends() -> frozenset[str]:
+    """Video backends needing the CUDA worker stack, read fresh (issue 248).
+
+    Function (not import-time constant) so a runtime registry change is
+    reflected in preflight instead of going stale.
+    """
+    return frozenset(
+        name for name, record in BACKEND_REGISTRY.items() if record.device.startswith("cuda")
+    )
+
+
+def _cuda_audio_backends() -> frozenset[str]:
+    """Audio backends needing the CUDA worker stack, read fresh (issue 248)."""
+    return frozenset(
+        record.audio_backend
+        for record in BACKEND_REGISTRY.values()
+        if record.audio_device.startswith("cuda")
+    )
+
+
+def _cuda_sfx_backends() -> frozenset[str]:
+    """SFX backends needing the CUDA worker stack, read fresh (issue 248)."""
+    return frozenset(
+        record.sfx_backend
+        for record in BACKEND_REGISTRY.values()
+        if record.sfx_device.startswith("cuda")
+    )
 
 
 _CUDA_VIDEO_BACKENDS: frozenset[str] = frozenset(
     name for name, record in BACKEND_REGISTRY.items() if record.device.startswith("cuda")
 )
-"""Video backends needing the CUDA worker stack (derived, issue 021)."""
+"""Video backends needing the CUDA worker stack (derived, issue 021).
+
+Legacy import-time snapshot kept for `test_surface_rank2` compat —
+preflight consumers use `_cuda_video_backends()` (fresh read).
+"""
 
 _CUDA_AUDIO_BACKENDS: frozenset[str] = frozenset(
     record.audio_backend
     for record in BACKEND_REGISTRY.values()
     if record.audio_device.startswith("cuda")
 )
-"""Audio backends needing the CUDA worker stack (derived, issue 021)."""
+"""Audio backends needing the CUDA worker stack (derived, issue 021).
+
+Legacy snapshot — preflight consumers use `_cuda_audio_backends()`.
+"""
 
 _CUDA_SFX_BACKENDS: frozenset[str] = frozenset(
     record.sfx_backend
     for record in BACKEND_REGISTRY.values()
     if record.sfx_device.startswith("cuda")
 )
-"""SFX backends needing the CUDA worker stack (derived, issue 021)."""
+"""SFX backends needing the CUDA worker stack (derived, issue 021).
+
+Legacy snapshot — preflight consumers use `_cuda_sfx_backends()`.
+"""
 
 _CUDA_BACKENDS = _CUDA_VIDEO_BACKENDS | _CUDA_AUDIO_BACKENDS | _CUDA_SFX_BACKENDS
 """Legacy union across the video/audio/sfx vocabularies (issue 021).
@@ -171,11 +196,11 @@ def _cuda_offenders(config: ProjectConfig) -> list[str]:
     Each branch checks its own vocabulary set (issue 021).
     """
     offenders: list[str] = []
-    if config.video.backend in _CUDA_VIDEO_BACKENDS:
+    if config.video.backend in _cuda_video_backends():
         offenders.append(f"video {config.video.backend!r}")
-    if config.audio.backend in _CUDA_AUDIO_BACKENDS:
+    if config.audio.backend in _cuda_audio_backends():
         offenders.append(f"audio {config.audio.backend!r}")
-    if config.sfx.backend in _CUDA_SFX_BACKENDS:
+    if config.sfx.backend in _cuda_sfx_backends():
         offenders.append(f"sfx {config.sfx.backend!r}")
     return offenders
 
@@ -196,14 +221,17 @@ def _require_cuda_stack(config: ProjectConfig) -> bool:
     # (Two-verb CLI: the old `voyage.cli` re-export seam is gone.)
 
     needs_cuda = (
-        config.video.backend in _CUDA_VIDEO_BACKENDS
-        or config.audio.backend in _CUDA_AUDIO_BACKENDS
-        or config.sfx.backend in _CUDA_SFX_BACKENDS
+        config.video.backend in _cuda_video_backends()
+        or config.audio.backend in _cuda_audio_backends()
+        or config.sfx.backend in _cuda_sfx_backends()
     )
     if not needs_cuda or _torch_available():
         return True
     offenders = _cuda_offenders(config)
-    label = " + ".join(offenders) if offenders else config.video.backend
+    # Dead-else removed (issue 248): `needs_cuda` true implies at least
+    # one branch above matched, and `_cuda_offenders` tests the same
+    # fresh sets, so `offenders` is non-empty whenever we get here.
+    label = " + ".join(offenders)
     print(_cuda_stack_error(label), file=sys.stderr)
     return False
 

@@ -47,3 +47,31 @@ Repro (static): `grep -n "extractall" worker/Dockerfile.*` → two hits, zero `f
 ## Log
 
 - 2026-10-07: filed from read-only Track F sweep; no code touched.
+
+## Evaluation
+
+- 2026-10-07 (Group L): re-read live — `worker/Dockerfile.video:258-259` and
+  `worker/Dockerfile.ltx:143-144` both still `archive.extractall(...)` with no
+  `filter=` and no member sanitization; `grep -nE "extractall"` → two hits,
+  zero `filter=`. Build Pythons remain 3.10 (video) / 3.11 (ltx), so PEP 706
+  `filter="data"` is unavailable. Issue is LIVE, not stale.
+
+## Progress log
+
+- 2026-10-07 (Group L): added `_is_safe_member` validation before extract in
+  both heredoc blocks (rejects empty/absolute/`..`-segment names, symlinks,
+  hardlinks, char/block devices, fifos; aborts with the offending names on
+  `SystemExit`, sha256 gate kept as the first layer). Blocks verified
+  byte-identical across both Dockerfiles; heredoc python compiles under
+  `py_compile`; 11 guard cases pass (clean member + absolute + `..` +
+  nested `..` + symlink + hardlink + dev/chr/blk/fifo + empty). No image
+  builds per mandate. Concurrent mastering-venv hunks in both Dockerfiles
+  left untouched.
+
+## Resolution (2026-10-07)
+
+- RESOLVED. Files changed: `worker/Dockerfile.video`, `worker/Dockerfile.ltx`
+  (heredoc python only). Verification: `grep -nE` shows the guard in both
+  files; both heredocs `py_compile` clean; 11-case guard matrix green.
+  Left open: nothing — a future Python ≥3.12 bump could replace the hand
+  guard with `filter="data"`, but the current guard is complete on its own.

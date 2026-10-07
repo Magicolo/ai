@@ -47,3 +47,33 @@ NaN/inf/bool parametrized pins.
 
 ## Log
 - Track A sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07)
+- Re-read `voyage/workers/_validators.py:31-66` live: all five range-only
+  validators (`sample_rate`/`channels`/`geometry`/`fps`/`frame_count`)
+  still test only `<= 0` / `not in (1, 2)` — `nan`/`inf` pass (`nan <= 0`
+  and `inf <= 0` are both `False`), `True` passes as 1 everywhere
+  (`True == 1`, `True in (1, 2)`). `validate_energy`/`validate_duration_seconds`
+  already demand `math.isfinite`. NOT stale.
+- Live repro in-container (`voyage:latest`): `validate_sample_rate(nan)`,
+  `validate_fps(inf)`, `validate_frame_count(True)`,
+  `validate_geometry(nan, 512)` all PASSED (no raise) — bug confirmed.
+- `loop.py:122` maps `(ValueError, KeyError, TypeError)` to
+  `INVALID_PAYLOAD`, so the new `ValueError` for `str` inputs stays in
+  the same taxonomy as the old raw `TypeError` (no behavior change there).
+
+## Progress log (2026-10-07)
+- Added `isinstance(v, bool)` rejection + `isinstance(v, (int, float))` +
+  `math.isfinite` guards to `validate_sample_rate`/`validate_geometry`/
+  `validate_fps`/`validate_frame_count`, and a `bool` guard to
+  `validate_channels` (`nan`/`inf` already fail its `not in (1, 2)`;
+  `True == 1` was the gap), all mirroring `validate_energy`.
+- Added `test_shared_validators_reject_non_finite_and_bool_221` to
+  `tests/test_worker_validators_unified_084.py` (NaN/±inf/True/False pins
+  across all five validators + both geometry axes).
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `voyage/workers/_validators.py`,
+  `tests/test_worker_validators_unified_084.py`. Scoped + neighbor pytest
+  green in-container; ruff + format + mypy strict clean on touched modules.
+  Nothing left open.

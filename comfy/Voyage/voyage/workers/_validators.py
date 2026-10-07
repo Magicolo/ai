@@ -30,13 +30,18 @@ MAX_ENERGY = 1.0
 
 def validate_sample_rate(sample_rate: int) -> None:
     """Reject non-positive output sample rates."""
-    if sample_rate <= 0:
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, (int, float))
+        or not math.isfinite(sample_rate)
+        or sample_rate <= 0
+    ):
         raise ValueError(f"sample_rate must be positive (got {sample_rate})")
 
 
 def validate_channels(channels: int) -> None:
     """Reject non-mono/stereo channel counts."""
-    if channels not in (1, 2):
+    if isinstance(channels, bool) or channels not in (1, 2):
         raise ValueError(f"channels must be 1 or 2 (got {channels})")
 
 
@@ -48,21 +53,41 @@ def validate_output_path(output_path: str) -> None:
 
 def validate_geometry(width: int, height: int) -> None:
     """Reject non-positive frame dimensions before any ffmpeg side effect."""
-    if width <= 0:
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, (int, float))
+        or not math.isfinite(width)
+        or width <= 0
+    ):
         raise ValueError(f"width must be positive (got {width})")
-    if height <= 0:
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, (int, float))
+        or not math.isfinite(height)
+        or height <= 0
+    ):
         raise ValueError(f"height must be positive (got {height})")
 
 
 def validate_fps(fps: int) -> None:
     """Reject non-positive frame rates before rendering."""
-    if fps <= 0:
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or not math.isfinite(fps)
+        or fps <= 0
+    ):
         raise ValueError(f"fps must be positive (got {fps})")
 
 
 def validate_frame_count(frames: int) -> None:
     """Reject non-positive block lengths before rendering."""
-    if frames <= 0:
+    if (
+        isinstance(frames, bool)
+        or not isinstance(frames, (int, float))
+        or not math.isfinite(frames)
+        or frames <= 0
+    ):
         raise ValueError(f"frames must be positive (got {frames})")
 
 

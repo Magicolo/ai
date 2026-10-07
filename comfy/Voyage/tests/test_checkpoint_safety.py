@@ -133,6 +133,35 @@ def test_verify_against_manifest_passes_through_without_manifest(tmp_path: Path)
     )
 
 
+def test_verify_against_manifest_kwarg_bypass_is_loud(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue 235: the kwarg bypass warns on stderr (never silent)."""
+    target = tmp_path / "model.pt"
+    target.write_bytes(b"anything")
+    model_registry.verify_checkpoint_against_manifest(
+        tmp_path, "video", target, allow_missing_manifest=True
+    )
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "video" in captured.err
+    assert "allow_missing_manifest=True" in captured.err
+
+
+def test_verify_against_manifest_env_bypass_is_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue 235: the env bypass warns on stderr (never silent)."""
+    target = tmp_path / "model.pt"
+    target.write_bytes(b"anything")
+    monkeypatch.setenv("VOYAGE_ALLOW_MISSING_MANIFEST", "1")
+    model_registry.verify_checkpoint_against_manifest(tmp_path, "video", target)
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "video" in captured.err
+    assert "VOYAGE_ALLOW_MISSING_MANIFEST" in captured.err
+
+
 def test_verify_against_manifest_fails_closed_on_mismatch(tmp_path: Path) -> None:
     target = tmp_path / "model_bf16.pt"
     target.write_bytes(b"real-bytes")

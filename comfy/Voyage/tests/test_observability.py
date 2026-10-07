@@ -123,6 +123,73 @@ def test_metric_file_iterator_ignores_non_dated_siblings(tmp_path: Path) -> None
     assert iter_metric_files(run_dir) == [live]
 
 
+def test_metric_file_iterator_surfaces_compound_rotates(tmp_path: Path) -> None:
+    """Double-rotate + counter siblings stay in the history stream (216).
+
+    The old emission minted `metrics-<written>-<today>[-N]` names that no
+    reader opened and no pruner deleted; the current emission mints
+    `metrics-<day>-<N>`. All shapes must surface (name order: `-` (0x2D)
+    sorts before `.` (0x2E), so compounds precede their same-day single).
+    """
+    run_dir = tmp_path / "run"
+    logs_dir = run_dir / paths.LOGS_DIRNAME
+    logs_dir.mkdir(parents=True)
+    live = logs_dir / "metrics.jsonl"
+    live.write_text('{"event": "live"}\n', encoding="utf-8")
+    single = logs_dir / "metrics-2026-01-01.jsonl"
+    single.write_text('{"event": "single"}\n', encoding="utf-8")
+    double = logs_dir / "metrics-2026-01-01-2026-01-02.jsonl"
+    double.write_text('{"event": "double"}\n', encoding="utf-8")
+    counter = logs_dir / "metrics-2026-01-01-2026-01-02-2.jsonl"
+    counter.write_text('{"event": "counter"}\n', encoding="utf-8")
+    new_counter = logs_dir / "metrics-2026-01-03-2.jsonl"
+    new_counter.write_text('{"event": "new-counter"}\n', encoding="utf-8")
+    assert iter_metric_files(run_dir) == [counter, double, single, new_counter, live]
+    events = read_all_metric_events(run_dir)
+    assert [event["event"] for event in events] == [
+        "counter",
+        "double",
+        "single",
+        "new-counter",
+        "live",
+    ]
+
+
+def test_prune_removes_old_compound_rotates(tmp_path: Path) -> None:
+    """Retention prunes compound archives by content (first) day (216)."""
+    recent = tmp_path / f"metrics-{_day_ago(5)}.jsonl"
+    recent.write_text("", encoding="utf-8")
+    old_single = tmp_path / f"metrics-{_day_ago(40)}.jsonl"
+    old_single.write_text("", encoding="utf-8")
+    old_double = tmp_path / f"metrics-{_day_ago(40)}-{_day_ago(39)}.jsonl"
+    old_double.write_text("", encoding="utf-8")
+    old_counter = tmp_path / f"metrics-{_day_ago(40)}-2.jsonl"
+    old_counter.write_text("", encoding="utf-8")
+    log = tmp_path / "metrics.jsonl"
+    log.write_text("", encoding="utf-8")
+    _backdate(log, 1)
+    append_line(log, '{"event": "new"}', keep_days=30)
+    assert recent.exists()
+    assert not old_single.exists()
+    assert not old_double.exists()
+    assert not old_counter.exists()
+
+
+def test_double_rotate_emits_counter_only_name(tmp_path: Path) -> None:
+    """A third same-day collision appends -N instead of overwriting (216)."""
+    from voyage import logrotate as rotate
+
+    log = tmp_path / "metrics.jsonl"
+    log.write_text('{"event": "old"}\n', encoding="utf-8")
+    _backdate(log, 1)
+    day = _day_ago(1)
+    (tmp_path / f"metrics-{day}.jsonl").write_text("taken\n", encoding="utf-8")
+    rotated = rotate.rotate_log(log)
+    assert rotated is not None
+    assert rotated.name == f"metrics-{day}-2.jsonl"
+    assert rotated.read_text(encoding="utf-8") == '{"event": "old"}\n'
+
+
 def test_metric_file_iterator_missing_logs_dir(tmp_path: Path) -> None:
     """A run without logs yet yields no files instead of raising."""
     assert iter_metric_files(tmp_path / "absent-run") == []

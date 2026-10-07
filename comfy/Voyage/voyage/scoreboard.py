@@ -10,7 +10,9 @@ before a daily log rotation (DESIGN §60, via `logrotate`).
 committed segment: frame counts, per-stage seconds, deterministic visual
 metrics (when the experimental inspector ran), deltas against the previous
 segment, the director destination/phase, take ids, and the viewable video
-path. The CLI `inspect scoreboard` target renders the compact table.
+path. The `python -m voyage.scoreboard --run ...` entry renders the compact
+table (text by default, `--json` for the raw rows). Exit 0 on success,
+2 on CLI misuse. Read-only: it never writes into the run directory.
 
 All-deferred audio choice (documented): `audio_path`/`audio_exists`
 columns are dropped (no per-segment audio artifact anymore; old runs
@@ -22,8 +24,11 @@ finalize takes themselves live under `run/audio/takes.jsonl`.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -105,8 +110,9 @@ def partial_segment_ids(run_dir: Path) -> list[str]:
     Why a helper, not a silent skip: non-DONE dirs are stalled partial
     commits, invisible in the very table meant for iteration. The row
     builder keeps skipping them (DONE-gating invariant,
-    docs/STATE_AND_RECOVERY.md); the CLI renders this list as a trailing
-    `partial: [...]` line so stalls stay visible.
+    docs/STATE_AND_RECOVERY.md); the `python -m voyage.scoreboard`
+    entry renders this list as a trailing `partial: [...]` line so
+    stalls stay visible.
     """
     segments_root = run_dir / paths.SEGMENTS_DIRNAME
     if not segments_root.is_dir():
@@ -193,3 +199,64 @@ def scoreboard_rows(run_dir: Path) -> list[dict[str, JsonValue]]:
             previous = current
             previous_id = segment.name
     return rows
+
+
+def format_scoreboard_table(rows: list[dict[str, JsonValue]], partial: list[str]) -> str:
+    """Compact per-segment table, one line per committed row (pure; no I/O)."""
+    lines = [f"segments: {len(rows)}"]
+    for row in rows:
+        stages = row.get("stages")
+        if isinstance(stages, dict):
+            stage_cells = ",".join(
+                f"{key}={value:.1f}"
+                for key, value in sorted(stages.items())
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+        else:
+            stage_cells = "-"
+        errors = row.get("errors")
+        error_cell = (
+            ";".join(str(item) for item in errors) if isinstance(errors, list) and errors else "-"
+        )
+        lines.append(
+            f"  {row.get('segment_id')} frames={row.get('frames')} "
+            f"video={'ok' if row.get('video_exists') else 'missing'} "
+            f"dest={row.get('destination')} phase={row.get('phase')} "
+            f"stages={stage_cells or '-'} errors={error_cell}"
+        )
+    lines.append(f"partial: {partial}")
+    return "\n".join(lines)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """CLI surface for the read-only scoreboard view."""
+    parser = argparse.ArgumentParser(
+        prog="voyage.scoreboard",
+        description="Per-segment scoreboard table over a committed run (read-only).",
+    )
+    parser.add_argument("--run", required=True, help="Run directory (e.g. Voyage/output/crabz).")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the raw rows JSON instead of the text table.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point: render one run's scoreboard, never writing into it."""
+    args = _build_parser().parse_args(argv)
+    run_path = Path(args.run)
+    rows = scoreboard_rows(run_path)
+    partial = partial_segment_ids(run_path)
+    if args.json:
+        sys.stdout.write(json.dumps({"rows": rows, "partial": partial}, indent=2))
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(format_scoreboard_table(rows, partial))
+        sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - thin runner over main()
+    raise SystemExit(main())

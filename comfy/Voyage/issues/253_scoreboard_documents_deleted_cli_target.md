@@ -50,3 +50,30 @@ Repro: `./scripts/run.sh inspect scoreboard --run output/x` → `invalid choice:
 ## Log
 
 - 2026-10-07: filed from read-only Track E sweep; no code touched.
+
+## Evaluation
+- Claim CONFIRMED live 2026-10-07: `voyage/cli.py` exposes only
+  `configure` + `generate` (two-verb migration), while `scoreboard.py:13`
+  and `partial_segment_ids` docstring still reference the deleted
+  `inspect scoreboard` verb; `partial_segment_ids`/`scoreboard_rows` have no
+  production callers (definitions + tests only). The table (stages incl.
+  rotated siblings, deltas, partial trailer) has no replacement —
+  `boundary_metrics --prompts` covers continuity + prompts only.
+
+## Progress log
+- 2026-10-07 (Group J): chose re-exposure over retirement (preserves the
+  §59 operator view; retirement would delete value to save ~70 lines).
+  Added a read-only `python -m voyage.scoreboard --run ...` entry mirroring
+  `boundary_metrics.main` (stdlib argparse, `sys.stdout.write` — no
+  `print`, per the T201 contract — exit 0/2, `--json` for raw rows,
+  `partial: [...]` trailer; shares `iter_metric_files` via the existing
+  `_stages_by_segment` path) plus `format_scoreboard_table` and the
+  `__main__` runner; both stale CLI sentences reworded to the new entry.
+  Tests in `tests/test_scoreboard.py` use the Supervisor-free
+  `_write_committed_segment` helper (text + JSON + read-only pins). Live
+  proof in-container: text and JSON render with the partial trailer, exit 0.
+  Gates: ruff + format + mypy strict clean, scoped pytest green.
+
+## Resolution (2026-10-07)
+- RESOLVED. Files: `Voyage/voyage/scoreboard.py`,
+  `Voyage/tests/test_scoreboard.py`. Nothing deliberately left open.

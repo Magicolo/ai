@@ -119,10 +119,13 @@ def _require_finite_positive_timeout(module: str, operation: str, timeout_value:
     branch-on-class restart path. Reject every non-finite or
     non-positive value here as `RecoverableWorkerError` (the same class
     a genuinely expired deadline raises), before any deadline is
-    computed. Mirrors `audio.beat._require_finite`.
+    computed. Mirrors `audio.beat._require_finite`. `bool` is rejected
+    explicitly (issue 282): `True == 1` would otherwise pass as a 1 s
+    deadline, mirroring the `workers/loop.py` `checked_request` guard.
     """
     if (
-        not isinstance(timeout_value, (int, float))
+        isinstance(timeout_value, bool)
+        or not isinstance(timeout_value, (int, float))
         or not math.isfinite(timeout_value)
         or timeout_value <= 0
     ):

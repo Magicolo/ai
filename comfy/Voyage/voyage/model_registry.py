@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -523,7 +524,10 @@ def verify_checkpoint_against_manifest(
     key — e.g. volumes provisioned outside `voyage models download`) fails
     closed by default (071): pass ``allow_missing_manifest=True`` or set
     ``VOYAGE_ALLOW_MISSING_MANIFEST=1`` to keep the external-volume
-    pass-through explicitly. Provisioned workers never opt in.
+    pass-through explicitly. Every bypass is loud (issue 235): a WARNING
+    naming the key, checkpoint, and opt-in source goes to stderr, so a
+    stale export can never downgrade verification silently. Provisioned
+    workers never opt in.
     """
     manifest_path = models_dir / "manifest.json"
     recorded: str | None = None
@@ -542,6 +546,13 @@ def verify_checkpoint_against_manifest(
             "yes",
         }
         if allow_missing_manifest or env_opt_in:
+            opt_in = (
+                "VOYAGE_ALLOW_MISSING_MANIFEST" if env_opt_in else "allow_missing_manifest=True"
+            )
+            sys.stderr.write(
+                f"WARNING: skipping sha256 verification for {key} ({checkpoint}) "
+                f"via {opt_in} — no recorded hash in {manifest_path}\n"
+            )
             return
         raise ValueError(
             f"no recorded sha256 for {key} in {manifest_path} — refusing to load "

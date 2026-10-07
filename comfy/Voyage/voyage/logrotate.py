@@ -39,7 +39,13 @@ instead of every commit.
 """
 
 METRICS_FILENAME = "metrics.jsonl"
-"""Live metrics filename; rotated siblings are `metrics-YYYY-MM-DD.jsonl`."""
+"""Live metrics filename; rotated siblings are `metrics-YYYY-MM-DD.jsonl`.
+
+Collision archives also exist on disk (`metrics-<written>-<today>[-N].jsonl`
+from the old emission, `metrics-<day>-<N>.jsonl` from the current one):
+every reader/pruner accepts all shapes via `_rotated_content_day`
+(issue 216), so single-date behavior is unchanged.
+"""
 
 WORKER_LOG_FILENAMES = ("video-worker.log", "audio-worker.log", "director-worker.log")
 """Worker stderr logs held open for the whole worker lifetime (issue 056).
@@ -88,6 +94,41 @@ marks the line `truncated: true`.
 """
 
 _ROTATED_SUFFIX = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})$")
+"""Single-date rotated sibling shape (original emission, still produced)."""
+
+_ROTATED_MULTI_SUFFIX = re.compile(
+    r"^(?P<base>.+?)(?P<dates>(?:-\d{4}-\d{2}-\d{2})+)(?P<counter>-\d+)?$"
+)
+"""Compound rotated sibling shapes (issue 216).
+
+Covers the double-rotate emission (`<stem>-<written>-<today>[-N]`, from
+`rotate_log`'s collision path and the old `_unique_rotated`) plus the
+counter-only emission (`<stem>-<day>-<N>`, the current `_unique_rotated`).
+The lazy `base` keeps the shortest stem so
+`metrics-2026-01-01-2026-10-07-2` parses as base `metrics` with two dates,
+not base `metrics-2026-01-01`.
+"""
+
+
+def _rotated_content_day(stem: str, base: str) -> datetime.date | None:
+    """Content day of a rotated sibling stem, or None when not a sibling.
+
+    `base` is the live stem (`metrics`, `video-worker`, ...). Returns the
+    FIRST date group — the day the content was written — so retention prunes
+    by content age. Every date group must be calendar-valid (a month-13
+    lookalike stays invisible, like before).
+    """
+    match = _ROTATED_MULTI_SUFFIX.match(stem)
+    if match is None or match.group("base") != base:
+        return None
+    days = re.findall(r"\d{4}-\d{2}-\d{2}", match.group("dates"))
+    if not days:
+        return None
+    try:
+        parsed = [datetime.date.fromisoformat(day) for day in days]
+    except ValueError:
+        return None
+    return parsed[0]
 
 
 def _today() -> datetime.date:
@@ -157,9 +198,9 @@ def rotate_log(
         rotated = _rotated_name(path, written)
         if rotated.exists():
             # Clock skew / double rotate: keep both, never overwrite.
-            rotated = path.with_name(
-                f"{path.stem}-{written.isoformat()}-{today.isoformat()}{path.suffix}"
-            )
+            # `_unique_rotated` also adds the missing counter loop (a third
+            # same-day collision used to overwrite the compound file).
+            rotated = _unique_rotated(path, written, today)
         path.rename(rotated)
         with contextlib.suppress(OSError):
             fsync_dir(path.parent)
@@ -209,9 +250,7 @@ def iter_metric_files(run_dir: Path) -> list[Path]:
         siblings = sorted(
             sibling
             for sibling in logs_dir.glob(f"{live.stem}-*{live.suffix}")
-            if sibling.is_file()
-            and (match := _ROTATED_SUFFIX.match(sibling.stem)) is not None
-            and match.group("stem") == live.stem
+            if sibling.is_file() and _rotated_content_day(sibling.stem, live.stem) is not None
         )
     except OSError:
         siblings = []
@@ -235,12 +274,8 @@ def _prune_siblings(path: Path, keep_days: int) -> None:
     today = _today()
     pruned = 0
     for sibling in path.parent.glob(f"{path.stem}-*{path.suffix}"):
-        match = _ROTATED_SUFFIX.match(sibling.stem)
-        if match is None or match.group("stem") != path.stem:
-            continue
-        try:
-            day = datetime.date.fromisoformat(match.group("day"))
-        except ValueError:
+        day = _rotated_content_day(sibling.stem, path.stem)
+        if day is None:
             continue
         if (today - day).days > keep_days and sibling.is_file():
             try:
@@ -335,20 +370,22 @@ def parse_metric_lines(
 
 
 def _unique_rotated(path: Path, day: datetime.date, today: datetime.date) -> Path:
-    """Dated sibling that never overwrites an existing archive (issue 056)."""
+    """Dated sibling that never overwrites an existing archive (issue 056).
+
+    Collision form is counter-only (`<stem>-<day>-<N>`, issue 216): the old
+    compound `<written>-<today>` names stay readable (the matcher covers both
+    shapes), but new archives never mint them. `today` is kept so the
+    `rotate_log` collision call site stays unchanged.
+    """
+    del today
     rotated = _rotated_name(path, day)
     if not rotated.exists():
         return rotated
     # Clock skew / double rotate / repeated same-day size rolls: keep
     # both, never overwrite (mirrors `rotate_log`).
-    candidate = path.with_name(f"{path.stem}-{day.isoformat()}-{today.isoformat()}{path.suffix}")
-    if not candidate.exists():
-        return candidate
     counter = 2
     while True:
-        numbered = path.with_name(
-            f"{path.stem}-{day.isoformat()}-{today.isoformat()}-{counter}{path.suffix}"
-        )
+        numbered = path.with_name(f"{path.stem}-{day.isoformat()}-{counter}{path.suffix}")
         if not numbered.exists():
             return numbered
         counter += 1

@@ -57,6 +57,28 @@ def test_shared_validators_reject_bad_inputs() -> None:
         validators.validate_duration_seconds(0.0)
 
 
+def test_shared_validators_reject_non_finite_and_bool_221() -> None:
+    """Issue 221: range-only validators reject NaN/inf/bool like validate_energy."""
+    import pytest
+
+    from voyage.workers import _validators as validators
+
+    hostile_numbers = [float("nan"), float("inf"), float("-inf"), True, False]
+    for hostile in hostile_numbers:
+        with pytest.raises(ValueError, match="sample_rate"):
+            validators.validate_sample_rate(hostile)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="fps"):
+            validators.validate_fps(hostile)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="frames"):
+            validators.validate_frame_count(hostile)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="width"):
+            validators.validate_geometry(hostile, 64)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="height"):
+            validators.validate_geometry(64, hostile)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="channels"):
+            validators.validate_channels(hostile)  # type: ignore[arg-type]
+
+
 def test_resident_module_exports_gib_and_torch_guard() -> None:
     from voyage.workers import _resident as resident
 

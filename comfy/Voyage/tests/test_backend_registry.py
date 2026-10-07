@@ -154,3 +154,29 @@ def test_with_video_backend_is_pure() -> None:
     before = base.model_dump()
     with_video_backend(base, "ltxv")
     assert base.model_dump() == before
+
+
+def test_planning_novel_counts_derive_from_registry_248() -> None:
+    """Issue 248: duration planning reads registry rows (no cli-local copy)."""
+    from voyage import cli_planning
+
+    for name, row in BACKEND_REGISTRY.items():
+        config = with_video_backend(_base_config(), name)
+        assert cli_planning._frames_per_segment(config) == row.segment_frames
+    two_block = with_video_backend(_base_config(), "ltxv")
+    two_block.video.blocks_per_segment = 2
+    expected_two = 2 * BACKEND_REGISTRY["ltxv"].segment_frames
+    assert cli_planning._frames_per_segment(two_block) == expected_two
+
+
+def test_segments_for_duration_rejects_non_positive_248() -> None:
+    """Issue 248: unguarded division becomes ValueError (never ZeroDivisionError)."""
+    from voyage import cli_planning
+
+    with pytest.raises(ValueError, match="frames_per_segment"):
+        cli_planning.segments_for_duration(10.0, 24, 0)
+    with pytest.raises(ValueError, match="frames_per_segment"):
+        cli_planning.segments_for_duration(10.0, 24, -48)
+    with pytest.raises(ValueError, match="fps"):
+        cli_planning.segments_for_duration(10.0, 0, 48)
+    assert cli_planning.segments_for_duration(2.0, 24, 48) == 1
