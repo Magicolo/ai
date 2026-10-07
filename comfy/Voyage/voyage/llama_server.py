@@ -190,6 +190,137 @@ def _probe_models_endpoint(endpoint: str) -> bool:
         return False
 
 
+def is_sidecar_healthy(endpoint: str) -> bool:
+    """Single-probe health check (Track D gate before decide/enhance).
+
+    True when the sidecar answers `GET <endpoint>/v1/models` with HTTP
+    200. Never raises, never waits — a refused connection reads as
+    unhealthy so the caller heals instead of routing director traffic at
+    a dead server.
+    """
+    return _probe_models_endpoint(endpoint)
+
+
+def health_gate(endpoint: str) -> bool:
+    """Health gate helper before decide/enhance (Track A wire point).
+
+    Same single-probe contract as `is_sidecar_healthy` under the gate
+    name Track A calls: True proceeds to decide/enhance, False heals via
+    `heal_if_needed` first (start-once-never-healed fix — a sidecar that
+    dies mid-run must not serve stale traffic).
+    """
+    return is_sidecar_healthy(endpoint)
+
+
+def is_port_in_use(port: int) -> bool:
+    """True when something answers TCP on loopback `port` (Track D)."""
+    import socket as _socket
+
+    try:
+        with _socket.create_connection((LLAMA_SERVER_HOST, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
+def find_free_port() -> int:
+    """Random free loopback port (Track D collision escape)."""
+    import socket as _socket
+
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+        sock.bind((LLAMA_SERVER_HOST, 0))
+        return int(sock.getsockname()[1])
+
+
+def resolve_port(port: int) -> int:
+    """Free port for the sidecar: `port` when free, else a random one.
+
+    Probe + free-port (never adopt-or-kill an unknown owner — issue 237:
+    a fixed 8080 collides with a stale server from a previous run and
+    misroutes traffic). The caller propagates the resolved port via
+    `handle.endpoint` (endpoint propagation — never assume 8080).
+    """
+    if 1 <= port <= 65535 and not is_port_in_use(port):
+        return port
+    return find_free_port()
+
+
+def is_owned_by(handle: LlamaSidecar | None, pid: int | None) -> bool:
+    """Pid/port ownership check (Track D): True when `handle` is live.
+
+    `pid` is the expected owner (the supervisor's recorded sidecar pid);
+    None reads as unowned. A live process with a matching pid plus a
+    healthy endpoint is owned; anything else (dead process, pid mismatch,
+    unhealthy endpoint) is stale and must heal, never serve traffic.
+    """
+    if handle is None or pid is None:
+        return False
+    try:
+        live_pid: int | None = int(handle.process.pid)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if live_pid != pid:
+        return False
+    try:
+        alive = handle.process.poll() is None
+    except (AttributeError, OSError):
+        return False
+    if not alive:
+        return False
+    return is_sidecar_healthy(handle.endpoint)
+
+
+def metric_for_heal(*, op: str, attempt: int, budget: int, reason: str) -> dict[str, str | int]:
+    """`worker_restart`-style metric payload for sidecar heals (Track D).
+
+    Returns the code (data only — the caller emits via its own
+    `_log_metric`, so this module never touches supervisor logging).
+    """
+    return {
+        "event": "worker_restart",
+        "worker": "llama-sidecar",
+        "op": op,
+        "attempt": attempt,
+        "budget": budget,
+        "reason": reason,
+    }
+
+
+def heal_if_needed(
+    handle: LlamaSidecar | None,
+    models_dir: str | Path,
+    *,
+    port: int = LLAMA_SERVER_PORT,
+    op: str = "decide",
+    attempt: int = 1,
+    budget: int = 3,
+    visible_devices: str | None = None,
+) -> tuple[LlamaSidecar | None, dict[str, str | int] | None]:
+    """Heal a dead sidecar before decide/enhance (Track D never-healed fix).
+
+    Probes `handle` (None or unhealthy/dead → stale); a healthy handle is
+    returned untouched with no metric. A stale handle is stopped
+    (best-effort) and a fresh sidecar starts on a resolved port
+    (`resolve_port` — endpoint propagation via the returned handle).
+    Returns `(handle, metric_or_None)`: the metric is the
+    `worker_restart`-style code for the caller to emit (return code, caller
+    emits — this module never logs). Raises `LlamaServerError` when the
+    restart itself fails (fail loud, never silent fallback to AWQ).
+    """
+    if handle is not None:
+        try:
+            alive = handle.process.poll() is None
+        except (AttributeError, OSError):
+            alive = False
+        if alive and is_sidecar_healthy(handle.endpoint):
+            return handle, None
+        stop(handle)
+    resolved = resolve_port(port)
+    fresh = start(models_dir, port=resolved, visible_devices=visible_devices)
+    metric = metric_for_heal(op=op, attempt=attempt, budget=budget, reason="sidecar-heal")
+    return fresh, metric
+
+
 def wait_ready(process: Popen[bytes], endpoint: str, timeout_seconds: float) -> None:
     """Block until readiness or fail loud (timeout or early process exit)."""
     deadline = monotonic() + timeout_seconds
@@ -235,7 +366,8 @@ def start(
     if not model_path.is_file():
         raise LlamaServerError(
             f"llama sidecar weight missing: {model_path} "
-            "(provision with `voyage models download director-qwen35-gguf`)"
+            "(provision via the `configure` ensure-path — "
+            '`model_registry.download_model(models_dir, "director-qwen35-gguf")`)'
         )
     binary = server_binary()
     command = build_server_argv(

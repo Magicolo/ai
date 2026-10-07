@@ -63,6 +63,30 @@ JOINT_TS_KEY_PREFIX = "jointts"
 InterpFn = Callable[[Path, Path, Any, float, str], bytes]
 """(anchor_a_png, anchor_b_png, weights, moment, device) -> PNG bytes."""
 
+_JOINT_SHA_CACHE: dict[str, tuple[int, int, str]] = {}
+"""Joint/segment video shas keyed by path -> (mtime_ns, size, sha).
+
+Issues 250/252: joint planning (`ensure_joint_units`), joint assembly,
+and finalize-start GC each hashed every joint video on every call.
+Videos hash once per process; a re-rendered file stats differently
+and re-hashes. Failures are never cached. Per-process only.
+"""
+
+
+def joint_video_sha(video: Path) -> str:
+    """Content sha of a joint/segment video, hashed once per process."""
+    try:
+        stat = video.stat()
+        identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return sha256_file(video)
+    cached = _JOINT_SHA_CACHE.get(str(video))
+    if cached is not None and (cached[0], cached[1]) == identity:
+        return cached[2]
+    digest = sha256_file(video)
+    _JOINT_SHA_CACHE[str(video)] = (identity[0], identity[1], digest)
+    return digest
+
 
 @dataclass(frozen=True)
 class JointUnit:
@@ -186,7 +210,7 @@ def render_joint_source(
         interp_backend=interp_backend,
     )
     _encode_joint_video(bridges.frames, joint_video, source_fps, crf, preset)
-    joint_sha = sha256_file(joint_video)
+    joint_sha = joint_video_sha(joint_video)
     _write_joint_record(
         ledger_path,
         source_key,
@@ -218,6 +242,7 @@ def ensure_joint_units(
     weights: Any = None,
     device: str = "cpu",
     interp_backend: str = "rife",
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[JointUnit]:
     """Fix every adjacent pair (ledger-hit when already rendered), in order.
 
@@ -226,12 +251,17 @@ def ensure_joint_units(
     source yields no joints. Raises on short sides (``morph_anchors``)
     — a segment too short to anchor is a fail-loud data error, never a
     silent skip.
+
+    ``should_stop``, when given, is checked between units: a stop returns
+    the units finished so far (ledger-hit resume covers the rest on the
+    next pass — no rendered work is ever lost, at most the in-flight
+    unit re-renders). None (default) renders every pair, which keeps the
+    finalize/parallel drivers' settle semantics byte-identical.
     """
     units: list[JointUnit] = []
     root = joint_sources_root(run_dir)
     root.mkdir(parents=True, exist_ok=True)
     dimensions: dict[str, tuple[int, int]] = {}
-    checksums: dict[str, str] = {}
 
     def _dimensions(video: Path) -> tuple[int, int]:
         key = str(video)
@@ -240,12 +270,13 @@ def ensure_joint_units(
         return dimensions[key]
 
     def _checksum(video: Path) -> str:
-        key = str(video)
-        if key not in checksums:
-            checksums[key] = sha256_file(video)
-        return checksums[key]
+        # Process-wide memo (issues 250/252); the per-call dict below
+        # is gone — every call site shares one hash per file identity.
+        return joint_video_sha(video)
 
     for position in range(len(ordered_sources) - 1):
+        if should_stop is not None and should_stop():
+            return units
         first = ordered_sources[position]
         second = ordered_sources[position + 1]
         width, height = _dimensions(first.video_path)
@@ -325,6 +356,53 @@ def segment_keep(
     return (start, end)
 
 
+def map_contiguous_keep_to_chunked(
+    start: int,
+    end: int,
+    *,
+    source_frames: int,
+    multiplier: int,
+    chunk_frames: int,
+) -> tuple[int, int]:
+    """Map a contiguous keep ``[start, end)`` to chunk-concatenated coordinates (DESIGN §140).
+
+    Identity since the 2026-10-07 overlap fix: ``chunk_windows`` tiles
+    overlapping windows whose chunks sum to the exact unchunked
+    ``(n-1)*m+1`` total, so contiguous cut coordinates land directly on
+    the concatenated intermediate — no per-boundary loss to compensate.
+    (Before: each chunk joint skipped ``multiplier - 1`` frames and each
+    cut mapped to ``c - (multiplier-1) * boundaries_crossed``.) Kept as a
+    validated pass-through (callers + trim keys unchanged);
+    ``multiplier == 1`` was already identity. Fail loud on bad
+    types/ranges and on an empty keep.
+    """
+    if (
+        isinstance(start, bool)
+        or not isinstance(start, int)
+        or isinstance(end, bool)
+        or not isinstance(end, int)
+        or isinstance(source_frames, bool)
+        or not isinstance(source_frames, int)
+        or isinstance(multiplier, bool)
+        or not isinstance(multiplier, int)
+        or isinstance(chunk_frames, bool)
+        or not isinstance(chunk_frames, int)
+    ):
+        raise TypeError(
+            "map_contiguous_keep_to_chunked needs int start/end/source_frames/"
+            "multiplier/chunk_frames"
+        )
+    if source_frames < 1 or multiplier < 1 or chunk_frames < 1:
+        raise ValueError(
+            "map_contiguous_keep_to_chunked needs source_frames/multiplier/chunk_frames >= 1"
+        )
+    if start < 0 or end <= start:
+        raise ValueError(
+            f"map_contiguous_keep_to_chunked needs 0 <= start < end (got [{start}, {end}))"
+        )
+    return (start, end)
+
+
 def assemble_joint_timeline(
     segment_intermediates: list[Path],
     joint_intermediates: list[Path],
@@ -336,6 +414,7 @@ def assemble_joint_timeline(
     crf: int,
     preset: str,
     pix_fmt: str,
+    chunk_frames: int | None = None,
     concat_fn: morph.ConcatFn | None = None,
 ) -> Path:
     """Assemble ``[trimA, joint, trimB, ...]`` into one timeline (TS pieces).
@@ -346,6 +425,16 @@ def assemble_joint_timeline(
     TS under a ``jointts|`` key (source content + recipe, fork-proof).
     Pieces join via ``concat_fn`` (default: stream-copy concat). A lone
     segment passes through untouched (no joints, no re-encode).
+
+    ``chunk_frames`` (None = legacy contiguous) maps each contiguous
+    keep through ``map_contiguous_keep_to_chunked`` first: chunked
+    rendering loses ``(multiplier-1)`` frames per chunk boundary, so a
+    contiguous ``[start, end)`` overshoots the concatenated
+    intermediate and ``ffmpeg -frames:v`` caps silently. The mapped
+    range rides the trim key (a re-tile forks the key and re-renders)
+    and the final frame-count gate. Trim reuse probe-verifies the file
+    (stored ``end-start`` alone never ledger-hits): a probed length
+    mismatch deletes and re-renders instead of reusing a short trim.
     """
     if not isinstance(segment_intermediates, list) or not segment_intermediates:
         raise ValueError(
@@ -358,6 +447,12 @@ def assemble_joint_timeline(
         )
     if len(source_counts) != len(segment_intermediates):
         raise ValueError("source_counts must cover every segment intermediate")
+    if chunk_frames is not None and (
+        isinstance(chunk_frames, bool) or not isinstance(chunk_frames, int)
+    ):
+        raise TypeError(f"chunk_frames must be an int or None (got {type(chunk_frames).__name__})")
+    if chunk_frames is not None and chunk_frames < 1:
+        raise ValueError(f"chunk_frames must be >= 1 (got {chunk_frames})")
     rate = _require_rate(fps)
     joint_root.mkdir(parents=True, exist_ok=True)
     join = concat_fn if concat_fn is not None else morph._default_concat
@@ -366,16 +461,33 @@ def assemble_joint_timeline(
     trim_dir = joint_root / "trims"
     trim_dir.mkdir(parents=True, exist_ok=True)
     pieces: list[Path] = []
-    checksum_cache: dict[str, str] = {}
+    mapped_keeps: list[tuple[int, int]] = []
 
     def _checksum(video: Path) -> str:
-        key = str(video)
-        if key not in checksum_cache:
-            checksum_cache[key] = sha256_file(video)
-        return checksum_cache[key]
+        # Process-wide memo (issues 250/252), shared with fix planning.
+        return joint_video_sha(video)
+
+    def _trim_probed_frames(trim_path: Path) -> int | None:
+        try:
+            return morph._probe_frames(trim_path)
+        except (OSError, MediaError, ValueError):
+            return None
 
     for index, (video, count) in enumerate(zip(segment_intermediates, source_counts, strict=True)):
-        start, end = segment_keep(index, len(segment_intermediates), count, multiplier)
+        contiguous_start, contiguous_end = segment_keep(
+            index, len(segment_intermediates), count, multiplier
+        )
+        if chunk_frames is None:
+            start, end = contiguous_start, contiguous_end
+        else:
+            start, end = map_contiguous_keep_to_chunked(
+                contiguous_start,
+                contiguous_end,
+                source_frames=count,
+                multiplier=multiplier,
+                chunk_frames=chunk_frames,
+            )
+        mapped_keeps.append((start, end))
         width, height = morph._probe_size(video)
         trim = trim_dir / f"seg_{index:06d}_trim"
         trim_key = morph.morph_trim_key(
@@ -391,10 +503,17 @@ def assemble_joint_timeline(
         )
         trim_record = morph._trim_record_path(trim)
         stored = morph._read_trim_record(trim_record)
-        if not (trim.exists() and trim.stat().st_size > 0 and stored.get("source_key") == trim_key):
+        expected_trim_frames = end - start
+        reuse = (
+            trim.exists()
+            and trim.stat().st_size > 0
+            and stored.get("source_key") == trim_key
+            and _trim_probed_frames(trim) == expected_trim_frames
+        )
+        if not reuse:
             trim_record.unlink(missing_ok=True)
             morph._trim_keep(video, start, end, trim, rate, crf, preset, pix_fmt)
-            morph._write_trim_record(trim_record, trim_key, end - start)
+            morph._write_trim_record(trim_record, trim_key, expected_trim_frames)
         pieces.append(trim)
         if index < len(joint_intermediates):
             pieces.append(
@@ -405,18 +524,13 @@ def assemble_joint_timeline(
                     crf,
                     preset,
                     pix_fmt,
-                    checksum_cache,
                 )
             )
     final = joint_root / "jointed_timeline.mp4"
     join(pieces, final)
-    expected = sum(
-        end - start
-        for start, end in (
-            segment_keep(i, len(segment_intermediates), c, multiplier)
-            for i, c in enumerate(source_counts)
-        )
-    ) + sum(morph._probe_frames(joint) for joint in joint_intermediates)
+    expected = sum(end - start for start, end in mapped_keeps) + sum(
+        morph._probe_frames(joint) for joint in joint_intermediates
+    )
     if morph._probe_frames(final) != expected:
         raise MediaError(
             f"jointed timeline holds {morph._probe_frames(final)} frames "
@@ -433,15 +547,12 @@ def _joint_ts_piece(
     crf: int,
     preset: str,
     pix_fmt: str,
-    checksum_cache: dict[str, str],
 ) -> Path:
     """Re-encode one drained joint intermediate to TS (ledgered, fork-proof)."""
     from voyage.augment import ffmpeg_decode_chunk
 
-    key = str(joint_mp4)
-    if key not in checksum_cache:
-        checksum_cache[key] = sha256_file(joint_mp4)
-    joint_key = f"{JOINT_TS_KEY_PREFIX}|{checksum_cache[key]}|{rate}|crf{crf}|{preset}|{pix_fmt}"
+    digest = joint_video_sha(joint_mp4)
+    joint_key = f"{JOINT_TS_KEY_PREFIX}|{digest}|{rate}|crf{crf}|{preset}|{pix_fmt}"
     record_path = morph._trim_record_path(dest)
     stored = morph._read_trim_record(record_path)
     if dest.exists() and dest.stat().st_size > 0 and stored.get("source_key") == joint_key:

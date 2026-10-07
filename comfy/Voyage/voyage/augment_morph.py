@@ -197,7 +197,58 @@ def _run_ffmpeg(argv: list[str], purpose: str) -> None:
         raise MediaError(f"morph {purpose} failed: {proc.stderr[-2000:]}")
 
 
+_MORPH_FRAME_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}
+"""Trim frame counts keyed by path -> (mtime_ns, size, frames).
+
+Issue 249: trim reuse re-probed the same files on every assembly.
+Identity-keyed; failures never cached. Per-process only.
+"""
+
+
 def _probe_frames(video: Path) -> int:
+    try:
+        stat = video.stat()
+        identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        identity = None
+    if identity is not None:
+        cached = _MORPH_FRAME_COUNT_CACHE.get(str(video))
+        if cached is not None and (cached[0], cached[1]) == identity:
+            return cached[2]
+    header = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames",
+            "-of",
+            "default=nw=1:nk=1",
+            str(video),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if header.returncode == 0:
+        try:
+            header_counts = [int(line) for line in header.stdout.splitlines() if line.strip()]
+        except ValueError:
+            header_counts = []
+        if (
+            header_counts
+            and all(count == header_counts[0] for count in header_counts)
+            and header_counts[0] > 0
+        ):
+            if identity is not None:
+                _MORPH_FRAME_COUNT_CACHE[str(video)] = (
+                    identity[0],
+                    identity[1],
+                    header_counts[0],
+                )
+            return header_counts[0]
     proc = subprocess.run(
         [
             "ffprobe",
@@ -229,6 +280,8 @@ def _probe_frames(video: Path) -> int:
         raise MediaError(f"morph frame probe disagrees for {video}: {proc.stdout!r}")
     if counts[0] <= 0:
         raise MediaError(f"morph found no frames in {video}")
+    if identity is not None:
+        _MORPH_FRAME_COUNT_CACHE[str(video)] = (identity[0], identity[1], counts[0])
     return counts[0]
 
 

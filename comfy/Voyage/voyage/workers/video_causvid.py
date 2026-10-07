@@ -367,6 +367,7 @@ def parse_recovery_tape(tape: dict[str, Any]) -> dict[str, Any]:
 
 def _load_tape_json(recovery_path: str) -> dict[str, Any]:
     """Read a §5.4 JSON tape; non-JSON bytes fail with a clean-break error."""
+    video_common.check_recovery_tape_size(Path(recovery_path))
     try:
         with open(recovery_path, encoding="utf-8") as handle:
             loaded: Any = json.load(handle)
@@ -378,6 +379,57 @@ def _load_tape_json(recovery_path: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("CausVid recovery tape must be a JSON object")
     return loaded
+
+
+def _validate_tape_trust(tape: dict[str, Any]) -> dict[str, Any]:
+    """Resume-trust gate: profile + overlap + revision (Track D).
+
+    Recomputes the profile hash from the tape's own geometry/latent and
+    compares it plus the overlap/block counts and the pinned checkpoint +
+    code revisions. Mismatch raises ValueError (Fatal — never resume
+    across numerics). The checkpoint `torch.load` itself stays sha-gated
+    via `verify_checkpoint_against_manifest` (tape byte caps do not apply
+    to multi-GB checkpoints — see `checked_tape` note in `video_common`).
+    """
+    parsed = parse_recovery_tape(tape)
+    width = parsed.get("width")
+    height = parsed.get("height")
+    fps = parsed.get("fps")
+    latent = parsed.get("latent_shape")
+    overlap = parsed.get("num_overlap_frames")
+    block = parsed.get("num_frame_per_block")
+    config_sha = parsed.get("config_sha256")
+    if (
+        isinstance(width, int)
+        and isinstance(height, int)
+        and isinstance(fps, int)
+        and isinstance(latent, list)
+        and isinstance(overlap, int)
+        and isinstance(block, int)
+        and isinstance(config_sha, str)
+    ):
+        expected_hash = generation_profile_hash(
+            width=width,
+            height=height,
+            fps=fps,
+            latent_shape=[int(dim) for dim in latent],
+            overlap_frames=overlap,
+            num_frame_per_block=block,
+            config_sha256=config_sha,
+        )
+        video_common.validate_resume_trust(
+            parsed,
+            expected_profile_hash=expected_hash,
+            expected_tail_frames=overlap,
+            expected_model_revision=CAUSVID_HF_REVISION,
+        )
+    else:
+        video_common.validate_resume_trust(
+            parsed,
+            expected_tail_frames=int(overlap) if isinstance(overlap, int) else None,
+            expected_model_revision=CAUSVID_HF_REVISION,
+        )
+    return parsed
 
 
 class _Rollout(NamedTuple):
@@ -508,10 +560,14 @@ def require_weight_files(models_dir: Path) -> dict[str, Path]:
         if label.endswith("tokenizer"):
             if not path.is_dir() or not any(path.iterdir()):
                 raise FileNotFoundError(
-                    f"missing {label} {path} — run `voyage models download` first"
+                    f"missing {label} {path} — run `configure` first "
+                    "(models are ensured via `model_registry.download_model`)"
                 )
         elif not path.is_file():
-            raise FileNotFoundError(f"missing {label} {path} — run `voyage models download` first")
+            raise FileNotFoundError(
+                f"missing {label} {path} — run `configure` first "
+                "(models are ensured via `model_registry.download_model`)"
+            )
     return needed
 
 
@@ -810,6 +866,7 @@ class CausvidSession:
         # rollout — repeated alloc/free cycles fragment into OOMs.
         conditionals = self._encode_conditionals(prompts)
         for index, (prompt, seed, cut) in enumerate(zip(prompts, seeds, scene_cuts, strict=True)):
+            video_common.report_block_progress(index, len(prompts), backend=RECOVERY_PROFILE)
             conditional = conditionals[index]
             start, was_fresh, fallback = self._rollout_start(cut)
             if fallback is not None and resume_fallback is None:
@@ -902,9 +959,11 @@ class CausvidSession:
         tape hash stays advisory: a derived tail re-hashes the tape in
         memory when it carries a tail hash (tapes without one are left
         alone), and an existing tail is adopted untouched — resume never
-        hard-fails on a hash mismatch.
+        hard-fails on a hash mismatch. Trust is enforced first via
+        `_validate_tape_trust` (profile + overlap + revision mismatch
+        raises ValueError Fatal).
         """
-        parsed = parse_recovery_tape(tape)
+        parsed = _validate_tape_trust(tape)
         tail_path = str(parsed["conditioning_tail_path"])
         overlap = int(parsed["num_overlap_frames"])
         tail_frames = max(video_common.DERIVED_TAIL_FRAMES, reencode_window_frames(overlap))
@@ -1190,7 +1249,7 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     serve(
-        video_common.standard_serve_map(
+        video_common.standard_serve_map_with_cancel(
             "causvid",
             handle_init=handle_init,
             handle_health=handle_health,

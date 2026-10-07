@@ -1,8 +1,10 @@
 """Pinned model registry (DESIGN §§84-85).
 
 Every integration records provider/repo/revision/license/local-path/checksum
-in the run manifest. Downloads are explicit (`voyage models download`) —
-never from `voyage run`.
+in the run manifest. Downloads are explicit (the `configure`
+ensure-path, programmatic entry
+`model_registry.download_model(models_dir, "<spec>")`) — never from
+`generate`.
 """
 
 from __future__ import annotations
@@ -563,7 +565,7 @@ def verify_checkpoint_against_manifest(
     ``ValueError`` (fail closed).
 
     Unknown-manifest + known-key (no manifest, no entry, or no sha for this
-    key — e.g. volumes provisioned outside `voyage models download`) fails
+    key — e.g. volumes provisioned outside the `configure` ensure-path) fails
     closed by default (071): pass ``allow_missing_manifest=True`` or set
     ``VOYAGE_ALLOW_MISSING_MANIFEST=1`` to keep the external-volume
     pass-through explicitly. Every bypass is loud (issue 235): a WARNING
@@ -598,7 +600,7 @@ def verify_checkpoint_against_manifest(
             return
         raise ValueError(
             f"no recorded sha256 for {key} in {manifest_path} — refusing to load "
-            f"{checkpoint} (provision with `voyage models download`, or opt in explicitly "
+            f"{checkpoint} (provision via the `configure` ensure-path, or opt in explicitly "
             "with allow_missing_manifest=True / VOYAGE_ALLOW_MISSING_MANIFEST=1 "
             "for external volumes)"
         )
@@ -1355,7 +1357,7 @@ def snapshot_present(models_dir: Path, ref: SnapshotRef) -> bool:
 
 
 def _require_spec(spec_name: str) -> ModelSpec:
-    """Look up a spec by CLI target name (fail loud on unknown)."""
+    """Look up a spec by registry spec name (fail loud on unknown)."""
     try:
         return MODEL_SPECS[spec_name]
     except KeyError:
@@ -1632,8 +1634,9 @@ def download_causvid_models(models_dir: Path) -> dict[str, JsonValue]:
     The autoregressive DMD checkpoint from tianweiy/CausVid plus the
     Wan2.1-T2V-1.3B base subset (DiT shard + VAE + T5 + tokenizer) the
     worker needs underneath it. Merges into the shared manifest; returns
-    the merged record. Backs the `models download causvid` CLI target for
-    the `causvid` worker (`voyage/workers/video_causvid.py`).
+    the merged record. Backs the `causvid` registry spec for
+    the `causvid` worker (`voyage/workers/video_causvid.py`, ensured at
+    `configure` time via `model_registry.download_model(models_dir, "causvid")`).
     """
     return download_model(models_dir, "causvid")
 
@@ -1651,8 +1654,9 @@ def download_ltx25_models(models_dir: Path) -> dict[str, JsonValue]:
     upscaler (Lightricks/LTX-2.5, gated). Single-file fetches that
     replicate the Hub layout under <models>/ltx25/. Merges into the
     shared manifest; returns the merged record. Backs the
-    `models download ltx25` CLI target for the `ltx25` worker
-    (`voyage/workers/video_ltx25.py`).
+    `ltx25` registry spec for the `ltx25` worker
+    (`voyage/workers/video_ltx25.py`, ensured at `configure` time via
+    `model_registry.download_model(models_dir, "ltx25")`).
     """
     return download_model(models_dir, "ltx25")
 
@@ -1670,8 +1674,9 @@ def download_ltx23_models(models_dir: Path) -> dict[str, JsonValue]:
     <models>/ltx23/ (Hub layout). The Mode-A spatial upscaler is shared
     from the ltx25 volume (checked, not re-fetched). Merges into the
     shared manifest; returns the merged record. Backs the
-    `models download ltx23` CLI target for the `ltx23` worker
-    (`voyage/workers/video_ltx23.py`).
+    `ltx23` registry spec for the `ltx23` worker
+    (`voyage/workers/video_ltx23.py`, ensured at `configure` time via
+    `model_registry.download_model(models_dir, "ltx23")`).
     """
     return download_model(models_dir, "ltx23")
 
@@ -1686,7 +1691,8 @@ def download_film_models(models_dir: Path) -> dict[str, JsonValue]:
 
     Single fp16 file into <models>/frame_interpolation/ (ComfyUI layout).
     Merges into the shared manifest; returns the merged record. Backs the
-    `models download film` CLI target.
+    `film` registry spec (ensured at `configure` time via
+    `model_registry.download_model(models_dir, "film")`).
     """
     return download_model(models_dir, "film")
 
@@ -1701,7 +1707,8 @@ def download_rife_models(models_dir: Path) -> dict[str, JsonValue]:
 
     Single fp16 file into <models>/frame_interpolation/ (ComfyUI layout).
     Merges into the shared manifest; returns the merged record. Backs the
-    `models download rife` CLI target.
+    `rife` registry spec (ensured at `configure` time via
+    `model_registry.download_model(models_dir, "rife")`).
     """
     return download_model(models_dir, "rife")
 
@@ -1715,8 +1722,9 @@ def download_realesrgan_models(models_dir: Path) -> dict[str, JsonValue]:
     """Explicit download of the Real-ESRGAN anime upscaler (Track C).
 
     Single .pth into <models>/realesrgan/. Merges into the shared manifest;
-    returns the merged record. Backs the `models download realesrgan-anime`
-    CLI target.
+    returns the merged record. Backs the `realesrgan-anime`
+    registry spec (ensured at `configure` time via
+    `model_registry.download_model(models_dir, "realesrgan-anime")`).
     """
     return download_model(models_dir, "realesrgan-anime")
 

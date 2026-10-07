@@ -21,18 +21,23 @@ Defaults (`voyage/config.py`, `AugmentConfig`):
   instead of lifting the frame rate);
 - `interp_backend = "rife"` (the interpolation model: `rife`
   default, `film` opt-in for hero/archival renders — see the RIFE
-  section below; rides the manifest `[augment]` section and the
+  section below; rides the manifest `augment` object and the
   freshness key, so a switch re-renders interp by design).
 
-Stored in the manifest's `[augment]` section at `configure` time:
+Stored in the manifest's `augment` object at `configure` time:
 
-```toml
-[augment]
-upscale = 1
-interpolate = 1
-# presentation_fps unset unless pinned
-# interp_backend unset defaults to rife
+```json
+{
+  "augment": {
+    "upscale": 1,
+    "interpolate": 1,
+    "interp_backend": "rife"
+  }
+}
 ```
+
+(`presentation_fps` unset unless pinned — `null` default ships
+`round(source_fps × interpolate)`.)
 
 Flags (shared helper `_add_augment_args` on `configure`):
 
@@ -219,8 +224,11 @@ Precision is fp16 on CUDA, fp32 elsewhere; batch inference starts full
 and halves on OOM down to single items (Comfy `FrameInterpolate`
 recipe).
 
-Weights (`models download rife` ~87 MB heavy, `realesrgan-anime`
-~2.5 MB, `film` ~66 MB stays provisionable for the opt-in backend;
+Weights (ensured at `configure` time via
+`model_registry.download_model(models_dir, "rife")` ~87 MB heavy,
+`model_registry.download_model(models_dir, "realesrgan-anime")`
+~2.5 MB, `model_registry.download_model(models_dir, "film")` ~66 MB stays
+provisionable for the opt-in backend;
 `docs/MODELS.md:45-65`): the interp leg lands in
 `<models>/frame_interpolation/`, the anime upscaler in
 `<models>/realesrgan/`. `generate` ensures the configured backend

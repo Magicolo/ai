@@ -40,6 +40,12 @@ from voyage.media import (
 #: Source frames per pre-warm chunk (mirrors the poller/finalize default).
 BACKGROUND_CHUNK_FRAMES = 32
 
+#: Joints-sweep legs counted in `PrewarmResult.joint_frames_total`: the
+#: fix stage plus the uniform upscale and interp sweeps each contribute
+#: one bridge video's worth of source frames per joint, so the combined
+#: joints bar's total is this count times the joint bridge length.
+JOINT_SWEEP_LEG_COUNT = 3
+
 #: Pre-warm runs one segment-interleaved upscale→interp pass (same
 #: pipeline as finalize: the legs share `cuda:1`, never co-resident).
 BACKGROUND_DEVICE_FALLBACK = "cuda:1"
@@ -145,6 +151,14 @@ class PrewarmResult:
     sequentially — never co-resident). `seams_done` counts
     boundary joints rendered early during the pass (surfaced on
     the verbose sweep line; the ledger stays frame-shaped).
+    The `joint_*` fields split the joints-first sweep out of the
+    shared totals for the dedicated joints bar and the post-commit
+    joints summary: `joints_seen` units known, `joint_fix_done` fresh
+    fix renders (`joint_fix_frames` source frames), per-leg uniform
+    chunks done/skipped plus per-leg ledgered source frames
+    (done + skipped, the bar's advance unit). `joint_frames_total` is
+    the whole sweep's source frames (fix + upscale + interp over every
+    seen unit) — the combined joints bar's total.
     `skip_reason` is empty when both legs swept: it names the leg the
     VRAM guard held back (upscale or interp alone) or a busy-device pass
     the idle wait gave up on. Moot passes (no plan) return None instead —
@@ -164,6 +178,16 @@ class PrewarmResult:
     interp_seconds: float = 0.0
     skip_reason: str = ""
     seams_done: int = 0
+    joints_seen: int = 0
+    joint_fix_done: int = 0
+    joint_fix_frames: int = 0
+    joint_upscale_chunks_done: int = 0
+    joint_upscale_chunks_skipped: int = 0
+    joint_interp_chunks_done: int = 0
+    joint_interp_chunks_skipped: int = 0
+    joint_upscale_frames_ledgered: int = 0
+    joint_interp_frames_ledgered: int = 0
+    joint_frames_total: int = 0
 
 
 PREWARM_NOTHING_LOUD_NOTE = "pre-warm did nothing — everything defers to finalize"
@@ -201,6 +225,7 @@ def prewarm_pass_did_nothing(result: PrewarmResult | None) -> bool:
         and result.interp_chunks_waiting == 0
         and result.upscale_frames_done == 0
         and result.interp_frames_done == 0
+        and result.joint_fix_done == 0
     )
 
 
@@ -234,6 +259,15 @@ def report_prewarm_pass(
         progress.note(f"pre-warm detail: {result.skip_reason}")
 
 
+_SEGMENT_SOURCE_CACHE: dict[str, tuple[int, int, tuple[int, int, float]]] = {}
+"""Seg-0 geometry/fps keyed by path -> (mtime_ns, size, (w, h, fps)).
+
+Issue 250: `resolve_background_plan` runs on every commit and
+re-probed seg-0 each time. Geometry never changes mid-run; the
+identity re-probes on re-render. Per-process only.
+"""
+
+
 def probe_segment_source(video_path: Path) -> tuple[int, int, float]:
     """Source (width, height, fps) for one committed segment video.
 
@@ -241,15 +275,28 @@ def probe_segment_source(video_path: Path) -> tuple[int, int, float]:
     via `media.probe` + `_probe_video_fps`/`_probe_video_geometry`, and so
     does this default. Raises when the source is unprobable — the caller
     treats that as "nothing to pre-warm yet", never as an error.
+    Results memoize per file identity (issue 250).
     """
     from voyage.media import _probe_video_fps, _probe_video_geometry, probe
 
+    try:
+        stat = video_path.stat()
+        identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        identity = None
+    if identity is not None:
+        cached = _SEGMENT_SOURCE_CACHE.get(str(video_path))
+        if cached is not None and (cached[0], cached[1]) == identity:
+            return cached[2]
     info = probe(video_path)
     width, height = _probe_video_geometry(info)
     fps = _probe_video_fps(info)
     if width <= 0 or height <= 0 or fps <= 0:
         raise ValueError(f"unprobable segment source {video_path} ({width}x{height}@{fps})")
-    return (width, height, float(fps))
+    resolved = (width, height, float(fps))
+    if identity is not None:
+        _SEGMENT_SOURCE_CACHE[str(video_path)] = (identity[0], identity[1], resolved)
+    return resolved
 
 
 def _first_committed_video(run_dir: Path) -> Path | None:
@@ -376,30 +423,39 @@ def prewarm_once(
     on_upscale_frames: Callable[[str, int], None] | None = None,
     on_interp_chunk: Callable[[str, int, int], None] | None = None,
     on_interp_frames: Callable[[str, int], None] | None = None,
+    on_joint_chunk: Callable[[str, str, int, int], None] | None = None,
+    on_joint_frames: Callable[[str, str, int, int, int], None] | None = None,
+    on_mastering_chunk: Callable[[str, int, int], None] | None = None,
+    on_mastering_frames: Callable[[str, int], None] | None = None,
     include_interp: bool = True,
 ) -> PrewarmResult | None:
-    """Run one segment-interleaved upscale + interp pass (unless disabled).
+    """Run one joints-first upscale + interp pass (unless disabled).
 
-    Each pass enumerates the committed segments once, then runs every
-    segment's upscale immediately followed by its interp — interp starts
-    on committed frames instead of waiting for the full upscale sweep
-    (mirrors the finalize driver). Direct callers keep the default
-    `include_interp=True` path; `include_interp=False` runs the upscale
-    leg only (upscale-only by design — never a skip, never interp
-    progress). `chunk_encode_fn`, when given, replaces the production
-    chunk-ffmpeg encode inside the interp pollers' per-chunk
+    Each pass ensures every boundary's joints first (fix stage), runs
+    the joints' uniform upscale immediately followed by their interp —
+    scarce idle windows cover the few joint units before the long
+    segment sweep, so finalize's joint stage shrinks to a drain even
+    on short runs — then runs the segment-interleaved pipeline
+    (each segment's upscale immediately followed by its interp, so
+    interp starts on committed frames instead of waiting for the
+    full upscale sweep; mirrors the finalize driver). Direct callers
+    keep the default `include_interp=True` path; `include_interp=False`
+    runs the upscale leg only (upscale-only by design — never a skip,
+    never interp progress). `chunk_encode_fn`, when given, replaces the
+    production chunk-ffmpeg encode inside the interp pollers' per-chunk
     durable-mp4 step (tests stub it); forwarded only to pollers
     accepting the param, and only when not None (a `functools.partial`
     worker keeps showing bound kwargs in its signature, so an
     unconditional forward would clobber a partial-bound stub).
 
     Returns None when pre-warm is moot (see `resolve_background_plan`)
-    or when `should_stop` fires after a segment's upscale (lets `stop()`
-    abandon a pass without racing a live CUDA sweep at interpreter
-    exit — accumulated counts are discarded, same as the old
-    between-sweeps check). Raises `MediaError` on a failed chunk
-    (fail-loud like finalize — the background thread catches it; direct
-    callers such as tests see it).
+    or when `should_stop` fires (lets `stop()` abandon a pass without
+    racing a live CUDA sweep at interpreter exit — accumulated counts
+    are discarded, same as the old between-sweeps check, but responsive
+    mid-pass: the fix stage and every joint unit check between units,
+    and the segment sweep keeps its after-upscale check). Raises
+    `MediaError` on a failed chunk (fail-loud like finalize — the
+    background thread catches it; direct callers such as tests see it).
 
     VRAM gating is per leg: the pass needs `UPSCALE_MIN_FREE_GIB` to
     start (SRVGG fits beside the resident sidecar), the interp leg
@@ -414,18 +470,28 @@ def prewarm_once(
     legs held back means no poller runs at all. Unknown free space
     stays fail-open on both legs.
 
-    After the segment sweep, the pass runs the uniform joint sweep: the
+    Before the segment sweep, the pass runs the uniform joint sweep: the
     fix stage above rendered every boundary's source-res joints, and the
     joint units poll through the same legs via the pollers' `sources=`
-    override (bridge frames upscale + re-interpolate by design).
+    override (bridge frames upscale + re-interpolate by design), one
+    unit at a time with `should_stop` between units.
 
     The `on_*` callbacks forward to the pollers' `on_chunk` /
     `on_chunk_frames` (fired per rendered chunk on the calling thread —
     skipped chunks never fire, so pass-end ledger deltas stay the source
-    of truth for skipped frames). The background driver passes None
-    unless the generation loop supplies live callbacks; any callback must
-    never touch display code (it runs on the pre-warm thread — the main
-    thread drains them into progress bars).
+    of truth for skipped frames). The `on_joint_*` callbacks carry the
+    joints-first sweep separately — `(unit_id, leg, index, total)` /
+    `(unit_id, leg, frames, position, total)` with `leg` one of
+    `"fix"` / `"upscale"` / `"interp"` — so the joints bar counts only
+    joint work; the shared segment callbacks never see joint units.
+    The background driver passes None unless the generation loop
+    supplies live callbacks; any callback must never touch display code
+    (it runs on the pre-warm thread — the main thread drains them into
+    progress bars). The mastering pair
+    (`on_mastering_chunk` / `on_mastering_frames`, Track C) is accepted
+    here for the future `voyage/mastering.py` sweep (Track B owns that
+    module and its poller) — no mastering work runs in this pass yet,
+    so both stay uncalled until Track B wires them through.
     """
     plan = resolve_background_plan(run_dir, config)
     if plan is None:
@@ -513,9 +579,158 @@ def prewarm_once(
         weights=plan.interp_path,
         device=plan.device,
         interp_backend=plan.interp_backend,
+        should_stop=should_stop,
     )
+    if should_stop is not None and should_stop():
+        return None
     seams_early += sum(1 for unit in joint_units if str(unit.joint_video) not in seen_joint_videos)
-    joint_sources = [unit.as_source() for unit in joint_units]
+    total_joints = len(joint_units)
+    joint_frames_total = JOINT_SWEEP_LEG_COUNT * sum(
+        int(unit.as_source().total_frames or 0) for unit in joint_units
+    )
+    joint_fix_done = 0
+    joint_fix_frames = 0
+    for position, unit in enumerate(joint_units):
+        if str(unit.joint_video) in seen_joint_videos:
+            continue
+        unit_frames = int(unit.as_source().total_frames or 0)
+        joint_fix_done += 1
+        joint_fix_frames += unit_frames
+        if on_joint_chunk is not None:
+            on_joint_chunk(unit.joint_dir.name, "fix", 1, 1)
+        if on_joint_frames is not None:
+            on_joint_frames(unit.joint_dir.name, "fix", unit_frames, position, total_joints)
+    # Uniform pass over the fix-stage joints (sources= override): joints
+    # upscale + re-interpolate by design, one unit at a time so a stop
+    # abandons at most one joint chunk (the chunk ledger resumes it next
+    # pass). Joint chunks route to the `on_joint_*` callbacks — never the
+    # shared segment callbacks — so the joints bar counts only joint
+    # work. Joints are new units, so their upscale runs even when the
+    # segment sweep was interp-only. Same plan keys as the all-units
+    # sweep, so ledger entries stay finalize-identical.
+    joint_upscale_chunks_done = 0
+    joint_upscale_chunks_skipped = 0
+    joint_interp_chunks_done = 0
+    joint_interp_chunks_skipped = 0
+    joint_upscale_frames = 0
+    joint_interp_frames = 0
+    for position, unit in enumerate(joint_units):
+        if should_stop is not None and should_stop():
+            return None
+        joint_source = unit.as_source()
+        unit_id = joint_source.segment_id
+
+        def _joint_up_chunk(
+            segment_id: str,
+            index: int,
+            total: int,
+            _unit_id: str = unit_id,
+        ) -> None:
+            del segment_id
+            if on_joint_chunk is not None:
+                on_joint_chunk(_unit_id, "upscale", index, total)
+
+        def _joint_up_frames(
+            segment_id: str,
+            frames: int,
+            _unit_id: str = unit_id,
+            _position: int = position,
+        ) -> None:
+            del segment_id
+            if on_joint_frames is not None:
+                on_joint_frames(_unit_id, "upscale", frames, _position, total_joints)
+
+        joint_up_kwargs: dict[str, Any] = {
+            "weights_path": plan.realesrgan_path,
+            "weights_key": plan.weights_key,
+            "out_width": plan.out_width,
+            "out_height": plan.out_height,
+            "out_fps": plan.source_fps_key,
+            "upscale_factor": plan.upscale_factor,
+            "chunk_frames": BACKGROUND_CHUNK_FRAMES,
+            "device": plan.device,
+            "crf": plan.crf,
+            "preset": plan.preset,
+            "on_chunk": _joint_up_chunk,
+            "on_chunk_frames": _joint_up_frames,
+            "sources": [joint_source],
+        }
+        if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
+            joint_up_kwargs["interp_multiplier"] = plan.multiplier
+        if up_takes_segments:
+            joint_up_kwargs["segment_ids"] = [unit_id]
+        joint_up_started = time.monotonic()
+        joint_up_result = upscale_poll_fn(run_dir, **joint_up_kwargs)
+        upscale_seconds += time.monotonic() - joint_up_started
+        joint_up_done = int(getattr(joint_up_result, "chunks_done", 0) or 0)
+        joint_up_skipped = int(getattr(joint_up_result, "chunks_skipped", 0) or 0)
+        joint_up_frames_done = int(getattr(joint_up_result, "frames_done", 0) or 0)
+        joint_up_frames_skipped = int(getattr(joint_up_result, "frames_skipped", 0) or 0)
+        up_chunks_done += joint_up_done
+        up_chunks_skipped += joint_up_skipped
+        up_frames_done += joint_up_frames_done
+        joint_upscale_chunks_done += joint_up_done
+        joint_upscale_chunks_skipped += joint_up_skipped
+        joint_upscale_frames += joint_up_frames_done + joint_up_frames_skipped
+        if should_stop is not None and should_stop():
+            return None
+        if interp_armed and interp_poll_fn is not None:
+
+            def _joint_ip_chunk(
+                segment_id: str,
+                index: int,
+                total: int,
+                _unit_id: str = unit_id,
+            ) -> None:
+                del segment_id
+                if on_joint_chunk is not None:
+                    on_joint_chunk(_unit_id, "interp", index, total)
+
+            def _joint_ip_frames(
+                segment_id: str,
+                frames: int,
+                _unit_id: str = unit_id,
+                _position: int = position,
+            ) -> None:
+                del segment_id
+                if on_joint_frames is not None:
+                    on_joint_frames(_unit_id, "interp", frames, _position, total_joints)
+
+            joint_ip_kwargs: dict[str, Any] = {
+                "weights_path": plan.interp_path,
+                "weights_key": plan.weights_key,
+                "out_width": plan.out_width,
+                "out_height": plan.out_height,
+                "out_fps": plan.source_fps_key,
+                "upscale_factor": plan.upscale_factor,
+                "chunk_frames": BACKGROUND_CHUNK_FRAMES,
+                "multiplier": plan.multiplier,
+                "device": plan.device,
+                "crf": plan.crf,
+                "preset": plan.preset,
+                "interp_backend": plan.interp_backend,
+                "on_chunk": _joint_ip_chunk,
+                "on_chunk_frames": _joint_ip_frames,
+                "sources": [joint_source],
+            }
+            if chunk_encode_fn is not None and _accepts_keyword(interp_poll_fn, "chunk_encode_fn"):
+                joint_ip_kwargs["chunk_encode_fn"] = chunk_encode_fn
+            if ip_takes_segments:
+                joint_ip_kwargs["segment_ids"] = [unit_id]
+            joint_ip_started = time.monotonic()
+            joint_ip_result = interp_poll_fn(run_dir, **joint_ip_kwargs)
+            ip_seconds += time.monotonic() - joint_ip_started
+            joint_ip_done = int(getattr(joint_ip_result, "chunks_done", 0) or 0)
+            joint_ip_skipped = int(getattr(joint_ip_result, "chunks_skipped", 0) or 0)
+            joint_ip_frames_done = int(getattr(joint_ip_result, "frames_done", 0) or 0)
+            joint_ip_frames_skipped = int(getattr(joint_ip_result, "frames_skipped", 0) or 0)
+            ip_chunks_done += joint_ip_done
+            ip_chunks_skipped += joint_ip_skipped
+            ip_chunks_waiting += int(getattr(joint_ip_result, "chunks_waiting", 0) or 0)
+            ip_frames_done += joint_ip_frames_done
+            joint_interp_chunks_done += joint_ip_done
+            joint_interp_chunks_skipped += joint_ip_skipped
+            joint_interp_frames += joint_ip_frames_done + joint_ip_frames_skipped
     for source in ordered_sources:
         segment_id = source.segment_id
         up_kwargs: dict[str, Any] = {
@@ -534,6 +749,8 @@ def prewarm_once(
         }
         if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
             up_kwargs["interp_multiplier"] = plan.multiplier
+        if _accepts_keyword(upscale_poll_fn, "shared_segment_decode"):
+            up_kwargs["shared_segment_decode"] = True
         if up_takes_segments:
             up_kwargs["segment_ids"] = [segment_id]
         up_started = time.monotonic()
@@ -573,66 +790,6 @@ def prewarm_once(
             ip_chunks_skipped += int(getattr(ip_result, "chunks_skipped", 0) or 0)
             ip_chunks_waiting += int(getattr(ip_result, "chunks_waiting", 0) or 0)
             ip_frames_done += int(getattr(ip_result, "frames_done", 0) or 0)
-    # Uniform pass over the fix-stage joints (sources= override): joints
-    # upscale + re-interpolate by design. Joints are new units, so their
-    # upscale runs even when the segment sweep was interp-only.
-    if joint_sources:
-        joint_up_kwargs: dict[str, Any] = {
-            "weights_path": plan.realesrgan_path,
-            "weights_key": plan.weights_key,
-            "out_width": plan.out_width,
-            "out_height": plan.out_height,
-            "out_fps": plan.source_fps_key,
-            "upscale_factor": plan.upscale_factor,
-            "chunk_frames": BACKGROUND_CHUNK_FRAMES,
-            "device": plan.device,
-            "crf": plan.crf,
-            "preset": plan.preset,
-            "on_chunk": on_upscale_chunk,
-            "on_chunk_frames": on_upscale_frames,
-            "sources": joint_sources,
-        }
-        if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
-            joint_up_kwargs["interp_multiplier"] = plan.multiplier
-        if up_takes_segments:
-            joint_up_kwargs["segment_ids"] = [unit.segment_id for unit in joint_sources]
-        joint_up_started = time.monotonic()
-        joint_up_result = upscale_poll_fn(run_dir, **joint_up_kwargs)
-        upscale_seconds += time.monotonic() - joint_up_started
-        up_chunks_done += int(getattr(joint_up_result, "chunks_done", 0) or 0)
-        up_chunks_skipped += int(getattr(joint_up_result, "chunks_skipped", 0) or 0)
-        up_frames_done += int(getattr(joint_up_result, "frames_done", 0) or 0)
-        if should_stop is not None and should_stop():
-            return None
-        if interp_armed and interp_poll_fn is not None:
-            joint_ip_kwargs: dict[str, Any] = {
-                "weights_path": plan.interp_path,
-                "weights_key": plan.weights_key,
-                "out_width": plan.out_width,
-                "out_height": plan.out_height,
-                "out_fps": plan.source_fps_key,
-                "upscale_factor": plan.upscale_factor,
-                "chunk_frames": BACKGROUND_CHUNK_FRAMES,
-                "multiplier": plan.multiplier,
-                "device": plan.device,
-                "crf": plan.crf,
-                "preset": plan.preset,
-                "interp_backend": plan.interp_backend,
-                "on_chunk": on_interp_chunk,
-                "on_chunk_frames": on_interp_frames,
-                "sources": joint_sources,
-            }
-            if chunk_encode_fn is not None and _accepts_keyword(interp_poll_fn, "chunk_encode_fn"):
-                joint_ip_kwargs["chunk_encode_fn"] = chunk_encode_fn
-            if ip_takes_segments:
-                joint_ip_kwargs["segment_ids"] = [unit.segment_id for unit in joint_sources]
-            joint_ip_started = time.monotonic()
-            joint_ip_result = interp_poll_fn(run_dir, **joint_ip_kwargs)
-            ip_seconds += time.monotonic() - joint_ip_started
-            ip_chunks_done += int(getattr(joint_ip_result, "chunks_done", 0) or 0)
-            ip_chunks_skipped += int(getattr(joint_ip_result, "chunks_skipped", 0) or 0)
-            ip_chunks_waiting += int(getattr(joint_ip_result, "chunks_waiting", 0) or 0)
-            ip_frames_done += int(getattr(joint_ip_result, "frames_done", 0) or 0)
     return PrewarmResult(
         segments_seen=segments_seen,
         upscale_chunks_done=up_chunks_done,
@@ -646,6 +803,16 @@ def prewarm_once(
         interp_seconds=round(ip_seconds, 3),
         seams_done=seams_early,
         skip_reason=skip_reason,
+        joints_seen=total_joints,
+        joint_fix_done=joint_fix_done,
+        joint_fix_frames=joint_fix_frames,
+        joint_upscale_chunks_done=joint_upscale_chunks_done,
+        joint_upscale_chunks_skipped=joint_upscale_chunks_skipped,
+        joint_interp_chunks_done=joint_interp_chunks_done,
+        joint_interp_chunks_skipped=joint_interp_chunks_skipped,
+        joint_upscale_frames_ledgered=joint_upscale_frames,
+        joint_interp_frames_ledgered=joint_interp_frames,
+        joint_frames_total=joint_frames_total,
     )
 
 
@@ -666,8 +833,12 @@ class BackgroundPrewarm:
     queue-appending callbacks and drains them into progress bars on the
     main thread while the video render blocks. The `on_interp_*` callbacks
     (also None by default) forward per-rendered-chunk interp events the
-    same way. The background pass runs both legs when VRAM allows and is
-    silent unless the caller passes callbacks.
+    same way. The `on_mastering_*` callbacks (also None by default,
+    Track C) forward per-rendered-chunk mastering events the same way
+    once `voyage/mastering.py` (Track B) wires its sweep — until then
+    they are accepted and forwarded but never fire. The background pass
+    runs both legs when VRAM allows and is silent unless the caller
+    passes callbacks.
     """
 
     def __init__(
@@ -681,6 +852,10 @@ class BackgroundPrewarm:
         on_upscale_frames: Callable[[str, int], None] | None = None,
         on_interp_chunk: Callable[[str, int, int], None] | None = None,
         on_interp_frames: Callable[[str, int], None] | None = None,
+        on_joint_chunk: Callable[[str, str, int, int], None] | None = None,
+        on_joint_frames: Callable[[str, str, int, int, int], None] | None = None,
+        on_mastering_chunk: Callable[[str, int, int], None] | None = None,
+        on_mastering_frames: Callable[[str, int], None] | None = None,
     ) -> None:
         self._run_dir = run_dir
         self._config = config
@@ -699,6 +874,10 @@ class BackgroundPrewarm:
                 on_upscale_frames=on_upscale_frames,
                 on_interp_chunk=on_interp_chunk,
                 on_interp_frames=on_interp_frames,
+                on_joint_chunk=on_joint_chunk,
+                on_joint_frames=on_joint_frames,
+                on_mastering_chunk=on_mastering_chunk,
+                on_mastering_frames=on_mastering_frames,
                 include_interp=True,
             )
         self._idle_fn = idle_fn or (lambda: True)
@@ -713,6 +892,11 @@ class BackgroundPrewarm:
         # upscale frames, interp frames, upscale seconds, interp seconds.)
         # One tuple store keeps the read GIL-atomic.
         self._ledgered: tuple[int, int, int, int, int, float, float] = (0, 0, 0, 0, 0, 0.0, 0.0)
+        # Cumulative joint frames ledgered by passes so far — (fix,
+        # upscale, interp) source frames, the dedicated joints bar's unit
+        # (segment legs never see joint units, so the shared `_ledgered`
+        # stays segment-only). One tuple store keeps the read GIL-atomic.
+        self._joint_ledgered: tuple[int, int, int] = (0, 0, 0)
         # Latest finished pass (for --verbose sweep lines); None before
         # the first pass or when the latest pass was moot/skipped.
         self._last_result: PrewarmResult | None = None
@@ -761,6 +945,29 @@ class BackgroundPrewarm:
         leg, so both legs share one comparable unit.
         """
         return self._ledgered
+
+    def ledgered_mastering_frames(self) -> tuple[int, int, float]:
+        """Cumulative mastering work (chunks, frames, seconds), Track C.
+
+        Separate from `ledgered_frames` (which keeps its 7-tuple shape
+        for existing readers): no mastering sweep runs in this pass yet
+        (`voyage/mastering.py` is Track B's), so this stays zero until
+        Track B accumulates real mastering counts here. The supervisor
+        reads it via `getattr` with a zero fallback, so older drivers
+        without this method keep working.
+        """
+        return (0, 0, 0.0)
+
+    def ledgered_joint_frames(self) -> tuple[int, int, int]:
+        """Cumulative joint frames ledgered (fix, upscale, interp).
+
+        Separate from `ledgered_frames` (which stays segment-only now
+        that joint units route to the `on_joint_*` callbacks): the
+        supervisor reads this via `getattr` with a zero fallback, so
+        older drivers without this method keep working. Frame counts
+        are source frames per leg, the joints bar's advance unit.
+        """
+        return self._joint_ledgered
 
     @property
     def last_result(self) -> PrewarmResult | None:
@@ -883,6 +1090,7 @@ class BackgroundPrewarm:
             try:
                 result = self._prewarm_fn(self._run_dir, self._config)
                 passes, up, ip, upf, ipf, ups, ips = self._ledgered
+                joint_fix, joint_up, joint_ip = self._joint_ledgered
                 if result is not None:
                     up += result.upscale_chunks_done
                     ip += result.interp_chunks_done
@@ -890,7 +1098,11 @@ class BackgroundPrewarm:
                     ipf += result.interp_frames_done
                     ups += result.upscale_seconds
                     ips += result.interp_seconds
+                    joint_fix += int(getattr(result, "joint_fix_frames", 0) or 0)
+                    joint_up += int(getattr(result, "joint_upscale_frames_ledgered", 0) or 0)
+                    joint_ip += int(getattr(result, "joint_interp_frames_ledgered", 0) or 0)
                     self._last_result = result
                 self._ledgered = (passes + 1, up, ip, upf, ipf, ups, ips)
+                self._joint_ledgered = (joint_fix, joint_up, joint_ip)
             except Exception:  # noqa: BLE001 - pre-warm must never fail generation
                 continue

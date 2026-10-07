@@ -54,3 +54,35 @@ the fix; operator docs were never updated).
 ## Log
 
 - 2026-10-07: filed from read-only Track E sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live-verified RELEVANT, no integrity deltas. `probe()` returns `compute_cap`
++ `cuda_runtime` (`voyage/doctor.py:439,464-465`, `_parse_gpu_details:192-224`,
+`_cuda_runtime:227-240`, issue-066 as-built note at `doctor.py:14-19`), while
+`TROUBLESHOOTING.md:20-23` and `INSTALL.md:60-64` still list both as unchecked
+gaps. Residual true gaps named in both paragraphs (FlashAttention/Triton,
+checkpoint compat, fs perms, worker interpreters, ACE-Step runtime) remain
+correct and stay. Overlap noted: `doctor.py:12` also carries the deleted
+`voyage models verify` string (issue-218 class) — fixed in the same edit
+since this file is in scope for both.
+
+## Progress log (2026-10-07)
+
+- `docs/TROUBLESHOOTING.md:18-23` rewritten to the issue-066 reality
+  (covered: python/ffmpeg+ffprobe/version, nvidia-smi GPUs, per-GPU
+  VRAM/driver/compute-capability/temperature, CUDA runtime, torch-CUDA,
+  per-mount disks, models presence required/optional split; remaining gaps:
+  FlashAttention/Triton, checkpoint compat, fs perms, worker interpreters,
+  ACE-Step runtime).
+- `docs/INSTALL.md:53-64` rewritten to the same reality (same covered set,
+  same remaining gaps, `configure --no-download` verify-only pointer kept).
+- `voyage/doctor.py:12` dead-verb string fixed alongside (issue-218 overlap).
+- Verify: `compute capability|does NOT yet check` 0 hits in both docs;
+  `test.sh tests/test_causvid_worker.py` 32 passed (neighbor scope);
+  ruff check + format clean on `doctor.py`.
+
+## Resolution (2026-10-07)
+
+Verdict: RESOLVED. Both doctor-gap paragraphs now match `probe()` keys;
+nothing left open (residual gaps are true and intentionally kept).

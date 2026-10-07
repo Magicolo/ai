@@ -1,5 +1,13 @@
 # Video backend qualification (DESIGN §137A)
 
+> ARCHIVED 2026-09-24 — fake-backend harness snapshot only. The `init`/`run`
+> verbs quoted below were removed (two-verb CLI: `configure` + `generate`
+> only), the environment table is frozen at 2026-09-24, and the "pending"
+> legs predate Streams A–D, the qual-driven fixes, and the RIFE/SRVGG
+> finalize stack. Do not cite these numbers as GPU evidence. For current
+> qualification, run `scripts/qualify.sh` (backend-agnostic driver) and read
+> the JSON summaries it tees to `reports/qual-*.json`.
+
 Stream A owns the LTXV leg. A backend
 becomes operationally preferable only on measured numbers — no static
 ranking here overrides benchmark results. Every GPU-gated field below is

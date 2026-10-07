@@ -94,7 +94,9 @@ def concat_chunk_mp4s(chunks: list[Path], dest: Path) -> Path:
             "-c",
             "copy",
             str(dest),
-        ]
+        ],
+        # Unbounded: the chunk list scales with total video length.
+        timeout=None,
     )
     if proc.returncode != 0:
         raise MediaError(f"sidecar chunk concat failed: {proc.stderr[-2000:]}")
@@ -223,18 +225,71 @@ def ensure_chunk_mp4(
         render(interp_dir, partial, rate)
         if not partial.exists() or partial.stat().st_size == 0:
             raise MediaError(f"chunk encode produced empty output {partial}")
+        # Track C probe-before-prune: the fresh encode must probe to
+        # `expected_frames` BEFORE the PNG donors are pruned — a short
+        # encode (kill mid-write, torn mp4) re-raises here while its
+        # PNGs are still intact for the retry. Unprobable (no ffprobe)
+        # skips the count check but keeps the non-empty gate above.
+        probed = sidecar._probe_mp4_frames(partial)
+        if probed is not None and probed != int(key.expected_frames):
+            with contextlib.suppress(OSError):
+                partial.unlink()
+            raise MediaError(
+                f"chunk encode probed {probed}f for chunk {key.chunk_index} "
+                f"(expected {key.expected_frames}f) — PNGs kept for retry"
+            )
         os.replace(partial, dest)
         fsync_dir(plan_dir)
         relative = os.path.relpath(dest, run_dir).replace(os.sep, "/")
         sidecar.append_chunk_record(ledger, key, stage=sidecar.STAGE_CHUNK_MP4, path=relative)
+    else:
+        # Track C probe-before-prune on the fast path too: a ledgered
+        # mp4 that probes short (truncated since record) is treated as
+        # missing — fall through and re-encode from intact PNGs when
+        # present, else fail loud (the heal sweep strips the record).
+        if not sidecar.chunk_mp4_frames_match(plan_dir, key):
+            raise MediaError(
+                f"chunk mp4 probes short for chunk {key.chunk_index} "
+                f"(expected {key.expected_frames}f; re-render the chunk)"
+            )
     _prune_chunk_png_dirs(plan_dir, key.chunk_index)
     return sidecar.chunk_mp4_path(plan_dir, key.chunk_index)
+
+
+def settle_uses_output_truth(
+    plan_dir: Path,
+    records: list[dict[str, Any]],
+    key: sidecar.ChunkKey,
+) -> bool:
+    """Whether a chunk is settled (Track C output-truth, not ledger-only).
+
+    Settled means the exact-key `chunk_mp4` record exists AND the mp4
+    probes to `expected_frames` (the durable artifact is truth — its PNG
+    donors were pruned by design, so surviving PNG dirs never veto it),
+    OR — when no durable mp4 exists yet — the interp PNGs are complete
+    with matching geometry. Ledger-only completion once settled short
+    chunks (torn encodes with intact records); this is the gate poll/drain
+    settle checks must use.
+    """
+    if sidecar.chunk_mp4_complete(plan_dir, records, key):
+        return True
+    from voyage.augment import chunk_frames_match_size as _size_match
+
+    interp_dir = plan_dir / f"interpolated_{key.chunk_index:02d}"
+    if not sidecar.chunk_output_complete(interp_dir, int(key.expected_frames)):
+        return False
+    try:
+        size = (int(key.out_width), int(key.out_height))
+    except (TypeError, ValueError):
+        return True
+    return bool(_size_match(interp_dir, size))
 
 
 def sweep_chunk_mp4s(
     run_dir: Path,
     *,
     encode_fn: EncodeFn | None = None,
+    live_dirs: set[Path] | None = None,
 ) -> tuple[int, int]:
     """Retroactive chunk-mp4 pass over every plan dir (finalize-start sweep).
 
@@ -244,19 +299,21 @@ def sweep_chunk_mp4s(
     gigabytes of PNGs collapse to megabytes before polling starts.
     Chunks with incomplete interp PNGs are skipped, never fail-loud
     (the pollers below heal them); returns `(ensured, skipped)`.
+
+    Track C liveness: `live_dirs` (the `plan_dir_for_segment` set for
+    the current usable segments + joints) restricts the sweep to live
+    dirs — orphaned plan dirs are GC's concern (prune-then-sweep order),
+    never re-encoded here. None (default) keeps the legacy all-dirs
+    sweep for direct callers/tests.
     """
     if not isinstance(run_dir, Path):
         raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
-    try:
-        plan_dirs = sorted(
-            child for child in (run_dir / sidecar.AUGMENT_DIRNAME).iterdir() if child.is_dir()
-        )
-    except OSError:
-        return (0, 0)
     ensured = 0
     skipped = 0
-    for plan_dir in plan_dirs:
+    for plan_dir in sidecar.list_plan_dirs(run_dir):
         if plan_dir.is_symlink() or plan_dir.name == "morph_joints":
+            continue
+        if live_dirs is not None and plan_dir not in live_dirs:
             continue
         ledger = plan_dir / sidecar.CHUNKS_LEDGER_FILENAME
         records = sidecar.load_chunk_ledger(ledger)
@@ -369,6 +426,87 @@ def _newest_modification_time(plan_dir: Path) -> float | None:
     return newest
 
 
+_LAST_GC_FINGERPRINT: tuple[Any, ...] | None = None
+"""Inputs of the last completed orphan-GC pass (issue 252).
+
+Repeat finalize starts in one process re-ran the whole GC (joint
+re-hashes + recursive mtime stats) with nothing changed. When the
+cheap fingerprint below still matches, there is nothing new to
+collect and the pass returns 0. Skips defer collection only — they
+never delete wrongly (a changed tree changes the fingerprint and
+runs the full pass). Wall time (`now_seconds`) is deliberately NOT
+part of the fingerprint: an orphan aging past grace waits for the
+next fingerprint change instead of forcing a full pass per call.
+"""
+
+
+def _gc_fingerprint(
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    crf: int,
+    preset: str,
+    grace_days: float,
+    run_dir: Path,
+    joint_videos: list[Path],
+) -> tuple[Any, ...]:
+    """Cheap GC inputs identity (no hashes, no recursive stats).
+
+    Segment manifests (id + source key + file identity) catch
+    commits/re-renders; the augment top-level listing (names + dir
+    mtimes) catches new/removed plan dirs; joint video identities
+    catch re-rendered bridges. All shallow: one `iterdir` + a few
+    stats, versus the full pass's recursive stats + gigabyte hashes.
+    """
+    from voyage import paths
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    segment_bits: list[tuple[str, str, int, int]] = []
+    try:
+        sources, _skipped = committed_segment_sources(run_dir)
+    except (OSError, ValueError):
+        sources = []
+    for source in sorted(sources, key=lambda item: item.segment_id):
+        manifest = source.segment_dir / paths.SEGMENT_MANIFEST_FILENAME
+        try:
+            stat = manifest.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = (-1, -1)
+        segment_bits.append((source.segment_id, source.source_key, stamp[0], stamp[1]))
+    top_bits: list[tuple[str, int]] = []
+    for child in sidecar.list_plan_dirs(run_dir):
+        try:
+            stamp_ns = child.stat().st_mtime_ns
+        except OSError:
+            stamp_ns = -1
+        top_bits.append((child.name, stamp_ns))
+    joint_bits: list[tuple[str, int, int]] = []
+    for joint_video in sorted(str(video) for video in joint_videos):
+        try:
+            stat = Path(joint_video).stat()
+            joint_bits.append((joint_video, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            joint_bits.append((joint_video, -1, -1))
+    return (
+        str(run_dir),
+        weights_key,
+        out_width,
+        out_height,
+        out_fps,
+        upscale_factor,
+        crf,
+        preset,
+        float(grace_days),
+        tuple(segment_bits),
+        tuple(top_bits),
+        tuple(joint_bits),
+    )
+
+
 def prune_orphan_plan_dirs(
     run_dir: Path,
     *,
@@ -399,13 +537,18 @@ def prune_orphan_plan_dirs(
     wired into finalize (explicit later decision) — callers invoke it
     deliberately.
 
+    Track C joint/morph GC: liveness derives from the CURRENT adjacent
+    usable pairs only (the committed segment order at call time — a
+    re-trimmed run's stale pairs are not live), and `joint_sources/`,
+    `joint_timeline/`, `morph_native/` artifacts age out via the same
+    `grace_days` (see `prune_stale_joint_artifacts`).
+
     Stdlib-only like the rest of this module (supervisor §12 GPU ban):
     segment sources and plan derivations import locally to avoid cycles.
     """
-    from voyage.augment_joints import existing_joint_videos
+    from voyage.augment_joints import existing_joint_videos, joint_video_sha
     from voyage.augment_sidecar import AUGMENT_DIRNAME, plan_dir_for_segment
     from voyage.augment_upscale_poller import committed_segment_sources
-    from voyage.hashing import sha256_file
 
     if not isinstance(run_dir, Path):
         raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
@@ -424,6 +567,24 @@ def prune_orphan_plan_dirs(
     augment_root = run_dir / AUGMENT_DIRNAME
     if not augment_root.is_dir():
         return 0
+    joint_list = existing_joint_videos(run_dir)
+    global _LAST_GC_FINGERPRINT
+    fingerprint = _gc_fingerprint(
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=out_fps,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+        grace_days=float(grace_days),
+        run_dir=run_dir,
+        joint_videos=joint_list,
+    )
+    if fingerprint == _LAST_GC_FINGERPRINT:
+        # Same tree, same settings, same segments: the last completed
+        # pass already collected everything collectible (issue 252).
+        return 0
     sources, _skipped = committed_segment_sources(run_dir)
     live_dirs: set[Path] = set()
     for source in sources:
@@ -440,9 +601,9 @@ def prune_orphan_plan_dirs(
                 preset=preset,
             )
         )
-    for joint_video in existing_joint_videos(run_dir):
+    for joint_video in joint_list:
         try:
-            joint_sha = sha256_file(joint_video)
+            joint_sha = joint_video_sha(joint_video)
         except (OSError, ValueError):
             continue
         live_dirs.add(
@@ -459,7 +620,7 @@ def prune_orphan_plan_dirs(
             )
         )
     pruned = 0
-    for child in sorted(augment_root.iterdir()):
+    for child in sidecar.list_plan_dirs(run_dir):
         if not child.is_dir() or child.is_symlink():
             continue
         if child.name == "morph_joints":
@@ -476,4 +637,110 @@ def prune_orphan_plan_dirs(
         except OSError:
             continue
         pruned += 1
+    # Track C joint/morph grace-aging: stale fix-stage artifacts (joint
+    # units for non-adjacent pairs, joint_timeline/morph_native outputs)
+    # age out under the same grace — liveness is the current adjacent
+    # usable pairs only (see helper). Best-effort: never fails the GC.
+    with contextlib.suppress(OSError, ValueError, TypeError, ImportError):
+        pruned += prune_stale_joint_artifacts(
+            run_dir, grace_days=float(grace_days), now_seconds=current_time
+        )
+    _LAST_GC_FINGERPRINT = fingerprint
+    return pruned
+
+
+def _live_adjacent_pair_keys(run_dir: Path) -> set[tuple[str, str]]:
+    """Current adjacent usable pair keys (segment ids), empty on failure.
+
+    Liveness single source for joint/morph GC: only pairs adjacent in
+    the CURRENT committed order are live — a re-trimmed or extended
+    run's stale pairs age out instead of pinning artifacts forever.
+    """
+    try:
+        from voyage.augment_upscale_poller import committed_segment_sources
+    except ImportError:
+        return set()
+    try:
+        sources, _ = committed_segment_sources(run_dir)
+    except (OSError, ValueError, TypeError):
+        return set()
+    ordered = sorted(sources, key=lambda source: source.segment_id)
+    return {(ordered[i].segment_id, ordered[i + 1].segment_id) for i in range(len(ordered) - 1)}
+
+
+def prune_stale_joint_artifacts(
+    run_dir: Path, *, grace_days: float = 7.0, now_seconds: float | None = None
+) -> int:
+    """Age out stale joint/morph artifacts under grace (Track C, best-effort).
+
+    Covers `augment/joint_sources/` units whose pair is no longer adjacent
+    in the current committed order, plus `augment/joint_timeline/` and
+    `augment/morph_native/` outputs older than `grace_days` (by newest
+    mtime under each root). Live pairs (current adjacency) and young
+    artifacts are always kept; missing roots prune nothing. Returns the
+    pruned count. Never raises for I/O (GC must never break finalize).
+    """
+    if isinstance(grace_days, bool) or not isinstance(grace_days, (int, float)):
+        raise TypeError(f"grace_days must be a number (got {type(grace_days).__name__})")
+    import math as _math
+
+    if not _math.isfinite(float(grace_days)) or float(grace_days) < 0:
+        raise ValueError(f"grace_days must be finite and >= 0 (got {grace_days!r})")
+    current_time = float(now_seconds) if now_seconds is not None else time.time()
+    cutoff = current_time - float(grace_days) * _SECONDS_PER_DAY
+    pruned = 0
+    live_pairs = _live_adjacent_pair_keys(run_dir)
+    # Joint-source units: dirname encodes the pair (leftID_rightID or
+    # joint_II_JJ) — keep only current-adjacent pairs, age out the rest.
+    try:
+        from voyage.augment_joints import joint_sources_root
+    except ImportError:
+        joint_sources_root = None  # type: ignore[assignment]
+    if joint_sources_root is not None:
+        try:
+            units_root = joint_sources_root(run_dir)
+        except (OSError, ValueError, TypeError):
+            units_root = None
+        if units_root is not None and units_root.is_dir():
+            try:
+                children = sorted(units_root.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                try:
+                    if not child.is_dir() or child.is_symlink():
+                        continue
+                except OSError:
+                    continue
+                # Pair liveness: keep when the dirname names a live pair.
+                name = child.name
+                live = any(left in name and right in name for left, right in live_pairs)
+                if live:
+                    continue
+                newest = _newest_modification_time(child)
+                if newest is None or newest > cutoff:
+                    continue
+                try:
+                    shutil.rmtree(child)
+                    pruned += 1
+                except OSError:
+                    continue
+    # Timeline/morph outputs: whole-root aging (their contents rebuild
+    # from the current pairs each finalize — stale roots are safe to
+    # drop past grace).
+    for dirname in ("joint_timeline", "morph_native"):
+        root = run_dir / "augment" / dirname
+        try:
+            if not root.is_dir() or root.is_symlink():
+                continue
+        except OSError:
+            continue
+        newest = _newest_modification_time(root)
+        if newest is None or newest > cutoff:
+            continue
+        try:
+            shutil.rmtree(root)
+            pruned += 1
+        except OSError:
+            continue
     return pruned

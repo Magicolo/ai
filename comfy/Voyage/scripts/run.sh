@@ -95,14 +95,24 @@ fi
 # Non-dict sections / non-string backends warn on stderr and are ignored
 # (issue 240: the old comprehension raised AttributeError, hidden by
 # 2>/dev/null into a silent wrong-image pick — stderr now stays loud).
-# An unreadable manifest or non-dict root warns and yields no signal:
-# generate keeps the historical ltx25 fallback below, while other verbs
-# exit 2 naming the manifest (fail-closed, like the qualify.sh gates —
-# the CLI would fail loud on the same file anyway).
+# An unreadable manifest or non-dict root warns and yields no signal for
+# non-generate verbs (fail-closed, exit 2 naming the manifest, like the
+# qualify.sh gates — the CLI would fail loud on the same file anyway).
+# For `generate` with a present-but-unreadable manifest the sniff also
+# fails closed (Track D: no silent ltx25 fallback — a torn manifest must
+# not silently render the wrong backend); only a MISSING manifest file
+# (no output/<NAME>/manifest.json yet — fresh NAME) keeps the historical
+# ltx25 default below.
 # Any CUDA backend in any of the three media sections selects the
 # video image (issue 090: [audio].backend=acestep + video=fake used to
 # stay slim, then died late in cli._require_cuda_stack; the same holds
 # for [sfx].backend=mmaudio + fake/fake).
+# Track D coverage: augment.interp_backend (film/rife model pass) and
+# audio.mastering (SonicMaster venv) are GPU work baked only into the
+# CUDA images — when the manifest requests a model pass (upscale>1 or
+# interpolate>1) or mastering=true, the sniff selects CUDA even if every
+# media backend reads fake (missing keys read as no-work, so existing
+# fake manifests stay slim).
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/manifest.json" ]; then
   if sniff_output="$(RUN_DIR="$run_dir" python3 -c '
@@ -137,13 +147,33 @@ for backend in (video, audio, sfx):
         print(backend)
         break
 else:
-    print("llama" if director == "llama" else video)
+    # Track D: augment model pass (upscale>1 or interpolate>1 with a known
+    # interp backend) and audio.mastering=true are GPU work even when every
+    # media backend reads fake — select the video image for them. Missing
+    # keys read as no-work (existing fake manifests stay slim).
+    try:
+        augment = config.get("augment", {})
+        needs_model_pass = False
+        if isinstance(augment, dict):
+            upscale = augment.get("upscale", 1)
+            interpolate = augment.get("interpolate", 1)
+            interp_backend = augment.get("interp_backend", "")
+            if isinstance(upscale, int) and isinstance(interpolate, int):
+                if (upscale > 1 or interpolate > 1) and interp_backend in ("film", "rife"):
+                    needs_model_pass = True
+        mastering = False
+        audio_section = config.get("audio", {})
+        if isinstance(audio_section, dict) and audio_section.get("mastering") is True:
+            mastering = True
+    except (AttributeError, TypeError, ValueError):
+        needs_model_pass = False
+        mastering = False
+    if needs_model_pass or mastering:
+        print("rife" if needs_model_pass else "mmaudio")
+    else:
+        print("llama" if director == "llama" else video)
 ')"; then
     requested_backend="$sniff_output"
-  elif [ "${1:-}" = "generate" ]; then
-    # Malformed/unreadable manifest (already warned on stderr above):
-    # keep the historical ltx25 fallback below, never a launcher failure.
-    requested_backend=""
   else
     echo "run.sh: error: cannot sniff a backend from $run_dir/manifest.json; refusing to guess an image" >&2
     exit 2
@@ -186,16 +216,37 @@ if [ "$needs_cuda" = "1" ] || [ "$host_has_gpu" = "1" ]; then
 else
   want_cuda=0
 fi
-if [ -n "${VOYAGE_IMAGE:-}" ]; then
-  image="$VOYAGE_IMAGE"
-elif [ "$ltx_backend" = "1" ]; then
-  image="voyage-ltx:latest"
-elif [ "$want_cuda" = "1" ]; then
-  image="voyage-video:latest"
+# Auto-selection (no explicit VOYAGE_IMAGE): ltx stack, CUDA video, or slim.
+if [ -z "${VOYAGE_IMAGE:-}" ]; then
+  if [ "$ltx_backend" = "1" ]; then
+    image="voyage-ltx:latest"
+  elif [ "$want_cuda" = "1" ]; then
+    image="voyage-video:latest"
+  else
+    image="voyage:latest"
+  fi
+  sniff_image="$image"
+  image_warning="none"
 else
-  image="voyage:latest"
+  image="$VOYAGE_IMAGE"
+  # Track D: validate the explicit image against the sniff (explicit wins,
+  # but a mismatch warns — slim for a CUDA run dies late in the worker,
+  # CUDA for a fake run only wastes pull time). Dry-run reports it.
+  if [ "$ltx_backend" = "1" ]; then
+    sniff_image="voyage-ltx:latest"
+  elif [ "$want_cuda" = "1" ]; then
+    sniff_image="voyage-video:latest"
+  else
+    sniff_image="voyage:latest"
+  fi
+  if [ "$image" != "$sniff_image" ]; then
+    image_warning="explicit VOYAGE_IMAGE=$image disagrees with sniffed $sniff_image"
+    echo "run.sh: warning: $image_warning" >&2
+  else
+    image_warning="none"
+  fi
 fi
-models="${VOYAGE_MODELS:-$HOME/.cache/voyage-models}"
+models="${VOYAGE_MODELS:-${XDG_CACHE_HOME:-$HOME/.cache}/voyage-models}"
 mkdir -p "$models"
 gpu_args=()
 if [ "${VOYAGE_GPUS:-}" = "1" ]; then
@@ -212,33 +263,46 @@ fi
 # Host-user mapping (issue 053 follow-up): images carry a real `voyager`
 # user whose UID/GID match the builder host, and --user pins the runtime
 # ids explicitly so even a stale image (built under other ids) still
-# leaves host-owned files on the bind mounts ($PWD:/app, /tmp:/tmp,
-# $models:/models) instead of root-owned ones.
+# leaves host-owned files on the bind mounts ($PWD:/app, $models:/models)
+# instead of root-owned ones. Track D: the host /tmp mount is dropped
+# (was `-v /tmp:/tmp`): the 31G tmpfs with usrquota killed an LTX25 run
+# mid-mux (boba ENOSPC), and every temp file already routes via run/tmp
+# (supervisor TMPDIR backstop + `scratch_dir` init fields) — the
+# container's own ephemeral /tmp (torchinductor/HF scratch) stays
+# writable, just isolated from the host quota.
 user_args=("--user=$(id -u):$(id -g)")
 # Direct entrypoint (CUDA-banner suppression): the voyage-video stack
 # inherits the nvidia/cuda entrypoint (/opt/nvidia/nvidia_entrypoint.sh),
 # which prints a large CUDA banner + license block on every run. Voyage has
 # its own GPU checks (torch/doctor), so exec the CLI directly. The slim
 # image defines no entrypoint, making this override equivalent there.
-# LTX worker tuning passthrough (Track C strength/carry matrix): the
-# video workers read VOYAGE_LTX_STRENGTH / VOYAGE_LTX_CARRY / VOYAGE_LTX_FAST
-# from their own environment (fail-loud validators in video_ltx25.py), but
-# `docker run` below never forwarded them — so `VOYAGE_LTX_STRENGTH=0.8
-# ./scripts/run.sh generate NAME` silently rendered at strength 1.0.
-# Forward each only when set in the caller environment (empty `-e` would
-# inject empty strings the validators reject).
+# LTX worker tuning passthrough (Track C strength/carry matrix + Track D
+# prefix rule): the video workers read VOYAGE_LTX_* from their own
+# environment (fail-loud validators in video_ltx25.py). Forward every set
+# VOYAGE_LTX_* variable by prefix (skip empty — empty `-e` would inject
+# empty strings the validators reject). Likewise forward the alternate
+# interpreter overrides (VOYAGE_DIRECTOR_PYTHON / VOYAGE_ACESTEP_PYTHON /
+# VOYAGE_SFX_PYTHON / VOYAGE_MASTERING_PYTHON): without forwarding, a host
+# override never reaches the worker spawn inside the container.
 ltx_env_args=()
-for ltx_env_name in VOYAGE_LTX_STRENGTH VOYAGE_LTX_CARRY VOYAGE_LTX_FAST; do
+for ltx_env_name in $(compgen -v VOYAGE_LTX_ || true); do
   if [ -n "${!ltx_env_name:-}" ]; then
     ltx_env_args+=(-e "${ltx_env_name}=${!ltx_env_name}")
   fi
 done
+python_env_args=()
+for python_env_name in VOYAGE_DIRECTOR_PYTHON VOYAGE_ACESTEP_PYTHON VOYAGE_SFX_PYTHON VOYAGE_MASTERING_PYTHON; do
+  if [ -n "${!python_env_name:-}" ]; then
+    python_env_args+=(-e "${python_env_name}=${!python_env_name}")
+  fi
+done
+forwarded_env_args=("${ltx_env_args[@]}" "${python_env_args[@]}")
 # Single-sourced so the dry-run seam and `docker run` cannot drift apart.
 entrypoint="voyage"
 if [ "${VOYAGE_DRY_RUN:-}" = "1" ]; then
-  printf 'image=%s\ngpus=%s\nuser=%s\nentrypoint=%s\nenv=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}" "$entrypoint" "${ltx_env_args[*]:-none}"
+  printf 'image=%s\ngpus=%s\nuser=%s\nentrypoint=%s\nenv=%s\nimage_warning=%s\n' "$image" "${gpu_args[*]:-none}" "${user_args[*]}" "$entrypoint" "${forwarded_env_args[*]:-none}" "$image_warning"
   exit 0
 fi
-docker run --rm --entrypoint "$entrypoint" -e PYTHONDONTWRITEBYTECODE=1 "${ltx_env_args[@]}" -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
-  -v "$PWD:/app" -v /tmp:/tmp -v "$models:/models" \
+docker run --rm --entrypoint "$entrypoint" -e PYTHONDONTWRITEBYTECODE=1 "${forwarded_env_args[@]}" -w /app "${user_args[@]}" "${gpu_args[@]}" "${tty_args[@]}" \
+  -v "$PWD:/app" -v "$models:/models" \
   "$image" "$@"

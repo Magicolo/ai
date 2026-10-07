@@ -1117,7 +1117,8 @@ def _verify_weights_size(weights_path: Path, kind: str, floor_bytes: int) -> Non
         raise ModelCompatibilityError(
             f"{kind} weights at {weights_path} size {actual_bytes} bytes below "
             f"floor {floor_bytes} bytes "
-            "(truncated download — re-provision via `voyage models download`)"
+            "(truncated download — re-provision via the `configure` ensure-path "
+            "(`model_registry.download_model`))"
         )
 
 

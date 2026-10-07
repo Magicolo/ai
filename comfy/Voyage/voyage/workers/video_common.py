@@ -473,7 +473,66 @@ def find_segment_video(segment_dir: Path) -> Path | None:
     return max(candidates, key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name))
 
 
-def count_video_frames(source_video: Path) -> int:
+_FRAME_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}
+"""ffprobe frame counts keyed by path -> (mtime_ns, size, frames).
+
+Issue 249: tail derives and freshness gates re-probed the same segment
+videos on every pass. The (mtime_ns, size) identity keeps the cache
+honest across re-renders — a re-rendered video stats differently and
+re-probes. Per-process only (workers are short-lived subprocesses);
+failures are never cached, so a transient ffprobe error retries next
+call.
+"""
+
+
+def _frame_count_identity(source_video: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) for a path, None when it cannot be stated."""
+    try:
+        stat = source_video.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _ffprobe_header_frames(source_video: Path) -> int | None:
+    """Container-header frame count (`nb_frames`), no decode.
+
+    Returns None when ffprobe fails or the container omits the count
+    (MPEG-TS `N/A`, some mkv) — the caller falls back to the decode
+    path. Never raises: header reads are advisory, the decode is truth.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_frames",
+                "-of",
+                "csv=p=0",
+                str(source_video),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=TAIL_DERIVE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        count = int(proc.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+    return count if count > 0 else None
+
+
+def _ffprobe_decode_frames(source_video: Path) -> int:
     """Exact frame count via ffprobe decode (no container estimate).
 
     Raises ValueError when the source is not a regular file, RuntimeError
@@ -514,20 +573,54 @@ def count_video_frames(source_video: Path) -> int:
         ) from exc
 
 
-def tail_start_frame(source_video: Path, tail_frames: int) -> int:
+def count_video_frames(source_video: Path, known_frames: int | None = None) -> int:
+    """Exact frame count for `source_video` (issue 249).
+
+    `known_frames` (e.g. manifest `metrics.frames`, already trusted at
+    the pollers) skips both probes — validated positive-int, bools
+    rejected. Otherwise the container-header `nb_frames` is tried
+    first (no decode) with the decode path as fallback; results cache
+    per (path, mtime_ns, size). Default None preserves the old
+    decode-first behavior exactly.
+    """
+    if known_frames is not None:
+        if isinstance(known_frames, bool) or not isinstance(known_frames, int):
+            raise TypeError(f"known_frames must be an int (got {type(known_frames).__name__})")
+        if known_frames < 1:
+            raise ValueError(f"known_frames must be positive (got {known_frames})")
+        return known_frames
+    identity = _frame_count_identity(source_video)
+    if identity is not None:
+        cached = _FRAME_COUNT_CACHE.get(str(source_video))
+        if cached is not None and (cached[0], cached[1]) == identity:
+            return cached[2]
+    header = _ffprobe_header_frames(source_video)
+    if header is not None:
+        if identity is not None:
+            _FRAME_COUNT_CACHE[str(source_video)] = (identity[0], identity[1], header)
+        return header
+    total = _ffprobe_decode_frames(source_video)
+    if identity is not None:
+        _FRAME_COUNT_CACHE[str(source_video)] = (identity[0], identity[1], total)
+    return total
+
+
+def tail_start_frame(source_video: Path, tail_frames: int, total_frames: int | None = None) -> int:
     """First frame index of the last-`tail_frames` window (ffprobe-backed).
 
-    Raises ValueError for non-positive counts or short sources.
+    `total_frames` threads an already-known count (manifest frames);
+    None probes as before. Raises ValueError for non-positive counts
+    or short sources.
     """
     if tail_frames < 1:
         raise ValueError(f"tail_frames must be positive (got {tail_frames})")
-    total_frames = count_video_frames(source_video)
-    if total_frames < tail_frames:
+    total = count_video_frames(source_video, known_frames=total_frames)
+    if total < tail_frames:
         raise ValueError(
-            f"segment video {source_video} has {total_frames} frames, "
+            f"segment video {source_video} has {total} frames, "
             f"need {tail_frames} for the conditioning tail"
         )
-    return total_frames - tail_frames
+    return total - tail_frames
 
 
 def build_tail_trim_argv(
@@ -573,17 +666,22 @@ def build_tail_trim_argv(
 
 
 def derive_tail_from_segment_video(
-    source_video: Path, dest_tail: Path, tail_frames: int = DERIVED_TAIL_FRAMES
+    source_video: Path,
+    dest_tail: Path,
+    tail_frames: int = DERIVED_TAIL_FRAMES,
+    total_frames: int | None = None,
 ) -> Path:
     """Trim the last `tail_frames` frames of `source_video` into `dest_tail`.
 
-    Writes to a `.tmp` sibling then renames (a crash mid-derive leaves a
-    flagged temp, never a torn tail). Returns `dest_tail`. Raises
-    ValueError for bad counts/short sources, RuntimeError when ffmpeg
-    fails or yields an empty file.
+    `total_frames` threads an already-known count (manifest frames) so
+    the derive costs one ffmpeg trim instead of probe + trim; None
+    probes as before. Writes to a `.tmp` sibling then renames (a crash
+    mid-derive leaves a flagged temp, never a torn tail). Returns
+    `dest_tail`. Raises ValueError for bad counts/short sources,
+    RuntimeError when ffmpeg fails or yields an empty file.
     """
     dest_tmp = dest_tail.with_suffix(".tmp")
-    start = tail_start_frame(source_video, tail_frames)
+    start = tail_start_frame(source_video, tail_frames, total_frames=total_frames)
     argv = build_tail_trim_argv(source_video, dest_tmp, start, tail_frames)
     try:
         proc = subprocess.run(
@@ -666,6 +764,7 @@ def run_benchmark_harness(
     clock: Callable[[], float] = time.monotonic,
     reset_peak_memory: Callable[[], None] | None = None,
     read_peak_gib: Callable[[], float] | None = None,
+    staging_parent: Path | None = None,
 ) -> BenchmarkHarnessOutcome:
     """Run warmup + measured probes in a scratch dir, timing each.
 
@@ -675,12 +774,15 @@ def run_benchmark_harness(
     results then — and false for warmup) and format their own
     backend-specific response from the returned measured-only walls/peaks.
     Counts are validated first so bad values fail fast on CPU without
-    touching GPU state.
+    touching GPU state. `staging_parent` routes the scratch under the run
+    (`run_dir/tmp/`, never bare host /tmp — issue 287); None keeps the
+    TMPDIR default (which the supervisor points at the run scratch in
+    production, bare /tmp only in bench/test callers).
     """
     validate_benchmark_counts(warmup_count, measured_count)
     wall_seconds: list[float] = []
     peak_gib: list[float] = []
-    with tempfile.TemporaryDirectory(prefix=temporary_prefix) as tmp:
+    with tempfile.TemporaryDirectory(prefix=temporary_prefix, dir=staging_parent) as tmp:
         for index in range(warmup_count + measured_count):
             if reset_peak_memory is not None:
                 reset_peak_memory()
@@ -704,14 +806,19 @@ def standard_serve_map(
     handle_evict_gpu: Handler,
     handle_rebuild: Handler,
     handle_resume: Handler,
+    handle_cancel: Handler | None = None,
 ) -> dict[str, Handler]:
     """Build the standard nine-op worker `serve()` dispatch map.
 
     Every video worker serves the same ops; only the `checkpoint` id prefix
     varies, which `backend_name` supplies (e.g. `"ltxv"` →
-    `"ltxv-<segment_id>"`).
+    `"ltxv-<segment_id>"`). `handle_cancel` is optional for backward
+    compatibility (existing callers pass seven handlers and get the nine-op
+    map exactly — see `test_standard_serve_map_keys_and_checkpoint`); pass
+    one or omit it to get the idle `loop.handle_cancel` tenth op (Track D
+    cancel wire name, stable for Track A probing).
     """
-    return {
+    serve_map: dict[str, Handler] = {
         "init": handle_init,
         "health": handle_health,
         "generate_blocks": handle_generate_blocks,
@@ -724,3 +831,247 @@ def standard_serve_map(
         "resume": handle_resume,
         "shutdown": lambda _payload: {"stopped": True},
     }
+    # Backward-compatible default: nine ops exactly (existing callers/tests
+    # pin the key set). New workers opt into the Track D `cancel` wire name
+    # via `standard_serve_map_with_cancel` below or by passing an explicit
+    # `handle_cancel` here.
+    if handle_cancel is not None:
+        serve_map["cancel"] = handle_cancel
+    return serve_map
+
+
+def standard_serve_map_with_cancel(
+    backend_name: str,
+    *,
+    handle_init: Handler,
+    handle_health: Handler,
+    handle_generate_blocks: Handler,
+    handle_benchmark: Handler,
+    handle_evict_gpu: Handler,
+    handle_rebuild: Handler,
+    handle_resume: Handler,
+    handle_cancel: Handler | None = None,
+) -> dict[str, Handler]:
+    """Ten-op map with the Track D `cancel` wire name (Track A wire point).
+
+    Same nine ops as `standard_serve_map` plus `cancel` (idle handler by
+    default, explicit handler when passed). New workers prefer this; the
+    nine-op builder stays frozen for backward compatibility.
+    """
+    from voyage.workers.loop import handle_cancel as _idle_cancel
+
+    base = standard_serve_map(
+        backend_name,
+        handle_init=handle_init,
+        handle_health=handle_health,
+        handle_generate_blocks=handle_generate_blocks,
+        handle_benchmark=handle_benchmark,
+        handle_evict_gpu=handle_evict_gpu,
+        handle_rebuild=handle_rebuild,
+        handle_resume=handle_resume,
+    )
+    base["cancel"] = handle_cancel if handle_cancel is not None else _idle_cancel
+    return base
+
+
+def report_block_progress(
+    block_index: int, total_blocks: int, *, backend: str = "", stream: Any = None
+) -> None:
+    """Worker-side progress line on stderr per diffusion chunk/block (Track D).
+
+    One line per block (`voyage_progress backend=<b> block=i/n`) so the
+    supervisor watchdog can tell a slow render from a wedged one without
+    touching RPC (non-blocking + 8MiB cap intact). Never raises (progress
+    must not fail a render); defaults to `sys.stderr` (stdout is RPC
+    framing). Call once per block/rollout inside `generate_blocks`.
+    """
+    import contextlib as _contextlib
+    import sys as _sys
+
+    target = stream if stream is not None else _sys.stderr
+    with _contextlib.suppress(OSError):
+        print(
+            f"voyage_progress backend={backend} block={block_index + 1}/{total_blocks}",
+            file=target,
+            flush=True,
+        )
+
+
+def touch_progress_file(progress_path: Path) -> Path:
+    """Record now as the last-progress timestamp (Track D watchdog).
+
+    Atomic write of `time.monotonic()` to `progress_path` (sibling of the
+    segment video or under the session work_root). The supervisor polls
+    the file mtime/content via `read_progress_timestamp` and gates on
+    `rpc.is_wedged`. Never raises (best-effort); returns the path.
+    """
+    try:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text(f"{time.monotonic():.3f}\n", encoding="utf-8")
+    except OSError:
+        pass
+    return progress_path
+
+
+def read_progress_timestamp(progress_path: Path) -> float | None:
+    """Read the last-progress monotonic timestamp, None when unknown."""
+    try:
+        text = progress_path.read_text(encoding="utf-8").strip().split()[0]
+        value = float(text)
+    except (OSError, ValueError, IndexError):
+        return None
+    if value != value or value == float("inf") or value == float("-inf"):
+        return None
+    return value
+
+
+def prune_work_root(work_root: Path) -> None:
+    """Prune session scratch contents on refresh (Track D).
+
+    Deletes every child of `work_root` (files + dirs, best-effort) but
+    keeps the root itself, so a refreshed session restarts from an empty
+    ComfyUI output/input/temp without losing the session dir identity.
+    Never raises (a prune failure must not fail the refresh — the next
+    render overwrites anyway). Track A calls this on the session-refresh
+    path (which charges one budget unit via `rpc.restart_with_budget`).
+    """
+    try:
+        if not work_root.is_dir():
+            return
+        for child in work_root.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    import shutil as _shutil
+
+                    _shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def validate_resume_trust(
+    tape: dict[str, Any],
+    *,
+    expected_profile_hash: str | None = None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+    expected_tail_frames: int | None = None,
+    expected_model_revision: str | None = None,
+) -> dict[str, Any]:
+    """Compare tape profile/geometry/tail/model against the session (Track D).
+
+    Mismatch raises `ValueError` (Fatal over the wire — never resume across
+    numerics/geometry). Returns the validated tape for chaining. Every
+    expectation is optional (None = skip that axis); callers pass what the
+    session knows (profile hash + geometry + tail frames + model revision).
+    The supervisor gate helper `resume_gate_for_supervisor` wraps this with
+    the metric hook (caller emits `resume_trust_mismatch`).
+    """
+    if not isinstance(tape, dict):
+        raise TypeError("recovery tape must be a JSON object")
+    if expected_profile_hash is not None:
+        actual = tape.get("profile_hash")
+        if not isinstance(actual, str) or actual != expected_profile_hash:
+            raise ValueError(
+                f"recovery tape profile_hash mismatch (taped {actual!r} "
+                f"vs session {expected_profile_hash!r}) — re-render from seed"
+            )
+    if expected_width is not None:
+        actual_width = tape.get("width")
+        if actual_width != expected_width:
+            raise ValueError(
+                f"recovery tape width mismatch (taped {actual_width!r} "
+                f"vs session {expected_width!r}) — re-render from seed"
+            )
+    if expected_height is not None:
+        actual_height = tape.get("height")
+        if actual_height != expected_height:
+            raise ValueError(
+                f"recovery tape height mismatch (taped {actual_height!r} "
+                f"vs session {expected_height!r}) — re-render from seed"
+            )
+    if expected_tail_frames is not None:
+        actual_tail = tape.get("conditioning_tail_frames", tape.get("num_overlap_frames"))
+        if actual_tail != expected_tail_frames:
+            raise ValueError(
+                f"recovery tape tail_frames mismatch (taped {actual_tail!r} "
+                f"vs session {expected_tail_frames!r}) — re-render from seed"
+            )
+    if expected_model_revision is not None:
+        actual_revision = tape.get("model_revision", tape.get("checkpoint_revision"))
+        if not isinstance(actual_revision, str) or actual_revision != expected_model_revision:
+            raise ValueError(
+                f"recovery tape model_revision mismatch (taped {actual_revision!r} "
+                f"vs session {expected_model_revision!r}) — re-render from seed"
+            )
+    return tape
+
+
+def resume_gate_for_supervisor(
+    tape: dict[str, Any],
+    *,
+    expected_profile_hash: str | None = None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+    expected_tail_frames: int | None = None,
+    expected_model_revision: str | None = None,
+    worker_name: str = "video",
+    segment_id: str = "",
+) -> tuple[bool, dict[str, Any]]:
+    """Supervisor gate helper for resume trust (Track A wire point).
+
+    Returns `(trusted, metric)`: `trusted` False when
+    `validate_resume_trust` raises (caller skips resume, renders fresh,
+    and emits `metric` as `resume_trust_mismatch`); True with a
+    `resume_trusted` metric otherwise. Never raises (the gate itself must
+    not fail the commit — only the resume decision).
+    """
+    try:
+        validate_resume_trust(
+            tape,
+            expected_profile_hash=expected_profile_hash,
+            expected_width=expected_width,
+            expected_height=expected_height,
+            expected_tail_frames=expected_tail_frames,
+            expected_model_revision=expected_model_revision,
+        )
+    except ValueError as exc:
+        return False, {
+            "event": "resume_trust_mismatch",
+            "worker": worker_name,
+            "segment_id": segment_id,
+            "reason": str(exc),
+        }
+    return True, {
+        "event": "resume_trusted",
+        "worker": worker_name,
+        "segment_id": segment_id,
+    }
+
+
+def checked_torch_load(path: Path, **kwargs: Any) -> Any:
+    """`torch.load` gated on `check_recovery_tape_size` (Track D).
+
+    One `stat` before the load: implausible sizes fail fast with
+    ValueError instead of OOMing the worker and burning restart budget.
+    All video-worker `torch.load` call sites must route through here.
+    """
+    import torch as _torch
+
+    check_recovery_tape_size(path)
+    return _torch.load(str(path), **kwargs)
+
+
+def is_idempotent_op(op: str) -> bool:
+    """True when retrying `op` cannot duplicate timeline state (Track D).
+
+    The ACE/SFX finalize renders (`generate_audio` / `generate_sfx`) and
+    the read-only probes (`health`, `benchmark`, `checkpoint`, `cancel`)
+    overwrite their outputs atomically — a retry-once restart is safe.
+    `generate_blocks` commits segment state and is NOT idempotent (the
+    supervisor's full budget path owns it, never the finalize helper).
+    """
+    return op in ("generate_audio", "generate_sfx", "health", "benchmark", "checkpoint", "cancel")

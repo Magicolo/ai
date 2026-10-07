@@ -109,8 +109,8 @@ checksums/ranges/alignment, and publishes atomically (sources never
 mutated). Use `configure --skip-bad` to finalize around corrupt
 segments with warnings. Explicit quality applies at finalize: output
 ships the probed source geometry by default (`--upscale`/`--interpolate`/
-`--presentation-fps` on `configure`, stored in `[augment]` — see
-`docs/AUGMENT.md`). The SFX pass dubs director-captioned effects
+`--presentation-fps` on `configure`, stored in the manifest's `augment`
+object — see `docs/AUGMENT.md`). The SFX pass dubs director-captioned effects
 under the music afterwards unless `--no-sfx` (pins
 `--sfx-caption`/`--music-caption`/`--video-caption` on `configure` —
 see `docs/SFX.md`).
@@ -128,4 +128,4 @@ see `docs/SFX.md`).
   History readers span the rotation: `iter_metric_files(run_dir)`
   (`voyage/logrotate.py`) yields dated siblings oldest-first with the
   live file last.
-- Worker `benchmark` ops + soak trending: see `docs/BENCHMARKING.md`.
+- Worker `benchmark` ops + endurance trending: see `docs/BENCHMARKING.md`.

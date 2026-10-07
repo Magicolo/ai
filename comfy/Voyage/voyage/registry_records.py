@@ -716,8 +716,8 @@ from voyage.registry_sfx import (
 # Finalize-stage augmentation weights (Track C + Phase 1 RIFE port): RIFE
 # v4.25 / FILM frame interpolation + Real-ESRGAN anime upscaler.
 # Inference-only weights fetched at runtime via
-# `voyage models download rife/film/realesrgan-anime` (or pulled
-# automatically by `generate`'s ensure step on CUDA backends) — the video
+# `model_registry.download_model(models_dir, "rife" | "film" | "realesrgan-anime")`
+# (or pulled automatically by `generate`'s ensure step on CUDA backends) — the video
 # image carries only the torch-native loaders (safetensors/Pillow leaf
 # deps in worker/Dockerfile.video), never retraining code.
 #

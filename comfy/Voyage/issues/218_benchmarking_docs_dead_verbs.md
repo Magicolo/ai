@@ -120,3 +120,39 @@ None (in-tree two-verb deletion note is the anchor).
 ### Log
 
 - 2026-10-07: filed from read-only pass-2 TUI-remnant sweep; no code touched; consolidated into 218 the same day.
+
+## Progress log (2026-10-07)
+
+- Evaluation appended (relevance confirmed; `registry_records.py:659` → live `:719` delta recorded).
+- `voyage/model_registry.py`: module docstring + `verify_checkpoint_against_manifest`
+  docstring (×2 strings) + `_require_spec` docstring + 6 `download_*` docstrings
+  reworded to the `configure` ensure-path /
+  `model_registry.download_model(models_dir, "<spec>")` entry (string-literals only).
+- `voyage/workers/{video_ltxv,video_ltx25,video_ltx23,video_causvid×2,augment_worker}.py`,
+  `voyage/audio/{mmaudio_sfx,acestep}.py`, `voyage/llama_server.py`,
+  `voyage/doctor.py:12`, `voyage/registry_records.py:719`: all dead-verb
+  strings reworded (SFX/ACE/sidecar sites carry their spec name).
+- `tests/test_causvid_worker.py:663`: pin re-pointed to
+  `match=r"model_registry\.download_model"`.
+- Docs: `BENCHMARKING.md` Commands → library path (`tests/test_benchmark.py`,
+  `voyage/boundary_metrics.py`, `pytest -m endurance`; accuracy fix — no `-m gpu`
+  selection exists on those files); `INSTALL.md` downloads → spec table with
+  ensure entry; `BACKENDS.md` 5 Needs-lines + `MODELS.md` 13 headers + intro +
+  `SFX.md:46,163` + `TROUBLESHOOTING.md:31,63` + `AUGMENT.md:222` → ensure-path
+  wording; `OPERATIONS.md:131` soak → endurance trending.
+- Verify: scope greps clean (`voyage models` 0 hits; `models download|verify`
+  only the 4 deliberately-left UPSTREAM history lines; `run.sh benchmark|soak|models`
+  0 hits); `test.sh tests/test_causvid_worker.py` 32 passed; ruff check +
+  format clean on all 12 touched Python files. `cli*.py`/`config.py`/
+  `supervisor.py`/`media.py`/`sfx_finalize.py`/`augment*.py` untouched.
+
+## Resolution (2026-10-07)
+
+Verdict: RESOLVED. All 12 runtime strings + BACKENDS/MODELS/SFX docs + test
+pin now prescribe the `configure [--no-download]` ensure-path. Left open
+(deliberate, out of scope): `UPSTREAM_CAUSVID_NOTES.md:10,68,100` +
+`UPSTREAM_LTX25_NOTES.md:11` historical wiring mentions (past-event record,
+not operator instructions, uncited by this issue); `test_issue195_doctor_coverage.py:4`
+docstring verb (foreign file); `ModelSpec.name` `# CLI target` inline comment
+(non-string literal, kept per the string-literal-only rule); `cli.py`
+`[sfx]`/`[augment]` help strings + `config.py` TOML comments (forbidden files).

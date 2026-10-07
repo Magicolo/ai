@@ -6,6 +6,7 @@ voyage imports (stdlib only).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -42,15 +43,19 @@ def _check_run_id(run_id: str) -> int:
     return 0
 
 
-def resolve_run_ref(*, run: str | None, name: str | None) -> Path | None:
-    """`--run` vs `--name` → run dir (None + stderr on misuse).
+def resolve_run_dir(*, run: str | None, name: str | None) -> Path | None:
+    """`--run` vs `--name` → run dir (None + stderr on misuse, issue 206).
 
-    `--name jango` is the short spelling for the default output path
-    (`output/jango`, resolved against the cwd like `generate`'s default
-    and the TUI). Passing both flags is exit 2 (ambiguous); passing
-    neither is exit 2 (nothing to resolve); a non-flat `--name` is
-    exit 2 (traversal guard, same rule as `--run-id`). Empty strings
-    read as absent (benchmark defaults `--run` to `""`).
+    Single resolver for both flags so validation cannot drift between
+    them again: `--name jango` is the short spelling for the default
+    output path (`output/jango` under `output_root()`); `--run` must be
+    an absolute path (the codebase invariant is absolute voyage paths —
+    workers spawn with CWD=run_dir, so a relative dir doubles up inside
+    payload paths) and warns when it escapes the output tree. Passing
+    both flags is exit 2 (ambiguous); passing neither is exit 2 (nothing
+    to resolve); a non-flat `--name` is exit 2 (traversal guard, same
+    rule as `--run-id`). Empty strings read as absent (benchmark
+    defaults `--run` to `""`).
     """
     if run and name:
         print("error: pass only one of --run or --name", file=sys.stderr)
@@ -59,13 +64,27 @@ def resolve_run_ref(*, run: str | None, name: str | None) -> Path | None:
         stripped = name.strip()
         if _check_run_id(stripped) != 0:
             return None
+        # Flat name joined under the output root: inside by construction,
+        # so no containment warning is possible here.
         return (output_root() / stripped).resolve()
     if run:
-        # Absolute: workers spawn with CWD=run_dir, so a relative dir
-        # doubles up inside payload paths.
-        return Path(run).resolve()
+        candidate = Path(run)
+        if not candidate.is_absolute():
+            print(
+                f"error: --run must be an absolute path (got {run!r})",
+                file=sys.stderr,
+            )
+            return None
+        resolved = candidate.resolve()
+        warn_if_outside_output_dir(resolved, flag="--run")
+        return resolved
     print("error: one of --run or --name is required", file=sys.stderr)
     return None
+
+
+def resolve_run_ref(*, run: str | None, name: str | None) -> Path | None:
+    """Legacy alias of `resolve_run_dir` (kept for library callers)."""
+    return resolve_run_dir(run=run, name=name)
 
 
 def output_root() -> Path:
@@ -74,7 +93,13 @@ def output_root() -> Path:
     The TUI hardcodes `output/<name>` and `generate` defaults to
     `output/<run-id>` — both relative to wherever the user invoked the
     command — so the containment root tracks the cwd, not the package.
+    `VOYAGE_OUTPUT` overrides the root (issue 206, documented): set it
+    to pin one output tree across working directories; unset keeps the
+    historical cwd behavior.
     """
+    override = os.environ.get("VOYAGE_OUTPUT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return (Path.cwd() / "output").resolve()
 
 

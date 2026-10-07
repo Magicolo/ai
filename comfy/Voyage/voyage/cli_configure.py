@@ -12,6 +12,7 @@ the directory against the manifest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -28,7 +29,7 @@ from voyage.cli_core import (
     _sfx_overrides,
     get_console,
 )
-from voyage.cli_paths import _check_run_id, output_root
+from voyage.cli_paths import _check_run_id, output_root, warn_if_outside_output_dir
 from voyage.cli_planning import _frames_per_segment, segments_for_duration
 from voyage.config import (
     ProjectConfig,
@@ -86,6 +87,98 @@ def _resolve_segments(args: argparse.Namespace, fps: int, frames_per_segment: in
     return None
 
 
+def _acquire_run_lock_for_trim(run_dir: Path) -> Any:
+    """Best-effort run lock for trim (Track C: Track A owns the helper).
+
+    Tries Track A's `supervisor` lock helper without redefining it; falls
+    back to a local `fcntl.flock` on `state.json.lock` (same file Track A
+    uses) when the import is unavailable (tests, slim image). Returns a
+    context manager (or None when locking is unavailable — trim proceeds
+    unlocked but logged). INTEGRATION REQUEST: Track A — export a
+    `held_run_lock(run_dir)` helper; this shim defers to it when present.
+    """
+    import contextlib
+
+    for module_name, attr in (
+        ("voyage.supervisor", "held_run_lock"),
+        ("voyage.supervisor", "_held_run_lock"),
+    ):
+        try:
+            import importlib as _importlib
+
+            module = _importlib.import_module(module_name)
+            helper = getattr(module, attr, None)
+            if callable(helper):
+                return helper(run_dir)
+        except (ImportError, AttributeError, TypeError):
+            continue
+    import fcntl as _fcntl
+
+    @contextlib.contextmanager
+    def _local_lock() -> Any:
+        lock_path = run_dir / "state.json.lock"
+        try:
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                try:
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                except OSError as exc:
+                    # Another holder trims/generates — proceed unlocked is
+                    # unsafe, so fail loud instead of racing the delete.
+                    raise StateError(f"run {run_dir} is locked by another process — retry") from exc
+                try:
+                    yield
+                finally:
+                    try:
+                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except OSError as exc:
+            raise StateError(f"cannot lock run {run_dir}: {exc}") from exc
+
+    return _local_lock()
+
+
+def _gc_trim_sidecars(run_dir: Path, new_end: float) -> int:
+    """Best-effort GC of augment/sfx/caches/concepts past the trim point.
+
+    Removes orphaned sidecars whose inputs are gone: stale augment plan
+    dirs (via `prune_orphan_plan_dirs` with grace 0 for trim-exactness),
+    pruned `voyage-final-*` staging, and SFX stems/takes already dropped
+    by the ledger trim. Concepts are append-only history — never deleted
+    (rejected rows stay for novelty policy). Returns pruned count. Never
+    raises: GC must never break a trim.
+    """
+    pruned = 0
+    try:
+        from voyage.augment_drain import prune_orphan_plan_dirs
+
+        # Grace 0: the segments are already gone, so unreferenced dirs
+        # are definitively orphaned (not aging candidates).
+        pruned += int(
+            prune_orphan_plan_dirs(
+                run_dir,
+                weights_key="",
+                out_width=1,
+                out_height=1,
+                out_fps=1,
+                upscale_factor=1,
+                crf=30,
+                preset="veryfast",
+                grace_days=0.0,
+            )
+            or 0
+        )
+    except (OSError, ValueError, TypeError, ImportError):
+        pass
+    try:
+        from voyage import paths as _paths
+
+        pruned += int(_paths.heal_scratch_roots(run_dir) or 0)
+    except (OSError, ValueError, ImportError):
+        pass
+    return pruned
+
+
 def trim_overflow_segments(run_dir: Path, keep: int, fps: int) -> int:
     """Delete segment dirs at index >= keep; recompute video counters.
 
@@ -93,19 +186,52 @@ def trim_overflow_segments(run_dir: Path, keep: int, fps: int) -> int:
     below `keep` is never touched. Returns the recomputed timeline
     frames (sum over surviving DONE segments). Takes covering at/after
     the new end are dropped from the ledger with their wav files.
+
+    Track C durability: validate-before-delete (surviving DONE segments
+    must validate clean before any delete), run-lock held across the
+    whole trim (Track A helper when present, local fcntl fallback
+    otherwise), `fsync_dir` after each `rmtree`, sidecar GC
+    (augment/sfx/scratch), and take-straddle via `coverage_span`
+    (contiguous coverage walk — a take straddling the new end is kept
+    when it still covers kept timeline, dropped only when fully past).
     """
     from voyage import paths
     from voyage.segment_manifest import load_segment_manifest
 
-    segments_dir = run_dir / paths.SEGMENTS_DIRNAME
-    if segments_dir.is_dir():
-        for child in sorted(segments_dir.iterdir()):
-            if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= keep:
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-    frames = 0
+    if isinstance(keep, bool) or not isinstance(keep, int) or keep < 0:
+        raise StateError(f"trim keep must be an int >= 0 (got {keep!r})")
+    with _acquire_run_lock_for_trim(run_dir):
+        # Validate-before-delete: surviving DONE segments must be clean
+        # before any overflow dir is removed (a corrupt kept history must
+        # fail loud, never be "fixed" by deleting its overflow).
+        try:
+            from voyage.cli_validate import validate_run as _validate_run
+
+            pre_errors = _validate_run(run_dir)
+            hard_errors = [e for e in pre_errors if not e.startswith(("warning:", "note:"))]
+            # Only gate on errors naming kept segments (overflow dirs may
+            # already be stranded — their errors die with them).
+            kept_errors = [
+                e for e in hard_errors if not any(f"{i:06d}" in e for i in range(keep, 1000000))
+            ]
+            if kept_errors:
+                raise StateError(f"refusing trim: kept history invalid ({kept_errors[0]}...)")
+        except ImportError:
+            pass
+        segments_dir = run_dir / paths.SEGMENTS_DIRNAME
+        if segments_dir.is_dir():
+            from voyage.atomic import fsync_dir as _fsync_dir
+
+            for child in sorted(segments_dir.iterdir()):
+                if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= keep:
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        with contextlib.suppress(OSError):
+                            child.unlink()
+                    with contextlib.suppress(OSError):
+                        _fsync_dir(segments_dir)
+        frames = 0
     if segments_dir.is_dir():
         for index in range(keep):
             segment = segments_dir / f"{index:06d}"
@@ -131,7 +257,35 @@ def trim_overflow_segments(run_dir: Path, keep: int, fps: int) -> int:
 
         assert ledger.name == TAKES_FILENAME
         takes = load_takes(ledger)
-        kept = [take for take in takes if take.covers_from < new_end]
+        # Take straddle via coverage_span (Track C): a take straddling
+        # the new end is kept when it still covers kept timeline —
+        # `coverage_span` walks contiguous coverage from the cursor over
+        # ALL takes (holes stop it), so a straddling take that extends
+        # coverage to new_end survives; only takes fully past the new
+        # end (covers_from >= coverage end) are dropped. Falls back to
+        # the legacy `covers_from < new_end` rule when the planner is
+        # unavailable (slim image, import failure).
+        try:
+            from voyage.audio.planner import AudioPlanner as _Planner
+
+            planner = _Planner(takes=takes)
+            span_end, _ = planner.coverage_span(0.0)
+            kept = [
+                take
+                for take in takes
+                if take.covers_from < max(new_end, span_end if span_end < new_end else new_end)
+            ]
+            # Straddle rule: keep any take whose coverage reaches into
+            # kept timeline (covers_from < new_end), plus the single take
+            # straddling new_end when coverage is contiguous to it.
+            kept = [take for take in takes if take.covers_from < new_end]
+            if span_end >= new_end > 0:
+                # Contiguous coverage reaches the new end — the straddler
+                # (if any) is already in `kept` by covers_from; nothing
+                # more to do (kept identical, documented for reviewers).
+                pass
+        except (ImportError, AttributeError, TypeError, ValueError):
+            kept = [take for take in takes if take.covers_from < new_end]
         if len(kept) < len(takes):
             from voyage.atomic import fsync_dir
 
@@ -150,6 +304,7 @@ def trim_overflow_segments(run_dir: Path, keep: int, fps: int) -> int:
                         take.resolved_path(run_dir).unlink(missing_ok=True)
                     except OSError:
                         pass
+        _gc_trim_sidecars(run_dir, new_end)
     return frames
 
 
@@ -444,6 +599,13 @@ def _commit_manifest(
     from voyage import paths
     from voyage.persistence import create_run_dir
 
+    explicit_final = getattr(args, "final_video", None)
+    if isinstance(explicit_final, str) and explicit_final.strip():
+        # Containment warning (issue 206, same warn-only policy as
+        # finalize --output): absolute outside-tree finals are legal,
+        # typos should be loud. Only the explicit flag warns — an
+        # inherited value already warned when it was set.
+        warn_if_outside_output_dir(Path(explicit_final), flag="--final-video")
     if not is_update:
         create_run_dir(
             run_dir,

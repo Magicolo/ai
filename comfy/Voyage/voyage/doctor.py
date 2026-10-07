@@ -9,7 +9,7 @@ nvidia-smi GPUs/torch-CUDA/disk/models-manifest presence; the remaining
 §64 gaps (FlashAttention/Triton, checkpoint compat, fs permissions,
 worker interpreters, ACE-Step) are documented in
 `docs/TROUBLESHOOTING.md` and `docs/INSTALL.md` — full model checks stay
-behind `voyage models verify`.
+behind `configure --no-download` (verify-only).
 
 As-built note (issue 066): `probe()` additionally reports per-mount
 disks (`disk_by_mount`: root/models/tmp), per-GPU VRAM + compute
@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -133,7 +134,7 @@ def _torch_cuda() -> bool | None:
         import torch  # noqa: PLC0415 — lazy: supervisor image has no torch.
 
         return bool(torch.cuda.is_available())
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
         return None
 
 
@@ -236,7 +237,7 @@ def _cuda_runtime() -> str | None:
 
         runtime = torch.version.cuda
         return str(runtime) if runtime else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
         return None
 
 
@@ -487,3 +488,93 @@ def check_ffmpeg() -> tuple[bool, str]:
     if shutil.which("ffprobe") is None:
         return False, "ffprobe not found on PATH"
     return True, "ffmpeg + ffprobe present"
+
+
+def health_alert_event(
+    alerts: Sequence[str],
+    *,
+    segment_id: str | None = None,
+    detail: str = "",
+) -> dict[str, Any]:
+    """Build one `health_alert` metric event (Track A/C runtime health, DESIGN §64).
+
+    Pure builder over `health_alerts` output: one alert string per member
+    (already `WARN:`/`CRIT:`-prefixed). Track A/C evaluates `health_alerts`
+    on gauges + preflight facts, logs this via `_log_metric`, and mirrors
+    the strings to the console via `report_health_alerts` so the metric
+    stream and the screen agree. Empty `alerts` is valid (clean bill).
+    """
+    event: dict[str, Any] = {
+        "event": "health_alert",
+        "alerts": list(alerts),
+    }
+    if segment_id is not None:
+        event["segment_id"] = segment_id
+    if detail:
+        event["detail"] = detail
+    return event
+
+
+def gauges_to_facts(gauges: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt a `resource_gauges` event to `health_alerts` facts (Track E, DESIGN §64).
+
+    Gauges carry flat `disk_free_gib` + per-worker `*_vram_*_gib` fields;
+    `health_alerts` wants `disk_by_mount` + `gpu_details` + `models`.
+    This maps the known fields (disk → `root` mount, video VRAM → one GPU
+    entry) so Track A can evaluate thresholds on live gauges without a
+    fresh `probe()`. Unknown/missing fields degrade to None (silent, never
+    a false alert).
+    """
+    disk_free = gauges.get("disk_free_gib")
+    if isinstance(disk_free, bool) or not isinstance(disk_free, (int, float)):
+        disk_free_value: float | None = None
+    else:
+        disk_free_value = float(disk_free)
+    video_free = gauges.get("video_vram_free_gib")
+    video_total = gauges.get("video_vram_total_gib")
+    if isinstance(video_free, bool) or not isinstance(video_free, (int, float)):
+        video_free_value: float | None = None
+    else:
+        video_free_value = float(video_free)
+    if isinstance(video_total, bool) or not isinstance(video_total, (int, float)):
+        video_total_value: float | None = None
+    else:
+        video_total_value = float(video_total)
+    facts: dict[str, Any] = {
+        "disk_by_mount": {
+            "root": {
+                "free_gib": disk_free_value,
+                "total_gib": None,
+                "used_fraction": None,
+            }
+        },
+        "gpu_details": [
+            {
+                "name": "video-worker",
+                "vram_total_gib": video_total_value,
+                "vram_free_gib": video_free_value,
+                "driver": None,
+                "compute_cap": None,
+                "temp_c": None,
+            }
+        ],
+    }
+    return facts
+
+
+def report_health_alerts(console: Any, alerts: Sequence[str]) -> None:
+    """One `warn` line per doctor alert (Track E runtime health, DESIGN §64).
+
+    Track A/C calls this after evaluating `health_alerts` so the operator
+    sees the same strings the `health_alert` metric records. Never raises:
+    a console without `warn` degrades to silence. `console` is `Any` by
+    design — the supervisor package never imports display types (§83).
+    """
+    warn = getattr(console, "warn", None)
+    if not callable(warn):
+        return
+    for alert in alerts:
+        try:
+            warn(str(alert))
+        except Exception:  # noqa: BLE001 - best-effort display, never fails output
+            continue

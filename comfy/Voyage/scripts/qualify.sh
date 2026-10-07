@@ -179,7 +179,7 @@ fi
 # Run dir travels via the environment (never shell-interpolated into the
 # python snippet): paths with spaces/quotes would otherwise break the
 # quoting or inject code (single quotes inside double quotes do not expand).
-artifact="reports/qual-${name}-$(date +%F).json"
+artifact="reports/qual-${name}-$(date +%FT%H%M%S).json"
 docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" -w /app -v "$PWD:/app" -e RUN_DIR="$run_dir" -e QUALIFY_SEGMENTS_FLAG="$segments_flag" -e QUALIFY_PLAN_BEFORE="$plan_before" voyage:latest \
   python -c 'import json, os; from tests.test_qualification import summarize_run; \
 run_dir = os.environ["RUN_DIR"]; summary = summarize_run(run_dir); \

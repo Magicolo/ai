@@ -22,7 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from voyage import paths
-from voyage.augment import chunk_frames_match_size, chunk_windows, interpolated_frame_count
+from voyage.augment import (
+    chunk_frames_match_size,
+    chunk_windows,
+    interpolated_chunk_frame_count,
+)
 from voyage.augment_sidecar import (
     STAGE_UPSCALED,
     ChunkKey,
@@ -281,6 +285,35 @@ def _adopt_upscaled_chunk(
     return True
 
 
+def _slice_shared_frames(
+    shared_frames: list[Path], start: int, count: int, partial_dir: Path, segment_id: str
+) -> list[Path]:
+    """Copy one chunk window out of a shared segment decode (issue 251).
+
+    `shared_frames` is the whole-segment decode (`frame_%06d`, index =
+    source frame); the window `[start, start+count)` lands renumbered
+    from zero in the fresh `partial_dir` (same layout as a per-chunk
+    decode, so downstream renders are byte-identical). Hardlinks with a
+    copy fallback (donor-adoption pattern); the caller owns the
+    staging-dir lifecycle. Raises `MediaError` on short shared decodes.
+    """
+    if start < 0 or count < 1 or start + count > len(shared_frames):
+        raise MediaError(
+            f"shared decode holds {len(shared_frames)} frames, "
+            f"cannot slice [{start}, {start + count}) ({segment_id})"
+        )
+    partial_dir.mkdir(parents=True, exist_ok=True)
+    sliced: list[Path] = []
+    for offset in range(count):
+        dest = partial_dir / f"frame_{offset:06d}.png"
+        try:
+            os.link(shared_frames[start + offset], dest)
+        except OSError:
+            shutil.copy2(shared_frames[start + offset], dest)
+        sliced.append(dest)
+    return sliced
+
+
 def upscale_poll_once(
     run_dir: Path,
     *,
@@ -303,6 +336,7 @@ def upscale_poll_once(
     prune_partials: bool = True,
     sources: list[SegmentSource] | None = None,
     interp_multiplier: int | None = None,
+    shared_segment_decode: bool = False,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -338,6 +372,14 @@ def upscale_poll_once(
     they would re-render pointlessly. None (default) keeps the legacy
     PNG-truth skip. Drivers pass the interp multiplier guarded by
     `_accepts_keyword`, so older fakes without the param keep working.
+    `shared_segment_decode` (default False) decodes each source video
+    ONCE per poll (`(0, total_frames)`) and slices chunk windows out
+    of it (issue 251: per-chunk from-start decodes re-decode the
+    prefix, ~4.6x redundant on a 232f/32f tiling). Engages only with
+    2+ missing chunks (a lone chunk gains nothing); slice bytes equal
+    per-chunk decode bytes (same decoder output, file copies), so
+    renders are byte-identical. The staging dir carries a `.partial`
+    suffix, so a crash leftover is swept by the next prune.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -411,7 +453,9 @@ def upscale_poll_once(
                         chunk_index=index,
                         start_frame=start,
                         source_frames=count,
-                        expected_frames=interpolated_frame_count(count, interp_multiplier),
+                        expected_frames=interpolated_chunk_frame_count(
+                            index, count, interp_multiplier
+                        ),
                         upscale_factor=upscale_factor,
                         multiplier=interp_multiplier,
                         crf=crf,
@@ -467,27 +511,118 @@ def upscale_poll_once(
             missing_set = set(missing)
         chunks_skipped += len(indexes) - len(missing)
         frames_skipped += sum(windows[index][1] for index in indexes if index not in missing_set)
-        for index in missing:
-            start, count = windows[index]
-            output_dir = _chunk_output_dir(plan_dir, index)
-            if _adopt_upscaled_chunk(
-                run_dir=run_dir,
-                plan_dir=plan_dir,
-                ledger_path=ledger_path,
-                source_key=source.source_key,
-                out_width=out_width,
-                out_height=out_height,
-                out_fps=out_fps,
-                upscale_factor=upscale_factor,
-                chunk_frames=chunk_frames,
-                weights_key=weights_key,
-                esrgan_sha=esrgan_sha,
-                index=index,
-                start=start,
-                count=count,
-                crf=crf,
-                preset=preset,
-            ):
+        # Shared segment decode (issue 251): one full decode per source
+        # only pays off across several missing chunks — a lone chunk
+        # keeps the exact per-chunk decode. Staging is lazy (donor
+        # adoption inside the loop may cover everything) and removed
+        # after this source either way.
+        shared_frames: list[Path] | None = None
+        shared_staging = plan_dir / "shared_decode.partial"
+        use_shared = bool(shared_segment_decode) and len(missing) >= 2
+        try:
+            for index in missing:
+                start, count = windows[index]
+                output_dir = _chunk_output_dir(plan_dir, index)
+                if _adopt_upscaled_chunk(
+                    run_dir=run_dir,
+                    plan_dir=plan_dir,
+                    ledger_path=ledger_path,
+                    source_key=source.source_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=out_fps,
+                    upscale_factor=upscale_factor,
+                    chunk_frames=chunk_frames,
+                    weights_key=weights_key,
+                    esrgan_sha=esrgan_sha,
+                    index=index,
+                    start=start,
+                    count=count,
+                    crf=crf,
+                    preset=preset,
+                ):
+                    records = load_chunk_ledger(ledger_path)
+                    chunks_done += 1
+                    frames_done += count
+                    if on_chunk is not None:
+                        on_chunk(source.segment_id, index, len(windows))
+                    if on_chunk_frames is not None:
+                        on_chunk_frames(source.segment_id, count)
+                    continue
+                if output_dir.exists():
+                    # Ledger-truth rule: unledgered output is incomplete — drop it.
+                    if output_dir.is_dir() and not output_dir.is_symlink():
+                        shutil.rmtree(output_dir)
+                    else:
+                        output_dir.unlink()
+                partial_dir = plan_dir / f"upscaled_{index:02d}.partial"
+                if partial_dir.exists():
+                    if partial_dir.is_dir() and not partial_dir.is_symlink():
+                        shutil.rmtree(partial_dir)
+                    else:
+                        partial_dir.unlink()
+                if use_shared:
+                    if shared_frames is None:
+                        if shared_staging.exists():
+                            if shared_staging.is_dir() and not shared_staging.is_symlink():
+                                shutil.rmtree(shared_staging)
+                            else:
+                                shared_staging.unlink()
+                        whole = decode(source.video_path, shared_staging, 0, source.total_frames)
+                        if len(whole) != source.total_frames:
+                            raise MediaError(
+                                f"upscale shared decode delivered {len(whole)} frames, "
+                                f"expected {source.total_frames} ({source.segment_id})"
+                            )
+                        shared_frames = whole
+                    decoded = _slice_shared_frames(
+                        shared_frames, start, count, partial_dir, source.segment_id
+                    )
+                else:
+                    decoded = decode(source.video_path, partial_dir, start, count)
+                if len(decoded) != count:
+                    raise MediaError(
+                        f"upscale decode delivered {len(decoded)} frames, "
+                        f"expected {count} ({source.segment_id} chunk {index})"
+                    )
+                if upscale is None:
+                    written = _default_upscale_pngs(
+                        decoded,
+                        partial_dir,
+                        weights_path=weights_path,
+                        device=device,
+                        upscale_factor=upscale_factor,
+                    )
+                else:
+                    written = upscale(decoded, partial_dir)
+                if len(written) != count:
+                    raise MediaError(
+                        f"upscale rendered {len(written)} frames, "
+                        f"expected {count} ({source.segment_id} chunk {index})"
+                    )
+                for frame_file in written:
+                    if not frame_file.is_file():
+                        where = f"{source.segment_id} chunk {index}"
+                        raise MediaError(f"upscale output missing: {frame_file} ({where})")
+                os.replace(partial_dir, output_dir)
+                key = ChunkKey(
+                    chunk_index=index,
+                    start_frame=start,
+                    source_frames=count,
+                    expected_frames=count,
+                    upscale_factor=upscale_factor,
+                    multiplier=1,
+                    crf=crf,
+                    preset=preset,
+                    source_key=source.source_key,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=out_fps,
+                    chunk_frames=chunk_frames,
+                )
+                relative = os.path.relpath(output_dir, run_dir).replace(os.sep, "/")
+                append_chunk_record(ledger_path, key, stage=UPSCALE_STAGE, path=relative)
                 records = load_chunk_ledger(ledger_path)
                 chunks_done += 1
                 frames_done += count
@@ -495,71 +630,14 @@ def upscale_poll_once(
                     on_chunk(source.segment_id, index, len(windows))
                 if on_chunk_frames is not None:
                     on_chunk_frames(source.segment_id, count)
-                continue
-            if output_dir.exists():
-                # Ledger-truth rule: unledgered output is incomplete — drop it.
-                if output_dir.is_dir() and not output_dir.is_symlink():
-                    shutil.rmtree(output_dir)
+        finally:
+            # Shared staging never outlives its source (a crash leftover
+            # carries `.partial`, so the next prune sweeps it).
+            if shared_frames is not None and shared_staging.exists():
+                if shared_staging.is_dir() and not shared_staging.is_symlink():
+                    shutil.rmtree(shared_staging)
                 else:
-                    output_dir.unlink()
-            partial_dir = plan_dir / f"upscaled_{index:02d}.partial"
-            if partial_dir.exists():
-                if partial_dir.is_dir() and not partial_dir.is_symlink():
-                    shutil.rmtree(partial_dir)
-                else:
-                    partial_dir.unlink()
-            decoded = decode(source.video_path, partial_dir, start, count)
-            if len(decoded) != count:
-                raise MediaError(
-                    f"upscale decode delivered {len(decoded)} frames, "
-                    f"expected {count} ({source.segment_id} chunk {index})"
-                )
-            if upscale is None:
-                written = _default_upscale_pngs(
-                    decoded,
-                    partial_dir,
-                    weights_path=weights_path,
-                    device=device,
-                    upscale_factor=upscale_factor,
-                )
-            else:
-                written = upscale(decoded, partial_dir)
-            if len(written) != count:
-                raise MediaError(
-                    f"upscale rendered {len(written)} frames, "
-                    f"expected {count} ({source.segment_id} chunk {index})"
-                )
-            for frame_file in written:
-                if not frame_file.is_file():
-                    raise MediaError(
-                        f"upscale output missing: {frame_file} ({source.segment_id} chunk {index})"
-                    )
-            os.replace(partial_dir, output_dir)
-            key = ChunkKey(
-                chunk_index=index,
-                start_frame=start,
-                source_frames=count,
-                expected_frames=count,
-                upscale_factor=upscale_factor,
-                multiplier=1,
-                crf=crf,
-                preset=preset,
-                source_key=source.source_key,
-                weights_key=weights_key,
-                out_width=out_width,
-                out_height=out_height,
-                out_fps=out_fps,
-                chunk_frames=chunk_frames,
-            )
-            relative = os.path.relpath(output_dir, run_dir).replace(os.sep, "/")
-            append_chunk_record(ledger_path, key, stage=UPSCALE_STAGE, path=relative)
-            records = load_chunk_ledger(ledger_path)
-            chunks_done += 1
-            frames_done += count
-            if on_chunk is not None:
-                on_chunk(source.segment_id, index, len(windows))
-            if on_chunk_frames is not None:
-                on_chunk_frames(source.segment_id, count)
+                    shared_staging.unlink()
     return UpscalePollResult(
         segments_seen=len(sources),
         segments_skipped=skipped,

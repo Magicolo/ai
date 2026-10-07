@@ -7,19 +7,23 @@ First-run load/compile is always excluded from steady-state numbers.
 
 ## Commands
 
+There is no `benchmark`/`soak` CLI verb (two-verb CLI: `configure` +
+`generate` only). Benchmarks run through the worker `benchmark` ops and
+the pytest/qualification harness instead:
+
 ```bash
-# Block-level: warmup + measured probe through the real worker RPC:
-./scripts/run.sh benchmark video --run <dir> [--warmup 1 --measured 3]
-./scripts/run.sh benchmark audio --run <dir> [--warmup 1 --measured 3]
-# Segment-level: throwaway temp run, N segments, stage means + deltas:
-./scripts/run.sh benchmark end-to-end [--segments 2]
-# Stability: real run, N segments, resource-trend report (exit 1 on errors):
-./scripts/run.sh soak --run <dir> --segments N
+# Block-level: warmup + measured probes through the real worker RPC
+# (fake backends on CPU; same ops drive GPU workers — see voyage/bench.py):
+python -m pytest tests/test_benchmark.py
+# Continuity math on a committed run (boundary vs within-segment diffs):
+python -m voyage.boundary_metrics --run /app/output/<name>
+# Stability: multi-segment flatness (RSS/VRAM trend, exit 1 on errors):
+python -m pytest -m endurance
 ```
 
-`benchmark video|audio` needs `--run` (workers start from that run's
-config). `end-to-end` never touches your run — it builds a temp dir.
-`soak` commits real segments, then reports.
+The worker `benchmark` ops still need a configured run (workers start
+from that run's config). End-to-end harness runs never touch your run —
+they build a temp dir. Soak-style runs commit real segments, then report.
 
 ## Report fields
 

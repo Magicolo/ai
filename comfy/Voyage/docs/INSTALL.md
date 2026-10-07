@@ -55,12 +55,12 @@ The Qwen3.5-9B VLM inspector still serves from CPU system RAM (~19 GB).
 - NVIDIA driver supporting CUDA 12.8, nvidia-container-toolkit installed.
 - Pass `--gpus all`: `VOYAGE_GPUS=1 ./scripts/run.sh …`.
 - The `doctor` probe library (`voyage/doctor.py`) reports driver/GPU/ffmpeg
-  facts plus torch-CUDA, disk-free, and a models presence summary
-  before you start. Full weight-file checks stay behind `configure
-  --no-download` (verify-only); remaining doctor gaps
-  (compute capability, CUDA runtime, FlashAttention/Triton, checkpoint
-  compat, permissions, worker interpreters, ACE-Step runtime
-  availability) are listed in
+  facts plus torch-CUDA, per-GPU VRAM/driver/compute-capability/temperature,
+  the CUDA runtime, per-mount disk-free, and a models presence summary
+  (required vs optional split) before you start. Full weight-file checks
+  stay behind `configure --no-download` (verify-only); remaining doctor
+  gaps (FlashAttention/Triton, checkpoint compat, permissions, worker
+  interpreters, ACE-Step runtime availability) are listed in
   TROUBLESHOOTING.
 
 ## ffmpeg
@@ -81,22 +81,27 @@ never leave root-owned `__pycache__` in the bind mount.
 
 ## Model downloads
 
-```bash
-./scripts/run.sh models download ltxv-2b         # LTXV video (~7 GB, default)
-./scripts/run.sh models download causvid        # CausVid DMD + Wan2.1-1.3B base (~28 GB)
-./scripts/run.sh models download ltx25          # LTX-2.5 Q3 + TE + VAEs (~38 GB, joint A/V; TE/VAEs gated)
-./scripts/run.sh models download ltx23          # LTX-2.3 Q3 + TE + VAEs (~20 GB, joint A/V)
-./scripts/run.sh models download director-qwen8b  # director (~16 GB)
-./scripts/run.sh models download director-qwen4b-awq  # GPU director decider (~2.6 GB)
-./scripts/run.sh models download director-qwen35-gguf # llama-server sidecar GGUF (~3 GB)
-./scripts/run.sh models download audio-acestep    # audio checkpoints
-./scripts/run.sh models download sfx-mmaudio      # video-synced SFX (~13 GB, CC-BY-NC-4.0)
-./scripts/run.sh models download film             # finalize interpolation (~66 MB, MIT + Apache-2.0)
-./scripts/run.sh models download rife             # finalize interpolation, RIFE v4.25-heavy fp16 (~87 MB, MIT, default)
-./scripts/run.sh models download realesrgan-anime # finalize upscaler (~2.5 MB, BSD-3-Clause)
-./scripts/run.sh models download inspector-qwen35 # VLM (~19 GB, optional)
-./scripts/run.sh models verify                    # presence + size checks
-```
+There is no `models` CLI verb (two-verb CLI: `configure` + `generate`
+only). `configure` verifies — and downloads when missing — only the
+stacks the effective config needs (programmatic entry
+`model_registry.download_model(models_dir, "<spec>")`); `--no-download`
+verifies without fetching, failing loud offline instead of hanging:
+
+| Spec (`download_model` name) | Stack | Size |
+|---|---|---|
+| `ltxv-2b` | LTXV video (default) | ~7 GB |
+| `causvid` | CausVid DMD + Wan2.1-1.3B base | ~28 GB |
+| `ltx25` | LTX-2.5 Q3 + TE + VAEs, joint A/V (TE/VAEs gated) | ~38 GB |
+| `ltx23` | LTX-2.3 Q3 + TE + VAEs, joint A/V | ~20 GB |
+| `director-qwen8b` | director | ~16 GB |
+| `director-qwen4b-awq` | GPU director decider | ~2.6 GB |
+| `director-qwen35-gguf` | llama-server sidecar GGUF | ~3 GB |
+| `audio-acestep` | audio checkpoints | — |
+| `sfx-mmaudio` | video-synced SFX (CC-BY-NC-4.0) | ~13 GB |
+| `film` | finalize interpolation (MIT + Apache-2.0) | ~66 MB |
+| `rife` | finalize interpolation, RIFE v4.25-heavy fp16 (MIT, default) | ~87 MB |
+| `realesrgan-anime` | finalize upscaler (BSD-3-Clause) | ~2.5 MB |
+| `inspector-qwen35` | VLM (optional) | ~19 GB |
 
 Exact repo IDs, revisions, and links: `docs/MODELS.md`. All repos are
 ungated — no Hugging Face token needed — except the LTX-2.5 text

@@ -383,7 +383,8 @@ class LTXVSession:
         for needed in (dit_path, upsc_path):
             if not needed.exists():
                 raise FileNotFoundError(
-                    f"missing LTXV weight file {needed} — run `voyage models download` first"
+                    f"missing LTXV weight file {needed} — run `configure` first "
+                    "(models are ensured via `model_registry.download_model`)"
                 )
         torch.set_grad_enabled(False)
         print("loading LTXV transformer (bf16) ...", file=sys.stderr)
@@ -723,6 +724,7 @@ class LTXVSession:
         resume_fallback: dict[str, Any] | None = None
         try:
             for index, (prompt, seed) in enumerate(zip(prompts, seeds, strict=True)):
+                video_common.report_block_progress(index, len(prompts), backend=RECOVERY_PROFILE)
                 conditioning_source: str | NDArray[np.uint8] | None
                 if index == 0:
                     tail_candidate = resident_tail
@@ -873,8 +875,10 @@ class LTXVSession:
         tail re-hashes the tape in memory when it carries a tail hash
         (tapes without one are left alone), and an existing tail is
         adopted untouched — resume never hard-fails on a hash mismatch.
+        Trust is enforced first via `_validate_tape_trust` (profile +
+        tail + revision mismatch raises ValueError Fatal).
         """
-        parsed = parse_recovery_tape(tape)
+        parsed = _validate_tape_trust(tape)
         tail_path = str(parsed["conditioning_tail_path"])
         raw_tail_frames = parsed.get("conditioning_tail_frames", CONDITIONING_TAIL_FRAMES)
         tail_frames = (
@@ -945,11 +949,18 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"video_ltxv requires a CUDA device (got {device!r})")
     if not torch.cuda.is_available():
         raise RuntimeError("video_ltxv requires a CUDA GPU")
+    device_index = video_common.cuda_device_index(device)
+    if device_index >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"video_ltxv device {device!r} is out of range "
+            f"({torch.cuda.device_count()} CUDA device(s) visible)"
+        )
     started = time.monotonic()
     _INIT_PARAMS.update({"models_dir": models_dir, "device": device})
     _SESSION = _build_session()
-    name = torch.cuda.get_device_name(0)
-    free_gib, total_gib = torch.cuda.mem_get_info()
+    device_arg = video_common.torch_device_arg(device_index)
+    name = torch.cuda.get_device_name(device)
+    free_gib, total_gib = torch.cuda.mem_get_info(device)
     return {
         "status": "READY",
         "backend": RECOVERY_PROFILE,
@@ -957,6 +968,8 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
         "load_seconds": round(time.monotonic() - started, 1),
         "vram_free_gib": round(free_gib / 1024**3, 1),
         "vram_total_gib": round(total_gib / 1024**3, 1),
+        "device_index": device_index,
+        "device_arg": list(device_arg),
     }
 
 
@@ -967,7 +980,14 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
     ready = _SESSION is not None
     info: dict[str, Any] = {"status": "READY" if ready else "IDLE"}
     if torch.cuda.is_available():
-        free_gib, total_gib = torch.cuda.mem_get_info()
+        device = str(_INIT_PARAMS.get("device", "cuda:0"))
+        try:
+            device_index = video_common.cuda_device_index(device)
+        except ValueError:
+            device_index = 0
+        info["device"] = device
+        info["device_index"] = device_index
+        free_gib, total_gib = torch.cuda.mem_get_info(device)
         info["vram_free_gib"] = round(free_gib / 1024**3, 1)
         info["vram_total_gib"] = round(total_gib / 1024**3, 1)
     return info
@@ -1051,14 +1071,16 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             committed = int(result["committed_frames"])
             generated = int(result["generated_frames"])
 
+    benchmark_device = video_common.cuda_device_index(str(_INIT_PARAMS.get("device", "cuda:0")))
+    device_arg = video_common.torch_device_arg(benchmark_device)
     try:
         outcome = video_common.run_benchmark_harness(
             warmup,
             measured,
             "voyage-ltxv-bench-",
             probe,
-            reset_peak_memory=torch.cuda.reset_peak_memory_stats,
-            read_peak_gib=lambda: torch.cuda.max_memory_allocated() / 1024**3,
+            reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
+            read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
         )
     finally:
         session._conditioning_tail_path = saved_tail
@@ -1082,6 +1104,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _load_tape_json(recovery_path: str) -> dict[str, Any]:
     """Read a §5.3 JSON tape; old torch tapes fail with a clean-break error."""
+    video_common.check_recovery_tape_size(Path(recovery_path))
     try:
         with open(recovery_path, encoding="utf-8") as handle:
             loaded: Any = json.load(handle)
@@ -1093,6 +1116,46 @@ def _load_tape_json(recovery_path: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("LTXV recovery tape must be a JSON object")
     return loaded
+
+
+def _validate_tape_trust(tape: dict[str, Any]) -> dict[str, Any]:
+    """Resume-trust gate: profile + geometry + tail + revision (Track D).
+
+    Recomputes the profile hash from the tape's own geometry and compares
+    it plus the tail-frame count and the pinned model/pipeline revisions.
+    Mismatch raises ValueError (Fatal over the wire — never resume across
+    numerics). The supervisor's full geometry gate
+    (`video_common.resume_gate_for_supervisor`) runs before this with the
+    config's expected geometry; this is the worker-side self-consistency
+    half.
+    """
+    parsed = parse_recovery_tape(tape)
+    width = parsed.get("width")
+    height = parsed.get("height")
+    fps = parsed.get("fps")
+    target = parsed.get("segment_target_frames", SEGMENT_TARGET_FRAMES)
+    tail = parsed.get("conditioning_tail_frames", CONDITIONING_TAIL_FRAMES)
+    if isinstance(width, int) and isinstance(height, int) and isinstance(fps, int):
+        expected_hash = generation_profile_hash(
+            int(width),
+            int(height),
+            int(fps),
+            int(target) if isinstance(target, int) else SEGMENT_TARGET_FRAMES,
+            int(tail) if isinstance(tail, int) else CONDITIONING_TAIL_FRAMES,
+        )
+        video_common.validate_resume_trust(
+            parsed,
+            expected_profile_hash=expected_hash,
+            expected_tail_frames=CONDITIONING_TAIL_FRAMES,
+            expected_model_revision=LTXV_HF_REVISION,
+        )
+    else:
+        video_common.validate_resume_trust(
+            parsed,
+            expected_tail_frames=CONDITIONING_TAIL_FRAMES,
+            expected_model_revision=LTXV_HF_REVISION,
+        )
+    return parsed
 
 
 def handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1132,7 +1195,7 @@ def handle_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     serve(
-        video_common.standard_serve_map(
+        video_common.standard_serve_map_with_cancel(
             "ltxv",
             handle_init=handle_init,
             handle_health=handle_health,

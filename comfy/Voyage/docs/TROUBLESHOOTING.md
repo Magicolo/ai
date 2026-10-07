@@ -17,9 +17,10 @@
   and free disk under the run dir and `/models` (`generate` gates on
   all three before rendering). The `doctor` probe library
   (`voyage/doctor.py`) covers driver/GPU/ffmpeg facts plus torch-CUDA,
-  disk-free, and a models presence summary — it does NOT yet check
-  compute capability, CUDA runtime version, FlashAttention/Triton,
-  checkpoint compat, fs permissions, worker interpreters, or ACE-Step
+  per-GPU VRAM/driver/compute-capability/temperature, the CUDA runtime,
+  per-mount disk-free, and a models presence summary (required vs
+  optional split) — remaining gaps are FlashAttention/Triton,
+  checkpoint compat, fs permissions, worker interpreters, and ACE-Step
   runtime availability.
 - transformers is pinned to 4.57.6 in the video image (the LTXV/CausVid
   stack is probe-verified against it; 5.x lives only in the director venv).
@@ -28,7 +29,7 @@
 
 ## Model mismatch
 
-- `models verify` — every weight file, presence + size sanity.
+- `configure --no-download` (verify-only) — every weight file, presence + size sanity.
 - Checkpoints must match upstream `MAIN_MODEL_COMPONENTS` layout under
   `<models>/acestep/checkpoints/` (includes the gate-only 1.7 B LM).
 - Tapes never resume across numerics: switching `fp8|bf16` starts the
@@ -46,7 +47,7 @@
 - The 0.6 B planner must `initialize(offload_to_cpu=True)` or the DiT
   preflight fails. 2060-class cards cannot hold the ACE DiT — render
   audio on the 16 GB card via the standard evict/render/rebuild cycle.
-- SFX OOM at finalize: drop `[sfx] model_size` down the ladder first
+- SFX OOM at finalize: drop the manifest `sfx` object `model_size` down the ladder first
   (`large_44k_v2` needs the 4060 at 6.2 GiB; `small_44k` fits the 2060
   at 4.6 GiB — `docs/SFX.md`), then check co-residency.
 
@@ -60,7 +61,9 @@
   SRVGGNetCompact XS) has its own key-sniffed loader; RRDB-shaped
   files take the classic builder.
 - Missing `film`/`realesrgan-anime` weights raise torch-free before any
-  torch import — `models download film realesrgan-anime` + `models verify`.
+  torch import — re-run `configure`/`generate` to re-provision via the
+  ensure-path (`model_registry.download_model`), or pass `--no-download`
+  to fail fast with the verify message.
 
 ## Disk full
 

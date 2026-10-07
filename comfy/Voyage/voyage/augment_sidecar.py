@@ -51,6 +51,20 @@ PNG-count gate (pruned PNGs never rejoin the missing set).
 _KNOWN_STAGES = frozenset({STAGE_UPSCALED, STAGE_INTERPOLATED, STAGE_CHUNK_MP4})
 
 
+def list_plan_dirs(run_dir: Path) -> list[Path]:
+    """Sorted `augment/` subdirs, [] when absent/unreadable (issue 252).
+
+    Sweep, heal, and GC share this enumeration instead of each
+    re-walking the tree. Per-caller filters (symlink skips,
+    `morph_joints`, hash-name checks, ledger presence) stay at the
+    call sites — only the walk is shared, so behavior is unchanged.
+    """
+    try:
+        return sorted(child for child in (run_dir / AUGMENT_DIRNAME).iterdir() if child.is_dir())
+    except OSError:
+        return []
+
+
 @dataclass(frozen=True)
 class ChunkKey:
     """Identity of one sidecar chunk (all must match for a ledger hit).
@@ -309,6 +323,73 @@ def chunk_mp4_path(plan_dir: Path, chunk_index: int) -> Path:
     return plan_dir / f"chunk_{chunk_index:02d}.mp4"
 
 
+def _probe_mp4_frames(mp4: Path) -> int | None:
+    """Probed presented frames for one chunk mp4, None when unprobable.
+
+    Header `nb_frames` first (no decode), decode-count fallback — the
+    same shape as `media.presented_frames` but stdlib-local (this module
+    stays torch/ffmpeg-wrapper free; failures read as None, never raise).
+    """
+    try:
+        import subprocess as _subprocess
+
+        header = _subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_frames",
+                "-of",
+                "default=nw=1:nk=1",
+                str(mp4),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return None
+    if header.returncode == 0:
+        try:
+            count = int(header.stdout.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            count = 0
+        if count > 0:
+            return count
+    try:
+        import subprocess as _subprocess
+
+        proc = _subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=nw=1:nk=1",
+                str(mp4),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
 def chunk_mp4_file_complete(plan_dir: Path, chunk_index: int) -> bool:
     """Whether the durable chunk mp4 exists and is non-empty (pure file truth)."""
     try:
@@ -318,19 +399,42 @@ def chunk_mp4_file_complete(plan_dir: Path, chunk_index: int) -> bool:
         return False
 
 
+def chunk_mp4_frames_match(plan_dir: Path, key: ChunkKey) -> bool:
+    """Whether the durable chunk mp4 probes to `key.expected_frames` (Track C).
+
+    File-exists + non-empty is not enough: a truncated encode (kill
+    mid-concat, torn chunk) probes short and must re-render. Unprobable
+    (no ffprobe in the test image) reads as True when the file is
+    non-empty — the count gate only hardens environments with ffprobe,
+    never unit tests/fakes. Mismatch reads as missing (caller treats it
+    as incomplete, never as complete).
+    """
+    if not chunk_mp4_file_complete(plan_dir, key.chunk_index):
+        return False
+    probed = _probe_mp4_frames(chunk_mp4_path(plan_dir, key.chunk_index))
+    if probed is None:
+        return True
+    return probed == int(key.expected_frames)
+
+
 def chunk_mp4_complete(plan_dir: Path, records: list[dict[str, Any]], key: ChunkKey) -> bool:
     """Whether chunk `key` needs no further PNG work (record + file truth).
 
     Complete means an exact-key `chunk_mp4`-stage record exists (the same
     `ChunkKey` the interp record carries, so any settings change still
-    re-renders) plus a non-empty `chunk_NN.mp4` beside it. Pollers check
-    this BEFORE any PNG-count gate: pruned PNG dirs must skip, never
-    rejoin the missing set. The drain encodes through `ensure_chunk_mp4`
-    instead of checking this directly (it must also produce the mp4).
+    re-renders) plus a non-empty `chunk_NN.mp4` beside it that probes to
+    `key.expected_frames` (Track C: a truncated encode probes short and
+    re-renders — file-exists alone once shipped short chunks silently).
+    Pollers check this BEFORE any PNG-count gate: pruned PNG dirs must
+    skip, never rejoin the missing set. The drain encodes through
+    `ensure_chunk_mp4` instead of checking this directly (it must also
+    produce the mp4).
     """
     if not chunk_cache_hit(records, key, stage=STAGE_CHUNK_MP4):
         return False
-    return chunk_mp4_file_complete(plan_dir, key.chunk_index)
+    if not chunk_mp4_file_complete(plan_dir, key.chunk_index):
+        return False
+    return chunk_mp4_frames_match(plan_dir, key)
 
 
 def prune_stale_partials(target: Path) -> int:
@@ -744,12 +848,8 @@ def heal_augment_ledgers(run_dir: Path) -> int:
     so the next pass re-renders them. Never raises — per-plan-dir
     `OSError` is skipped so one unreadable plan never blocks the sweep.
     """
-    try:
-        plan_dirs = sorted(p for p in (run_dir / AUGMENT_DIRNAME).iterdir() if p.is_dir())
-    except OSError:
-        return 0
     stripped = 0
-    for plan_dir in plan_dirs:
+    for plan_dir in list_plan_dirs(run_dir):
         ledger = plan_dir / CHUNKS_LEDGER_FILENAME
         if not ledger.is_file():
             continue

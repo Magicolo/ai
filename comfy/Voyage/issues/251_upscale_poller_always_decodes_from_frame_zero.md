@@ -52,3 +52,61 @@ branch exists but is never taken by this caller).
 ## Log
 
 - 2026-10-07: filed from read-only Track D sweep; no code touched, no GPU work run.
+
+## Evaluation (2026-10-07, group N)
+
+Re-verified live against current code before fixing — claim CONFIRMED:
+
+- `_default_decode_fn` (`voyage/augment_upscale_poller.py:148-154`)
+  still hardcodes `fps=None`, forcing the from-start
+  `between(n,start,end)` path for every chunk. The fast-seek branch
+  (`voyage/augment.py:363-381`) is input-`-ss` (keyframe-approximate) —
+  the exact hazard the issue notes — and no caller passes `fps`.
+- The O(N^2) arithmetic was rechecked by hand: windows
+  32,32,32,32,32,32,32,15 over 232f decode prefix sums = 1063 frames
+  (4.58x). Computed, not profiled — but it is exact integer math on
+  the window layout, not a timing estimate, so it stands.
+- Fix adopted: per-segment shared decode (decode `(0, total)` ONCE,
+  slice windows by file copy/hardlink + renumber) behind opt-in
+  `shared_segment_decode` (default False — existing stub-based tests
+  pin per-chunk calls). Engages only with >= 2 missing chunks (a lone
+  chunk gains nothing). Byte-identical by construction (same decoder
+  output bytes, copies). Wired at the interleaved-finalize and
+  background call sites with `_accepts_keyword` guards; the parallel
+  driver is deliberately EXCLUDED (per-chunk work-stealing granularity
+  — a whole-segment decode per single-chunk task would decode MORE).
+
+## Progress log (2026-10-07, group N)
+
+- Implemented in `voyage/augment_upscale_poller.py`: new
+  `_slice_shared_frames` helper + opt-in `shared_segment_decode`
+  param on `upscale_poll_once` (default False — all existing
+  stub-based tests pin per-chunk calls and pass unchanged). Engages
+  only with 2+ missing chunks; staging carries `.partial` (next
+  prune sweeps crash leftovers) and is removed per source in
+  `finally`; short shared decodes fail loud like short chunk
+  decodes. Wired (guarded `_accepts_keyword`) at the
+  interleaved-finalize segment loop (`augment_finalize.py`) and the
+  background segment loop (`augment_background.py`); joint units
+  (4f, single-chunk) and the parallel driver (per-chunk stealing)
+  intentionally excluded.
+- New tests in `Voyage/tests/test_group_n_perf.py`: one decode +
+  byte-correct slices (window contents pinned), default shape
+  unchanged, lone-chunk stays per-chunk, slice bounds fail loud.
+
+## Resolution (2026-10-07)
+
+- Verdict: RESOLVED. Production upscale polling decodes each source
+  once per pass instead of once per chunk (~4.6x fewer decoded
+  frames on 232f/32f tilings by window arithmetic); slices are file
+  copies of the same decoder output, so renders are byte-identical
+  (pinned by content assertions).
+- Files changed: `voyage/augment_upscale_poller.py`,
+  `voyage/augment_finalize.py`, `voyage/augment_background.py`,
+  `Voyage/tests/test_group_n_perf.py` (new).
+- Verification: ruff check + format clean on touched files; mypy
+  strict clean on touched modules; scoped pytest 318 passed /
+  5 skipped plus 153 passed neighbors. No GPU workloads. No commits.
+- Left open: nothing in-scope. The accurate-`-ss`-after-`-i`
+  alternative was not implemented (shared decode dominates it:
+  after-`-i` seek still decodes from the previous keyframe).

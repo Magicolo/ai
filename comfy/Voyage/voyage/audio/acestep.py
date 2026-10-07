@@ -5,7 +5,8 @@ or the supervisor. Upstream's handler/inference API drifts between
 releases (handler method vs `inference.generate_music`, GenerationParams
 field names), so exactly one file needs auditing when the pin moves.
 
-Checkpoint layout (populated by `voyage models download audio-acestep`):
+Checkpoint layout (populated by the `configure` ensure-path via
+`model_registry.download_model(models_dir, "audio-acestep")`):
 `<models_dir>/acestep/` is the ACE project root holding `checkpoints/`
 with all four MAIN_MODEL_COMPONENTS (turbo DiT + VAE + text encoder +
 the 1.7B default LM, which only satisfies the handler's gate) plus the

@@ -43,7 +43,8 @@ Weight ladder (2026-09-29, `docs/MODELS.md:130-131`):
 - `medium_44k` OOMs the 2060;
 - `large_44k_v2` (default) needs the 4060 (6.2 GiB peak).
 
-Weights are CC-BY-NC-4.0 (`models download sfx-mmaudio`, ~13 GB:
+Weights are CC-BY-NC-4.0 (provisioned at `configure` time via
+`model_registry.download_model(models_dir, "sfx-mmaudio")`, ~13 GB:
 3 variants + VAE/sync/CLIP/vocoder under `<models>/mmaudio/`).
 Under-provisioning the SFX stack is the common finalize OOM — drop
 `model_size` before touching anything else (see TROUBLESHOOTING).
@@ -73,16 +74,22 @@ non-empty outputs. The ledger appends one row per window
 (`window_id`, `start`, `duration`, `caption`, `seed`, …) with
 flush + fsync + fsync_dir (takes-philosophy, immutable, versioned).
 
-Config (`voyage/config.py:361`, `[sfx]` TOML):
+Config (`voyage/config.py:361`, manifest `sfx` object):
 
-```toml
-[sfx]
-backend = "fake"        # "mmaudio" (CUDA) | "fake" (built-in, CPU-only)
-device = "cpu"          # CUDA backends pair "cuda:0"
-models_dir = "/models"
-model_size = "large_44k_v2"  # small_44k | medium_44k | large_44k_v2
-dual_pan = true         # spatialized pair (below); false = legacy single bed
+```json
+{
+  "sfx": {
+    "backend": "fake",
+    "device": "cpu",
+    "models_dir": "/models",
+    "model_size": "large_44k_v2",
+    "dual_pan": true
+  }
+}
 ```
+
+(`configure --sfx-*` flags write it; `sfx_caption`/`num_workers` omitted
+when default. CUDA backends pair `"cuda:0"`.)
 
 ## Dual-pan pair (two seeds, ±75% pan, stereo mix)
 
@@ -115,13 +122,14 @@ required for runs committed before SFX captions existed.
 
 Pins (all in-memory — the run manifest carries the effective config, no TOML):
 
-- `--sfx-caption` (finalize + `sfx` verb): one caption for the whole
-  timeline; default is per-segment director captions.
-- `--music-caption` / `--video-caption` (`run`/`generate`): pin the
+- `--sfx-caption` (this generate's finalize pass): one caption for the
+  whole timeline; default is per-segment director captions.
+- `--music-caption` / `--video-caption` (`configure`/`generate`): pin the
   music/video families; default is director-driven evolution.
-- `--no-sfx` (finalize path only): skip the SFX pass even when `[sfx]`
-  is configured. The standalone `sfx` verb has no `--no-sfx` — the
-  verb IS the pass.
+- `--no-sfx` (on `configure`, stored; or on `generate`, this-generate-only):
+  skip the SFX pass even when the manifest `sfx` object configures it.
+  There is no standalone `sfx` verb — the pass runs inside `generate`'s
+  finalize step.
 - `--sfx-backend fake|mmaudio`, `--sfx-device`, `--sfx-model-size`
   (`small_44k|medium_44k|large_44k_v2`), `--sfx-workers 1|2`
   (2 = shard `small_44k` across cuda:0+cuda:1, needs 2 visible GPUs).
@@ -143,7 +151,7 @@ serially on `cuda:0` (`voyage/augment.py:18-26` contract,
 `voyage/augment.py:514-571`; all registry CUDA rows pair
 `sfx_device="cuda:0"`, `voyage/config.py:158,176,199+`). The SFX worker
 defaults to `cuda:0` (`voyage/workers/sfx_mmaudio.py:51`); the
-`--sfx-device` override and `[sfx] device` TOML move it.
+`--sfx-device` override and the manifest `sfx` object `device` key move it.
 
 `run.sh` sniffs the stored manifest backend (video/audio/sfx plus the
 director backend) and selects `voyage-ltx:latest` for `ltx25`/`ltx23`,
@@ -160,7 +168,9 @@ win. A CUDA backend in an image without torch fails fast with the
   (`large` → `small`), then check co-residency — the supervisor evicts
   video before audio/SFX and rebuilds from `recovery.pt`; driving
   workers manually without `evict_gpu` re-creates the OOM.
-- **Missing weights**: `models download sfx-mmaudio` + `models verify`;
+- **Missing weights**: re-run `configure`/`generate` to re-provision via
+  the ensure-path (`model_registry.download_model(models_dir, "sfx-mmaudio")`)
+  or pass `--no-download` to fail fast with the verify message;
   the VLM/director resolution pattern applies (missing snapshot
   re-downloads into the volume on demand instead of silently falling
   back).

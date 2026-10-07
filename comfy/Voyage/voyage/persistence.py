@@ -30,6 +30,10 @@ def build_manifest(
     finalize policy (`final_video`/`skip_bad`/`no_sfx`). No snapshots,
     no provenance, no duplication — readers validate the root straight
     into ProjectConfig (extra manifest keys are ignored).
+
+    `schema_version` (issue 226) stamps the manifest format: current
+    `paths.SCHEMA_VERSION`, so future breaking changes fail loud in
+    `read_manifest` instead of needing another content-sniff carve-out.
     """
     manifest = config.model_dump(mode="json")
     # Caption pins are in-memory only (config.py): a stored pin would
@@ -46,6 +50,7 @@ def build_manifest(
     manifest["final_video"] = final_video
     manifest["skip_bad"] = skip_bad
     manifest["no_sfx"] = no_sfx
+    manifest["schema_version"] = paths.SCHEMA_VERSION
     return manifest
 
 
@@ -97,6 +102,22 @@ def read_manifest(run_dir: Path) -> dict[str, object]:
         raise StateError(f"invalid {paths.MANIFEST_FILENAME} in {run_dir}: {exc}") from exc
     if not isinstance(data, dict):
         raise StateError(f"{paths.MANIFEST_FILENAME} is not a JSON object")
+    version = data.get("schema_version")
+    if version is None:
+        # Legacy manifest (pre-226, no version key): the only format ever
+        # shipped, so it reads as v1.
+        pass
+    elif isinstance(version, bool) or not isinstance(version, int):
+        raise StateError(
+            f"{paths.MANIFEST_FILENAME} in {run_dir} carries a non-integer "
+            f"schema_version ({version!r}) — re-configure the run"
+        )
+    elif version > paths.SCHEMA_VERSION:
+        raise StateError(
+            f"{paths.MANIFEST_FILENAME} in {run_dir} carries schema_version "
+            f"{version} (newer than supported {paths.SCHEMA_VERSION}) — "
+            "upgrade voyage, then retry"
+        )
     return data
 
 
@@ -132,18 +153,69 @@ def read_effective_config(run_dir: Path) -> ProjectConfig:
                 "with --upscale/--interpolate; no legacy format is read"
             )
     augment_section = manifest.get("augment")
-    if isinstance(augment_section, dict):
-        # Runs configured before the interp_backend knob existed rendered
-        # with FILM (RIFE never existed) — backfill truthfully so those
-        # ledgers keep hitting. Runs without an augment section never
-        # rendered a model pass; the rife default stands.
-        augment_section.setdefault("interp_backend", "film")
+    # Runs configured before the interp_backend knob existed rendered
+    # with FILM (RIFE never existed) — backfill truthfully so those
+    # ledgers keep hitting. Runs without an augment section never
+    # rendered a model pass; the rife default stands. Single source:
+    # `interp_backend_or_default` (the finalize skip-key reads the
+    # same helper, so the two can never disagree).
+    if isinstance(augment_section, dict) and "interp_backend" not in augment_section:
+        augment_section["interp_backend"] = "film"
     try:
         return ProjectConfig.model_validate(manifest)
     except Exception as exc:
         raise StateError(
             f"invalid effective config in {paths.MANIFEST_FILENAME} ({run_dir}): {exc}"
         ) from exc
+
+
+def interp_backend_or_default(value: object) -> str:
+    """Canonical interp backend with legacy default (Track C single source).
+
+    Returns `"film"`/`"rife"` for those literals, else `"film"` — the
+    pre-knob truth (RIFE never existed, so runs without the key rendered
+    FILM). Single source for `read_effective_config` backfill and the
+    finalize skip-key, so the two can never disagree on what a missing
+    key means. Non-string or unknown values read as the legacy default
+    (fail-open for readers; writers validate strictly elsewhere).
+    """
+    if value == "film" or value == "rife":
+        return str(value)
+    return "film"
+
+
+def write_manifest_state_group(run_dir: Path, manifest: dict[str, object], state: RunState) -> None:
+    """Write manifest + state as one atomic group (Track C durability).
+
+    Stages both payloads to `*.partial` siblings, then replaces + fsyncs
+    the directory once — readers never see a manifest advanced past its
+    state (or vice versa) across a crash. Uses the same
+    temp-write/flush/fsync/replace/fsync_dir rule as `atomic_write_json`
+    for each file; the single trailing `fsync_dir` makes the pair
+    crash-consistent as a group.
+    """
+    import os
+
+    from voyage.atomic import fsync_dir
+
+    manifest_path = run_dir / paths.MANIFEST_FILENAME
+    state_path = run_dir / paths.STATE_FILENAME
+    import json as _json
+
+    staged: list[tuple[Path, Path]] = []
+    for dest, payload in (
+        (manifest_path, manifest),
+        (state_path, state.model_dump()),
+    ):
+        partial = dest.with_name(f"{dest.name}.partial")
+        with partial.open("w", encoding="utf-8") as handle:
+            handle.write(_json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        staged.append((partial, dest))
+    for partial, dest in staged:
+        os.replace(partial, dest)
+    fsync_dir(run_dir)
 
 
 def write_state(run_dir: Path, state: RunState) -> None:

@@ -3,11 +3,15 @@
 All pins live in code in `voyage/model_registry.py` (the single source of
 truth); this file mirrors them for humans. Most repos are **ungated** —
 no token required — except the LTX-2.5 text encoder, VAEs and upscaler
-(see below), which need a token with access. Verify local files with
-`configure --no-download` (verify-only; the default verifies and
-downloads the stacks the effective config needs).
+(see below), which need a token with access. There is no `models` CLI
+verb (two-verb CLI: `configure` + `generate` only): `configure`
+verifies — and downloads when missing — only the stacks the effective
+config needs (programmatic entry
+`model_registry.download_model(models_dir, "<spec>")`, with `<spec>` the
+parenthesized name on each section header below); `configure
+--no-download` verifies without fetching (verify-only).
 
-## Video — LTXV 2B distilled (`models download ltxv-2b`, ~7 GB, default)
+## Video — LTXV 2B distilled (`ltxv-2b`, ~7 GB, default)
 
 | Artifact  | Repo / file | Revision |
 |-----------|-------------|----------|
@@ -18,7 +22,7 @@ Code (not weights): [Lightricks/LTX-Video](https://github.com/Lightricks/LTX-Vid
 at `4b2d053057623ddd4d0a1d3e9cd28890e9ef487f`, installed (`--no-deps`,
 `[inference]` extra) in `worker/Dockerfile.video`.
 
-## Video — CausVid DMD + Wan2.1-1.3B base (`models download causvid`, ~28 GB)
+## Video — CausVid DMD + Wan2.1-1.3B base (`causvid`, ~28 GB)
 
 | Artifact  | Repo / file | Revision |
 |-----------|-------------|----------|
@@ -33,7 +37,7 @@ at `adb6a5ecd07666b4d0290042915c8406e6d5ce22`, cloned in
 geometry 832×480 @ 16 fps; full notes:
 `docs/UPSTREAM_CAUSVID_NOTES.md`.
 
-## Video — LTX-2.5 Q3 + Gemma4 TE + VAEs (`models download ltx25`, ~38 GB, joint A/V)
+## Video — LTX-2.5 Q3 + Gemma4 TE + VAEs (`ltx25`, ~38 GB, joint A/V)
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
@@ -45,7 +49,7 @@ Driven in-process through pinned ComfyUI (`2f35f4a`) + ComfyUI-GGUF
 (`6ea2651`) + gemma4 patch — see `LTX2.md` experiments E1-E4/S21-S30.
 Generates joint audio (no ACE-Step/MMAudio for this backend).
 
-## Video — LTX-2.3 Q3 + Gemma3 TE + VAEs (`models download ltx23`, ~20 GB, joint A/V)
+## Video — LTX-2.3 Q3 + Gemma3 TE + VAEs (`ltx23`, ~20 GB, joint A/V)
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
@@ -55,7 +59,7 @@ Generates joint audio (no ACE-Step/MMAudio for this backend).
 Same pinned ComfyUI stack as ltx25; the Mode-A spatial upscaler is
 shared from the ltx25 volume (not duplicated). Joint audio, like ltx25.
 
-## Finalize augmentation — FILM interpolation (`models download film`, ~66 MB)
+## Finalize augmentation — FILM interpolation (`film`, ~66 MB)
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
@@ -67,7 +71,7 @@ hzwer/Practical-RIFE (MIT), hence the `mit-and-apache-2.0` tag. Weights
 land in `<models>/frame_interpolation/` (ComfyUI layout); leaf deps in
 `worker/Dockerfile.video`.
 
-## Finalize augmentation — RIFE interpolation (`models download rife`, ~87 MB)
+## Finalize augmentation — RIFE interpolation (`rife`, ~87 MB)
 
 | File under `~/.cache/voyage-models/...` | Origin | Size | License |
 |---|---|---|---|
@@ -75,7 +79,7 @@ land in `<models>/frame_interpolation/` (ComfyUI layout); leaf deps in
 
 RIFE v4.25-heavy fp16 is the DEFAULT interp backend (`interp_backend = "rife"`): the 2026-10-06 probe measured it sharpest and closest-to-FILM of all variants (0.05-0.10 s/pair vs FILM 0.85 s/pair at 2048x1152, identical 0.65 GiB peak, clean line-art eyeball). FILM stays for hero/archival renders via `--interp-backend film`. The repack ships the same way as the FILM file (single-file safetensors, floor-checked + sha-verified by the registry).
 
-## Finalize augmentation — realesr-animevideov3 (`models download realesrgan-anime`, ~2.5 MB)
+## Finalize augmentation — realesr-animevideov3 (`realesrgan-anime`, ~2.5 MB)
 
 | Artifact | Repo / file | Revision |
 |----------|-------------|----------|
@@ -87,7 +91,7 @@ RRDB layouts — the file wraps params one level deep under `params`;
 the old 18 MB `RealESRGAN_x4plus_anime_6B` RRDB weights are superseded,
 ~11-13x slower on the 2060); weights land in `<models>/realesrgan/`.
 
-## Director — Qwen3-8B + MiniLM (`models download director-qwen8b`, ~16 GB)
+## Director — Qwen3-8B + MiniLM (`director-qwen8b`, ~16 GB)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
@@ -101,7 +105,7 @@ instead of silently falling back. Any other known registry repo id maps
 the same way; unknown ids and local directory paths pass through to
 hub/cache behavior untouched.
 
-## Director — Qwen3-4B-AWQ GPU decider (`models download director-qwen4b-awq`, ~2.6 GB)
+## Director — Qwen3-4B-AWQ GPU decider (`director-qwen4b-awq`, ~2.6 GB)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
@@ -113,7 +117,7 @@ Default placement is cuda:1 (the second GPU) via `VOYAGE_DIRECTOR_PYTHON`;
 `--director-device cpu` opts back into the Qwen3-8B CPU path above.
 Full row (subdir, allow-list, size floor): `MODEL_SPECS["director-qwen4b-awq"]`.
 
-## Director — Qwen3.5-4B GGUF sidecar (`models download director-qwen35-gguf`, ~3 GB)
+## Director — Qwen3.5-4B GGUF sidecar (`director-qwen35-gguf`, ~3 GB)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
@@ -125,7 +129,7 @@ ensures this file instead of the AWQ stack. Same /models resolution as
 the director pair above (`Qwen3.5-4B-GGUF/`).
 Full row (file, size floor): `MODEL_SPECS["director-qwen35-gguf"]`.
 
-## Inspector — Qwen3.5-9B VLM (`models download inspector-qwen35`, ~19 GB, optional)
+## Inspector — Qwen3.5-9B VLM (`inspector-qwen35`, ~19 GB, optional)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
@@ -138,7 +142,7 @@ director pair above (`Qwen3.5-9B/`). Note: the inspector loads with
 modeling — verified live 2026-09-29, issue 056); no remote code executes.
 The pin + allow-list remain as availability guards.
 
-## Audio — ACE-Step 1.5 (`models download audio-acestep`)
+## Audio — ACE-Step 1.5 (`audio-acestep`)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|
@@ -150,7 +154,7 @@ Code: [ace-step/ACE-Step-1.5](https://github.com/ace-step/ACE-Step-1.5) at
 `<models>/acestep/checkpoints/` matching upstream `MAIN_MODEL_COMPONENTS`
 (includes the gate-only 1.7 B LM).
 
-## SFX — MMAudio 44 kHz (`models download sfx-mmaudio`, ~13 GB)
+## SFX — MMAudio 44 kHz (`sfx-mmaudio`, ~13 GB)
 
 | Artifact | Repo | Revision |
 |----------|------|----------|

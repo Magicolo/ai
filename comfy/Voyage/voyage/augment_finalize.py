@@ -15,17 +15,19 @@ and ffmpeg enter through injected seams or function-local lazy imports.
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from voyage.augment_joints import ensure_joint_units
+from voyage.augment_morph import MORPH_BRIDGE
 from voyage.augment_sidecar import plan_dir_for_segment
 from voyage.console import optional_bar, optional_stage
 from voyage.errors import MediaError
-from voyage.hashing import sha256_file
+from voyage.hashing import sha256_file, sha256_text
 
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
@@ -36,6 +38,32 @@ FINAL_INTERMEDIATE_FILENAME = "model_intermediate.mp4"
 _MAX_POLL_PASSES = 10
 """Poll-loop cap: each pass must finish chunks or the run is stuck (fail-loud)."""
 
+_JOINT_BAR_LEG_COUNT = 2
+"""Joint-bar legs: upscale + interp. The fix stage renders inside
+`_refresh_joint_units` without bar callbacks, so only the two uniform
+legs advance the combined "joint frames" bar; its total is this count
+times `MORPH_BRIDGE` source frames per joint."""
+
+
+_WEIGHTS_KEY_CACHE: dict[tuple[str, str, int, int, int, int], str] = {}
+"""Ledger weights keys keyed by (interp, realesrgan, interp_mtime_ns,
+interp_size, realesrgan_mtime_ns, realesrgan_size).
+
+Issue 250: `weights_key_for` re-read ~90 MB of weights on every call
+(once per finalize plus once per commit via the background plan).
+Weights never change mid-run; the identity keeps the memo honest
+across swaps. Per-process only; stat failures compute uncached.
+"""
+
+
+def _weights_identity(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) for a weights file, None when unstated."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
 
 def weights_key_for(weights: Any, interp_backend: str = "rife") -> str:
     """Ledger key covering both model legs, legacy `sha|sha` shape.
@@ -45,7 +73,9 @@ def weights_key_for(weights: Any, interp_backend: str = "rife") -> str:
     so a backend switch already misses old records by construction --
     while pre-backend runs (e.g. kaolin's FILM ledgers) keep hitting
     with zero re-render. Final freshness across a backend switch rides
-    the skip-key backend component instead.
+    the skip-key backend component instead. Results memoize per file
+    identity (issue 250) — repeat calls with unchanged weights hash
+    nothing.
     """
     from voyage.workers import augment_worker
 
@@ -58,6 +88,25 @@ def weights_key_for(weights: Any, interp_backend: str = "rife") -> str:
             "durable model pass needs the interp leg and the upscale leg provisioned "
             f"(backend={backend}, interp={interp!r}, realesrgan={realesrgan!r})"
         )
+    interp_path = Path(interp) if not isinstance(interp, Path) else interp
+    realesrgan_path = Path(realesrgan) if not isinstance(realesrgan, Path) else realesrgan
+    interp_identity = _weights_identity(interp_path)
+    realesrgan_identity = _weights_identity(realesrgan_path)
+    if interp_identity is not None and realesrgan_identity is not None:
+        memo_key = (
+            str(interp_path),
+            str(realesrgan_path),
+            interp_identity[0],
+            interp_identity[1],
+            realesrgan_identity[0],
+            realesrgan_identity[1],
+        )
+        cached = _WEIGHTS_KEY_CACHE.get(memo_key)
+        if cached is not None:
+            return cached
+        key = f"{sha256_file(interp)}|{sha256_file(realesrgan)}"
+        _WEIGHTS_KEY_CACHE[memo_key] = key
+        return key
     return f"{sha256_file(interp)}|{sha256_file(realesrgan)}"
 
 
@@ -70,6 +119,353 @@ def _interp_weights_path(weights: Any, interp_backend: str) -> Path | None:
     from voyage.augment import interp_leg_path
 
     return interp_leg_path(weights, interp_backend)
+
+
+_AUGMENT_PLAN_FINGERPRINT_VERSION = "augment-plan-v1"
+"""Fingerprint namespace: bump when the hashed field set changes (old markers miss)."""
+
+_COVERAGE_INTERP_BACKENDS = frozenset({"film", "rife"})
+"""Backends the coverage marker accepts (mirrors the worker vocabulary)."""
+
+_AUGMENT_COVERAGE_REQUIRED_KEYS = frozenset(
+    {
+        "fingerprint",
+        "segments",
+        "joints",
+        "jointed_timeline_sha",
+        "interp_backend",
+        "weights_key",
+    }
+)
+"""Exact marker keys: missing or extra keys fail validation (typo-proof)."""
+
+
+def _require_key_list(name: str, values: Sequence[str]) -> list[str]:
+    """Validated copy of an ordered key list (non-empty strings, order kept)."""
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{name} must be a sequence of strings (got {type(values).__name__})")
+    cleaned: list[str] = []
+    for entry in values:
+        if not isinstance(entry, str) or not entry:
+            raise ValueError(f"{name} entries must be non-empty strings (got {entry!r})")
+        cleaned.append(entry)
+    return cleaned
+
+
+def _require_frame_counts(name: str, values: Sequence[int]) -> list[int]:
+    """Validated copy of per-segment frame counts (positive ints, order kept)."""
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{name} must be a sequence of ints (got {type(values).__name__})")
+    cleaned: list[int] = []
+    for entry in values:
+        if isinstance(entry, bool) or not isinstance(entry, int) or entry < 1:
+            raise ValueError(f"{name} entries must be ints >= 1 (got {entry!r})")
+        cleaned.append(entry)
+    return cleaned
+
+
+def augment_plan_fingerprint(
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    multiplier: int,
+    crf: int,
+    preset: str,
+    interp_backend: str,
+    segment_source_keys: Sequence[str],
+    joint_fix_keys: Sequence[str],
+) -> str:
+    """Deterministic plan fingerprint over every input that forks plan dirs (DESIGN §§56-57, §140).
+
+    Covers `weights_key`, output geometry (`out_width`/`out_height`/`out_fps`
+    as the integer source-fps key), the upscale factor, the interp
+    `multiplier`, the chunk recipe (`crf`/`preset`), the `interp_backend`,
+    and the ordered segment `source_key` list plus the ordered joint fix-key
+    list. Order matters (presentation order): reordering segments or joints
+    forks the fingerprint and forces re-evaluation. Pure function, no I/O:
+    callers pass already-computed keys in (fix keys already derive from
+    video shas upstream) — this function never hashes video files.
+
+    `chunk_frames` is intentionally absent: plan dirs do not hash it (the
+    `ChunkKey` inside does), so a chunking change still misses via the
+    ledger exact-match in `augment_work_complete`, not via this hash.
+    """
+    from voyage.augment import CRF_MAXIMUM, CRF_MINIMUM
+
+    weights_key = _require_text("weights_key", weights_key)
+    out_width = _require_box("out_width", out_width)
+    out_height = _require_box("out_height", out_height)
+    out_fps = _require_box("out_fps", out_fps)
+    upscale_factor = _require_factor(upscale_factor)
+    multiplier = _require_multiplier(multiplier)
+    if isinstance(crf, bool) or not isinstance(crf, int):
+        raise TypeError(f"crf must be an int (got {type(crf).__name__})")
+    if not CRF_MINIMUM <= crf <= CRF_MAXIMUM:
+        raise ValueError(f"crf must be in [{CRF_MINIMUM}, {CRF_MAXIMUM}] (got {crf!r})")
+    preset = _require_text("preset", preset)
+    interp_backend = _require_text("interp_backend", interp_backend)
+    if interp_backend not in _COVERAGE_INTERP_BACKENDS:
+        raise ValueError(f"interp_backend must be one of {sorted(_COVERAGE_INTERP_BACKENDS)}")
+    ordered_segments = _require_key_list("segment_source_keys", segment_source_keys)
+    ordered_fixes = _require_key_list("joint_fix_keys", joint_fix_keys)
+    payload = {
+        "crf": crf,
+        "interp_backend": interp_backend,
+        "joint_fix_keys": ordered_fixes,
+        "multiplier": multiplier,
+        "out_fps": out_fps,
+        "out_height": out_height,
+        "out_width": out_width,
+        "preset": preset,
+        "segment_source_keys": ordered_segments,
+        "upscale_factor": upscale_factor,
+        "version": _AUGMENT_PLAN_FINGERPRINT_VERSION,
+        "weights_key": weights_key,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256_text(canonical)
+
+
+def stamp_augment_coverage(marker: dict[str, Any]) -> dict[str, Any]:
+    """Validate + stamp an augment coverage marker (DESIGN §56, §140).
+
+    Schema: `{"fingerprint": str, "segments": int >= 1, "joints": int >= 0,
+    "jointed_timeline_sha": str, "interp_backend": "film" | "rife",
+    "weights_key": str}`. Exact keys only (missing or extra fails), fresh
+    copy returned (never the caller's dict). The drain records
+    `jointed_timeline_sha` via `hashing.sha256_file(final)`; persistence
+    wiring (reading/writing the marker beside the run state) belongs to the
+    orchestrator — this module only constructs and validates.
+    """
+    if not isinstance(marker, dict):
+        raise TypeError(f"marker must be a dict (got {type(marker).__name__})")
+    if set(marker.keys()) != set(_AUGMENT_COVERAGE_REQUIRED_KEYS):
+        raise ValueError(
+            f"marker keys must be exactly {sorted(_AUGMENT_COVERAGE_REQUIRED_KEYS)} "
+            f"(got {sorted(marker.keys())})"
+        )
+    fingerprint = marker["fingerprint"]
+    segments = marker["segments"]
+    joints = marker["joints"]
+    timeline_sha = marker["jointed_timeline_sha"]
+    interp_backend = marker["interp_backend"]
+    weights_key = marker["weights_key"]
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError(f"fingerprint must be a non-empty string (got {fingerprint!r})")
+    if isinstance(segments, bool) or not isinstance(segments, int) or segments < 1:
+        raise ValueError(f"segments must be an int >= 1 (got {segments!r})")
+    if isinstance(joints, bool) or not isinstance(joints, int) or joints < 0:
+        raise ValueError(f"joints must be an int >= 0 (got {joints!r})")
+    if not isinstance(timeline_sha, str) or not timeline_sha:
+        raise ValueError(f"jointed_timeline_sha must be a non-empty string (got {timeline_sha!r})")
+    if not isinstance(interp_backend, str) or interp_backend not in _COVERAGE_INTERP_BACKENDS:
+        raise ValueError(
+            f"interp_backend must be one of {sorted(_COVERAGE_INTERP_BACKENDS)} "
+            f"(got {interp_backend!r})"
+        )
+    if not isinstance(weights_key, str) or not weights_key:
+        raise ValueError(f"weights_key must be a non-empty string (got {weights_key!r})")
+    return {
+        "fingerprint": fingerprint,
+        "segments": segments,
+        "joints": joints,
+        "jointed_timeline_sha": timeline_sha,
+        "interp_backend": interp_backend,
+        "weights_key": weights_key,
+    }
+
+
+def augment_work_complete(
+    run_dir: Path,
+    fingerprint: str,
+    expected_segments: int,
+    expected_joints: int,
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    multiplier: int,
+    chunk_frames: int,
+    crf: int,
+    preset: str,
+    interp_backend: str,
+    segment_source_keys: Sequence[str],
+    segment_frame_counts: Sequence[int],
+    joint_fix_keys: Sequence[str],
+) -> bool:
+    """Cheap ledger-truth completeness check for joints + model-pass work (DESIGN §§56-57, §140).
+
+    Returns True only when every joint fix record matches its expected
+    fix key with a non-empty `joint.mp4` beside it, and every expected
+    chunk in every segment and joint plan dir carries a `chunk_mp4`
+    record plus a probed-complete mp4 (`chunk_mp4_complete`, the one
+    ffprobe-backed truth in this path — joint videos check exists only to
+    stay fast on 127 dirs). No GPU, no ffmpeg render: ledger reads plus
+    exists checks, plus the `chunk_mp4_complete` probe which reads
+    fail-open (True) when ffprobe cannot parse. Any gap or any exception
+    reads as False (fail-open: incomplete work takes the normal poll
+    path) — joints work is therefore never re-done once complete,
+    cancellable/resumable via the ledger, and only a configuration change
+    (fingerprint mismatch from `augment_plan_fingerprint`) triggers
+    re-evaluation.
+    """
+    try:
+        if not isinstance(run_dir, Path):
+            return False
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return False
+        if (
+            isinstance(expected_segments, bool)
+            or not isinstance(expected_segments, int)
+            or expected_segments < 0
+        ):
+            return False
+        if (
+            isinstance(expected_joints, bool)
+            or not isinstance(expected_joints, int)
+            or expected_joints < 0
+        ):
+            return False
+        ordered_segments = _require_key_list("segment_source_keys", segment_source_keys)
+        ordered_counts = _require_frame_counts("segment_frame_counts", segment_frame_counts)
+        ordered_fixes = _require_key_list("joint_fix_keys", joint_fix_keys)
+        if len(ordered_segments) != expected_segments:
+            return False
+        if len(ordered_fixes) != expected_joints:
+            return False
+        if len(ordered_counts) != expected_segments:
+            return False
+        recomputed = augment_plan_fingerprint(
+            weights_key=weights_key,
+            out_width=out_width,
+            out_height=out_height,
+            out_fps=out_fps,
+            upscale_factor=upscale_factor,
+            multiplier=multiplier,
+            crf=crf,
+            preset=preset,
+            interp_backend=interp_backend,
+            segment_source_keys=ordered_segments,
+            joint_fix_keys=ordered_fixes,
+        )
+        if recomputed != fingerprint:
+            return False
+        chunk_frames = _require_count("chunk_frames", chunk_frames)
+        from voyage.augment import augment_plan
+        from voyage.augment_joints import (
+            JOINT_DIR_TEMPLATE,
+            JOINT_RECORD_FILENAME,
+            JOINT_VIDEO_FILENAME,
+            joint_sources_root,
+        )
+        from voyage.augment_sidecar import (
+            CHUNKS_LEDGER_FILENAME,
+            ChunkKey,
+            chunk_mp4_complete,
+            load_chunk_ledger,
+        )
+
+        joint_root = joint_sources_root(run_dir)
+        joint_shas: list[str] = []
+        for joint_position, expected_fix in enumerate(ordered_fixes):
+            joint_dir = joint_root / JOINT_DIR_TEMPLATE.format(
+                left=joint_position, right=joint_position + 1
+            )
+            record_path = joint_dir / JOINT_RECORD_FILENAME
+            try:
+                record_text = record_path.read_text(encoding="utf-8")
+            except OSError:
+                return False
+            try:
+                record = json.loads(record_text)
+            except ValueError:
+                return False
+            if not isinstance(record, dict):
+                return False
+            if record.get("source_key") != expected_fix:
+                return False
+            joint_sha = record.get("joint_sha")
+            if not isinstance(joint_sha, str) or not joint_sha:
+                return False
+            joint_video = joint_dir / JOINT_VIDEO_FILENAME
+            try:
+                if not joint_video.is_file() or joint_video.stat().st_size == 0:
+                    return False
+            except OSError:
+                return False
+            joint_shas.append(joint_sha)
+        for source_key, total_frames in zip(ordered_segments, ordered_counts, strict=True):
+            plan_dir = plan_dir_for_segment(
+                run_dir,
+                source_key=source_key,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=out_fps,
+                upscale_factor=upscale_factor,
+                crf=crf,
+                preset=preset,
+            )
+            records = load_chunk_ledger(plan_dir / CHUNKS_LEDGER_FILENAME)
+            for chunk in augment_plan(total_frames, chunk=chunk_frames, multiplier=multiplier):
+                key = ChunkKey(
+                    chunk_index=chunk.index,
+                    start_frame=chunk.start_frame,
+                    source_frames=chunk.source_frames,
+                    expected_frames=chunk.expected_frames,
+                    upscale_factor=upscale_factor,
+                    multiplier=multiplier,
+                    crf=crf,
+                    preset=preset,
+                    source_key=source_key,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=out_fps,
+                    chunk_frames=chunk_frames,
+                )
+                if not chunk_mp4_complete(plan_dir, records, key):
+                    return False
+        for joint_sha in joint_shas:
+            joint_plan = plan_dir_for_segment(
+                run_dir,
+                source_key=joint_sha,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=out_fps,
+                upscale_factor=upscale_factor,
+                crf=crf,
+                preset=preset,
+            )
+            joint_records = load_chunk_ledger(joint_plan / CHUNKS_LEDGER_FILENAME)
+            for chunk in augment_plan(MORPH_BRIDGE, chunk=chunk_frames, multiplier=multiplier):
+                key = ChunkKey(
+                    chunk_index=chunk.index,
+                    start_frame=chunk.start_frame,
+                    source_frames=chunk.source_frames,
+                    expected_frames=chunk.expected_frames,
+                    upscale_factor=upscale_factor,
+                    multiplier=multiplier,
+                    crf=crf,
+                    preset=preset,
+                    source_key=joint_sha,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=out_fps,
+                    chunk_frames=chunk_frames,
+                )
+                if not chunk_mp4_complete(joint_plan, joint_records, key):
+                    return False
+    except Exception:  # noqa: BLE001 - fail-open: incomplete reads as not-complete
+        return False
+    return True
 
 
 def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
@@ -151,16 +547,18 @@ def _expected_frame_totals(run_dir: Path, *, chunk_frames: int, multiplier: int)
     per-window `(n-1)*m+1` recipe, so the finish line can show both units.
     """
     try:
-        from voyage.augment import chunk_windows, interpolated_frame_count
+        from voyage.augment import chunk_windows, interpolated_chunk_frame_count
         from voyage.augment_upscale_poller import committed_segment_sources
 
         sources, _skipped = committed_segment_sources(run_dir)
         source_total = 0
         output_total = 0
         for source in sources:
-            for _start, count in chunk_windows(source.total_frames, chunk_frames):
+            for index, (_start, count) in enumerate(
+                chunk_windows(source.total_frames, chunk_frames)
+            ):
                 source_total += count
-                output_total += interpolated_frame_count(count, multiplier)
+                output_total += interpolated_chunk_frame_count(index, count, multiplier)
     except (OSError, ValueError, TypeError):
         return (0, 0)
     else:
@@ -191,6 +589,7 @@ def _poll_to_completion(
     include_upscale: bool = True,
     interp_backend: str = "rife",
     joint_interp_fn: Callable[..., Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Run both pollers segment-interleaved until a pass finishes nothing.
 
@@ -254,17 +653,24 @@ def _poll_to_completion(
         nonlocal joint_units, joint_signature
         signature = tuple((source.segment_id, source.source_key) for source in ordered)
         if joint_signature is None or signature != joint_signature:
-            joint_units = ensure_joint_units(
-                run_dir,
-                ordered,
-                source_fps=source_fps_key,
-                crf=crf,
-                preset=preset,
-                interp_fn=joint_interp_fn,
-                weights=interp_weights,
-                device=ip_dev,
-                interp_backend=interp_backend,
-            )
+            # Track C shared cache: the drain reuses this exact list via
+            # `joint_units_signature` (no second checksum pass).
+            cached = _JOINT_UNIT_CACHE.get(joint_units_signature(ordered))
+            if cached is not None:
+                joint_units = list(cached)
+            else:
+                joint_units = ensure_joint_units(
+                    run_dir,
+                    ordered,
+                    source_fps=source_fps_key,
+                    crf=crf,
+                    preset=preset,
+                    interp_fn=joint_interp_fn,
+                    weights=interp_weights,
+                    device=ip_dev,
+                    interp_backend=interp_backend,
+                )
+                _JOINT_UNIT_CACHE[joint_units_signature(ordered)] = tuple(joint_units)
             joint_signature = signature
         return joint_units
 
@@ -286,6 +692,8 @@ def _poll_to_completion(
         ip_takes_segments = _accepts_keyword(interp_poll_fn, "segment_ids")
         interp_weights = _interp_weights_path(weights, interp_backend)
         for source in ordered_sources:
+            if should_stop is not None and should_stop():
+                return
             segment_id = source.segment_id
             segment_frames = source.total_frames or None
             if include_upscale:
@@ -321,6 +729,8 @@ def _poll_to_completion(
                     }
                     if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
                         upscale_kwargs["interp_multiplier"] = multiplier
+                    if _accepts_keyword(upscale_poll_fn, "shared_segment_decode"):
+                        upscale_kwargs["shared_segment_decode"] = True
                     if up_takes_segments:
                         upscale_kwargs["segment_ids"] = [segment_id]
                     upscale_result = upscale_poll_fn(run_dir, **upscale_kwargs)
@@ -426,6 +836,30 @@ def _poll_to_completion(
         joint_here = _refresh_joint_units(ordered_sources)
         joint_sources = [unit.as_source() for unit in joint_here]
 
+        joint_up = include_upscale or (include_interp and bool(joint_sources))
+        joint_order = [unit.segment_id for unit in joint_sources]
+        joint_position = {segment_id: position for position, segment_id in enumerate(joint_order)}
+        joint_fired = [0, 0]  # upscale / interp source frames fired live
+        joint_bar_cm: Any = None
+        joint_tracker: Any = None
+        if joint_sources and (joint_up or include_interp):
+            joint_bar_cm = optional_bar(
+                progress, "joint frames", _JOINT_BAR_LEG_COUNT * MORPH_BRIDGE * len(joint_sources)
+            )
+            joint_tracker = joint_bar_cm.__enter__()
+
+        def _joint_status(
+            leg: str,
+            segment_id: str,
+            _tracker: Any = joint_tracker,
+            _positions: dict[str, int] = joint_position,
+            _order: list[str] = joint_order,
+        ) -> None:
+            if _tracker is None:
+                return
+            position = _positions.get(segment_id, 0)
+            _tracker.set_extra(f"{leg} {segment_id} ({position + 1}/{len(_order)})")
+
         def _joint_up_chunk(
             segment_id: str,
             index: int,
@@ -434,8 +868,16 @@ def _poll_to_completion(
         ) -> None:
             _into.setdefault(segment_id, []).append(index)
 
-        def _joint_up_frames(segment_id: str, frames: int) -> None:
-            del segment_id, frames
+        def _joint_up_frames(
+            segment_id: str,
+            frames: int,
+            _tracker: Any = joint_tracker,
+            _fired: list[int] = joint_fired,
+        ) -> None:
+            if _tracker is not None and frames > 0:
+                _fired[0] += frames
+                _tracker.update(frames)
+                _joint_status("upscaling", segment_id)
 
         def _joint_ip_chunk(
             segment_id: str,
@@ -445,10 +887,22 @@ def _poll_to_completion(
         ) -> None:
             _into.setdefault(segment_id, []).append(index)
 
-        def _joint_ip_pair(segment_id: str, fraction_done: float) -> None:
-            del segment_id, fraction_done
+        _joint_ip_carry: list[float] = [0.0]
 
-        joint_up = include_upscale or (include_interp and bool(joint_sources))
+        def _joint_ip_pair(
+            segment_id: str,
+            fraction_done: float,
+            _carry: list[float] = _joint_ip_carry,
+            _tracker: Any = joint_tracker,
+            _fired: list[int] = joint_fired,
+        ) -> None:
+            _carry[0] += fraction_done
+            whole, _carry[0] = divmod(_carry[0], 1.0)
+            if _tracker is not None and whole >= 1:
+                _fired[1] += int(whole)
+                _tracker.update(int(whole))
+                _joint_status("interpolating", segment_id)
+
         if joint_up and joint_sources:
             joint_up_start = time.monotonic()
             joint_up_kwargs: dict[str, Any] = {
@@ -515,6 +969,19 @@ def _poll_to_completion(
                 timings["interp_frames_done"] = timings.get("interp_frames_done", 0.0) + float(
                     getattr(joint_ip_result, "frames_done", 0) or 0
                 )
+        if joint_tracker is not None:
+            # Ledger-hit chunks never fire: bump the remainder so the bar
+            # always finishes at its total (mirrors the per-segment bars).
+            joint_tracker.update(
+                max(
+                    0,
+                    _JOINT_BAR_LEG_COUNT * MORPH_BRIDGE * len(joint_sources)
+                    - joint_fired[0]
+                    - joint_fired[1],
+                )
+            )
+        if joint_bar_cm is not None:
+            joint_bar_cm.__exit__(None, None, None)
         if verbose and up_per_segment and progress is not None:
             for segment_id in sorted(up_per_segment):
                 progress.info(
@@ -532,13 +999,164 @@ def _poll_to_completion(
                         f"augment polling stuck: {ip_waiting} chunks waiting "
                         "with no progress (rerun the pollers, then finalize again)"
                     )
+                # Track C settle output-truth: ledger counts alone once
+                # settled torn encodes — verify PNG/mp4 outputs before
+                # returning (a gap here fails loud instead of draining
+                # short silently).
+                settled, missing = verify_settle_output_truth(
+                    run_dir,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    source_fps_key=source_fps_key,
+                    upscale_factor=upscale_factor,
+                    multiplier=multiplier,
+                    chunk_frames=chunk_frames,
+                    crf=crf,
+                    preset=preset,
+                )
+                if not settled:
+                    raise MediaError(
+                        f"augment polling settled by counts but outputs missing: {missing} "
+                        "(rerun the pollers, then finalize again)"
+                    )
                 return
         elif up_done == 0:
+            settled, missing = verify_settle_output_truth(
+                run_dir,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                source_fps_key=source_fps_key,
+                upscale_factor=upscale_factor,
+                multiplier=1,
+                chunk_frames=chunk_frames,
+                crf=crf,
+                preset=preset,
+            )
+            if not settled:
+                raise MediaError(
+                    f"upscale polling settled by counts but outputs missing: {missing}"
+                )
             return
     raise MediaError(
         f"augment polling made no settling pass in {_MAX_POLL_PASSES} rounds "
         "(rerun the pollers, then finalize again)"
     )
+
+
+def verify_settle_output_truth(
+    run_dir: Path,
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    source_fps_key: int,
+    upscale_factor: int,
+    multiplier: int,
+    chunk_frames: int,
+    crf: int,
+    preset: str,
+) -> tuple[bool, list[str]]:
+    """Verify settle via output-truth, not ledger-only (Track C).
+
+    Checks every LEDGERED chunk has output-truth completion (durable mp4
+    with frame-count truth, else complete interp PNGs with matching
+    geometry). Returns `(ok, missing_descriptions)` — settle may return
+    only when ok; otherwise the poll loop fails loud when no progress is
+    possible. Ledger counts alone once settled torn encodes with intact
+    records; this is the gate that catches them. Sources/plan dirs with
+    no ledger records verify vacuously (injected test fakes render
+    without writing sidecars — counts settle those, not this gate).
+    """
+    from voyage.augment import (
+        augment_plan,
+        chunk_windows,
+    )
+    from voyage.augment import (
+        chunk_frames_match_size as _size_match,
+    )
+    from voyage.augment_sidecar import (
+        STAGE_CHUNK_MP4,
+        ChunkKey,
+        chunk_mp4_complete,
+        chunk_output_complete,
+        load_chunk_ledger,
+        plan_dir_for_segment,
+    )
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    try:
+        sources, _ = committed_segment_sources(run_dir)
+    except (OSError, ValueError, TypeError):
+        return (False, ["unreadable segment sources"])
+    missing: list[str] = []
+    for source in sorted(sources, key=lambda item: item.segment_id):
+        try:
+            plan_dir = plan_dir_for_segment(
+                run_dir,
+                source_key=source.source_key,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=source_fps_key,
+                upscale_factor=upscale_factor,
+                crf=crf,
+                preset=preset,
+            )
+        except (OSError, ValueError, TypeError):
+            continue
+        ledger = plan_dir / "chunks.jsonl"
+        records = load_chunk_ledger(ledger)
+        if not records:
+            continue  # injected fakes render without sidecars — counts settle those
+        try:
+            windows = list(chunk_windows(source.total_frames, chunk_frames))
+        except (TypeError, ValueError):
+            continue
+        plan = augment_plan(source.total_frames, chunk=chunk_frames, multiplier=multiplier)
+        # Only ledgered chunks verify: unrecorded windows are the
+        # pollers' business (counts settle them); recorded-but-incomplete
+        # outputs are this gate's catch (torn encodes with intact records).
+        recorded_indexes = {
+            record.get("chunk_index")
+            for record in records
+            if isinstance(record.get("chunk_index"), int)
+            and not isinstance(record.get("chunk_index"), bool)
+        }
+        for chunk in plan:
+            if chunk.index not in recorded_indexes:
+                continue
+            key = ChunkKey(
+                chunk_index=chunk.index,
+                start_frame=chunk.start_frame,
+                source_frames=chunk.source_frames,
+                expected_frames=chunk.expected_frames,
+                upscale_factor=upscale_factor,
+                multiplier=multiplier,
+                crf=crf,
+                preset=preset,
+                source_key=source.source_key,
+                weights_key=weights_key,
+                out_width=out_width,
+                out_height=out_height,
+                out_fps=source_fps_key,
+                chunk_frames=chunk_frames,
+            )
+            # Settled = durable mp4 (with frame-count truth) OR complete
+            # interp PNGs with matching geometry. Anything else is missing.
+            if chunk_mp4_complete(plan_dir, records, key):
+                continue
+            interp_dir = plan_dir / f"interpolated_{chunk.index:02d}"
+            if not chunk_output_complete(interp_dir, chunk.expected_frames):
+                missing.append(f"{source.segment_id}:chunk{chunk.index}")
+                continue
+            if not _size_match(interp_dir, (out_width, out_height)):
+                missing.append(f"{source.segment_id}:chunk{chunk.index}:geometry")
+                continue
+        _ = windows
+        _ = STAGE_CHUNK_MP4
+    return (not missing, missing)
 
 
 def _format_ranges(indexes: list[int]) -> str:
@@ -571,7 +1189,9 @@ def _ensure_model_pass_timings(timings: dict[str, float] | None) -> None:
     `mastering_frames_done`, Track C) are zero-initialized here for the
     future `voyage/mastering.py` consumer (Track B owns that module) —
     miners and `_model_pass_stage_rows` never KeyError, even before any
-    mastering work lands.
+    mastering work lands. Unified Track C/E vocabulary (drain/concat/
+    seam/morph rows) is zeroed here too, so the timing table never
+    KeyErrors on a leg this pass did not run.
     """
     if timings is None:
         return
@@ -594,6 +1214,76 @@ def _ensure_model_pass_timings(timings: dict[str, float] | None) -> None:
         "mastering_frames_done",
     ):
         timings.setdefault(key, 0.0)
+
+
+_JOINT_UNIT_CACHE: dict[tuple[str, ...], tuple[Any, ...]] = {}
+"""Shared joint-unit list cache (Track C redundant-hashing fix).
+
+`_poll_to_completion` and `_drain_to_intermediate` both build the fix-stage
+joint units from the same committed-segment manifests — each build re-hashes
+joint videos (`ensure_joint_units` checksums anchors). The cache keys on the
+ordered `(segment_id, source_key)` signature: poll stores, drain reuses, so
+one finalize hashes each joint once. Per-process only; signature mismatch
+rebuilds (never stale across trims/renders).
+"""
+
+
+def joint_units_signature(ordered: list[Any]) -> tuple[str, ...]:
+    """Cache signature for an ordered source list (ids + source keys)."""
+    signature: list[str] = []
+    for source in ordered:
+        signature.append(str(getattr(source, "segment_id", "")))
+        signature.append(str(getattr(source, "source_key", "")))
+    return tuple(signature)
+
+
+def _live_plan_dirs_for_sweep(
+    run_dir: Path,
+    usable: list[Path],
+    *,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    out_fps: int,
+    upscale_factor: int,
+    crf: int,
+    preset: str,
+) -> set[Path]:
+    """Live `plan_dir_for_segment` set for the current usable segments.
+
+    Track C sweep-liveness: the finalize-start sweep encodes only live
+    dirs (orphans are GC's, never re-encoded). Joint units join via the
+    poll's own live set; this covers segment dirs.
+    """
+    from voyage.augment_sidecar import plan_dir_for_segment
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    live: set[Path] = set()
+    try:
+        sources, _ = committed_segment_sources(run_dir)
+    except (OSError, ValueError, TypeError):
+        return live
+    usable_names = {segment.name for segment in usable}
+    for source in sources:
+        if source.segment_id not in usable_names:
+            continue
+        try:
+            live.add(
+                plan_dir_for_segment(
+                    run_dir,
+                    source_key=source.source_key,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=out_fps,
+                    upscale_factor=upscale_factor,
+                    crf=crf,
+                    preset=preset,
+                )
+            )
+        except (OSError, ValueError, TypeError):
+            continue
+    return live
 
 
 def run_durable_model_pass(
@@ -686,12 +1376,13 @@ def run_durable_model_pass(
         raise TypeError(f"work_dir must be a Path (got {type(work_dir).__name__})")
     _ensure_model_pass_timings(timings)
     weights_key = weights_key_for(weights, interp_backend)
-    # Finalize-start cleanup (see docstring): collapse any pre-cleanup
-    # PNGs to durable chunk mp4s first, then GC orphan plan dirs — both
-    # are idempotent, so a kill between them converges on retry.
+    # Finalize-start cleanup (Track C prune-then-sweep): GC orphan plan
+    # dirs FIRST (they are never re-encoded), then sweep only live dirs.
+    # The old sweep-then-GC order re-encoded orphans before deleting them
+    # (wasted GPU hours on stale backends); both steps stay idempotent, so
+    # a kill between them converges on retry.
     from voyage.augment_drain import prune_orphan_plan_dirs, sweep_chunk_mp4s
 
-    sweep_chunk_mp4s(run_dir, encode_fn=chunk_encode_fn)
     # Integer fps key shared by the pollers and the plan derivation below:
     # the hash formats it via str(), so float 24.0 vs int 24 would fork
     # plan dirs — one normalization keeps all three on the same dir.
@@ -706,6 +1397,18 @@ def run_durable_model_pass(
         crf=crf,
         preset=preset,
     )
+    live_dirs = _live_plan_dirs_for_sweep(
+        run_dir,
+        segments,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=source_fps_key,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+    )
+    sweep_chunk_mp4s(run_dir, encode_fn=chunk_encode_fn, live_dirs=live_dirs or None)
     _poll_to_completion(
         run_dir,
         weights=weights,
@@ -739,6 +1442,7 @@ def run_durable_model_pass(
         source_fps_key=source_fps_key,
         upscale_factor=upscale_factor,
         multiplier=multiplier,
+        chunk_frames=chunk_frames,
         crf=crf,
         preset=preset,
         device=interp_device or device,
@@ -765,6 +1469,7 @@ def _drain_to_intermediate(
     source_fps_key: int,
     upscale_factor: int,
     multiplier: int,
+    chunk_frames: int | None = None,
     crf: int,
     preset: str,
     device: str,
@@ -787,6 +1492,11 @@ def _drain_to_intermediate(
     [trimA, joint, trimB, ...] with source-derived trims. All interp
     work here runs on `device` — the caller passes the 4060 interp
     device, never the 2060 upscale card.
+
+    ``chunk_frames`` (None = legacy contiguous trims) forwards to
+    ``assemble_joint_timeline`` for chunk-aware keeps; ``None`` keeps
+    existing direct callers byte-identical while ``run_durable_model_pass``
+    forwards its own window so production drains map trims.
     """
     if drain_fn is None:
         from voyage.augment_drain import drain_interpolated_plan
@@ -799,6 +1509,8 @@ def _drain_to_intermediate(
     from voyage.augment_upscale_poller import committed_segment_sources
 
     _ensure_model_pass_timings(timings)
+    if chunk_frames is not None:
+        chunk_frames = _require_count("chunk_frames", chunk_frames)
     sources, _skipped = committed_segment_sources(run_dir)
     by_id = {source.segment_id: source for source in sources}
     ordered: list[Any] = []
@@ -817,17 +1529,24 @@ def _drain_to_intermediate(
     fix_start = time.monotonic()
     joint_units: list[Any] = []
     if len(ordered) > 1:
-        joint_units = ensure_joint_units(
-            run_dir,
-            ordered,
-            source_fps=source_fps_key,
-            crf=crf,
-            preset=preset,
-            interp_fn=joint_interp_fn,
-            weights=_interp_weights_path(weights, interp_backend),
-            device=device,
-            interp_backend=interp_backend,
-        )
+        # Track C shared cache: the poll sweep already hashed+rendered
+        # these units — reuse the list instead of re-checksumming.
+        cached = _JOINT_UNIT_CACHE.get(joint_units_signature(ordered))
+        if cached is not None:
+            joint_units = list(cached)
+        else:
+            joint_units = ensure_joint_units(
+                run_dir,
+                ordered,
+                source_fps=source_fps_key,
+                crf=crf,
+                preset=preset,
+                interp_fn=joint_interp_fn,
+                weights=_interp_weights_path(weights, interp_backend),
+                device=device,
+                interp_backend=interp_backend,
+            )
+            _JOINT_UNIT_CACHE[joint_units_signature(ordered)] = tuple(joint_units)
     if timings is not None:
         timings["seam_s"] += time.monotonic() - fix_start
         timings["seams_done"] += float(len(joint_units))
@@ -888,17 +1607,22 @@ def _drain_to_intermediate(
         joint_cm = optional_stage(progress, "joints", f"{len(joint_units)} joint(s)")
         joint_start = time.monotonic()
         with joint_cm:
+            assemble_kwargs: dict[str, Any] = {
+                "source_counts": [source.total_frames for source in ordered],
+                "multiplier": multiplier,
+                "joint_root": run_dir / "augment" / "joint_timeline",
+                "fps": int(round(source_fps * multiplier)),
+                "crf": crf,
+                "preset": preset,
+                "pix_fmt": "yuv420p",
+                "concat_fn": concat_fn,
+            }
+            if chunk_frames is not None and _accepts_keyword(assemble_fn, "chunk_frames"):
+                assemble_kwargs["chunk_frames"] = chunk_frames
             final = assemble_fn(
                 segment_intermediates,
                 joint_intermediates,
-                source_counts=[source.total_frames for source in ordered],
-                multiplier=multiplier,
-                joint_root=run_dir / "augment" / "joint_timeline",
-                fps=int(round(source_fps * multiplier)),
-                crf=crf,
-                preset=preset,
-                pix_fmt="yuv420p",
-                concat_fn=concat_fn,
+                **assemble_kwargs,
             )
         if timings is not None:
             timings["morph_s"] += time.monotonic() - joint_start

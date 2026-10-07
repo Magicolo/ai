@@ -216,7 +216,8 @@ def _stack_paths(models_dir: Path, model_size: str) -> dict[str, Path]:
     if missing:
         raise FileNotFoundError(
             f"MMAudio {model_size} stack incomplete under {base} "
-            f"(missing: {', '.join(missing)}; run `voyage models download sfx-mmaudio`)"
+            f"(missing: {', '.join(missing)}; run `configure` first "
+            '(ensured via `model_registry.download_model(models_dir, "sfx-mmaudio")`))'
         )
     return paths
 

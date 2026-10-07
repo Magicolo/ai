@@ -18,6 +18,13 @@ from pathlib import Path
 from voyage.errors import MediaError
 
 SCHEMA_VERSION = 1
+"""Run-manifest format version (issue 226).
+
+Emitted as `schema_version` by `persistence.build_manifest` and gated
+in `persistence.read_manifest` (missing key reads as legacy v1;
+unknown-future fails loud). Bump with a migration note whenever the
+manifest shape breaks backward compatibility.
+"""
 
 #: Segment-number bounds (issue 091): the six-digit `%06d` id doubles as
 #: the lexicographic/contiguous invariant validate_run relies on, so the
@@ -52,8 +59,38 @@ DONE_MARKER = "DONE"
 #: runs strand them — evict-time `rmtree` only runs on clean shutdown).
 #: Popup-bench prefixes (`voyage-bench-`, `voyage-sfx-bench-`, mux dirs)
 #: are `TemporaryDirectory`-owned and self-cleaning, so only the
-#: never-removed session roots are listed.
-STALE_SCRATCH_PREFIXES = frozenset({"voyage-ltx25-", "voyage-ltx23-", "voyage-acestep-cwd-"})
+#: never-removed session roots are listed. Track C finalize/durability
+#: additions (2026-10-07): every `TemporaryDirectory(prefix=...)` root a
+#: finalize/audio worker can strand under run scratch — take rendering,
+#: assembly, bench harnesses, and LTX mux staging — is listed so
+#: `ensure_scratch_dir` heals both roots on the next start.
+#: `ltx25-mux-`/`ltx23-mux-` cover the LoopingSampler mux staging dirs;
+#: the `ltx-`/`ltxv-` entries cover older worker session roots.
+#: Deliberately ABSENT (2026-10-07 B-vs-C resolution): the live finalize
+#: prefixes `voyage-sfx-final-*` and `voyage-master-*` plus the broad
+#: `voyage-sfx-` form — `finalize_sfx_pass` calls `ensure_scratch_dir`
+#: mid-run as its tmp parent, so pruning those would delete the LIVE
+#: tmpdir (ENOENT bed copy). The narrow `voyage-sfx-window-*` per-window
+#: worker prefix IS listed (never live across a prune — windows render
+#: under it only while their pool worker runs, and startup prune runs
+#: before any worker starts). Mid-run callers must use
+#: `ensure_scratch_dir_no_prune`, never `ensure_scratch_dir`.
+STALE_SCRATCH_PREFIXES = frozenset(
+    {
+        "voyage-ltx25-",
+        "voyage-ltx23-",
+        "voyage-acestep-cwd-",
+        "voyage-take-",
+        "voyage-sfx-window-",
+        "voyage-assemble-",
+        "voyage-bench-",
+        "voyage-sfx-bench-",
+        "ltx25-mux-",
+        "ltx23-mux-",
+        "ltx-",
+        "ltxv-",
+    }
+)
 
 # Layout dirnames usable as re-anchor points for legacy absolute entries
 # (issue 016): a moved run's stale absolute path still names the layout
@@ -93,6 +130,22 @@ def ensure_scratch_dir(run_dir: Path) -> Path:
     return scratch
 
 
+def ensure_scratch_dir_no_prune(run_dir: Path) -> Path:
+    """Create `run_dir/tmp/` without pruning (mid-run callers).
+
+    Same directory as `ensure_scratch_dir` but mkdir-only: safe while
+    live finalize/worker tmpdirs exist under it (`voyage-sfx-final-*`,
+    `voyage-master-*`, per-window dirs). All mid-run callers (worker
+    init payloads, finalize staging) must use this; only startup paths
+    (generate/finalize entry, under the run lock with no worker
+    running) may use the pruning `ensure_scratch_dir`. Never raises
+    for the mkdir itself beyond what the caller already tolerates.
+    """
+    scratch = scratch_dir(run_dir)
+    scratch.mkdir(parents=True, exist_ok=True)
+    return scratch
+
+
 def staging_parent(scratch_dir_value: str | None) -> Path | None:
     """Parent for worker staging dirs, or None for the TMPDIR default.
 
@@ -107,6 +160,55 @@ def staging_parent(scratch_dir_value: str | None) -> Path | None:
     parent = Path(scratch_dir_value)
     parent.mkdir(parents=True, exist_ok=True)
     return parent
+
+
+def scratch_tmp_size_bytes(run_dir: Path) -> int | None:
+    """Best-effort byte size of `run_dir/tmp/` (None when unscannable).
+
+    Report-only for the validate orphan scan (Track C): `tmp/` is
+    disposable scratch, never an error — the scan reports its size so a
+    leaked session root shows up as hygiene, not as INVALID. Never raises:
+    an unscannable scratch dir reads as None (unknown size), never as a
+    validation error.
+    """
+    scratch = scratch_dir(run_dir)
+    total = 0
+    try:
+        for child in scratch.rglob("*"):
+            try:
+                if child.is_file() and not child.is_symlink():
+                    total += child.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return total
+
+
+def heal_scratch_roots(run_dir: Path) -> int:
+    """Prune stale scratch under both roots (run/tmp/ + run-root finals).
+
+    `ensure_scratch_dir` covers `run_dir/tmp/`; run-root `voyage-final-*`
+    staging (crashed finalize `TemporaryDirectory(dir=run_dir)`) strands
+    beside it. This heals both in one best-effort pass and returns the
+    pruned count. Never raises — leftover scratch only costs disk, never
+    correctness. Callers: generate/finalize start (single-writer window).
+    """
+    pruned = 0
+    ensure_scratch_dir(run_dir)
+    try:
+        for candidate in sorted(run_dir.glob("voyage-final-*")):
+            try:
+                if candidate.is_dir() and not candidate.is_symlink():
+                    import shutil as _shutil
+
+                    _shutil.rmtree(candidate, ignore_errors=True)
+                    pruned += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return pruned
 
 
 def format_segment_id(number: int) -> str:

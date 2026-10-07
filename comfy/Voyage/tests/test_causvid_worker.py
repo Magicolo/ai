@@ -660,7 +660,7 @@ def test_handle_init_rejects_non_cuda_device(tmp_path: Path) -> None:
 
 
 def test_handle_init_missing_weights_says_download_first(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match=r"voyage models download"):
+    with pytest.raises(FileNotFoundError, match=r"model_registry\.download_model"):
         video_causvid.handle_init({"models_dir": str(tmp_path / "models")})
 
 

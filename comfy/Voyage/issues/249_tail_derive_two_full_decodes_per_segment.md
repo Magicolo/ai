@@ -90,3 +90,68 @@ stream=nb_frames` — order-of-magnitude delta.
 
 - 2026-10-07: filed from read-only Track D sweep; no code touched, no GPU work run.
 - 2026-10-07: consolidated into 249 (same full-decode frame-count family).
+
+## Evaluation (2026-10-07, group N)
+
+Re-verified live against current code before fixing — claim CONFIRMED,
+numbers qualified:
+
+- `count_video_frames` (`voyage/workers/video_common.py:476`) still uses
+  `-count_frames` full decode; `tail_start_frame` (`:517`) takes no frames
+  param; `derive_tail_from_segment_video` (`:575`) costs 2 spawns
+  (probe + trim). Only callers are `audio_finalize.py:142` and
+  `ensure_conditioning_tail` (`video_common.py:632`) — neither threads
+  manifest frames, even though `SegmentSource.total_frames` (manifest
+  `metrics.frames`) is already trusted at the pollers.
+- `presented_frames` (`voyage/media.py:772`) uses the same `-count_frames`
+  shape on finals (`cli_finalize.py:154`, `cli_generate.py:105`);
+  `augment_morph._probe_frames` (`voyage/augment_morph.py:200`) same shape
+  for trims.
+- The "512 decodes" / "tens of seconds per call" figures are
+  computed-not-profiled projections (reviewer flag stands): per-segment
+  cost is real (2 spawns, decode-bound on 121-257f files) but no wall
+  timing was measured; the 30-80 ms/spawn storm math understates
+  decode-bound probes. Recorded as estimates, not measurements.
+- Fix adopted: optional known-frames params (default None = current
+  behavior, out-of-scope callers untouched) + header-first `nb_frames`
+  with decode fallback + stat-keyed cache. The `-sseof` single-pass
+  alternative was rejected (keeps the trim path byte-identical).
+
+## Progress log (2026-10-07, group N)
+
+- Evaluated live (see Evaluation above); implemented in
+  `voyage/workers/video_common.py` (`count_video_frames` gains
+  `known_frames`, header-first + fallback + `_FRAME_COUNT_CACHE`;
+  `tail_start_frame`/`derive_tail_from_segment_video` gain
+  `total_frames`), `voyage/media.py` (`presented_frames` gains
+  `known_frames`, header-first + fallback + `_PRESENTED_FRAMES_CACHE`),
+  `voyage/augment_morph.py` (`_probe_frames` header-first + fallback +
+  `_MORPH_FRAME_COUNT_CACHE`).
+- New tests in `Voyage/tests/test_group_n_perf.py` (known-frames
+  skip, header-first argv shape, decode fallback, cache hits,
+  validation errors).
+- Live proof in-container (real ffmpeg, no GPU): 120f testsrc mp4 —
+  header path, decode path, and morph probe all agree (120 == 120);
+  `tail_start_frame` = 95. Full scoped suite green (see Resolution).
+
+## Resolution (2026-10-07)
+
+- Verdict: RESOLVED. Tail derives cost one trim when the caller knows
+  the count (new optional params; existing callers unchanged) and one
+  header probe + one trim otherwise — the per-segment full-decode
+  probe is gone except for containers that omit `nb_frames` (fallback
+  preserved). Finals/trim probes share the same header-first shape
+  with per-identity caches.
+- Files changed: `voyage/workers/video_common.py`,
+  `voyage/media.py`, `voyage/augment_morph.py`,
+  `Voyage/tests/test_group_n_perf.py` (new).
+- Verification: ruff check + format clean on touched files; mypy
+  strict clean on touched modules; scoped pytest 318 passed /
+  5 skipped (group-N + upscale/tail/drain/joint/morph/interp/
+  finalize-wire/overlap/sfx-finalize neighbors) plus 153 passed
+  (finalize/sfx/boundary/mix-cache neighbors); live header==decode
+  proof above. No GPU workloads. No commits.
+- Left open: threading manifest frames at the two derive call sites
+  (`audio_finalize.py:142`, `ensure_conditioning_tail`) — those
+  modules are outside this track's scope; the params are in place for
+  the owning pass.

@@ -138,13 +138,18 @@ FFMPEG_TIMEOUT_SECONDS = 600.0
 
 
 def run_capture(
-    argv: list[str], timeout: float = FFMPEG_TIMEOUT_SECONDS
+    argv: list[str], timeout: float | None = FFMPEG_TIMEOUT_SECONDS
 ) -> subprocess.CompletedProcess[str]:
     """Run argv capturing output; a wedged child maps to MediaError (issue 019).
 
     `timeout` mirrors `[voyage] rpc_timeout_seconds` / RPC 600 s default —
     callers may thread the configured value through; the default keeps
-    existing call sites bounded without a config round-trip.
+    existing call sites bounded without a config round-trip. `None` means
+    unbounded (`subprocess.run` waits forever) — reserved for ops whose
+    wall time scales with the total timeline (final publish encodes,
+    full-timeline mixes/convert/demux/remux/concats), the same way the
+    already-unbounded augment chunk path does; probes, slices, windows,
+    and per-segment assembly keep the 600 s bound.
     """
     try:
         return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
@@ -321,20 +326,64 @@ def _take_joint_fade(min_piece_seconds: float, crossfade_seconds: float) -> floa
     return min(crossfade_seconds, min_piece_seconds / 2.0)
 
 
+_AUDIO_DURATION_CACHE: dict[str, tuple[int, int, float]] = {}
+"""Probed audio durations keyed by path -> (mtime_ns, size, seconds).
+
+Issue 250: finalize re-probed the same takes/windows/stems/beds on
+every pass, retry, and stage (music, SFX hit + render paths, mix
+gates). The (mtime_ns, size) identity keeps the cache honest across
+re-renders — a replaced file stats differently and re-probes.
+Positive results only; failures re-probe (a transient ffprobe error
+must never pin a file as broken). Per-process only.
+"""
+
+
+def _duration_identity(path: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) for a path, None when it cannot be stated."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _cached_duration(path: Path) -> float | None:
+    """Cached probed duration for an unchanged file, else None."""
+    identity = _duration_identity(path)
+    if identity is None:
+        return None
+    cached = _AUDIO_DURATION_CACHE.get(str(path))
+    if cached is not None and (cached[0], cached[1]) == identity:
+        return cached[2]
+    return None
+
+
+def _store_duration(path: Path, seconds: float) -> None:
+    """Cache a positive probed duration under the file's identity."""
+    identity = _duration_identity(path)
+    if identity is not None:
+        _AUDIO_DURATION_CACHE[str(path)] = (identity[0], identity[1], seconds)
+
+
 def probed_take_seconds(take_file: Path) -> float:
     """Measured duration of a rendered take file (issue 094).
 
     ACE-Step renders are not sample-exact vs the requested duration; the
     ledger must be clamped to the file, not the request. Raises MediaError
     when the file probes empty so a missing render fails loud instead of
-    covering zero seconds silently.
+    covering zero seconds silently. Shares the issue-250 duration cache
+    (positive results only) with `_audio_duration_seconds`.
     """
+    cached = _cached_duration(take_file)
+    if cached is not None:
+        return cached
     try:
         actual = float(probe(take_file).get("format", {}).get("duration", 0.0) or 0.0)
     except (OSError, ValueError) as exc:
         raise MediaError(f"take file {take_file} is unprobable: {exc}") from exc
     if actual <= 0.0:
         raise MediaError(f"take file {take_file} probed empty")
+    _store_duration(take_file, actual)
     return actual
 
 
@@ -550,10 +599,12 @@ def _slice_cache_key(
     take_path: Path, start_seconds: float, duration_seconds: float
 ) -> tuple[str, str, str]:
     """Cache key for one take slice (issue 031): take identity + the
-    take-relative window at ffmpeg `.6f` precision, so adjacent segment
+    take-relative window at millisecond precision, so adjacent segment
     windows re-slicing identical bytes hit instead of re-spawning ffmpeg
-    on multi-GB takes."""
-    return (str(take_path), f"{start_seconds:.6f}", f"{duration_seconds:.6f}")
+    on multi-GB takes. Millisecond (not microsecond): the `-ss`/`-t`
+    grid carries ms precision and float dust below 1 ms must hit, not
+    miss (LOW slice-cache key)."""
+    return (str(take_path), f"{start_seconds:.3f}", f"{duration_seconds:.3f}")
 
 
 def _cached_slice_take(
@@ -586,10 +637,18 @@ def _cached_slice_take(
 
 
 def _audio_duration_seconds(path: Path) -> float:
-    """Probed audio duration; fail loud on unreadable/empty files."""
+    """Probed audio duration; fail loud on unreadable/empty files.
+
+    Shares the issue-250 cache with `probed_take_seconds`: unchanged
+    files probe once per process no matter how many stages ask.
+    """
+    cached = _cached_duration(path)
+    if cached is not None:
+        return cached
     duration = float(probe(path).get("format", {}).get("duration", 0.0) or 0.0)
     if duration <= 0:
         raise MediaError(f"audio file has non-positive duration: {path}")
+    _store_duration(path, duration)
     return duration
 
 
@@ -670,7 +729,8 @@ def _blend_pair(
             "pcm_s32le",
             str(dest),
         ]
-        proc = run_capture(argv)
+        # Unbounded: the fold accumulator grows to the full timeline.
+        proc = run_capture(argv, timeout=None)
         if proc.returncode != 0:
             raise MediaError(f"final audio pairwise blend failed: {proc.stderr[-2000:]}")
         return dest
@@ -774,7 +834,8 @@ def _join_audio_single_graph(
             "pcm_s32le",
             str(dest),
         ]
-        proc = run_capture(argv)
+        # Unbounded: one spawn over the full timeline.
+        proc = run_capture(argv, timeout=None)
         if proc.returncode != 0:
             raise MediaError(f"single-graph audio join failed: {proc.stderr[-2000:]}")
         return dest
@@ -783,7 +844,7 @@ def _join_audio_single_graph(
             timing_ms.append((time.monotonic() - start) * 1000.0)
 
 
-def build_final_audio(
+def build_final_audio_with_metrics(
     run_dir: Path,
     usable: list[Path],
     tmpdir: Path,
@@ -795,21 +856,16 @@ def build_final_audio(
     *,
     blend_timings: list[float] | None = None,
     stretch: float = 1.0,
-) -> Path:
-    """Blend committed segments into one timeline-exact final mix (§56).
+) -> tuple[Path, float]:
+    """Blend committed segments into one timeline-exact final mix (§56, H3).
 
-    Ledger-only (always-deferred finalize): every segment boundary gets
-    an overlap crossfade — segment windows are extended by half the
-    overlap on each side and re-sliced from the takes ledger (takes are
-    continuous, so the extension is real musical content — not
-    time-stretched), then blended pairwise with manual fades (afade
-    out/in + adelay + amix). Total length stays exactly the video
-    timeline, so no A/V drift. Segments commit video only, so there are
-    no per-segment `audio.wav` previews to fall back to: a missing takes
-    ledger, a take gap, or any degenerate window raises `MediaError`
-    instead of shipping silence — takes must have rendered via
-    `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
-    divides the timeline fps so the mix covers the stretched video.
+    Same contract as `build_final_audio` but returns `(dest, mix_seconds)`
+    where `mix_seconds` is the probed output duration for the caller's
+    `music_mix_seconds` metric hook (Track A/C emits it — this module never
+    touches supervisor/media). H3 mix gate: the probed mix must agree with
+    the stretched timeline within `AV_ALIGNMENT_TOLERANCE_SECONDS` (0.6 s,
+    mirroring the SFX `mix_music_and_sfx` gate); past it raises `MediaError`
+    instead of shipping a short mix the dub would then fail on.
     """
     from voyage.audio.planner import AudioPlanner, load_takes
 
@@ -943,38 +999,90 @@ def build_final_audio(
                 slices, window_path, overlap, joint_fade=fade, staging_parent=tmpdir
             )
         windows.append(window_path)
-    # Single window needs no join (single-segment runs land here: the
-    # window is real music re-sliced from rendered takes, so convert and
-    # return it).
     if len(windows) == 1:
-        return _convert_window_to_dest(windows[0], "single-window copy")
-    # Single-graph staged join (issue 152): chained pairwise stages with
-    # s32 barriers replay the fold byte-for-byte in one spawn (N=31 proven,
-    # no acrossfade anywhere). Each window is probed once here and threaded
-    # through, so the join adds zero re-probes.
-    window_seconds = [_audio_duration_seconds(window) for window in windows]
-    joined = tmpdir / "final_joined.wav"
-    _join_audio_single_graph(
-        windows,
-        joined,
-        overlap,
-        durations=window_seconds,
-        timing_ms=blend_timings,
+        _convert_window_to_dest(windows[0], "single-window copy")
+    else:
+        # Single-graph staged join (issue 152): chained pairwise stages with
+        # s32 barriers replay the fold byte-for-byte in one spawn (N=31 proven,
+        # no acrossfade anywhere). Each window is probed once here and threaded
+        # through, so the join adds zero re-probes.
+        window_seconds = [_audio_duration_seconds(window) for window in windows]
+        joined = tmpdir / "final_joined.wav"
+        _join_audio_single_graph(
+            windows,
+            joined,
+            overlap,
+            durations=window_seconds,
+            timing_ms=blend_timings,
+        )
+        accum = joined
+        proc = run_capture(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(accum),
+                "-c:a",
+                "pcm_s16le",
+                str(dest),
+            ],
+            # Unbounded: the joined mix spans the full timeline.
+            timeout=None,
+        )
+        if proc.returncode != 0:
+            raise MediaError(f"final audio blend failed: {proc.stderr[-2000:]}")
+    mix_seconds = _audio_duration_seconds(dest)
+    if abs(mix_seconds - timeline) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(f"final music mix {mix_seconds:.2f}s drifts from timeline {timeline:.2f}s")
+    return (dest, mix_seconds)
+
+
+def build_final_audio(
+    run_dir: Path,
+    usable: list[Path],
+    tmpdir: Path,
+    fps: int,
+    sample_rate: int,
+    channels: int,
+    overlap_fraction: float = 0.10,
+    overlap_cap_seconds: float = 0.5,
+    *,
+    blend_timings: list[float] | None = None,
+    stretch: float = 1.0,
+) -> Path:
+    """Blend committed segments into one timeline-exact final mix (§56).
+
+    Ledger-only (always-deferred finalize): every segment boundary gets
+    an overlap crossfade — segment windows are extended by half the
+    overlap on each side and re-sliced from the takes ledger (takes are
+    continuous, so the extension is real musical content — not
+    time-stretched), then blended pairwise with manual fades (afade
+    out/in + adelay + amix). Total length stays exactly the video
+    timeline, so no A/V drift. Segments commit video only, so there are
+    no per-segment `audio.wav` previews to fall back to: a missing takes
+    ledger, a take gap, or any degenerate window raises `MediaError`
+    instead of shipping silence — takes must have rendered via
+    `ensure_deferred_takes` first. `stretch` (>1 for slow motion)
+    divides the timeline fps so the mix covers the stretched video.
+
+    H3 mix gate rides along (via `build_final_audio_with_metrics`): the
+    probed mix must agree with the timeline within 0.6 s or `MediaError`.
+    Callers needing the `music_mix_seconds` metric hook use
+    `build_final_audio_with_metrics` directly (Track A/C wiring) — this
+    wrapper keeps the historical `Path` return for existing callers.
+    """
+    dest, _mix_seconds = build_final_audio_with_metrics(
+        run_dir,
+        usable,
+        tmpdir,
+        fps,
+        sample_rate,
+        channels,
+        overlap_fraction,
+        overlap_cap_seconds,
+        blend_timings=blend_timings,
+        stretch=stretch,
     )
-    accum = joined
-    proc = run_capture(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-y",
-            "-i",
-            str(accum),
-            "-c:a",
-            "pcm_s16le",
-            str(dest),
-        ]
-    )
-    if proc.returncode != 0:
-        raise MediaError(f"final audio blend failed: {proc.stderr[-2000:]}")
     return dest

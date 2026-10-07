@@ -101,3 +101,63 @@ Repro: run `qualify.sh` twice same day → second `tee` overwrites the first art
 - 2026-10-07: filed from read-only Track B sweep; no code touched.
 - 2026-10-07: consolidated into 206 (cwd/output-root family; cwd-coupled and unwarned
   halves subsumed).
+
+## Progress (2026-10-07, group O)
+
+- `voyage/cli_paths.py`: new single `resolve_run_dir(*, run, name)` —
+  both/neither → None + stderr (unchanged), `--name` flat-guard
+  (unchanged), `--run` must be absolute (relative → None + "must be an
+  absolute path") and warns via `warn_if_outside_output_dir(..., "--run")`
+  when it escapes the tree; `resolve_run_ref` kept as a delegating alias
+  (sole caller `cli_finalize.cmd_finalize` untouched). `output_root()`
+  honors `VOYAGE_OUTPUT` (expanduser + resolve) with the cwd default
+  unchanged (the `test_output_root_is_cwd_output` pin still passes).
+- `voyage/cli_configure.py`: `_commit_manifest` warns on an explicit
+  `--final-video` outside the tree (create + update share the site;
+  inherited values do not re-warn).
+- `scripts/run.sh:198`: `models="${VOYAGE_MODELS:-${XDG_CACHE_HOME:-$HOME/.cache}/voyage-models}"`
+  (explicit > XDG > HOME default, verified live in all three shapes).
+- `scripts/qualify.sh:182`: artifact `qual-${name}-$(date +%FT%H%M%S).json`
+  (second granularity — same-day reruns no longer `tee`-overwrite).
+- New `tests/test_issue_206_runref.py` (12 tests: both/neither/empty
+  misuse, name resolve + traversal reject, relative-run reject,
+  outside-run warns, inside-run quiet, alias parity, VOYAGE_OUTPUT
+  override + default, configure outside-warns-but-proceeds with manifest
+  pin, configure inside quiet).
+- Verified in-container: `ruff check` clean, `ruff format --check` clean
+  (after one reflow), `mypy` strict clean on `cli_paths` +
+  `cli_configure`, scoped pytest 12/12 green; neighbors
+  (`test_output_containment`, `test_configure`, `test_run_sh`,
+  `test_definition_tiers`, `test_scoreboard`, ...) green.
+
+## Resolution (2026-10-07)
+
+FIXED. All five surfaces closed with warn-only semantics preserved
+(outside-tree paths stay legal for `/tmp` flows and tmp_path suites).
+`--run` had no live CLI parser surface (only the finalize library path,
+which always passes an absolute dir), so the new absolute gate breaks
+no production caller. Nothing left open.
+
+## Evaluation (2026-10-07, group O)
+
+Re-verified live against current tree (all claims hold):
+- `--run` unvalidated: `voyage/cli_paths.py:63-66` is still a bare
+  `Path(run).resolve()` (no flatness/absolute/containment check) while
+  `--name` goes through `_check_run_id` (`:58-62`). No live parser
+  defines `--run`/`--name` flags (configure/generate take positional
+  NAME); the only caller is `cli_finalize.cmd_finalize` (`:27`, legacy
+  library path, defensive getattr) plus `cli_generate._finalize_run_dir`
+  which always passes an absolute `str(run_dir)`.
+- `output_root()` cwd-coupled: `:71-78` unchanged; `tests/test_output_containment.py:26-29`
+  pins cwd-coupled as the intentional (024) default, so a `VOYAGE_OUTPUT`
+  override must keep cwd/output as the default.
+- Containment half-warned: `warn_if_outside_output_dir` has exactly one
+  production caller (`cli_finalize.py:44`); `cli_configure.py:435-483`
+  (`_commit_manifest`, create + update) never warns on `--final-video`.
+- 274 script halves: `scripts/run.sh:198`
+  `models="${VOYAGE_MODELS:-$HOME/.cache/voyage-models}"` (no
+  `$XDG_CACHE_HOME`); `scripts/qualify.sh:182`
+  `artifact="reports/qual-${name}-$(date +%F).json"` (day granularity,
+  same-day reruns `tee`-overwrite).
+- Reviewer note (222): multi-uid harm correctly out of scope — not
+  evaluated here.

@@ -73,8 +73,9 @@ crash-recovery anchor, so the supervisor's resume/rebuild flow works
 unchanged; `recovery.pt` carries the §5.3 JSON record (clean break from
 old torch-pickle tapes — unresumable by design) with profile `ltxv`
 (tapes never resume across backends or numerics); `scene_cut` forces a
-fresh start. Native 768×512; draft 640×352 verified. Needs
-`models download ltxv-2b`. The `benchmark` op saves/restores tail state
+fresh start. Native 768×512; draft 640×352 verified. Provisioned at
+`configure` time via `model_registry.download_model(models_dir, "ltxv-2b")`.
+The `benchmark` op saves/restores tail state
 around its probes, so it does not advance any stream —
 safe to run mid-sequence.
 
@@ -93,8 +94,9 @@ safe to run mid-sequence.
  beside the video; the tail doubles as the crash-recovery tape
  (`recovery.pt` carries profile `causvid` — tapes never resume across
  backends); `scene_cut` forces a fresh start. Native 832×480 @ 16 fps (the
- worker refuses any other fps — never relabeled); draft geometry is not
- supported. Needs `models download causvid`. The `benchmark` op
+  worker refuses any other fps — never relabeled); draft geometry is not
+  supported. Provisioned at `configure` time via
+  `model_registry.download_model(models_dir, "causvid")`. The `benchmark` op
  saves/restores tail state around its probes, so like ltxv it does not
  advance any stream — safe to run mid-sequence.
 
@@ -122,7 +124,8 @@ SFX dubbed at finalize. The tail file
 `recovery.pt` carries the §5.3 JSON record with profile `ltx25` (tapes
 never resume across backends); `scene_cut` forces a fresh start. Native
 1216×704 @ 24 fps (high tier); low tier renders 768×448 with a 384×224
-stage 1, same 257/25/232 chaining. Needs `models download ltx25`. The `benchmark` op
+stage 1, same 257/25/232 chaining. Provisioned at `configure` time via
+`model_registry.download_model(models_dir, "ltx25")`. The `benchmark` op
 saves/restores tail state around its probes, so it does not advance any
 stream — safe to run mid-sequence.
 
@@ -136,7 +139,8 @@ video/audio VAEs, and the Q3_K_M DiT file — the spatial upscaler is the
 shared LTX-2.5 file (no duplication). Same Mode-A geometry (1216×704 @
 24 fps high tier, 768×448 low tier), same 121/25/96 chaining, same ACE-Step music pairing, same
 `reconstructable_prefix` state mode; `recovery.pt` carries profile
-`ltx23`. Needs `models download ltx23`. The `benchmark` op
+`ltx23`. Provisioned at `configure` time via
+`model_registry.download_model(models_dir, "ltx23")`. The `benchmark` op
 saves/restores tail state around its probes — safe to run mid-sequence.
 
 ## Experimental backends
@@ -144,7 +148,8 @@ saves/restores tail state around its probes — safe to run mid-sequence.
 - **Visual inspector** (`[experimental] visual_inspector`, default off):
   Qwen3.5-9B reads the previous segment's middle frame; measured metrics
   feed the director context, amendments apply post-validation with a
-  provisional `style_similarity_min = 0.60`. Advisory only — retry→skip,
-  never blocks a commit. Needs `models download inspector-qwen35`.
+   provisional `style_similarity_min = 0.60`. Advisory only — retry→skip,
+   never blocks a commit. Provisioned at `configure` time via
+   `model_registry.download_model(models_dir, "inspector-qwen35")`.
 - **Recovery profiles** (`ltxv`, `causvid`, `ltx25`, `ltx23`): tapes never resume across
    backends or numerics.

@@ -133,14 +133,93 @@ def interpolated_frame_count(source_frames: int, multiplier: int) -> int:
     return (sources - 1) * factor + 1
 
 
+def interpolated_chunk_frame_count(chunk_index: int, source_frames: int, multiplier: int) -> int:
+    """Frames one chunk contributes to the concatenated timeline.
+
+    Chunk 0 keeps the full ``(c-1)*m+1`` recipe (first frame + every mid);
+    every later chunk drops its duplicated boundary frame (it re-renders
+    the previous chunk's last source frame), contributing ``(c-1)*m``.
+    Summed over an overlapping `chunk_windows` tiling, chunks total the
+    exact unchunked `interpolated_frame_count` — no boundary pair is
+    skipped, so the concat has no intra-segment jumps. A single-frame
+    chunk always contributes its passthrough frame: 1-frame windows
+    cannot overlap, so ``size == 1`` keeps the legacy tiling untouched
+    (still lossy versus unchunked — inherent to 1-frame windows — but
+    byte-identical to before).
+    """
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, int):
+        raise TypeError(f"chunk_index must be an int (got {type(chunk_index).__name__})")
+    if chunk_index < 0:
+        raise ValueError(f"chunk_index must be >= 0 (got {chunk_index})")
+    sources = _require_count("source_frames", source_frames, 1)
+    factor = _require_count("multiplier", multiplier, 1)
+    if sources == 1 or chunk_index == 0:
+        return (sources - 1) * factor + 1
+    return (sources - 1) * factor
+
+
 def chunk_windows(
     total_frames: int, chunk: int = DEFAULT_CHUNK_FRAMES
 ) -> Iterator[tuple[int, int]]:
-    """Yield `(start, count)` source-frame windows tiling `[0, total_frames)` contiguously."""
+    """Yield `(start, count)` source-frame windows tiling `[0, total_frames)` with overlap.
+
+    Consecutive windows share exactly one source frame (stride ``size - 1``,
+    counts capped at ``size``): each chunk independently interpolates its
+    window to ``(c-1)*m+1`` frames, then every chunk after the first drops
+    its duplicated first frame (see `interpolated_chunk_frame_count`), so
+    the concatenated chunks sum to the exact unchunked ``(n-1)*m+1`` total.
+    Before this, windows were contiguous and non-overlapping, which skipped
+    one boundary pair per chunk joint — visible as a small jump every
+    ``chunk`` source frames inside segments (fett, 2026-10-07). ``size ==
+    1`` keeps the legacy stride-1 tiling (stride ``size - 1`` would be 0).
+    A trailing single-frame window is skipped (its frame is already the
+    previous window's last frame): rendering it would produce only the
+    duplicated boundary frame, which the drop step would delete, leaving a
+    0-frame chunk no encoder accepts.
+    """
     total = _require_count("total_frames", total_frames, 0)
     size = _require_count("chunk", chunk, 1)
-    for start in range(0, total, size):
-        yield (start, min(size, total - start))
+    stride = max(size - 1, 1)
+    for start in range(0, total, stride):
+        count = min(size, total - start)
+        if count == 1 and start > 0 and size > 1:
+            continue
+        yield (start, count)
+
+
+_PNG_SIZE_CACHE: dict[str, tuple[int, int, tuple[int, int]]] = {}
+"""PNG dimensions keyed by path -> (mtime_ns, size, (w, h)).
+
+Issue 252: queue-build and heal gates PIL-opened every chunk PNG on
+every pass. Renders write PNGs once (content-addressed by ledger),
+so per-identity memo is safe; re-rendered files stat differently
+and re-open. Failures are never cached. Per-process only.
+"""
+
+
+def _cached_png_size(frame_path: Path) -> tuple[int, int] | None:
+    """(w, h) for one PNG via the identity cache, None when unreadable."""
+    try:
+        import importlib
+
+        Image = importlib.import_module("PIL.Image")
+    except ImportError:
+        return None
+    try:
+        stat = frame_path.stat()
+        identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+    cached = _PNG_SIZE_CACHE.get(str(frame_path))
+    if cached is not None and (cached[0], cached[1]) == identity:
+        return cached[2]
+    try:
+        with Image.open(frame_path) as image:
+            size = (int(image.size[0]), int(image.size[1]))
+    except OSError:
+        return None
+    _PNG_SIZE_CACHE[str(frame_path)] = (identity[0], identity[1], size)
+    return size
 
 
 def chunk_frames_match_size(output_dir: Path, expected_size: tuple[int, int]) -> bool:
@@ -151,14 +230,15 @@ def chunk_frames_match_size(output_dir: Path, expected_size: tuple[int, int]) ->
     2048x1152) past every count-only output-truth gate, failing loud only
     later in the tensor load bridge. All ledger output-truth checks call
     this alongside their count checks. Header-only PIL reads (no pixel
-    decode). Fail-OPEN (True) when PIL is unavailable (slim image has no
-    PIL — keeps unit tests and fakes unaffected); fail-closed (False) on
-    unreadable/unparseable PNGs, empty dirs, or a first mismatch.
+    decode), memoized per file identity (issue 252). Fail-OPEN (True)
+    when PIL is unavailable (slim image has no PIL — keeps unit tests
+    and fakes unaffected); fail-closed (False) on unreadable/unparseable
+    PNGs, empty dirs, or a first mismatch.
     """
     try:
         import importlib
 
-        Image = importlib.import_module("PIL.Image")
+        importlib.import_module("PIL.Image")
     except ImportError:
         return True
     try:
@@ -168,12 +248,10 @@ def chunk_frames_match_size(output_dir: Path, expected_size: tuple[int, int]) ->
     if not frame_paths:
         return False
     for frame_path in frame_paths:
-        try:
-            with Image.open(frame_path) as image:
-                size = image.size
-        except OSError:
+        size = _cached_png_size(frame_path)
+        if size is None:
             return False
-        if (int(size[0]), int(size[1])) != (int(expected_size[0]), int(expected_size[1])):
+        if size != (int(expected_size[0]), int(expected_size[1])):
             return False
     return True
 
@@ -198,10 +276,11 @@ def augment_plan(
 ) -> list[AugmentChunk]:
     """Plan chunked augmentation: windows, per-chunk output counts, round-robin devices.
 
-    Chunk outputs do NOT sum to the unchunked `(n-1)*m+1` total: each chunk
-    interpolates independently, so one boundary pair per chunk joint is
-    skipped (the same trade-off VHS_BatchManager documents). Callers that
-    need exact end-to-end counts must use the unchunked formula.
+    Windows overlap by one source frame (`chunk_windows`) and each chunk's
+    expected count comes from `interpolated_chunk_frame_count`, so chunk
+    outputs sum to the exact unchunked `(n-1)*m+1` total — the old
+    contiguous tiling skipped one boundary pair per chunk joint (a small
+    jump every `chunk` source frames inside segments).
     """
     _require_count("multiplier", multiplier, 1)
     resolved = augment_devices() if devices is None else devices
@@ -214,11 +293,44 @@ def augment_plan(
                 index=index,
                 start_frame=start,
                 source_frames=count,
-                expected_frames=interpolated_frame_count(count, multiplier),
+                expected_frames=interpolated_chunk_frame_count(index, count, multiplier),
                 device=resolved[index % len(resolved)],
             )
         )
     return plan
+
+
+def drop_chunk_duplicate_frame(output_dir: Path) -> int:
+    """Drop a rendered chunk's duplicated first frame and renumber (DESIGN §140).
+
+    Chunks after the first re-render their window's first source frame
+    (the previous chunk's last source), so their interpolated output
+    starts with a duplicate of the previous chunk's last frame. Removing
+    `frame_000000.png` and shifting every later frame down one index keeps
+    the concatenated timeline seamless. Returns the remaining frame
+    count. Fail loud on a missing dir or an empty sequence (a chunk that
+    rendered nothing is corrupt, never silently complete).
+    """
+    if not output_dir.is_dir() or output_dir.is_symlink():
+        raise MediaError(f"chunk output dir missing for duplicate-frame drop: {output_dir}")
+    try:
+        frames = sorted(output_dir.glob("frame_*.png"))
+    except OSError as exc:
+        raise MediaError(f"cannot list chunk frames in {output_dir}: {exc}") from exc
+    if not frames:
+        raise MediaError(f"chunk output dir holds no frames: {output_dir}")
+    try:
+        frames[0].unlink()
+    except OSError as exc:
+        raise MediaError(f"cannot drop duplicate frame {frames[0]}: {exc}") from exc
+    # Ascending renames are collision-free: index 0 was just freed, so
+    # each frame shifts into the slot the previous frame vacated.
+    for position, frame in enumerate(frames[1:]):
+        try:
+            frame.rename(output_dir / f"frame_{position:06d}.png")
+        except OSError as exc:
+            raise MediaError(f"cannot renumber chunk frame {frame}: {exc}") from exc
+    return len(frames) - 1
 
 
 def run_capture(argv: list[str]) -> subprocess.CompletedProcess[str]:

@@ -51,3 +51,78 @@ Thread A loops `_write_state_preserving_control_plane`, thread B writes
 
 ## Log
 - Track A sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Progress (2026-10-07, group O)
+
+- Decision (recorded): NO code fix — none is available within scope.
+  The commit side of candidate 1 already holds `_held_run_lock` across
+  the whole commit body including both `_write_state_preserving_control_plane`
+  call sites, the single-threaded loop never writes control state
+  concurrent with a commit, and there are no remaining writers to convert
+  (no stop/pause CLI verbs exist; SIGINT is the in-process `_stop_flag`).
+  A merge sidecar (candidate 2) would add a file + readers for a producer
+  that does not exist. Took candidate 3 (the issue's own escape hatch).
+- `Voyage/DESIGN.md`: one appended as-built paragraph after the 099 note
+  (§73-control-plane-2026-10-07) — supersedes the stale "still open …
+  `_set_status` and the TUI Stop button" line (both refer to deleted
+  code), states the residual microsecond hand-edit window as LOST (not
+  delayed), and records the no-sidecar rationale.
+- `voyage/supervisor.py` (control-plane sections only): corrected the
+  three stale `voyage stop` / `voyage pause` verb references
+  (`_pause_requested`, `run_segments`, `_write_state_preserving_control_plane`
+  docstrings) to describe the actual file-based control plane; the
+  helper docstring now notes it runs under `_held_run_lock` on both call
+  paths. No behavior change.
+- New `tests/test_issue_223_control_plane.py` (4 tests: STOP/PAUSE present
+  at read time win with counters advancing, no-request passthrough,
+  missing-file fallback to fresh status).
+- Verified in-container: `ruff check` clean, `ruff format --check` clean
+  on own hunks (three flags at :837/:856/:960 are a concurrent agent's
+  prewarm/mastering hunks — left untouched per §9), `mypy` strict clean
+  on `supervisor.py`, scoped pytest 4/4 green; neighbors
+  (`test_recovery`, `test_supervisor_hardening`, `test_commit_hardening`,
+  `test_crash_matrix`, `test_failure_policy`) green.
+
+## Resolution (2026-10-07)
+
+DOCUMENTED (candidate 3, per the issue's own proviso). Present-at-read
+requests are preserved and now pinned by tests; the only remaining loss
+mode is an external hand-edit landing inside the microsecond
+read-then-write window, which is accepted and written down in DESIGN §73.
+Left open: nothing actionable — a future control-plane writer (if one is
+ever reintroduced) must take `_held_run_lock` non-blocking and fail with
+a retry message per candidate 1.
+
+## Evaluation (2026-10-07, group O)
+
+Re-verified live; shape confirmed, severity context narrowed:
+- Read-then-write shape is real: `_write_state_preserving_control_plane`
+  (`voyage/supervisor.py:2597-2614`; issue cites `:2386-2403`, shifted by
+  later insertions) still reads `read_state`, merges REQUESTED, writes —
+  with no lock and no CAS.
+- BUT the blamed lock-free writers no longer exist: the two-verb CLI
+  exposes only `configure` + `generate` parsers (`voyage/cli.py:240,330`)
+  — no `stop`/`pause` verbs write `state.json` anywhere in `voyage/`
+  (grep for status writes finds only supervisor-internal transitions in
+  `run_segments` plus test fixtures). SIGINT arrives via the in-process
+  `_stop_flag`, never via the file.
+- The commit side of fix candidate 1 is already done: `commit_one_segment`
+  (`:2907-2916`) holds `_held_run_lock` across the whole commit body
+  including both `_write_state_preserving_control_plane` call sites
+  (`:2723`, `:2835`), and the single-threaded loop never runs a control
+  write concurrent with a commit. There are no remaining writers to
+  convert to lock-taking, so candidate 1 has no missing half and
+  candidate 2 (merge sidecar) would add a file + readers for a producer
+  that does not exist.
+- Residual window (real but producer-less in production): an external
+  hand-edit of `state.json` landing between the helper's live read and
+  its write-back is clobbered (microseconds per commit); a clobbered
+  request is LOST, not merely delayed one segment (the issue's rationale
+  overstates the recovery — the next boundary reads the clobbered
+  RUNNING state). `tests/test_recovery.py:67-89` already documents the
+  sibling race and pins only the between-runs behavior.
+- Decision: code fix is not available within scope (nothing to convert,
+  commit side already locked) → candidate 3: one DESIGN §73 paragraph
+  (permitted single-docs-edit) + correct the stale `voyage stop` /
+  `voyage pause` verb references in the touched control-plane docstrings
+  + regression tests pinning the present-at-read preserve behavior.
