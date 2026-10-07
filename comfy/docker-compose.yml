@@ -20,8 +20,6 @@ services:
       - ./input:/input
       - ./Comfy:/comfy
       - comfy:/root/.cache
-    environment:
-      CUDA_LAUNCH_BLOCKING: 1
     init: true
     healthcheck:
       test: curl --fail http://localhost:8188 && curl --fail http://localhost:9000/status
