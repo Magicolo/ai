@@ -222,6 +222,31 @@ VIDEO_BACKENDS_NEEDING_FRESH_SESSION = frozenset({"ltx25"})
 #: owned by another track — this constant is the option meanwhile).
 RESOURCE_GAUGE_INTERVAL_SEGMENTS = 1
 
+#: Force a fresh visual start every K segments (scene_cut=True): the
+#: worker drops its tail and renders fresh, causing a strong change in
+#: visual content. `number` is zero-based, so `(number + 1) % K == 0`
+#: cuts on human segments 3, 6, 9, ... Segments in between keep
+#: always-continue (scene_cut=False; fresh only when the worker has no
+#: tail — first segment / missing tail). K itself is configurable
+#: (`voyage.scene_cut_every_n_segments`, default 3) — this constant is
+#: the code fallback when a config does not carry the knob.
+SCENE_CUT_EVERY_N_SEGMENTS = 3
+
+
+def scene_cut_for_segment(number: int, every_n: int) -> bool:
+    """Whether zero-based segment `number` takes the periodic scene cut.
+
+    Pure cadence predicate behind the `_render_video` usage below (and
+    its tests): `(number + 1) % every_n == 0`, so every_n=3 cuts human
+    segments 3, 6, 9, ... A non-positive cadence never cuts (defensive —
+    the config validator already rejects those, but a hand-built config
+    must not ZeroDivisionError a render).
+    """
+    if every_n <= 0:
+        return False
+    return (number + 1) % every_n == 0
+
+
 #: How far a worker-reported frame count may exceed the configured
 #: segment size before it reads as corruption, not reality (issue 006):
 #: `1..10 * segment_frames`. Beyond that the audio-coverage loop would
@@ -2213,13 +2238,17 @@ class Supervisor:
         # forces a fresh segment — the worker continues from its tail
         # whenever one exists and goes fresh only when it has none (first
         # segment / missing tail). Sending scene_cut on destination change
-        # rendered every drifted segment fresh (121f, hard cut).
+        # rendered every drifted segment fresh (121f, hard cut). The only
+        # intentional fresh is the periodic scene cut below (every Nth
+        # segment per `voyage.scene_cut_every_n_segments`) for a strong
+        # visual change.
+        scene_cut = scene_cut_for_segment(number, config.voyage.scene_cut_every_n_segments)
         request = VideoBackendAdapter.request_from_config(
             config.video,
             segment_id=segment_id,
             prompt=staged_prompt,
             seed=video_seed(config.seed, number, 0),
-            scene_cut=False,
+            scene_cut=scene_cut,
             block_prompts=list(staged_blocks) if staged_blocks is not None else None,
             block_seeds=(
                 [video_seed(config.seed, number, block) for block in range(proposed.num_blocks)]
