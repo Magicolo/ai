@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -56,6 +57,7 @@ from voyage.media_audio import _verify_segment as _verify_segment
 from voyage.media_audio import assemble_segment_audio as assemble_segment_audio
 from voyage.media_audio import av_drift_seconds as av_drift_seconds
 from voyage.media_audio import build_final_audio as build_final_audio
+from voyage.media_audio import build_final_audio_with_metrics as build_final_audio_with_metrics
 from voyage.media_audio import check_av_alignment as check_av_alignment
 from voyage.media_audio import check_free_space as check_free_space
 from voyage.media_audio import probe as probe
@@ -558,6 +560,7 @@ class FinalizeOptions:
     crf: int = FINALIZE_CRF_DEFAULT
     preset: str = FINALIZE_PRESET_DEFAULT
     presentation_fps: int | None = None
+    publish_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.joint_style not in ("blend", "hard-splice"):
@@ -582,6 +585,18 @@ class FinalizeOptions:
             )
         if self.presentation_fps is not None and self.presentation_fps < 1:
             raise ValueError(f"presentation_fps must be >= 1 (got {self.presentation_fps!r})")
+        if self.publish_timeout_seconds is not None:
+            timeout = self.publish_timeout_seconds
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise TypeError(
+                    f"publish_timeout_seconds must be a number or None (got {timeout!r})"
+                )
+            import math as _math
+
+            if not _math.isfinite(float(timeout)) or float(timeout) <= 0:
+                raise ValueError(
+                    f"publish_timeout_seconds must be finite and > 0 (got {timeout!r})"
+                )
         validate_crf(self.crf)
         validate_preset(self.preset)
 
@@ -636,6 +651,7 @@ class ResolvedFinalizeSettings:
     crf: int
     preset: str
     presentation_fps: int | None
+    publish_timeout_seconds: float | None = None
 
 
 def resolve_finalize_settings(
@@ -652,6 +668,7 @@ def resolve_finalize_settings(
     crf: int | None,
     preset: str | None,
     presentation_fps: int | None = None,
+    publish_timeout_seconds: float | None = None,
 ) -> ResolvedFinalizeSettings:
     """Resolve the scalar/`options=` split into one settings struct (pure).
 
@@ -699,6 +716,8 @@ def resolve_finalize_settings(
             settings = replace(settings, interp_backend=interp_backend)
         if presentation_fps is not None:
             settings = replace(settings, presentation_fps=presentation_fps)
+        if publish_timeout_seconds is not None:
+            settings = replace(settings, publish_timeout_seconds=publish_timeout_seconds)
     return ResolvedFinalizeSettings(
         settings=settings,
         upscale=upscale if upscale is not None else settings.upscale,
@@ -708,6 +727,11 @@ def resolve_finalize_settings(
         preset=validate_preset(preset if preset is not None else settings.preset),
         presentation_fps=(
             presentation_fps if presentation_fps is not None else settings.presentation_fps
+        ),
+        publish_timeout_seconds=(
+            publish_timeout_seconds
+            if publish_timeout_seconds is not None
+            else settings.publish_timeout_seconds
         ),
     )
 
@@ -769,12 +793,63 @@ def committed_usable_segments(
     return usable
 
 
-def presented_frames(video: Path) -> int | None:
+_PRESENTED_FRAMES_CACHE: dict[str, tuple[int, int, int]] = {}
+"""ffprobe presented-frame counts keyed by path -> (mtime_ns, size, frames).
+
+Issue 249: the generate freshness gate and the finalize coverage stamp
+probed the same finals repeatedly. Identity-keyed like the worker-side
+frame cache; failures never cached. Per-process only.
+"""
+
+
+def presented_frames(video: Path, known_frames: int | None = None) -> int | None:
     """ffprobe presented-frame count, None when the file is unreadable.
 
     Shared by the generate freshness gate and the finalize coverage stamp
     — one probe shape, so recorded and compared counts always agree.
+    `known_frames` (e.g. the committed `output_frames` metric) skips the
+    probe; otherwise the container-header `nb_frames` is tried first
+    (no decode) with the decode path as fallback, cached per
+    (path, mtime_ns, size). Default None preserves old behavior.
     """
+    if known_frames is not None:
+        if isinstance(known_frames, bool) or not isinstance(known_frames, int):
+            return None
+        return known_frames if known_frames > 0 else None
+    try:
+        stat = video.stat()
+        identity = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+    cached = _PRESENTED_FRAMES_CACHE.get(str(video))
+    if cached is not None and (cached[0], cached[1]) == identity:
+        return cached[2]
+    header = run_capture(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames",
+            "-of",
+            "default=nw=1:nk=1",
+            str(video),
+        ]
+    )
+    if header.returncode == 0:
+        try:
+            header_count = int(header.stdout.strip().splitlines()[0])
+        except (ValueError, IndexError):
+            header_count = 0
+        if header_count > 0:
+            _PRESENTED_FRAMES_CACHE[str(video)] = (
+                identity[0],
+                identity[1],
+                header_count,
+            )
+            return header_count
     try:
         proc = run_capture(
             [
@@ -796,9 +871,11 @@ def presented_frames(video: Path) -> int | None:
     if proc.returncode != 0:
         return None
     try:
-        return int(proc.stdout.strip())
+        total = int(proc.stdout.strip())
     except ValueError:
         return None
+    _PRESENTED_FRAMES_CACHE[str(video)] = (identity[0], identity[1], total)
+    return total
 
 
 def _model_pass_stage_rows(
@@ -821,8 +898,238 @@ def _model_pass_stage_rows(
         rows = {"upscale": up_seconds, "interpolate": ip_seconds}
         if mastering_seconds > 0:
             rows["mastering"] = mastering_seconds
+        # Track C/E unified rows: drain/concat/seam/morph legs report
+        # under the same keys the finalize table mines, so Track E's
+        # timing table never KeyErrors on a leg this pass did not run.
+        for key in ("drain", "concat", "seam", "morph"):
+            value = float(model_pass_timings.get(f"{key}_s", 0.0) or 0.0)
+            if value > 0:
+                rows[key] = value
         return rows
-    return {"upscale + interpolate": time.monotonic() - model_start}
+    # Legacy/tmpdir paths only know wall time — one combined row; still
+    # surface any known leg rows alongside it for Track E miners.
+    rows = {"upscale + interpolate": time.monotonic() - model_start}
+    for key in ("drain", "concat", "seam", "morph", "mastering"):
+        value = float(model_pass_timings.get(f"{key}_s", 0.0) or 0.0)
+        if value > 0:
+            rows[key] = value
+    return rows
+
+
+MUSIC_CACHE_TOLERANCE_SECONDS = 0.6
+"""Cached-music disagreement budget (Track C, mirrors the SFX bed gate).
+
+The bed gate (`_do_sfx_bed`) re-renders when the cached wav disagrees
+with its sidecar by more than `AV_ALIGNMENT_TOLERANCE_SECONDS` (0.6 s);
+the music slot gets the same budget — a stale sidecar value retimes
+the dub to the wrong length and fails the mix check downstream.
+"""
+
+
+def music_cache_usable(cached_wav: Path, expected_seconds: float) -> bool:
+    """Whether a cached music wav matches its expected timeline (Track C).
+
+    Probes the wav duration and returns True when within
+    `MUSIC_CACHE_TOLERANCE_SECONDS` of `expected_seconds` (positive only). Any probe failure,
+    non-positive expectation, or disagreement reads as unusable (caller
+    re-renders) — never raises, never ships stale audio.
+    """
+    if expected_seconds <= 0:
+        return False
+    try:
+        probed = _audio_duration_seconds(cached_wav)
+    except (MediaError, OSError, ValueError):
+        return False
+    return abs(probed - expected_seconds) <= MUSIC_CACHE_TOLERANCE_SECONDS
+
+
+def expected_music_seconds(usable: list[Path], audio_fps: float, audio_stretch: float) -> float:
+    """Expected music-mix timeline seconds (Track C probe reference).
+
+    Same `_segment_timeline` math the silent-AAC path uses: frame counts
+    over the stretched fps. Non-positive on degenerate input (caller
+    treats it as "no expectation" and skips the probe).
+    """
+    try:
+        if audio_fps <= 0 or audio_stretch <= 0:
+            return 0.0
+        _, _, timeline = _segment_timeline(usable, audio_fps / audio_stretch)
+        return float(timeline)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return 0.0
+
+
+def free_gib(path: Path) -> float | None:
+    """Free GiB under `path`, None when unscannable (Track C preflight log)."""
+    try:
+        return shutil.disk_usage(path).free / (1024**3)
+    except OSError:
+        return None
+
+
+def check_free_space_at_phase(run_dir: Path, minimum_gib: float, phase: str) -> float:
+    """Re-check disk before one finalize phase (Track C per-phase preflight).
+
+    Wraps `check_free_space` (raises `DiskSpaceError` when short) and logs
+    the free GiB at each gate so a mid-finalize ENOSPC triages to the
+    phase that passed a stale preflight. Returns free GiB. `minimum_gib
+    <= 0` still probes+logs (no raise) so the gate is observable even
+    when the run disables the hard floor.
+    """
+    if minimum_gib > 0:
+        check_free_space(run_dir, minimum_gib)
+    free = free_gib(run_dir)
+    if free is not None:
+        print(f"finalize disk preflight [{phase}]: {free:.2f} GiB free (floor {minimum_gib} GiB)")
+    return free if free is not None else 0.0
+
+
+PUBLISH_TIMEOUT_SECONDS_DEFAULT: float | None = None
+"""Default publish-encode timeout (Track C): None = unbounded.
+
+Chunked augments never bound (`augment.run_capture` has no timeout); the
+three workload-sized publish encodes match them (long finals exceed any
+fixed bound — the old 600 s `FFMPEG_TIMEOUT_SECONDS` killed healthy
+~1 h encodes). Pass an explicit `publish_timeout_seconds` to bound a
+run (raises instead of hanging forever); the elapsed-vs-timeout is
+always logged.
+"""
+
+
+def run_publish_encode(argv: list[str], *, timeout: float | None, label: str) -> Any:
+    """Run one publish ffmpeg argv with elapsed-vs-timeout logging (Track C).
+
+    `timeout=None` runs unbounded (the default for workload-sized
+    publishes); a finite timeout raises `MediaError` with the elapsed
+    time on expiry instead of a bare 600 s kill. Always logs
+    `publish <label>: <elapsed>s (timeout=<timeout>)`.
+    """
+    start = time.monotonic()
+    try:
+        proc = run_capture(argv, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        raise MediaError(
+            f"publish encode [{label}] timed out after {elapsed:.1f}s "
+            f"(timeout={timeout}s) — pass publish_timeout_seconds=None "
+            "for unbounded long finals"
+        ) from exc
+    elapsed = time.monotonic() - start
+    print(f"publish [{label}]: {elapsed:.1f}s elapsed (timeout={timeout})")
+    return proc
+
+
+def expected_presented_frames(
+    usable: list[Path],
+    *,
+    source_fps: float,
+    interpolate: int,
+    out_fps: int,
+    chunk_frames: int = 32,
+) -> int:
+    """Expected shipped frame count (Track C publish gate).
+
+    Sums per-chunk `interpolated_chunk_frame_count` over the overlapping
+    `chunk_windows` tiling of each usable segment's committed frame count
+    (read from its manifest metrics), then adds the joint math: each of
+    the `len(usable)-1` fix-stage joints contributes its whole joint unit
+    minus the two trims it replaces — net zero by construction
+    (count-preserving 2+2 morph), so the total equals the chunked interp
+    sum exactly. Raises `MediaError` when any segment has no usable frame
+    count (fail loud, never estimate from duration).
+    """
+    from voyage.augment import chunk_windows, interpolated_chunk_frame_count
+    from voyage.segment_manifest import load_segment_manifest
+
+    total = 0
+    for segment in usable:
+        try:
+            metrics = load_segment_manifest(segment).get("metrics")
+        except (OSError, ValueError, MediaError) as exc:
+            raise MediaError(
+                f"expected-frames gate: unreadable manifest in {segment.name} ({exc})"
+            ) from exc
+        count = metrics.get("frames", 0) if isinstance(metrics, dict) else 0
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise MediaError(f"expected-frames gate: segment {segment.name} has no frame count")
+        for index, (_start, window) in enumerate(chunk_windows(count, chunk_frames)):
+            total += interpolated_chunk_frame_count(index, window, interpolate)
+    # Joint math is net-zero (count-preserving morph replaces its own
+    # trims), so no addition — documented here so a future joint recipe
+    # that changes counts must update this gate in the same change.
+    return total
+
+
+def check_expected_frames_gate(
+    usable: list[Path],
+    *,
+    source_fps: float,
+    interpolate: int,
+    out_fps: int,
+    published_frames: int | None,
+    chunk_frames: int = 32,
+    tolerance_frames: int = 2,
+) -> int:
+    """Fail loud when shipped frames disagree with the chunk+joint math.
+
+    Compares `published_frames` (ffprobe presented count) against
+    `expected_presented_frames`; a mismatch beyond `tolerance_frames`
+    raises `MediaError` (stale ledger, dropped chunk, or joint mis-trim
+    shipped silently otherwise). Returns the expected count. `None`
+    published reads as "unprobable" and raises (the gate never passes
+    blind). Tolerance absorbs container-header rounding, not chunk loss.
+    """
+    expected = expected_presented_frames(
+        usable,
+        source_fps=source_fps,
+        interpolate=interpolate,
+        out_fps=out_fps,
+        chunk_frames=chunk_frames,
+    )
+    if published_frames is None:
+        raise MediaError(f"expected-frames gate: published frames unprobable (expected {expected})")
+    if abs(published_frames - expected) > tolerance_frames:
+        raise MediaError(
+            f"expected-frames gate: shipped {published_frames}f != expected {expected}f "
+            f"(tolerance {tolerance_frames}; chunk loss or joint mis-trim?)"
+        )
+    return expected
+
+
+def takes_ledger_normalized_hash(takes_path: Path, sort_key: str = "take_id") -> str:
+    """Order-normalized takes-ledger hash (Track C, bed-mirror).
+
+    Sorts parsed `takes.jsonl` rows by `sort_key` before hashing, so
+    ledger rewrites that only reorder rows (GC, re-append) hit the music
+    cache instead of re-rendering identical coverage. Torn trailing lines
+    are skipped like the sidecar loader; a missing ledger hashes as
+    "missing" (matches only another missing). Pure stdlib — the music
+    fingerprint (owned by the cache module) should call this instead of
+    a raw file hash (INTEGRATION REQUEST: `final_mix_cache`).
+    """
+    import hashlib
+    import json as _json
+
+    try:
+        lines = takes_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "missing"
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = _json.loads(stripped)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+    if not rows:
+        return "missing" if not takes_path.exists() else _json.dumps([], sort_keys=True)
+    rows.sort(key=lambda row: str(row.get(sort_key, "")))
+    canonical = _json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 FINALIZE_TMPDIR_PREFIX = "voyage-final-"
@@ -907,6 +1214,7 @@ def finalize_run(
     sfx_report: dict[str, Any] | None = None,
     no_music: bool = False,
     no_master: bool = False,
+    publish_timeout_seconds: float | None = None,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -1007,6 +1315,7 @@ def finalize_run(
         preset=preset,
         presentation_fps=presentation_fps,
         interp_backend=interp_backend,
+        publish_timeout_seconds=publish_timeout_seconds,
     )
     settings = resolved.settings
     effective_upscale = resolved.upscale
@@ -1015,6 +1324,31 @@ def finalize_run(
     effective_preset = resolved.preset
     effective_presentation_fps = resolved.presentation_fps
     effective_interp_backend = resolved.interp_backend
+    effective_publish_timeout = resolved.publish_timeout_seconds
+    # Track C entry evict: a previous finalize/SFX worker may hold
+    # resident augment nets (stale VRAM) — drop them best-effort before
+    # any GPU work, so the model pass starts from a known-empty state.
+    # Never raises: evict is hygiene, not correctness.
+    try:
+        from voyage.workers.augment_worker import evict_augment_models as _entry_evict
+
+        _entry_evict()
+    except (ImportError, OSError, ValueError):
+        pass
+    # Finalize staging (Track C consolidation): run-root `voyage-final-*`
+    # is load-bearing (NOT consolidatable under run/tmp/): the staged
+    # `final.mp4` + concat lists publish via same-filesystem
+    # `atomic_copy` beside the output path, and `TemporaryDirectory`
+    # cleanup owns the whole staging tree on success — run/tmp/ holds
+    # worker session scratch (pruned independently by
+    # `paths.ensure_scratch_dir`), never the publish staging. Both roots
+    # heal at entry (`heal_scratch_roots` covers tmp/ + stale finals).
+    try:
+        from voyage import paths as _paths_entry
+
+        _paths_entry.heal_scratch_roots(run_dir)
+    except (OSError, ValueError, ImportError):
+        pass
     resolved_weights = None
     model_selected = False
     if (effective_upscale > 1 or effective_interpolate > 1) and models_dir is not None:
@@ -1065,6 +1399,7 @@ def finalize_run(
                 )
     if min_free_space_gib > 0:
         check_free_space(run_dir, min_free_space_gib)
+    check_free_space_at_phase(run_dir, min_free_space_gib, "finalize-entry")
     # §56 steps 4-6 per segment, before any encoding work. skip_bad is
     # input triage (issues 138/188): missing artifacts fold into the same
     # skippable loop as checksum/metrics/alignment failures, and numbering
@@ -1370,6 +1705,7 @@ def finalize_run(
                 source_fps_key=int(round(source_fps)),
                 upscale_factor=effective_upscale,
                 multiplier=effective_interpolate,
+                chunk_frames=32,
                 crf=effective_crf,
                 preset=effective_preset,
                 device=interp_devices[0],
@@ -1507,6 +1843,9 @@ def finalize_run(
             armed_request = sfx_request_snapshot
             if armed_request is None:
                 raise MediaError("SFX bed needs an armed SFX request (got none)")
+            # Track C per-phase preflight: the bed renders gigabytes of
+            # stems — re-check disk here (not just at entry) and log.
+            check_free_space_at_phase(run_dir, min_free_space_gib, "sfx-bed")
             try:
                 from voyage.final_mix_cache import (
                     bed_fingerprint,
@@ -1518,7 +1857,11 @@ def finalize_run(
                     build_proxy_reference,
                     render_sfx_bed,
                     segment_sfx_bounds,
+                    sfx_bed_complete,
+                    sfx_bounds_fingerprint,
+                    stamp_sfx_coverage,
                 )
+                from voyage.persistence import record_sfx_coverage
 
                 # Durable single-slot bed cache (DESIGN §56): a
                 # no-change resume reuses the last bed instead of
@@ -1581,6 +1924,21 @@ def finalize_run(
                     armed_request.fps,
                     armed_request.caption_override,
                 )
+                # Stage-skip pre-check (joints/sfx resume): when the
+                # ledger already covers this timeline, join stems
+                # spawn-free — no worker ever starts, and a miss raises
+                # instead of rendering (covers the digest-shape-once-miss:
+                # stems complete but the bed cache keyed on the old shape).
+                bed_precomplete = sfx_bed_complete(
+                    run_dir,
+                    source_seconds,
+                    bounds,
+                    seed,
+                    armed_request.model_size,
+                    SFX_CONDITIONING_PROXY,
+                    armed_request.dual_pan,
+                    bounds_fingerprint=sfx_bounds_fingerprint(bounds),
+                )
                 bed = render_sfx_bed(
                     run_dir,
                     proxy_ref,
@@ -1599,10 +1957,22 @@ def finalize_run(
                     conditioning_source=SFX_CONDITIONING_PROXY,
                     conditioning_timeline=source_seconds,
                     dual_pan=armed_request.dual_pan,
+                    spawn_workers=not bed_precomplete,
                 )
                 bed_outcome["bed"] = bed
                 bed_outcome["source_seconds"] = source_seconds
                 store_bed_cache(run_dir, bed_digest, bed, source_seconds=source_seconds)
+                record_sfx_coverage(
+                    run_dir,
+                    stamp_sfx_coverage(
+                        run_dir=run_dir,
+                        timeline_seconds=source_seconds,
+                        conditioning_source=SFX_CONDITIONING_PROXY,
+                        dual_pan=armed_request.dual_pan,
+                        bed_digest=bed_digest,
+                        model_size=armed_request.model_size,
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001 — recorded for the music-only fallback, raised never
                 bed_outcome["error"] = exc
 
@@ -1626,6 +1996,12 @@ def finalize_run(
         # `if`, and the parallel gate below needs both names bound).
         from voyage.augment import augment_devices
         from voyage.augment_parallel import parallel_model_pass_armed
+
+        # Track C per-phase preflight: the model pass stages gigabytes of
+        # PNGs/mp4s — re-check disk here (entry preflight may be hours
+        # stale) and log free GiB at the gate.
+        if tensor_path:
+            check_free_space_at_phase(run_dir, min_free_space_gib, "model-pass")
 
         if phased and parallel_model_pass_armed(
             interp_backend=effective_interp_backend,
@@ -1735,6 +2111,11 @@ def finalize_run(
             # it is the exact fingerprint the mix would recompute, so
             # the recompute below only fires where no takes ran.
             music_digest = thread_music_digest if thread_music_digest is not None else "silent"
+            # Probed mix seconds for the `music_mix_seconds` metric hook
+            # (Track B `build_final_audio_with_metrics` contract): set on
+            # both the cache-hit path (sidecar `source_seconds`) and the
+            # fresh-render path (probed output), None for the silent path.
+            music_mix_seconds: float | None = None
             if no_music:
                 # Silent AAC sized to the stretched timeline (same
                 # frame-count math as the ledger mix, no takes needed).
@@ -1758,14 +2139,15 @@ def finalize_run(
                         "-c:a",
                         "pcm_s16le",
                         str(silent_dest),
-                    ]
+                    ],
+                    timeout=None,  # Unbounded: synths the full stretched timeline.
                 )
                 if silent_proc.returncode != 0:
                     raise MediaError(f"silent audio render failed: {silent_proc.stderr[-2000:]}")
                 final_audio = silent_dest
             else:
                 from voyage.final_mix_cache import (
-                    load_music_cache,
+                    load_music_cache_with_seconds,
                     music_fingerprint,
                     store_music_cache,
                 )
@@ -1787,8 +2169,21 @@ def finalize_run(
                         audio_stretch=audio_stretch,
                         audio_fps=float(audio_fps),
                     )
-                cached_music = load_music_cache(run_dir, music_digest)
-                if cached_music is not None:
+                # Track B hit-site probe (H5, mirrors the bed gate): the
+                # expectation rides INTO the load — a digest match on a
+                # truncated slot reads as a miss and re-renders instead of
+                # shipping short. The sidecar `source_seconds` rides back
+                # out for the `music_mix_seconds` metric hook.
+                expected_music = expected_music_seconds(
+                    usable, float(audio_fps), float(audio_stretch)
+                )
+                cached_hit = load_music_cache_with_seconds(
+                    run_dir,
+                    music_digest,
+                    expected_seconds=expected_music if expected_music > 0 else None,
+                )
+                if cached_hit is not None:
+                    cached_music, music_mix_seconds = cached_hit
                     final_audio = tmpdir / "final_audio.wav"
                     shutil.copyfile(cached_music, final_audio)
                     if progress is not None:
@@ -1796,7 +2191,7 @@ def finalize_run(
                             f"music: cache hit — reusing last mix ({len(usable)} segments)"
                         )
                 else:
-                    final_audio = build_final_audio(
+                    final_audio, mix_seconds = build_final_audio_with_metrics(
                         run_dir,
                         usable,
                         tmpdir,
@@ -1807,7 +2202,10 @@ def finalize_run(
                         settings.overlap_cap_seconds,
                         stretch=audio_stretch,
                     )
-                    store_music_cache(run_dir, music_digest, final_audio)
+                    music_mix_seconds = mix_seconds
+                    store_music_cache(
+                        run_dir, music_digest, final_audio, source_seconds=mix_seconds
+                    )
         final_stages["mix audio"] = time.monotonic() - mix_start
         audio_blend_ms = (time.monotonic() - audio_start) * 1000.0
         # DESIGN §140 A/V stream: on the phased path the 4060 runs
@@ -1909,12 +2307,15 @@ def finalize_run(
         publish_cm = optional_stage(
             publish_progress, publish_label, f"{out_w}x{out_h}@{out_fps}fps"
         )
+        # Track C per-phase preflight: the publish encodes the largest
+        # single ffmpeg output — re-check disk here and log.
+        check_free_space_at_phase(run_dir, min_free_space_gib, "publish")
         publish_start = time.monotonic()
         with publish_cm:
             if tensor_intermediate is not None:
                 tensor_vf = tensor_presentation_vf(out_w, out_h, out_fps, stretch, slowmo=slowmo)
                 final_start = time.monotonic()
-                proc = run_capture(
+                proc = run_publish_encode(
                     [
                         "ffmpeg",
                         "-hide_banner",
@@ -1944,7 +2345,13 @@ def finalize_run(
                         "128k",
                         "-shortest",
                         str(staged),
-                    ]
+                    ],
+                    # Workload-sized publish (tens of thousands of frames can
+                    # exceed the 600 s probe bound) — unbounded by default,
+                    # like the augment chunk path. `publish_timeout_seconds`
+                    # bounds it explicitly when set (raises with elapsed).
+                    timeout=effective_publish_timeout,
+                    label="tensor-intermediate",
                 )
                 final_encode_ms = (time.monotonic() - final_start) * 1000.0
                 if proc.returncode != 0:
@@ -2010,7 +2417,7 @@ def finalize_run(
                     f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
                 )
                 final_start = time.monotonic()
-                proc = run_capture(
+                proc = run_publish_encode(
                     [
                         "ffmpeg",
                         "-hide_banner",
@@ -2039,7 +2446,11 @@ def finalize_run(
                         "128k",
                         "-shortest",
                         str(staged),
-                    ]
+                    ],
+                    # Workload-sized publish — unbounded by default (see
+                    # above); explicit `publish_timeout_seconds` bounds it.
+                    timeout=effective_publish_timeout,
+                    label="native",
                 )
                 final_encode_ms = (time.monotonic() - final_start) * 1000.0
                 if proc.returncode != 0:
@@ -2058,7 +2469,7 @@ def finalize_run(
                     f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={out_fps}"
                 )
                 final_start = time.monotonic()
-                proc = run_capture(
+                proc = run_publish_encode(
                     [
                         "ffmpeg",
                         "-hide_banner",
@@ -2092,7 +2503,11 @@ def finalize_run(
                         "128k",
                         "-shortest",
                         str(staged),
-                    ]
+                    ],
+                    # Workload-sized publish — unbounded by default (see
+                    # above); explicit `publish_timeout_seconds` bounds it.
+                    timeout=effective_publish_timeout,
+                    label="presentation",
                 )
                 final_encode_ms = (time.monotonic() - final_start) * 1000.0
                 if proc.returncode != 0:
@@ -2174,15 +2589,48 @@ def finalize_run(
                 enabled=mastering_effective,
             )
             published = validate_video(ship, out_w, out_h, out_fps)
+            # Track C expected-frames gate (chunk sums + joint math): the
+            # model-pass publish must ship exactly the chunked interp sum
+            # (joints are net-zero by construction). Native/concat paths
+            # skip (no chunking involved) — the gate only knows the
+            # sidecar tiling. Fail loud past tolerance, never silent.
+            if tensor_intermediate is not None:
+                try:
+                    check_expected_frames_gate(
+                        usable,
+                        source_fps=float(source_fps),
+                        interpolate=int(effective_interpolate),
+                        out_fps=int(out_fps),
+                        published_frames=(
+                            published.get("frames")
+                            if isinstance(published.get("frames"), int)
+                            else None
+                        ),
+                    )
+                except MediaError as gate_exc:
+                    raise MediaError(
+                        f"publish expected-frames gate failed: {gate_exc}"
+                    ) from gate_exc
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_copy(ship, output_path)
-            # Fix [evict]: drop resident SRVGG/RIFE nets now that
-            # publish is done — finalize holds no more GPU work.
-            from voyage.workers.augment_worker import evict_augment_models
-
-            evicted_nets = evict_augment_models()
-            if progress is not None:
-                progress.info(f"evicted {evicted_nets} resident augment nets")
+            try:
+                atomic_copy(ship, output_path)
+            finally:
+                # Track C evict-in-finally: resident SRVGG/RIFE nets drop
+                # even when the copy raises (no stale VRAM into the next
+                # finalize). Best-effort — evict hygiene never masks the
+                # publish error (the original exception propagates).
+                try:
+                    from voyage.workers.augment_worker import evict_augment_models
+                except (ImportError, OSError, ValueError):
+                    pass
+                else:
+                    try:
+                        evicted_nets = evict_augment_models()
+                    except (OSError, ValueError, RuntimeError):
+                        pass
+                    else:
+                        if progress is not None:
+                            progress.info(f"evicted {evicted_nets} resident augment nets")
         final_stages["publish video"] = time.monotonic() - publish_start
         output_frames = published.get("frames")
         if isinstance(output_frames, int) and not isinstance(output_frames, bool):
@@ -2193,14 +2641,29 @@ def finalize_run(
                 )
         else:
             output_frames = None
-        from voyage.logrotate import append_line
+        from voyage.logrotate import append_line, format_finalize_metric
 
+        # Track E metric-schema contract (issue 224): finalize rides the
+        # same `run_id`/`ts_iso`/`schema` baseline as every commit-path
+        # event so `parse_metric_lines(run_id=...)` and `validate_metrics`
+        # see it. run_id mirrors the validator's expectation (manifest
+        # `name`, directory fallback — never raises here).
+        try:
+            from voyage.persistence import read_manifest as _read_manifest
+
+            _manifest_name = _read_manifest(run_dir).get("name")
+            finalize_run_id = (
+                str(_manifest_name)
+                if isinstance(_manifest_name, str) and _manifest_name
+                else run_dir.name
+            )
+        except Exception:  # noqa: BLE001 - metric correlation must never fail a publish
+            finalize_run_id = run_dir.name
         append_line(
             run_dir / paths.LOGS_DIRNAME / "metrics.jsonl",
-            json.dumps(
+            format_finalize_metric(
+                finalize_run_id,
                 {
-                    "ts": time.time(),
-                    "event": "finalize_completed",
                     "segments": len(usable),
                     "out_w": out_w,
                     "out_h": out_h,
@@ -2225,6 +2688,12 @@ def finalize_run(
                         if sfx_report is not None
                         else "skipped"
                     ),
+                    # The bed error that produced a music-only final (None
+                    # when dubbed/skipped): without it the cause of a
+                    # post-publish music-only was invisible in metrics.
+                    "sfx_error": (
+                        sfx_report.get("sfx_error") if sfx_report is not None else None
+                    ),
                     "model_pass_timings_s": {
                         key: round(value, 3)
                         for key, value in model_pass_timings.items()
@@ -2244,7 +2713,13 @@ def finalize_run(
                     # only. Rounded seconds, same keys as the console
                     # table — stage shares for future finalize analyses.
                     "final_stages_s": {key: round(value, 3) for key, value in final_stages.items()},
-                }
+                    # Track B metric hook: probed mix seconds on the
+                    # render path, sidecar `source_seconds` on a cache
+                    # hit, None for the silent path.
+                    "music_mix_seconds": (
+                        round(music_mix_seconds, 3) if music_mix_seconds is not None else None
+                    ),
+                },
             ),
         )
         _append_take_rendered_events(

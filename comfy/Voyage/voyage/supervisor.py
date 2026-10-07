@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import json
 import math
 import os
 import queue
@@ -61,7 +60,7 @@ from voyage.errors import (
     VoyageError,
 )
 from voyage.hashing import sha256_file as sha256_file  # re-export (issue 021, cf. cli.py)
-from voyage.logrotate import append_line, rotate_worker_logs
+from voyage.logrotate import append_line, format_metric_line, rotate_worker_logs
 from voyage.media import (
     check_free_space,
 )
@@ -231,6 +230,308 @@ RESOURCE_GAUGE_INTERVAL_SEGMENTS = 1
 #: (`voyage.scene_cut_every_n_segments`, default 3) — this constant is
 #: the code fallback when a config does not carry the knob.
 SCENE_CUT_EVERY_N_SEGMENTS = 3
+
+#: Seconds a `_take_prefetch` wait may block before it misses fast
+#: (Track A hardening). The prefetch overlaps the whole video render,
+#: so a still-running future at consume time is nearly done — or the
+#: worker is wedged, whose recovery the synchronous decide path owns.
+#: Capping at 12 s (inside the 10-15 s brief) keeps the commit moving
+#: instead of burning the full 60 s RPC budget on a best-effort thread.
+PREFETCH_WAIT_CAP_SECONDS = 12.0
+
+#: Poll tick for bounded waits that must stay responsive to stop
+#: (prefetch consume, render join). Small enough that SIGINT lands
+#: promptly, large enough that the wait does not spin.
+_STOP_POLL_TICK_SECONDS = 0.5
+
+#: Overall budget for the prompt-enhancement stage per segment
+#: (Track A hardening). Individual sidecar calls keep their own
+#: per-prompt timeout; this caps the whole expansion so a wedged
+#: sidecar degrades to unexpanded prompts instead of stalling the
+#: commit. Per-prompt progress notes ride the existing progress sink.
+ENHANCE_OVERALL_BUDGET_SECONDS = 120.0
+
+#: Process-wide re-entrant run-lock registry (Track A, issue 004).
+#: `acquire_run_lock` opens one fd per run dir per thread; nested
+#: acquires in the same thread (batch lock + per-commit lock, CLI
+#: discard + supervisor batch) bump the depth instead of opening a
+#: second fd — a second `flock` on another fd would EWOULDBLOCK
+#: against our own hold (flock fds are independent, even in the same
+#: process). Different threads (or processes) contend via the real
+#: `flock` and fail fast. Guarded by a threading lock; values are
+#: `(fd, depth)`.
+_PROCESS_RUN_LOCKS: dict[str, tuple[int, int]] = {}
+_PROCESS_RUN_LOCKS_GUARD = threading.Lock()
+
+
+def _run_lock_registry_key(run_dir: Path) -> str:
+    """Registry key for `acquire_run_lock` (run dir + thread identity).
+
+    Same-thread nesting shares one fd (depth-counted); different threads
+    — and different processes, which never share the registry — contend
+    via the real `flock`.
+    """
+    return f"{run_dir.resolve()}@{threading.get_ident()}"
+
+
+def run_lock_path(run_dir: Path) -> Path:
+    """Absolute path of the single-writer rendezvous file (DESIGN §73).
+
+    Other tracks import this (not a private helper) to name the same
+    file: `<run>/state.json.lock`. The lock itself is an `flock`
+    on the open fd, not the file's existence — the file is only the
+    rendezvous.
+    """
+    return run_dir / "state.json.lock"
+
+
+@contextmanager
+def acquire_run_lock(run_dir: Path) -> Iterator[None]:
+    """Hold the run-level single-writer lock (Track A, issue 004).
+
+    `fcntl.flock(LOCK_EX | LOCK_NB)` on `run_lock_path(run_dir)`,
+    non-blocking: the second writer in any process fails fast with
+    `FatalWorkerError` naming the holder pid instead of interleaving
+    media + state writes. Re-entrant in the same thread (depth-counted)
+    so `run_segments` can hold the batch lock while `commit_one_segment`
+    and CLI discard acquire nested. The lock dies with the process, so
+    no stale-lock recovery exists by design.
+
+    Other tracks (C/D/E): import this, never redefine — ::
+
+        from voyage.supervisor import acquire_run_lock
+
+        with acquire_run_lock(run_dir):
+            ...
+
+    Raises:
+        FatalWorkerError: Another process holds the lock.
+    """
+    key = _run_lock_registry_key(run_dir)
+    with _PROCESS_RUN_LOCKS_GUARD:
+        entry = _PROCESS_RUN_LOCKS.get(key)
+        if entry is not None:
+            fd_held, depth_held = entry
+            _PROCESS_RUN_LOCKS[key] = (fd_held, depth_held + 1)
+            nested = True
+        else:
+            nested = False
+    if nested:
+        try:
+            yield
+        finally:
+            with _PROCESS_RUN_LOCKS_GUARD:
+                current = _PROCESS_RUN_LOCKS.get(key)
+                if current is not None:
+                    fd_current, depth_current = current
+                    if depth_current <= 1:
+                        _PROCESS_RUN_LOCKS.pop(key, None)
+                    else:
+                        _PROCESS_RUN_LOCKS[key] = (fd_current, depth_current - 1)
+        return
+    lock_path = run_lock_path(run_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+            os.close(lock_fd)
+            raise
+        holder = read_lock_holder(lock_path)
+        os.close(lock_fd)
+        raise FatalWorkerError(
+            f"run {run_dir} is locked by pid {holder}; refusing a second concurrent writer"
+        ) from exc
+    with _PROCESS_RUN_LOCKS_GUARD:
+        _PROCESS_RUN_LOCKS[key] = (lock_fd, 1)
+    try:
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        os.ftruncate(lock_fd, 0)
+        os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+        yield
+    finally:
+        with _PROCESS_RUN_LOCKS_GUARD:
+            _PROCESS_RUN_LOCKS.pop(key, None)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(lock_fd)
+        try:
+            if lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                lock_path.unlink()
+        except OSError:
+            pass
+
+
+def install_stop_handlers(supervisor: Supervisor) -> Callable[[], None]:
+    """Wire SIGINT/SIGTERM to `supervisor.request_stop()` (Track A).
+
+    The handler sets the stop flag and returns — the run loop lands the
+    stop at the next segment boundary with a PAUSED rest instead of
+    stranding RUNNING. A second signal re-raises KeyboardInterrupt (for
+    SIGINT) so an operator can still force-abort a wedged render. Must
+    be called from the main thread (CLI entry); falls back to a no-op
+    restore when signals are unavailable (tests, non-main threads).
+
+    Returns:
+        A zero-arg restore function reinstalling the previous handlers.
+    """
+
+    def _restore(previous_int: Any, previous_term: Any) -> Callable[[], None]:
+        def _do_restore() -> None:
+            try:
+                signal.signal(signal.SIGINT, previous_int)
+            except (OSError, ValueError):
+                pass
+            try:
+                signal.signal(signal.SIGTERM, previous_term)
+            except (OSError, ValueError):
+                pass
+
+        return _do_restore
+
+    try:
+        previous_int = signal.getsignal(signal.SIGINT)
+        previous_term = signal.getsignal(signal.SIGTERM)
+    except (OSError, ValueError):
+        return lambda: None
+    fired = [False]
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        supervisor.request_stop()
+        # Second signal: restore defaults and re-raise so a wedged
+        # render stays force-abortable. Only the SIGINT path raises
+        # (SIGTERM has no Python-level default raise to mirror).
+        if fired[0]:
+            try:
+                signal.signal(signal.SIGINT, previous_int)
+                signal.signal(signal.SIGTERM, previous_term)
+            except (OSError, ValueError):
+                pass
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            return
+        fired[0] = True
+
+    try:
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+    except (OSError, ValueError):
+        return lambda: None
+    return _restore(previous_int, previous_term)
+
+
+def verify_doneless_segment_for_adoption(
+    run_dir: Path,
+    segment: Path,
+    *,
+    width: int,
+    height: int,
+    fps: int,
+    segment_frames: int,
+) -> bool:
+    """Verify a DONE-less segment dir for adoption (Track A, DESIGN §58).
+
+    Other tracks (CLI discard, future heal paths): import this, never
+    redefine — ::
+
+        from voyage.supervisor import verify_doneless_segment_for_adoption
+
+        if verify_doneless_segment_for_adoption(run, seg, width=..., ...):
+            atomic_write_bytes(seg / "DONE", b"")  # adoptable; supervisor adopts
+        else:
+            shutil.rmtree(seg)  # unverifiable only
+
+    Verification (all must hold to adopt): `video.mp4` + `manifest.json`
+    present, manifest parses, recorded `video.mp4` checksum matches,
+    every other non-empty recorded checksum verifies, metrics carries a
+    usable frame count within `1..10*segment_frames`, `validate_video`
+    passes at the given geometry, and the recovery-tail check passes
+    (`tape_tail_sha_matches`, refusal on mismatch like a checksum
+    failure).
+
+    Returns:
+        True when verifiable (caller writes DONE and skips deletion),
+        False when unverifiable (caller deletes after logging
+        checksums/size).
+
+    Raises:
+        MediaError: Manifest-read failures (torn/unreadable/malformed
+            `manifest.json`, unvalidatable world state) — fail loud with
+            the inspect-or-remove adoption directive; the caller must
+            NOT delete (a torn manifest may still cover real media).
+    """
+    del run_dir  # Reserved for future run-scoped checks; verification is segment-local.
+    video_out = segment / "video.mp4"
+    try:
+        video_present = video_out.is_file()
+    except OSError:
+        video_present = False
+    try:
+        manifest_present = (segment / "manifest.json").is_file()
+    except OSError:
+        manifest_present = False
+    if not video_present or not manifest_present:
+        return False
+    try:
+        manifest = load_segment_manifest(segment)
+        recorded_any = manifest.get("checksums")
+        recorded = dict(recorded_any) if isinstance(recorded_any, dict) else {}
+        metrics_any = manifest.get("metrics")
+        metrics_raw = dict(metrics_any) if isinstance(metrics_any, dict) else {}
+        world_any = manifest.get("world_state")
+        world_raw = dict(world_any) if isinstance(world_any, dict) else {}
+        SegmentWorldState.model_validate(world_raw)
+    except (OSError, ValueError, MediaError, VoyageError) as exc:
+        raise MediaError(
+            f"segment {segment.name}: DONE-less dir carries unreadable metadata "
+            f"({exc}); refusing to delete — inspect or remove {segment} manually"
+        ) from exc
+    recorded_video = recorded.get("video.mp4")
+    if not isinstance(recorded_video, str) or not recorded_video:
+        return False
+    try:
+        actual = sha256_file(video_out)
+    except OSError:
+        return False
+    if actual != recorded_video:
+        return False
+    for name, extra in sorted(recorded.items()):
+        if name == "video.mp4":
+            continue
+        if not isinstance(extra, str) or not extra:
+            continue
+        try:
+            actual_entry = sha256_file(segment / name)
+        except OSError:
+            return False
+        if actual_entry != extra:
+            return False
+    frames = metrics_raw.get("frames")
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+        return False
+    ceiling = REPORTED_FRAMES_SLACK * segment_frames
+    if not 1 <= frames <= ceiling:
+        return False
+    try:
+        validate_video(video_out, width, height, fps)
+    except (MediaError, VoyageError, OSError, ValueError):
+        return False
+    tape_candidate = segment / "recovery.pt"
+    try:
+        tape_is_file = tape_candidate.is_file()
+    except OSError:
+        tape_is_file = False
+    if tape_is_file:
+        try:
+            resolved_tape = tape_candidate.resolve()
+        except (OSError, RuntimeError):
+            resolved_tape = tape_candidate
+        if not tape_tail_sha_matches(segment, resolved_tape):
+            return False
+    return True
 
 
 def scene_cut_for_segment(number: int, every_n: int) -> bool:
@@ -470,65 +771,159 @@ class Supervisor:
         # slice B budget). Reset by run_segments; direct commit_one_segment
         # callers share the counters for the supervisor's lifetime.
         self._restarts: dict[str, int] = {}
+        # Deferred concept appends (Track A hardening): proposal/accept
+        # buffers here, flush happens in `_commit_segment` after DONE.
+        # Each entry holds the `ConceptStore.append` kwargs so ids assign
+        # at flush time; a failed render never flushes, so novelty stays
+        # unpolluted. Idempotent on flush (segment + canonical skip).
+        self._pending_concepts: list[dict[str, Any]] = []
 
     def request_stop(self) -> None:
         """Ask the run loop to exit after the current segment (SIGINT path)."""
         self._stop_flag = True
 
+    def _emit_progress_note(self, message: str) -> None:
+        """Best-effort progress note (Track A: never fails a commit).
+
+        The progress sink is display-only; a closed Live, a stub sink
+        without `note`, or any console error must degrade to silence,
+        never to a failed render. Failures are metric-visible.
+        """
+        progress = self._progress
+        if progress is None:
+            return
+        try:
+            progress.note(message)
+        except Exception:
+            try:
+                self._log_metric({"event": "progress_sink_failed", "op": "note"})
+            except Exception:
+                pass
+
+    def _emit_segment_start(self, number: int, segment_id: str) -> None:
+        """Best-effort `segment_start` (Track A: never fails a commit)."""
+        progress = self._progress
+        if progress is None:
+            return
+        try:
+            progress.segment_start(number, segment_id)
+        except Exception:
+            try:
+                self._log_metric({"event": "progress_sink_failed", "op": "segment_start"})
+            except Exception:
+                pass
+
+    def _emit_segment_plan(self, plan: dict[str, Any]) -> None:
+        """Best-effort `segment_plan` (Track A: never fails a commit)."""
+        progress = self._progress
+        if progress is None:
+            return
+        try:
+            progress.segment_plan(plan)
+        except Exception:
+            try:
+                self._log_metric({"event": "progress_sink_failed", "op": "segment_plan"})
+            except Exception:
+                pass
+
+    def _emit_segment_done(self, summary: dict[str, Any]) -> None:
+        """Best-effort `segment_done` (Track A: never fails a commit)."""
+        progress = self._progress
+        if progress is None:
+            return
+        try:
+            progress.segment_done(summary)
+        except Exception:
+            try:
+                self._log_metric({"event": "progress_sink_failed", "op": "segment_done"})
+            except Exception:
+                pass
+
+    def _buffer_concept(
+        self,
+        text: str,
+        accepted: bool,
+        summary: str = "",
+        vector: list[float] | None = None,
+        segment: int = 0,
+    ) -> None:
+        """Buffer one concept append for commit-time flush (Track A).
+
+        No disk write happens here — `_flush_pending_concepts` replays
+        the buffer after DONE. Keeps failed renders out of novelty.
+        """
+        self._pending_concepts.append(
+            {
+                "text": text,
+                "accepted": accepted,
+                "summary": summary,
+                "vector": list(vector) if vector is not None else None,
+                "segment": segment,
+            }
+        )
+
+    def _flush_pending_concepts(self) -> int:
+        """Replay buffered concept appends idempotently (Track A).
+
+        Opens the store fresh (reads committed history), skips entries
+        whose canonical form already exists for the same segment, and
+        appends the rest in buffer order. Returns the appended count.
+        Never leaves a partial-buffer retry double-appending: the skip
+        check runs per entry against live history. Failures propagate
+        as StateError/MediaError so the commit fails loud instead of
+        silently diverging novelty.
+        """
+        if not self._pending_concepts:
+            return 0
+        from voyage.concepts import canonicalize
+
+        try:
+            store = ConceptStore(
+                self._run_dir / "novelty",
+                similarity_threshold=self._config.voyage.novelty_threshold,
+                legacy_path=self._run_dir / paths.CONCEPTS_FILENAME,
+            )
+        except Exception as exc:
+            raise StateError(f"concept flush: corrupt concept history: {exc}") from exc
+        existing = {(record.first_segment, record.canonical_name) for record in store.records()}
+        appended = 0
+        for entry in list(self._pending_concepts):
+            text = str(entry.get("text", ""))
+            segment = entry.get("segment", 0)
+            segment_number = segment if isinstance(segment, int) else 0
+            key = (segment_number, canonicalize(text))
+            if key in existing:
+                continue
+            accepted = bool(entry.get("accepted", True))
+            summary = str(entry.get("summary", ""))
+            vector = entry.get("vector")
+            vector_arg: list[float] | None = list(vector) if isinstance(vector, list) else None
+            store.append(text, accepted, summary, vector_arg, segment_number)
+            existing.add(key)
+            appended += 1
+        self._pending_concepts.clear()
+        return appended
+
     @contextmanager
     def _held_run_lock(self) -> Iterator[None]:
-        """Single-writer run lock, held for one commit (issue 004).
+        """Hold the run-level single-writer lock (issue 004 + Track A batch).
 
-        `fcntl.flock(LOCK_EX | LOCK_NB)` on `<run>/state.json.lock`: the
-        second supervisor fails fast with FatalWorkerError (naming the
-        holder pid) instead of interleaving media + state writes. The lock
-        dies with the process, so no stale-lock recovery exists by design.
+        Delegates to the process-wide re-entrant `acquire_run_lock` so
+        batch + per-commit + CLI-discard nesting in one process shares a
+        single fd. The second writer in any *other* process still fails
+        fast with FatalWorkerError. Adds the `lock_ms` gap timing around
+        the acquire; the lock dies with the process (no stale recovery).
+
+        Other tracks: prefer the module-level `acquire_run_lock(run_dir)`
+        directly (same registry, documented there) — never copy this body.
         """
-        lock_path = self._run_dir / "state.json.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        acquired = False
-        try:
-            lock_started = time.monotonic()
+        lock_started = time.monotonic()
+        with acquire_run_lock(self._run_dir):
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
-                    # Not contention (EBADF/EINVAL/ENOLCK, …) — a
-                    # programming or environment error. Never misreport it
-                    # as "locked by pid" (issue 004): it propagates raw so
-                    # the real cause stays visible.
-                    raise
-                holder = self._read_lock_holder(lock_path)
-                raise FatalWorkerError(
-                    f"run {self._run_dir} is locked by pid {holder}; "
-                    "refusing a second concurrent writer"
-                ) from exc
-            acquired = True
-            self._gap_ms["lock_ms"] += (time.monotonic() - lock_started) * 1000.0
-            os.lseek(lock_fd, 0, os.SEEK_SET)
-            os.ftruncate(lock_fd, 0)
-            os.write(lock_fd, str(os.getpid()).encode("utf-8"))
-            yield
-        finally:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
+                self._gap_ms["lock_ms"] += (time.monotonic() - lock_started) * 1000.0
+            except Exception:
                 pass
-            os.close(lock_fd)
-            if acquired:
-                # Best-effort tidy (issue 004): remove the rendezvous file
-                # only while it still names this process — a successor that
-                # already acquired rewrote the pid, and its file must
-                # survive. Never raises: lock hygiene must not fail a
-                # commit. Residual: a contender arriving between this read
-                # and the unlink still splits onto a fresh inode (TOCTOU,
-                # documented in 004) — the lock itself stays correct.
-                try:
-                    if lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                        lock_path.unlink()
-                except OSError:
-                    pass
+            yield
 
     def _read_lock_holder(self, lock_path: Path) -> str:
         """Pid recorded by the lock holder (logic lives in supervisor_lock)."""
@@ -871,14 +1266,14 @@ class Supervisor:
                 getattr(latest, "joint_interp_chunks_skipped", 0) or 0
             )
             if fresh_fixes > 0 or up_chunks_done > 0 or ip_chunks_done > 0:
-                progress.note(
+                self._emit_progress_note(
                     f"pre-warm joints: {fresh_fixes} fixes early, "
                     f"{up_chunks_led} up + {ip_chunks_led} ip chunks "
                     f"ledgered ({joints_seen} joints)"
                 )
             elif joints_seen == 0 and int(getattr(latest, "seams_done", 0) or 0) > 0:
                 # Legacy drivers without joint fields: keep the old line.
-                progress.note(
+                self._emit_progress_note(
                     f"pre-warm seams: {int(getattr(latest, 'seams_done', 0) or 0)} rendered early"
                 )
         new_upf, new_ipf = upf - seen_upf, ipf - seen_ipf
@@ -914,7 +1309,7 @@ class Supervisor:
                 parts.append(f"+{new_upf}f upscale in {new_ups:.1f}s")
             if new_ipf > 0:
                 parts.append(f"+{new_ipf}f interp in {new_ips:.1f}s")
-            progress.note(f"pre-warm ledgered {', '.join(parts)}{scope}")
+            self._emit_progress_note(f"pre-warm ledgered {', '.join(parts)}{scope}")
             # Metric twin of the console note (jango analysis): the note
             # is the only record of background model-pass work done during
             # this segment's render — metrics.jsonl had zero pre-warm
@@ -932,12 +1327,16 @@ class Supervisor:
                 }
             )
             last = getattr(driver, "last_result", None)
+            try:
+                verbose_on = bool(getattr(progress, "verbose", False))
+            except Exception:
+                verbose_on = False
             if (
                 last is not None
                 and last is not getattr(self, "_reported_prewarm_result", None)
-                and bool(getattr(progress, "verbose", False))
+                and verbose_on
             ):
-                progress.note(
+                self._emit_progress_note(
                     f"pre-warm sweep: {last.segments_seen} segments, "
                     f"upscale {last.upscale_frames_done}f in {last.upscale_seconds:.1f}s, "
                     f"interp {last.interp_frames_done}f in {last.interp_seconds:.1f}s"
@@ -957,7 +1356,7 @@ class Supervisor:
                 # clean under `mypy --strict`).
                 skip_reason: str = getattr(cast(Any, last), "skip_reason", "")
                 if skip_reason:
-                    progress.note(f"pre-warm held back: {skip_reason}")
+                    self._emit_progress_note(f"pre-warm held back: {skip_reason}")
             self._reported_prewarm_result = last
         # Joints leg: ledgered via `driver.ledgered_joint_frames()` —
         # (fix, upscale, interp) source frames, segment legs excluded —
@@ -1228,6 +1627,14 @@ class Supervisor:
         pre-warm is byte-identical to the direct call. Falls back to the
         direct call when progress or the background driver is absent (or
         its thread died) — silent/library runs never pay for the fork.
+
+        Cancellable (Track A): the pump polls `self._stop_flag` every
+        tick and the final join uses `join(timeout)` in a loop, so
+        SIGINT/`request_stop()` stays responsive (a bare `join()` blocks
+        signal delivery indefinitely when the pump exits via exception
+        while the render is still alive). A stop still lands at the
+        segment boundary — this waits the render out, it just stays
+        interruptible while doing so.
         """
         driver = self._background
         if self._progress is None or driver is None or not driver.is_alive():
@@ -1242,25 +1649,51 @@ class Supervisor:
 
         worker = threading.Thread(target=_render, name="voyage-video-render", daemon=True)
         worker.start()
+        stop_noted = False
         try:
             while worker.is_alive():
+                if self._stop_flag and not stop_noted:
+                    self._emit_progress_note("stop requested — finishing segment, then pausing")
+                    stop_noted = True
                 self._drain_prewarm_queue(block=True)
             self._drain_prewarm_queue(block=False)
         finally:
-            worker.join()
+            while worker.is_alive():
+                worker.join(timeout=_PREWARM_PUMP_TICK_SECONDS)
+                try:
+                    self._drain_prewarm_queue(block=False)
+                except Exception:
+                    pass
         if "error" in outcome:
             raise outcome["error"]
         return cast(VideoSegmentResult, outcome["result"])
 
     def _stage(self, label: str, detail: str = "") -> AbstractContextManager[Any]:
-        """Progress spinner around one commit stage (no-op when silent)."""
+        """Progress spinner around one commit stage (no-op when silent).
+
+        Best-effort (Track A): a failing sink degrades to no spinner
+        instead of failing the commit.
+        """
         if self._progress is None:
             return nullcontext()
-        return self._progress.stage(label, detail)
+        try:
+            return self._progress.stage(label, detail)
+        except Exception:
+            try:
+                self._log_metric({"event": "progress_sink_failed", "op": "stage"})
+            except Exception:
+                pass
+            return nullcontext()
 
     def _log_metric(self, event: dict[str, object]) -> None:
-        line = json.dumps({"ts": time.time(), "run_id": self._config.name, **event})
-        append_line(self._logs / "metrics.jsonl", line)
+        """Append one schema-stamped metric line (issue 224).
+
+        Routed through `format_metric_line` so every commit-path event
+        carries `ts`/`ts_iso`/`run_id`/`schema` with the 16 KiB truncation
+        cap — base fields win over same-named event keys, so callers can
+        no longer spoof the correlation/version stamps.
+        """
+        append_line(self._logs / "metrics.jsonl", format_metric_line(self._config.name, event))
 
     def _rotate_worker_logs(self) -> None:
         """Mid-run worker-log rotation, one cadence tick (issue 056).
@@ -1510,8 +1943,81 @@ class Supervisor:
         from the latest tape (no tape → fresh stream, first segment).
         The supervisor process — and its prefetch future — survives, so
         steady-state prefetch keeps hitting across the refresh.
+
+        Budgeted (Track A): the restart routes through the same
+        `_call_with_restart` accounting as commit-path RPCs, emitting
+        `worker_restart` / `circuit_breaker_open` and tripping FAILED
+        through the caller's VoyageError mapping instead of escaping raw.
         """
-        self._video.restart()
+        budget = self._config.voyage.max_worker_restarts
+        try:
+            self._video.restart()
+        except RecoverableWorkerError as exc:
+            used = self._restarts.get("video", 0)
+            if used >= budget:
+                self._log_metric(
+                    {
+                        "event": "circuit_breaker_open",
+                        "worker": "video",
+                        "op": "refresh_restart",
+                        "segment_id": segment_id,
+                        "restarts_used": used,
+                        "budget": budget,
+                        "reason": str(exc),
+                    }
+                )
+                raise FatalWorkerError(
+                    f"circuit breaker open for video/refresh_restart: "
+                    f"{used} restarts exhausted ({exc})"
+                ) from exc
+            self._restarts["video"] = used + 1
+            self._log_metric(
+                {
+                    "event": "worker_restart",
+                    "worker": "video",
+                    "op": "refresh_restart",
+                    "segment_id": segment_id,
+                    "attempt": used + 1,
+                    "budget": budget,
+                    "reason": str(exc),
+                }
+            )
+            # One budgeted retry of the proactive restart; a second
+            # failure re-enters the gate via the resume path below (which
+            # itself retries through `_call_with_restart`), so the
+            # terminal error stays FatalWorkerError with a breaker event.
+            try:
+                self._video.restart()
+            except RecoverableWorkerError as retry_exc:
+                used_retry = self._restarts.get("video", 0)
+                if used_retry >= budget:
+                    self._log_metric(
+                        {
+                            "event": "circuit_breaker_open",
+                            "worker": "video",
+                            "op": "refresh_restart",
+                            "segment_id": segment_id,
+                            "restarts_used": used_retry,
+                            "budget": budget,
+                            "reason": str(retry_exc),
+                        }
+                    )
+                    raise FatalWorkerError(
+                        f"circuit breaker open for video/refresh_restart: "
+                        f"{used_retry} restarts exhausted ({retry_exc})"
+                    ) from retry_exc
+                self._restarts["video"] = used_retry + 1
+                self._log_metric(
+                    {
+                        "event": "worker_restart_failed",
+                        "worker": "video",
+                        "op": "refresh_restart",
+                        "segment_id": segment_id,
+                        "attempt": used_retry + 1,
+                        "budget": budget,
+                        "reason": str(retry_exc),
+                    }
+                )
         self._resume_video_worker(segment_id)
         self._log_metric(
             {
@@ -1596,7 +2102,12 @@ class Supervisor:
             pass
 
     def _pause_requested(self) -> bool:
-        """Honor an external `voyage pause`: transition to PAUSED and exit."""
+        """Honor an external pause request and rest at the boundary (099/223).
+
+        An operator writes `PAUSE_REQUESTED` into state.json (no CLI verb
+        does — the file is the control plane); this transitions to PAUSED
+        and exits so the next `generate` resumes cleanly.
+        """
         state = read_state(self._run_dir)
         if state.status != "PAUSE_REQUESTED":
             return False
@@ -1613,9 +2124,19 @@ class Supervisor:
         """Generate segments until `count` commits or a pause/stop arrives.
 
         `count=None` runs indefinitely (the autonomous voyage): each loop
-        iteration re-reads state.json so `voyage pause` / `voyage stop` from
-        another process — or SIGINT via `request_stop()` — takes effect at
-        the next segment boundary. Returns committed segment ids.
+        iteration re-reads state.json so an externally written
+        `PAUSE_REQUESTED` / `STOP_REQUESTED` — or SIGINT via
+        `request_stop()` — takes effect at the next segment boundary.
+        Returns committed segment ids.
+
+        Mutual exclusion (Track A): the whole batch — startup resume,
+        every commit, every refresh, and every status rest — holds one
+        `acquire_run_lock` (re-entrant with the per-commit lock), so a
+        second writer fails fast instead of interleaving. Each iteration
+        re-validates `committed_segments`/`next_segment_number` under
+        that lock; a drift fails loud (manual edit or lock bypass).
+        KeyboardInterrupt rests PAUSED (never strands RUNNING) and
+        returns the boundary-committed prefix.
         """
         # Run-level wall open (issue: jango analysis): `segment_committed`
         # carries per-segment elapsed, but nothing brackets the whole run —
@@ -1632,135 +2153,230 @@ class Supervisor:
             }
         )
         try:
-            self.start_workers()
-            self._restarts = {}
-            state = read_state(self._run_dir)
-            if state.status in ("PAUSE_REQUESTED", "STOP_REQUESTED"):
-                # A request that arrived before startup wins over RUNNING.
-                if state.status == "PAUSE_REQUESTED":
-                    state.status = "PAUSED"
+            with self._held_run_lock():
+                try:
+                    self.start_workers()
+                    self._restarts = {}
+                    state = read_state(self._run_dir)
+                    if state.status in ("PAUSE_REQUESTED", "STOP_REQUESTED"):
+                        # A request that arrived before startup wins over RUNNING.
+                        if state.status == "PAUSE_REQUESTED":
+                            state.status = "PAUSED"
+                            write_state(self._run_dir, state)
+                        return []
+                    state.status = "RUNNING"
                     write_state(self._run_dir, state)
-                return []
-            state.status = "RUNNING"
-            write_state(self._run_dir, state)
-            if (count is None or count > 0) and (
-                self._config.video.backend in STREAMING_VIDEO_BACKENDS
-            ):
-                # Swansy continuity: a fresh process starts with an empty
-                # video session tail, so without this the first segment of
-                # every extension renders fresh (121f) and hard-cuts. Resume
-                # from the latest committed tape before the first commit so
-                # cross-invocation extensions continue like same-batch ones
-                # (mid-batch refresh covers the rest). No tape (first
-                # segment) is a no-op inside `_resume_video_worker`.
-                try:
-                    pending_start = read_state(self._run_dir)
-                    resume_started = time.monotonic()
-                    self._resume_video_worker(
-                        paths.format_segment_id(pending_start.next_segment_number)
-                    )
-                    self._log_metric(
-                        {
-                            "event": "video_startup_resumed",
-                            "resume_seconds": round(time.monotonic() - resume_started, 3),
-                        }
-                    )
-                except VoyageError as exc:
-                    failed = read_state(self._run_dir)
-                    failed.status = "FAILED"
-                    write_state(self._run_dir, failed)
-                    self._log_metric({"event": "video_startup_resume_failed", "error": str(exc)})
-                    raise
-                except Exception as exc:
-                    failed = read_state(self._run_dir)
-                    failed.status = "FAILED"
-                    write_state(self._run_dir, failed)
-                    self._log_metric(
-                        {
-                            "event": "video_startup_resume_failed",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
-                    raise FatalWorkerError(
-                        f"video startup resume failed with {type(exc).__name__}: {exc}"
-                    ) from exc
-            stopped = False
-            while count is None or len(committed) < count:
-                control_started = time.monotonic()
-                stop_requested = self._stop_requested()
-                pause_requested = self._pause_requested()
-                self._gap_ms["control_ms"] += (time.monotonic() - control_started) * 1000.0
-                if stop_requested:
-                    stopped = True
-                    break
-                if pause_requested:
-                    break
-                try:
-                    segment_id = self.commit_one_segment()
-                except VoyageError as exc:
-                    failed = read_state(self._run_dir)
-                    if isinstance(exc, DiskSpaceError):
-                        # Free the operator to clear space and `run` again:
-                        # the next commit precheck re-pauses if still full.
-                        failed.status = "PAUSED_DISK_FULL"
-                    else:
-                        # Any abort leaves FAILED — resting at RUNNING after
-                        # a twice-failed recoverable op misled operators.
-                        failed.status = "FAILED"
-                    write_state(self._run_dir, failed)
-                    self._log_metric({"event": "segment_commit_failed", "error": str(exc)})
-                    raise
-                except Exception as exc:
-                    # Belt-and-braces (issue 002): anything that is not a
-                    # VoyageError — torn JSON, pydantic ValidationError, a
-                    # ZeroDivisionError from media probing — still rests the
-                    # run at FAILED instead of stranding RUNNING, and
-                    # re-raises as FatalWorkerError so callers branch on
-                    # class, never on message.
+                    batch_base_committed = state.committed_segments
+                    batch_base_next = state.next_segment_number
+                    if (count is None or count > 0) and (
+                        self._config.video.backend in STREAMING_VIDEO_BACKENDS
+                    ):
+                        # Swansy continuity: a fresh process starts with an empty
+                        # video session tail, so without this the first segment of
+                        # every extension renders fresh (121f) and hard-cuts. Resume
+                        # from the latest committed tape before the first commit so
+                        # cross-invocation extensions continue like same-batch ones
+                        # (mid-batch refresh covers the rest). No tape (first
+                        # segment) is a no-op inside `_resume_video_worker`.
+                        try:
+                            pending_start = read_state(self._run_dir)
+                            resume_started = time.monotonic()
+                            self._resume_video_worker(
+                                paths.format_segment_id(pending_start.next_segment_number)
+                            )
+                            self._log_metric(
+                                {
+                                    "event": "video_startup_resumed",
+                                    "resume_seconds": round(time.monotonic() - resume_started, 3),
+                                }
+                            )
+                        except VoyageError as exc:
+                            failed = read_state(self._run_dir)
+                            failed.status = "FAILED"
+                            write_state(self._run_dir, failed)
+                            self._log_metric(
+                                {"event": "video_startup_resume_failed", "error": str(exc)}
+                            )
+                            raise
+                        except Exception as exc:
+                            failed = read_state(self._run_dir)
+                            failed.status = "FAILED"
+                            write_state(self._run_dir, failed)
+                            self._log_metric(
+                                {
+                                    "event": "video_startup_resume_failed",
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            )
+                            raise FatalWorkerError(
+                                f"video startup resume failed with {type(exc).__name__}: {exc}"
+                            ) from exc
+                    stopped = False
+                    while count is None or len(committed) < count:
+                        # Re-validate under the batch lock (Track A): the
+                        # batch is the single writer, so any drift from the
+                        # expected counters is a manual edit or a lock
+                        # bypass — fail loud instead of double-counting.
+                        live_check = read_state(self._run_dir)
+                        if live_check.committed_segments != batch_base_committed + len(
+                            committed
+                        ) or live_check.next_segment_number != batch_base_next + len(committed):
+                            raise FatalWorkerError(
+                                f"run {self._run_dir} state drifted under lock: "
+                                f"expected committed={batch_base_committed + len(committed)} "
+                                f"next={batch_base_next + len(committed)}, "
+                                f"found committed={live_check.committed_segments} "
+                                f"next={live_check.next_segment_number} — "
+                                "refusing to interleave (inspect state.json manually)"
+                            )
+                        control_started = time.monotonic()
+                        stop_requested = self._stop_requested()
+                        pause_requested = self._pause_requested()
+                        self._gap_ms["control_ms"] += (time.monotonic() - control_started) * 1000.0
+                        if stop_requested:
+                            stopped = True
+                            break
+                        if pause_requested:
+                            break
+                        try:
+                            segment_id = self.commit_one_segment()
+                        except VoyageError as exc:
+                            failed = read_state(self._run_dir)
+                            if isinstance(exc, DiskSpaceError):
+                                # Free the operator to clear space and `run` again:
+                                # the next commit precheck re-pauses if still full.
+                                failed.status = "PAUSED_DISK_FULL"
+                            else:
+                                # Any abort leaves FAILED — resting at RUNNING after
+                                # a twice-failed recoverable op misled operators.
+                                failed.status = "FAILED"
+                            write_state(self._run_dir, failed)
+                            self._log_metric({"event": "segment_commit_failed", "error": str(exc)})
+                            raise
+                        except Exception as exc:
+                            # Belt-and-braces (issue 002): anything that is not a
+                            # VoyageError — torn JSON, pydantic ValidationError, a
+                            # ZeroDivisionError from media probing — still rests the
+                            # run at FAILED instead of stranding RUNNING, and
+                            # re-raises as FatalWorkerError so callers branch on
+                            # class, never on message.
+                            try:
+                                failed = read_state(self._run_dir)
+                            except VoyageError:
+                                self._log_metric(
+                                    {
+                                        "event": "segment_commit_failed",
+                                        "error": (
+                                            f"unreadable state after {type(exc).__name__}: {exc}"
+                                        ),
+                                    }
+                                )
+                                raise FatalWorkerError(
+                                    f"segment commit failed with {type(exc).__name__}: {exc} "
+                                    "(state.json unreadable)"
+                                ) from exc
+                            failed.status = "FAILED"
+                            write_state(self._run_dir, failed)
+                            self._log_metric(
+                                {
+                                    "event": "segment_commit_failed",
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            )
+                            raise FatalWorkerError(
+                                f"segment commit failed with {type(exc).__name__}: {exc}"
+                            ) from exc
+                        committed.append(segment_id)
+                        if self._should_refresh_video_session(count, len(committed)):
+                            # Issue 198: this backend's resident session OOMs on
+                            # continuation blocks while a fresh process renders
+                            # fine — refresh proactively so one invocation covers
+                            # the whole batch (and the prefetch future survives).
+                            # Same FAILED mapping as the commit above (Track A):
+                            # a refresh failure must rest FAILED, never strand
+                            # RUNNING.
+                            try:
+                                pending = read_state(self._run_dir)
+                                self._refresh_video_session(
+                                    paths.format_segment_id(pending.next_segment_number)
+                                )
+                            except VoyageError as exc:
+                                failed = read_state(self._run_dir)
+                                if isinstance(exc, DiskSpaceError):
+                                    failed.status = "PAUSED_DISK_FULL"
+                                else:
+                                    failed.status = "FAILED"
+                                write_state(self._run_dir, failed)
+                                self._log_metric(
+                                    {"event": "segment_commit_failed", "error": str(exc)}
+                                )
+                                raise
+                            except Exception as exc:
+                                try:
+                                    failed = read_state(self._run_dir)
+                                except VoyageError:
+                                    self._log_metric(
+                                        {
+                                            "event": "segment_commit_failed",
+                                            "error": (
+                                                f"unreadable state after {type(exc).__name__}: "
+                                                f"{exc}"
+                                            ),
+                                        }
+                                    )
+                                    raise FatalWorkerError(
+                                        f"video refresh failed with {type(exc).__name__}: "
+                                        f"{exc} (state.json unreadable)"
+                                    ) from exc
+                                failed.status = "FAILED"
+                                write_state(self._run_dir, failed)
+                                self._log_metric(
+                                    {
+                                        "event": "segment_commit_failed",
+                                        "error": f"{type(exc).__name__}: {exc}",
+                                    }
+                                )
+                                raise FatalWorkerError(
+                                    f"video refresh failed with {type(exc).__name__}: {exc}"
+                                ) from exc
+                    if stopped and self._stop_flag and not self._stop_requested_via_file():
+                        # SIGINT path: rest as PAUSED so `voyage run` resumes cleanly.
+                        resting = read_state(self._run_dir)
+                        resting.status = "PAUSED"
+                        write_state(self._run_dir, resting)
+                    elif not self._stop_requested() and not self._pause_requested():
+                        # Finite batch completed without external requests.
+                        resting = read_state(self._run_dir)
+                        resting.status = "PAUSED"
+                        write_state(self._run_dir, resting)
+                except KeyboardInterrupt:
+                    # Operator interrupt lands at the segment boundary
+                    # (Track A): rest PAUSED honestly instead of stranding
+                    # RUNNING, then return the boundary-committed prefix so
+                    # the CLI exits without a traceback.
                     try:
-                        failed = read_state(self._run_dir)
-                    except VoyageError:
-                        self._log_metric(
-                            {
-                                "event": "segment_commit_failed",
-                                "error": f"unreadable state after {type(exc).__name__}: {exc}",
-                            }
-                        )
-                        raise FatalWorkerError(
-                            f"segment commit failed with {type(exc).__name__}: {exc} "
-                            "(state.json unreadable)"
-                        ) from exc
-                    failed.status = "FAILED"
-                    write_state(self._run_dir, failed)
-                    self._log_metric(
-                        {
-                            "event": "segment_commit_failed",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
-                    raise FatalWorkerError(
-                        f"segment commit failed with {type(exc).__name__}: {exc}"
-                    ) from exc
-                committed.append(segment_id)
-                if self._should_refresh_video_session(count, len(committed)):
-                    # Issue 198: this backend's resident session OOMs on
-                    # continuation blocks while a fresh process renders
-                    # fine — refresh proactively so one invocation covers
-                    # the whole batch (and the prefetch future survives).
-                    pending = read_state(self._run_dir)
-                    self._refresh_video_session(
-                        paths.format_segment_id(pending.next_segment_number)
-                    )
-            if stopped and self._stop_flag and not self._stop_requested_via_file():
-                # SIGINT path: rest as PAUSED so `voyage run` resumes cleanly.
+                        resting = read_state(self._run_dir)
+                        # Never clobber an explicit FAILED the commit just
+                        # recorded — only RUNNING-family statuses rest here.
+                        if resting.status in ("RUNNING", "CREATED", "PAUSED"):
+                            resting.status = "PAUSED"
+                            write_state(self._run_dir, resting)
+                        self._log_metric({"event": "run_interrupted", "at": "boundary"})
+                    except Exception:
+                        pass
+                    return committed
+                else:
+                    return committed
+        except KeyboardInterrupt:
+            # Lock acquisition itself interrupted (or the inner handler
+            # re-raised past the batch): same PAUSED honesty, best-effort.
+            try:
                 resting = read_state(self._run_dir)
-                resting.status = "PAUSED"
-                write_state(self._run_dir, resting)
-            elif not self._stop_requested() and not self._pause_requested():
-                # Finite batch completed without external requests.
-                resting = read_state(self._run_dir)
-                resting.status = "PAUSED"
-                write_state(self._run_dir, resting)
+                if resting.status in ("RUNNING", "CREATED", "PAUSED"):
+                    resting.status = "PAUSED"
+                    write_state(self._run_dir, resting)
+            except Exception:
+                pass
             return committed
         finally:
             self._close_model_pass_bar()
@@ -1903,17 +2519,26 @@ class Supervisor:
             # The prefetch overlapped this segment's whole video render, so
             # a still-running future is nearly done — or the worker is
             # wedged, whose recovery the sync path's restart budget owns.
-            # Wait out its remaining RPC budget instead of instantly
-            # missing and then queueing a second decide behind the orphan
-            # on the serial worker lock: that queue is the observed
-            # director-between-segments gap. A hold discards the proposal
-            # unread, so it never waits.
-            remaining = PREFETCH_TIMEOUT_SECONDS - _age_ms() / 1000.0
-            if remaining > 0:
+            # Bounded wait (Track A): cap at PREFETCH_WAIT_CAP_SECONDS
+            # (12 s, inside the 10-15 s brief) then miss fast with a
+            # progress note, instead of burning the full 60 s RPC budget
+            # on a best-effort thread. Polls the stop flag so SIGINT lands
+            # promptly; a stop abandons the wait (miss) and the run loop
+            # rests at the boundary.
+            remaining_rpc = PREFETCH_TIMEOUT_SECONDS - _age_ms() / 1000.0
+            capped = min(max(0.0, remaining_rpc), PREFETCH_WAIT_CAP_SECONDS)
+            waited = 0.0
+            while not future.done() and waited < capped:
+                if self._stop_flag:
+                    break
+                tick = min(_STOP_POLL_TICK_SECONDS, capped - waited)
+                if tick <= 0:
+                    break
                 try:
-                    future.result(timeout=remaining)
-                except Exception:  # noqa: BLE001 — falls through to done() re-check
+                    future.result(timeout=tick)
+                except Exception:  # noqa: BLE001 — timeout or worker error; re-check done()
                     pass
+                waited += tick
         if not future.done():
             self._log_metric(
                 {
@@ -1922,6 +2547,8 @@ class Supervisor:
                     "prefetch_age_ms": _age_ms(),
                 }
             )
+            if not invalidated:
+                self._emit_progress_note("director prefetch timed out (continuing without it)")
             return None
         try:
             raw = future.result()
@@ -2124,6 +2751,14 @@ class Supervisor:
         carry novelty_accepted=False. Every rejection is recorded in
         the immutable concept history.
 
+        Deferred novelty (Track A): all `ConceptStore.append` calls are
+        buffered via `_buffer_concept` and flushed in `_commit_segment`
+        after DONE (idempotent on segment + canonical). A failed render
+        never flushes, so novelty stays unpolluted. In-loop novelty
+        scoring reads committed history only; the pending buffer does
+        not feed `check_novel` (feedback strings still carry rejection
+        reasons to the next attempt).
+
         Drift cadence: only every Nth segment (config
         drift_every_n_segments, 1 = drift each segment) consults the LLM;
         other segments hold the current concept via the deterministic
@@ -2146,7 +2781,7 @@ class Supervisor:
                     apply_feedback_amendments(stage_text, amendments)
                     for stage_text in hold.video.stages
                 ]
-            store.append(
+            self._buffer_concept(
                 hold.destination_concept,
                 accepted=True,
                 summary=f"drift cadence hold (every {drift_every})",
@@ -2212,7 +2847,7 @@ class Supervisor:
                 for stage_text in decision.video.stages:
                     check_prompt_against_style(stage_text, style_spec)
             except ProposalRejected as exc:
-                store.append(
+                self._buffer_concept(
                     decision.destination_concept,
                     accepted=False,
                     summary=f"style-policy rejection: {exc}",
@@ -2231,20 +2866,26 @@ class Supervisor:
             # schema/style-valid generation always renders. A revisit
             # simply carries novelty_accepted=False. Single-serve accepts
             # are also the director speedup: no retry loop burns extra
-            # ~120s+ LLM calls.
-            record = store.append(
+            # ~120s+ LLM calls. Buffered (Track A): the append below is
+            # deferred to `_commit_segment` after DONE, so the record id
+            # in the notes suffix is a pending placeholder (the flush
+            # assigns the durable id idempotently).
+            self._buffer_concept(
                 decision.destination_concept,
                 accepted=True,
                 summary=decision.destination.summary,
                 vector=vector,
                 segment=state.next_segment_number,
             )
+            pending_id = (
+                f"pending-{state.next_segment_number:06d}-{len(self._pending_concepts):03d}"
+            )
             decision.novelty_accepted = accepted or config.voyage.allow_concept_revisit
             kind = "novel" if decision.novelty_accepted else "revisit"
             suffix = (
                 f"novelty {kind} (similarity {last_score:.3f}, "
                 f"embeddings {'on' if vector is not None else 'fallback'}) "
-                f"record {record.id}"
+                f"record {pending_id}"
             )
             decision.notes = f"{decision.notes} | {suffix}" if decision.notes else suffix
             self._log_metric(
@@ -2267,7 +2908,7 @@ class Supervisor:
             destination_concept=state.destination_concept,
             phase=state.phase,
         )
-        store.append(
+        self._buffer_concept(
             fallback.destination_concept,
             accepted=True,
             summary="deterministic fallback after exhausted retries",
@@ -2354,8 +2995,8 @@ class Supervisor:
             invalidation_reason="+".join(invalidation_reasons),
         )
         prefetch_hit = prefetched_raw is not None
-        if prefetch_hit and self._progress is not None:
-            self._progress.note("director prefetch hit (used as first candidate)")
+        if prefetch_hit:
+            self._emit_progress_note("director prefetch hit (used as first candidate)")
         director_started = time.monotonic()
         with self._stage("director", config.director.backend):
             measured_context = format_measured_context(style_spec, self._last_motion)
@@ -2383,12 +3024,8 @@ class Supervisor:
         # Prefetch the next segment's raw proposal while this one renders
         # (CPU director vs GPU video — no contention by construction).
         self._prefetch_decide_for_next(config, number, decision, store, style_spec)
-        if (
-            self._progress is not None
-            and self._prefetch_target == number + 1
-            and self._prefetch_in_flight()
-        ):
-            self._progress.note(
+        if self._prefetch_target == number + 1 and self._prefetch_in_flight():
+            self._emit_progress_note(
                 f"director prefetch running for {paths.format_segment_id(number + 1)} (background)"
             )
 
@@ -2438,6 +3075,96 @@ class Supervisor:
             director_tokens=director_tokens,
         )
 
+    def _enhance_prompts_with_budget(
+        self,
+        prompts: list[str],
+        *,
+        enabled: bool,
+        backend: str,
+        endpoint: str,
+        segment_id: str,
+    ) -> tuple[list[str], dict[str, int]]:
+        """Expand staged prompts under an overall budget (Track A).
+
+        Per-prompt work goes through `prompt_enhancer.enhance` (fail-soft
+        single, never raises for transport reasons); this loop adds what
+        `enhance_many` lacks: an overall wall budget
+        (`ENHANCE_OVERALL_BUDGET_SECONDS`), a stop-flag poll between
+        prompts (a stop skips remaining expansions so the render lands
+        at the boundary promptly), and a per-prompt progress note via
+        the existing sink (best-effort — display never fails the
+        commit). Summary shape matches `enhance_many` exactly
+        (`prompts_total/prompts_changed/expanded_chars/prompt_tokens/
+        completion_tokens`) so the `prompt_enhanced` metric is unchanged.
+        Never raises: exhaustion/deferral degrades to unexpanded inputs.
+        """
+        total = len(prompts)
+        summary: dict[str, int] = {
+            "prompts_total": total,
+            "prompts_changed": 0,
+            "expanded_chars": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+        try:
+            enhancer_backends = prompt_enhancer.ENHANCER_BACKENDS
+            per_call_timeout = float(prompt_enhancer.DEFAULT_TIMEOUT_SECONDS)
+        except Exception:
+            return list(prompts), summary
+        if not enabled or backend not in enhancer_backends or total == 0:
+            return list(prompts), summary
+        started = time.monotonic()
+        expanded: list[str] = []
+        for index, prompt in enumerate(prompts):
+            elapsed = time.monotonic() - started
+            remaining = ENHANCE_OVERALL_BUDGET_SECONDS - elapsed
+            if remaining <= 0:
+                self._emit_progress_note(
+                    f"prompt enhancement budget exhausted ({index}/{total} expanded)"
+                )
+                try:
+                    self._log_metric(
+                        {
+                            "event": "prompt_enhance_budget_exhausted",
+                            "segment_id": segment_id,
+                            "expanded": index,
+                            "total": total,
+                        }
+                    )
+                except Exception:
+                    pass
+                expanded.extend(prompts[index:])
+                summary["expanded_chars"] += sum(len(text) for text in prompts[index:])
+                break
+            if self._stop_flag:
+                expanded.extend(prompts[index:])
+                summary["expanded_chars"] += sum(len(text) for text in prompts[index:])
+                break
+            self._emit_progress_note(f"enhancing prompt {index + 1}/{total}")
+            call_timeout = min(per_call_timeout, remaining)
+            try:
+                text, counts = prompt_enhancer.enhance(
+                    prompt, endpoint=endpoint, timeout=call_timeout
+                )
+            except Exception:
+                text, counts = prompt, {"prompt_tokens": 0, "completion_tokens": 0}
+            expanded.append(text)
+            try:
+                summary["expanded_chars"] += len(text)
+                prompt_tokens = counts.get("prompt_tokens", 0)
+                completion_tokens = counts.get("completion_tokens", 0)
+                summary["prompt_tokens"] += (
+                    int(prompt_tokens) if isinstance(prompt_tokens, int) else 0
+                )
+                summary["completion_tokens"] += (
+                    int(completion_tokens) if isinstance(completion_tokens, int) else 0
+                )
+            except Exception:
+                pass
+            if text != prompt:
+                summary["prompts_changed"] += 1
+        return expanded, summary
+
     def _render_video(
         self,
         config: ProjectConfig,
@@ -2478,25 +3205,30 @@ class Supervisor:
         # video-only; the sidecar holds ~5 GiB on cuda:1). When the knob
         # is off (`--no-prompt-enhance`) or the backend is not LTX, the
         # helper returns the inputs untouched and the payload below is
-        # byte-identical.
+        # byte-identical. Budgeted per Track A (overall wall + per-prompt
+        # progress notes via the existing sink; stop skips the rest).
         staged_prompt = proposed.prompt_plan.stages[0].prompt
         staged_blocks = list(proposed.block_prompts) if streaming else None
         if staged_blocks is not None:
-            staged_blocks, enhance_summary = prompt_enhancer.enhance_many(
+            staged_blocks, enhance_summary = self._enhance_prompts_with_budget(
                 staged_blocks,
                 enabled=config.video.prompt_enhance,
                 backend=config.video.backend,
                 endpoint=config.director.llama_endpoint,
+                segment_id=segment_id,
             )
             if staged_blocks:
                 staged_prompt = staged_blocks[0]
         else:
-            [staged_prompt], enhance_summary = prompt_enhancer.enhance_many(
+            single_expanded, enhance_summary = self._enhance_prompts_with_budget(
                 [staged_prompt],
                 enabled=config.video.prompt_enhance,
                 backend=config.video.backend,
                 endpoint=config.director.llama_endpoint,
+                segment_id=segment_id,
             )
+            if single_expanded:
+                staged_prompt = single_expanded[0]
         if config.video.prompt_enhance:
             # Track C observable: prove sidecar engagement per segment
             # (an ON run whose expansion never changes text — or never
@@ -2548,20 +3280,19 @@ class Supervisor:
 
         adapter = VideoBackendAdapter(_transport, config.video.backend, config.video)
         display_payload = adapter.build_payload(request, video_out)
-        if self._progress is not None:
-            self._progress.segment_plan(
-                self._segment_plan_info(
-                    config,
-                    number,
-                    segment_id,
-                    proposed.decision,
-                    proposed.block_prompts,
-                    display_payload,
-                    proposed.num_blocks,
-                    proposed.prefetch_hit,
-                    proposed.drift_hold,
-                )
+        self._emit_segment_plan(
+            self._segment_plan_info(
+                config,
+                number,
+                segment_id,
+                proposed.decision,
+                proposed.block_prompts,
+                display_payload,
+                proposed.num_blocks,
+                proposed.prefetch_hit,
+                proposed.drift_hold,
             )
+        )
         with self._stage(
             "video",
             f"{config.video.backend} {config.video.width}x{config.video.height}",
@@ -2659,15 +3390,19 @@ class Supervisor:
         )
 
     def _write_state_preserving_control_plane(self, fresh: RunState) -> None:
-        """Write back commit state without clobbering stop/pause (issue 099).
+        """Write back commit state without clobbering stop/pause (099/223).
 
         Shared by the render path (`_commit_segment`) and the orphan
-        adoption path (`_adopt_unaccounted_segment`, issue 013): `voyage
-        stop` / `voyage pause` write state.json without the run lock, so a
-        request that landed after the `fresh` read — e.g. during the
-        seconds-long checksum passes — would otherwise be clobbered by
-        this write-back. The request wins; the run loop honors it at the
-        next segment boundary.
+        adoption path (`_adopt_unaccounted_segment`, issue 013): an
+        externally written stop/pause request lands in state.json without
+        the run lock (no CLI verb writes it — the file is the control
+        plane), so a request that landed after the `fresh` read — e.g.
+        during the seconds-long checksum passes — would otherwise be
+        clobbered by this write-back. The request wins; the run loop
+        honors it at the next segment boundary. Runs under
+        `_held_run_lock` on both call paths; the residual microsecond
+        read-then-write window vs an external hand-edit is documented in
+        DESIGN §73 (issue 223).
         """
         try:
             live_status = read_state(self._run_dir).status
@@ -2705,7 +3440,7 @@ class Supervisor:
             world_any = manifest.get("world_state")
             world_raw = dict(world_any) if isinstance(world_any, dict) else {}
             world_state = SegmentWorldState.model_validate(world_raw)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, MediaError, VoyageError) as exc:
             raise MediaError(
                 f"segment {segment_id}: DONE exists but orphan metadata is unreadable "
                 f"({exc}); refusing to re-render over it — inspect or remove "
@@ -2756,6 +3491,25 @@ class Supervisor:
                 f"usable frame count; refusing to re-render over it — inspect or "
                 f"remove {segment} manually"
             )
+        # Tail verification on adopt (Track A): a truncated conditioning
+        # tail anchoring the next segment on garbage must refuse like a
+        # checksum failure, never silently adopt.
+        tape_candidate = segment / "recovery.pt"
+        try:
+            tape_is_file = tape_candidate.is_file()
+        except OSError:
+            tape_is_file = False
+        if tape_is_file:
+            try:
+                resolved_tape = tape_candidate.resolve()
+            except (OSError, RuntimeError):
+                resolved_tape = tape_candidate
+            if not self._tape_tail_sha_matches(segment, resolved_tape):
+                raise MediaError(
+                    f"segment {segment_id}: DONE exists but recovery.pt fails "
+                    "conditioning-tail verification; refusing to re-render over it — "
+                    f"inspect or remove {segment} manually"
+                )
         # Issue 006 (adoption-side mirror of the `_render_video` ceiling):
         # the orphan's frame count drives `timeline_frames` directly, so an
         # absurd stored count corrupts the timeline exactly like an absurd
@@ -2814,6 +3568,10 @@ class Supervisor:
         Records the `validate` + `commit` stage timings, emits the
         `segment_committed` metric and the progress summary. `started` is
         the commit's monotonic start (drives the elapsed metric).
+
+        Deferred novelty (Track A): buffered concept appends flush here
+        after DONE (idempotent on segment + canonical) — a failed render
+        never reaches this point, so novelty stays unpolluted.
         """
         video_out = segment / "video.mp4"
         decision = proposed.decision
@@ -2883,6 +3641,22 @@ class Supervisor:
             # a visible DONE.partial window where a concurrent validate
             # reported a spurious orphan on a healthy in-flight commit.
             atomic_write_bytes(segment / paths.DONE_MARKER, b"")
+
+        # Deferred novelty flush (Track A): buffered concept appends land
+        # after DONE (idempotent on segment + canonical — a retry re-flush
+        # skips what the first flush already wrote). A failed render never
+        # reaches here, so novelty stays unpolluted by construction.
+        try:
+            flushed = self._flush_pending_concepts()
+        except (StateError, MediaError, VoyageError, OSError, ValueError) as exc:
+            raise StateError(
+                f"segment {segment_id}: concept flush failed ({exc}); "
+                f"inspect novelty/ manually — media at {segment} is durable"
+            ) from exc
+        if flushed:
+            self._log_metric(
+                {"event": "concepts_flushed", "segment_id": segment_id, "appended": flushed}
+            )
 
         # 6. Supervisor-owned state advance (single writer).
         fresh = read_state(self._run_dir)
@@ -2955,34 +3729,36 @@ class Supervisor:
         rotate_started = time.monotonic()
         self._rotate_worker_logs()
         self._gap_ms["rotate_ms"] += (time.monotonic() - rotate_started) * 1000.0
-        if self._progress is not None:
+        try:
             from voyage.audio.acestep import MAX_BPM
             from voyage.audio.beat import beats_for_segment
 
             beats, grid_bpm = beats_for_segment(
                 duration, config.audio.beats_per_segment, max_bpm=MAX_BPM
             )
-            self._progress.segment_done(
-                {
-                    "number": number,
-                    "segment_id": segment_id,
-                    "frames": frames,
-                    "duration": duration,
-                    "take_ids": list(covered.audio_plan.take_ids),
-                    "take_action": covered.take_action,
-                    "take_reason": covered.take_reason,
-                    "beats": beats,
-                    "bpm": grid_bpm,
-                    "video_backend": config.video.backend,
-                    "overlap_fraction": config.audio.final_overlap_fraction,
-                    "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
-                    "stage_seconds": dict(stage_seconds),
-                    "elapsed": elapsed,
-                    "prefetch_hit": proposed.prefetch_hit,
-                    "motion_energy": motion.energy,
-                    "motion_seconds": motion.seconds,
-                }
-            )
+        except Exception:
+            beats, grid_bpm = 0, 0.0
+        self._emit_segment_done(
+            {
+                "number": number,
+                "segment_id": segment_id,
+                "frames": frames,
+                "duration": duration,
+                "take_ids": list(covered.audio_plan.take_ids),
+                "take_action": covered.take_action,
+                "take_reason": covered.take_reason,
+                "beats": beats,
+                "bpm": grid_bpm,
+                "video_backend": config.video.backend,
+                "overlap_fraction": config.audio.final_overlap_fraction,
+                "overlap_cap_seconds": config.audio.final_overlap_cap_seconds,
+                "stage_seconds": dict(stage_seconds),
+                "elapsed": elapsed,
+                "prefetch_hit": proposed.prefetch_hit,
+                "motion_energy": motion.energy,
+                "motion_seconds": motion.seconds,
+            }
+        )
         return segment_id
 
     def commit_one_segment(self) -> str:
@@ -3004,6 +3780,11 @@ class Supervisor:
         `_cover_audio` (video-only deferred-audio cover) and
         `_commit_segment` (validate + metadata + DONE + state advance),
         each independently testable (issue 020).
+
+        Deferred novelty (Track A): the pending-concept buffer resets
+        here, fills during propose/accept, and flushes in
+        `_commit_segment` after DONE. Re-stat of DONE happens under the
+        held lock (TOCTOU-closed); adoption returns before any buffering.
         """
         started = time.monotonic()
         stage_seconds: dict[str, float] = {}
@@ -3016,10 +3797,19 @@ class Supervisor:
         segment_id = paths.format_segment_id(number)
         segment = paths.segment_dir(self._run_dir, segment_id)
         segment.mkdir(parents=True, exist_ok=True)
-        done_present = (segment / paths.DONE_MARKER).exists()
+        # Re-stat DONE under the held lock (Track A TOCTOU close): the
+        # pre-lock existence check (if any) is stale by the time we hold
+        # the single-writer lock, so read again here — this read rules.
+        try:
+            done_present = (segment / paths.DONE_MARKER).exists()
+        except OSError:
+            done_present = False
         done_children: list[str] = []
         if done_present:
-            done_children = sorted(child.name for child in segment.iterdir())
+            try:
+                done_children = sorted(child.name for child in segment.iterdir())
+            except OSError:
+                done_children = [paths.DONE_MARKER]
         self._gap_ms["precheck_ms"] += (time.monotonic() - precheck_started) * 1000.0
         if done_present:
             # Crash-window orphan (issue 013): DONE went durable but the
@@ -3040,8 +3830,10 @@ class Supervisor:
                 )
             else:
                 return self._adopt_unaccounted_segment(state, number, segment_id, segment)
-        if self._progress is not None:
-            self._progress.segment_start(number, segment_id)
+        # Fresh render: reset the deferred-novelty buffer (a previous
+        # failed commit's unflushed entries must never leak into this one).
+        self._pending_concepts.clear()
+        self._emit_segment_start(number, segment_id)
 
         # 1. Director proposal (validated schema; never writes state itself).
         # §74 proposal transaction: validate → novelty → style → accept.
