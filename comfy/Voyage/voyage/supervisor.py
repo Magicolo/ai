@@ -411,6 +411,11 @@ class Supervisor:
             0.0,
             0.0,
         )
+        # Last reported mastering ledger as (driver, frames, seconds):
+        # mirrors `_reported_prewarm` for the Track C mastering leg (zero
+        # until Track B wires the mastering sweep). Driver identity resets
+        # the baseline across worker restarts.
+        self._reported_mastering: tuple[Any, int, float] = (None, 0, 0.0)
         # Per-leg pre-warm bars for the run loop (source frames ledgered
         # vs committed, one bar per leg). Opened lazily when a leg first
         # reports frames; closed after every post-commit report so no
@@ -433,9 +438,14 @@ class Supervisor:
         self._prewarm_queue: queue.Queue[tuple[Any, ...]] = queue.Queue()
         # Pumped-since-report frame counts, subtracted from the next
         # ledger delta so live-advanced frames are never counted twice.
+        # Mastering (Track C) pumps the same way; its ledger lives in
+        # `BackgroundPrewarm.ledgered_mastering_frames` (zero until Track
+        # B wires the mastering sweep), so the counter below is the delta
+        # truth until then.
         self._pumped_upscale_frames = 0
         self._pumped_interp_frames = 0
         self._pumped_joint_frames = 0
+        self._pumped_mastering_frames = 0
         # Post-commit motion sense (cheap tier): pixel-delta energy of the
         # just-committed segment, steering the NEXT proposal via the
         # measured_context/amendments path. Never gates a commit — a frozen
@@ -763,6 +773,12 @@ class Supervisor:
                         ("joint_frames", unit, leg, frames, position, total)
                     )
                 ),
+                on_mastering_chunk=lambda segment, index, total: self._enqueue_prewarm_event(
+                    ("mastering_chunk", segment, index, total)
+                ),
+                on_mastering_frames=lambda segment, frames: self._enqueue_prewarm_event(
+                    ("mastering_frames", segment, frames)
+                ),
             )
             driver.start()
             self._background = driver
@@ -803,11 +819,12 @@ class Supervisor:
         The background thread never touches display code — it only
         accumulates `ledgered_frames()`, and this post-commit call (main
         thread) announces the delta since the last report, advances one
-        per-leg bar per leg (`upscale frames`, `interpolate frames`),
-        and (verbose only) logs the latest sweep breakdown. Silent when
-        nothing new ledgered, so the log stays clean on idle passes.
-        Frame counts are source frames per leg. Bars close before return
-        so no Live is held across segment stages.
+        per-leg bar per leg (`upscale frames`, `interpolate frames`,
+        plus `mastering frames` for Track C), and (verbose only) logs
+        the latest sweep breakdown. Silent when nothing new ledgered,
+        so the log stays clean on idle passes. Frame counts are source
+        frames per leg. Bars close before return so no Live is held
+        across segment stages.
         """
         driver = self._background
         progress = self._progress
@@ -983,6 +1000,50 @@ class Supervisor:
             joint_result = getattr(driver, "last_result", None)
             joint_total = int(getattr(joint_result, "joint_frames_total", 0) or 0)
             self._advance_prewarm_leg_bar("joints", unreported_joint, joint_total or None)
+        # Mastering leg (Track C): ledgered via
+        # `driver.ledgered_mastering_frames()` — zero until Track B wires
+        # the mastering sweep — while pumped frames already advanced live
+        # via `_drain_prewarm_queue`. The bar moves only by the unreported
+        # ledger remainder; pumped-only work (no ledger yet) is noted once
+        # here so it stays visible. `getattr` guards keep doubles built
+        # without `__init__` working — live instances always carry both.
+        master_reader = getattr(driver, "ledgered_mastering_frames", None)
+        if callable(master_reader):
+            try:
+                master_values: Any = master_reader()
+                master_chunks = int(master_values[0])
+                master_frames = int(master_values[1])
+                master_seconds = float(master_values[2])
+            except Exception:
+                master_chunks, master_frames, master_seconds = 0, 0, 0.0
+        else:
+            master_chunks, master_frames, master_seconds = 0, 0, 0.0
+        del master_chunks
+        master_baseline: Any = getattr(self, "_reported_mastering", None)
+        if isinstance(master_baseline, tuple) and len(master_baseline) == 3:
+            seen_master_driver, seen_master_frames, seen_master_seconds = master_baseline
+        else:
+            seen_master_driver, seen_master_frames, seen_master_seconds = None, 0, 0.0
+        seen_master_frames, seen_master_seconds = (
+            int(seen_master_frames),
+            float(seen_master_seconds),
+        )
+        if seen_master_driver is not driver:
+            seen_master_frames, seen_master_seconds = 0, 0.0
+        self._reported_mastering = (driver, master_frames, master_seconds)
+        pumped_master = int(getattr(self, "_pumped_mastering_frames", 0) or 0)
+        if hasattr(self, "_pumped_mastering_frames"):
+            self._pumped_mastering_frames = 0
+        new_master_frames = master_frames - seen_master_frames
+        new_master_seconds = master_seconds - seen_master_seconds
+        if new_master_frames > 0:
+            unreported_master = max(0, new_master_frames - pumped_master)
+            self._advance_prewarm_leg_bar("mastering", unreported_master, None)
+            self._emit_progress_note(
+                f"mastering ledgered +{new_master_frames}f in {new_master_seconds:.1f}s"
+            )
+        elif pumped_master > 0:
+            self._emit_progress_note(f"mastering ledgered +{pumped_master}f")
         # Never hold a bar Live across segment stages: per-segment bars
         # close here (finish lines print), and the next segment reopens
         # them lazily on its first pump/report event.
@@ -998,11 +1059,14 @@ class Supervisor:
         """Advance one per-leg pre-warm bar, opening it lazily.
 
         `leg` is `upscale` (`upscale frames`), `interp`
-        (`interpolate frames`), or `joints` (`joint frames`). Each leg
-        counts its own source frames against committed frames, so legs
-        never share one X/Y total. Dict keys use the display spelling
-        (`upscale` / `interpolate` / `joints`). No-op when augmentation
-        is not demanded.
+        (`interpolate frames`), `joints` (`joint frames`), or `mastering`
+        (`mastering frames`, Track C). Each leg counts its own source
+        frames against committed frames, so legs never share one X/Y
+        total. Dict keys use the display spelling (`upscale` /
+        `interpolate` / `joints` / `mastering`). Upscale/interp/joints
+        are no-ops when augmentation is not demanded; the mastering leg
+        is independent of that knob (its demand lives in the future
+        mastering config, Track B) and only needs a progress sink.
         `status`, when given, replaces the bar's side text (the joints
         bar shows what the sweep is doing: fixing / upscaling /
         interpolating which unit).
@@ -1025,6 +1089,9 @@ class Supervisor:
             key = "joints"
             if not self._model_pass_demanded():
                 return
+        elif leg == "mastering":
+            label = "mastering frames"
+            key = "mastering"
         else:
             return
         try:
@@ -1088,7 +1155,9 @@ class Supervisor:
         mode sweeps stragglers after the render finishes. Frame events
         advance the bar live; chunk lifecycle events carry no frame
         counts — the pass-end ledger delta stays their source of truth.
-        Joint frame events (`joint_frames`,
+        Mastering frame events (Track C) advance the `mastering frames`
+        leg the same way; mastering chunk events stay ledger-truth like
+        the other chunk events. Joint frame events (`joint_frames`,
         carrying unit + leg + position) advance the combined `joint
         frames` bar with a live status; joint chunk events stay
         ledger-truth.
@@ -1120,6 +1189,11 @@ class Supervisor:
                         self._advance_prewarm_leg_bar(
                             "joints", frames, None, status=_joint_live_status(event)
                         )
+                elif kind == "mastering_frames":
+                    frames = int(event[2])
+                    if frames > 0:
+                        self._pumped_mastering_frames += frames
+                        self._advance_prewarm_leg_bar("mastering", frames, None)
             except Exception:  # noqa: BLE001 - display must never fail a render
                 pass
 
