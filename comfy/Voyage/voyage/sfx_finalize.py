@@ -600,6 +600,73 @@ _SFX_SHORTFALL_RE = re.compile(r"^sfx(-right)? coverage \d+\.\d{2}s short of tim
 def is_healable_sfx_shortfall(error: str) -> bool:
     """Whether an sfx error line is the pure tail shortfall finalize heals."""
     return bool(_SFX_SHORTFALL_RE.match(error))
+def drop_sfx_beyond(run_dir: Path, end_seconds: float) -> int:
+    """Prune SFX windows starting at or past `end_seconds` (M4 shrink helper).
+
+    Track C's `configure shrink` calls this (do not call from finalize):
+    drops ledger lines (both tracks) whose `start` >= `end_seconds`,
+    deletes their stem files best-effort, and rewrites both ledgers
+    atomically (temp + fsync + replace, never a torn ledger). Returns the
+    total dropped window count. Never raises for missing ledgers (0) —
+    only for a negative `end_seconds` (caller bug, `ValueError`).
+    Uses `atomic_write_bytes` for the rewrite (LOW configure-shrink rule:
+    shrink paths use the same atomic helpers as the render path).
+    """
+    if not math.isfinite(end_seconds) or end_seconds < 0.0:
+        raise ValueError(f"shrink end must be finite >= 0 (got {end_seconds})")
+    dropped = 0
+    sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
+    for ledger_name in (SFX_LEDGER_NAME, SFX_RIGHT_LEDGER_NAME):
+        ledger = sfx_dir / ledger_name
+        if not ledger.exists():
+            continue
+        try:
+            records = load_sfx_ledger(ledger)
+        except (OSError, ValueError, StateError):
+            continue
+        kept: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                start = float(record.get("start", 0.0))
+            except (TypeError, ValueError):
+                kept.append(record)
+                continue
+            if start >= end_seconds:
+                dropped += 1
+                stem_raw = record.get("path", "")
+                if isinstance(stem_raw, str) and stem_raw:
+                    try:
+                        stem = resolve_stored_path(run_dir, stem_raw)
+                        with contextlib.suppress(OSError):
+                            stem.unlink()
+                    except MediaError:
+                        pass
+            else:
+                kept.append(record)
+        lines = "".join(json.dumps(record) + "\n" for record in kept)
+        try:
+            atomic_write_bytes(ledger, lines.encode("utf-8"))
+        except OSError:
+            continue
+    return dropped
+
+
+def shrink_audio_artifacts(run_dir: Path, end_seconds: float) -> dict[str, int]:
+    """Shrink-time audio GC for Track C (M4 combined helper, never raises).
+
+    Drops SFX windows beyond `end_seconds` (`drop_sfx_beyond`) and deletes
+    the single-slot music/bed caches (`final_mix_cache.delete_audio_caches`)
+    so a shrunk timeline never reuses a stale mix/bed. Returns
+    `{"sfx_dropped": N, "caches_deleted": M}`. Track C calls this from
+    `configure shrink` — finalize never calls it (finalize heals forward,
+    never trims). Cache deletion never raises (best-effort); SFX errors
+    propagate as `ValueError` for a bad `end_seconds` only.
+    """
+    from voyage.final_mix_cache import delete_audio_caches
+
+    sfx_dropped = drop_sfx_beyond(run_dir, end_seconds)
+    caches_deleted = delete_audio_caches(run_dir)
+    return {"sfx_dropped": sfx_dropped, "caches_deleted": caches_deleted}
 
 
 def _sfx_worker_module(backend: str) -> str:
