@@ -49,6 +49,17 @@ slim image and on hosts — that simply means the legacy in-process
 interpreter serves the director (CPU path).
 """
 
+MASTERING_PYTHON_ENVIRONMENT_VARIABLE = "VOYAGE_MASTERING_PYTHON"
+"""Env var naming the mastering venv interpreter (Track D, DESIGN §140).
+
+The `voyage-ltx` and `voyage-video` images run the finalize-time
+SonicMaster mastering worker under `/opt/venvs/mastering/bin/python`
+(torch 2.4.0/cu124 + transformers 4.44 + diffusers 0.30, isolated from
+both images' main stacks) while the supervisor stays on its own
+interpreter. Absent on the slim image and on hosts — that simply means
+the legacy in-process interpreter serves mastering (CPU path).
+"""
+
 _SUBPROCESS_TIMEOUT_SECONDS = 15
 """Wall-clock cap per probe subprocess (nvidia-smi/ffmpeg must fail fast)."""
 
@@ -263,6 +274,26 @@ def check_director_python(python: Path | None = None) -> dict[str, Any]:
     return {"path": str(target), "exists": exists}
 
 
+def mastering_python() -> Path | None:
+    """Resolve the mastering venv interpreter, None when unset/empty."""
+    raw = os.environ.get(MASTERING_PYTHON_ENVIRONMENT_VARIABLE, "")
+    if not raw.strip():
+        return None
+    return Path(raw.strip())
+
+
+def check_mastering_python(python: Path | None = None) -> dict[str, Any]:
+    """Presence summary for the mastering venv interpreter (never raises)."""
+    target = python if python is not None else mastering_python()
+    if target is None:
+        return {"path": None, "exists": False}
+    try:
+        exists = target.is_file()
+    except OSError:
+        exists = False
+    return {"path": str(target), "exists": exists}
+
+
 def check_models(present_dir: Path | None = None) -> dict[str, Any]:
     """Presence summary for the models dir (issue 048).
 
@@ -420,6 +451,7 @@ def probe() -> dict[str, Any]:
     )
     models_ok_required = bool(model_facts["exists"]) and required_ok
     director = check_director_python()
+    mastering = check_mastering_python()
     return {
         "python": sys.version.split()[0],
         "ffmpeg": shutil.which("ffmpeg"),
@@ -444,6 +476,8 @@ def probe() -> dict[str, Any]:
         "models_ok_all": models_ok,
         "director_python": director["path"],
         "director_python_exists": director["exists"],
+        "mastering_python": mastering["path"],
+        "mastering_python_exists": mastering["exists"],
     }
 
 

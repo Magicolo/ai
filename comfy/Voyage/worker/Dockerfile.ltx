@@ -234,6 +234,30 @@ RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
     && test -d /opt/mmaudio/.git \
     && test -x /opt/venvs/sfx/bin/python
 
+# SonicMaster mastering venv (Track D, DESIGN §140): finalize-time
+# mastering runs isolated (same venv pattern as above) because its pins
+# (transformers 4.44 / diffusers 0.30) are irreconcilable with the
+# validated LTX freeze (transformers 5.17). Interpreter is the image's
+# existing python3.11 (torch 2.4.0+cu124 ships cp311 wheels but NO cp313
+# wheel — verified live against the cu124 index — so the requested
+# python3.13 is unbuildable with this torch pin; reusing 3.11 also avoids
+# a new apt layer and keeps the slow layers above cached).
+# huggingface_hub stays 0.36.2 (transformers 4.44 requires hub<1.0, so the
+# 1.33.0 used elsewhere would break resolution); pydantic mirrors the
+# other venvs (the future worker imports voyage over PYTHONPATH, which
+# needs it). The supervisor will spawn the mastering worker with this
+# interpreter via VOYAGE_MASTERING_PYTHON below; unset (slim image,
+# tests) falls back to the supervisor interpreter. Placed after the slow
+# layers so only the fast user-setup layers rerun; the recursive chown
+# below covers the venv (it already covers /opt/venvs).
+RUN python3.11 -m venv /opt/venvs/mastering \
+    && /opt/venvs/mastering/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/mastering/bin/pip install torch==2.4.0 \
+        --index-url https://download.pytorch.org/whl/cu124 \
+    && /opt/venvs/mastering/bin/pip install "transformers==4.44.0" "diffusers==0.30.0" \
+        "soundfile==0.14.0" "safetensors==0.8.0" "huggingface_hub==0.36.2" "pydantic==2.10.6" \
+    && test -x /opt/venvs/mastering/bin/python
+
 # Run as the invoking host user (same contract as the video image): the
 # supervisor and its worker subprocesses share bind mounts with the host,
 # so a root container leaves root-owned renders behind. A real user
@@ -264,6 +288,7 @@ ENV PYTHONPATH=/opt/comfyui:/app \
     VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
     VOYAGE_ACESTEP_PYTHON=/opt/venvs/acestep/bin/python \
     VOYAGE_SFX_PYTHON=/opt/venvs/sfx/bin/python \
+    VOYAGE_MASTERING_PYTHON=/opt/venvs/mastering/bin/python \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

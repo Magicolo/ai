@@ -31,6 +31,7 @@ def test_resolve_generate_skips_defaults_off() -> None:
         "skip_sfx": False,
         "force_upscale_1": False,
         "force_interpolate_1": False,
+        "skip_mastering": False,
     }
 
 
@@ -42,12 +43,14 @@ def test_resolve_generate_skips_shorthands() -> None:
         "skip_sfx": True,
         "force_upscale_1": False,
         "force_interpolate_1": False,
+        "skip_mastering": True,
     }
     assert resolve_generate_skips(argparse.Namespace(no_augment=True)) == {
         "skip_music": False,
         "skip_sfx": False,
         "force_upscale_1": True,
         "force_interpolate_1": True,
+        "skip_mastering": False,
     }
     skips = resolve_generate_skips(
         argparse.Namespace(no_music=True, no_interpolate=True, no_audio=False, no_augment=False)
@@ -57,6 +60,7 @@ def test_resolve_generate_skips_shorthands() -> None:
         "skip_sfx": False,
         "force_upscale_1": False,
         "force_interpolate_1": True,
+        "skip_mastering": False,
     }
 
 
@@ -68,6 +72,7 @@ def test_generate_parser_accepts_skip_flags() -> None:
     assert args.no_augment is True
     assert args.no_sfx is False
     assert args.no_audio is False
+    assert args.no_master is False
     plain = build_parser().parse_args(["generate", "probe"])
     assert plain.no_music is False
     assert plain.no_sfx is False
@@ -75,6 +80,9 @@ def test_generate_parser_accepts_skip_flags() -> None:
     assert plain.no_interpolate is False
     assert plain.no_audio is False
     assert plain.no_augment is False
+    assert plain.no_master is False
+    mastered = build_parser().parse_args(["generate", "probe", "--no-master"])
+    assert mastered.no_master is True
 
 
 def test_generate_skip_flags_not_on_configure() -> None:
@@ -85,7 +93,14 @@ def test_generate_skip_flags_not_on_configure() -> None:
     """
     from voyage.cli import build_parser
 
-    for flag in ("--no-music", "--no-upscale", "--no-interpolate", "--no-audio", "--no-augment"):
+    for flag in (
+        "--no-music",
+        "--no-upscale",
+        "--no-interpolate",
+        "--no-audio",
+        "--no-augment",
+        "--no-master",
+    ):
         with pytest.raises(SystemExit):
             build_parser().parse_args(["configure", "calm", "--segments", "1", flag])
     args = build_parser().parse_args(["configure", "calm", "--segments", "1", "--no-sfx"])
@@ -104,13 +119,16 @@ def test_generate_skip_key_combines_manifest_and_flags(tmp_path: Path) -> None:
     # lifted stored config for the multiplier assertions.
     effective = resolve_config(read_effective_config(run_dir), upscale=2, interpolate=4)
     base = gen_ops._expected_skip_key(argparse.Namespace(), manifest, effective)
-    assert base == "music=0,sfx=0,up=2,interp=4,backend=rife,dual=1"
+    assert base == "music=0,sfx=0,up=2,interp=4,backend=rife,dual=1,master=0"
     music = gen_ops._expected_skip_key(argparse.Namespace(no_music=True), manifest, effective)
     assert music.startswith("music=1,")
     assert music != base
     augment = gen_ops._expected_skip_key(argparse.Namespace(no_augment=True), manifest, effective)
-    assert augment.endswith(",up=1,interp=1,backend=-,dual=1")
+    assert augment.endswith(",up=1,interp=1,backend=-,dual=1,master=0")
     assert augment != base
+    mastered = gen_ops._expected_skip_key(argparse.Namespace(no_master=True), manifest, effective)
+    assert mastered.endswith(",master=1")
+    assert mastered != base
 
 
 def _seeded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

@@ -566,6 +566,12 @@ def _ensure_model_pass_timings(timings: dict[str, float] | None) -> None:
     bidirectional parallel branch (media.py), which never runs the
     durable entry's init, so the drain must not assume pre-initialized
     keys (live kaolin `KeyError: 'drain_s'`, 2026-10-06).
+
+    Mastering keys (`mastering_poll_s` / `mastering_chunks_done` /
+    `mastering_frames_done`, Track C) are zero-initialized here for the
+    future `voyage/mastering.py` consumer (Track B owns that module) —
+    miners and `_model_pass_stage_rows` never KeyError, even before any
+    mastering work lands.
     """
     if timings is None:
         return
@@ -583,6 +589,9 @@ def _ensure_model_pass_timings(timings: dict[str, float] | None) -> None:
         "seams_done",
         "morph_s",
         "morphs_done",
+        "mastering_poll_s",
+        "mastering_chunks_done",
+        "mastering_frames_done",
     ):
         timings.setdefault(key, 0.0)
 

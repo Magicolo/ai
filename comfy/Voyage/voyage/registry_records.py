@@ -469,6 +469,66 @@ from voyage.registry_ltxv import (
 from voyage.registry_ltxv import (
     _record_ltxv as _record_ltxv,
 )
+from voyage.registry_mastering import (
+    EXPECTED_SONICMASTER_MODEL_SHA256 as EXPECTED_SONICMASTER_MODEL_SHA256,
+)
+from voyage.registry_mastering import (
+    EXPECTED_SONICMASTER_VAE_SHA256 as EXPECTED_SONICMASTER_VAE_SHA256,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_HF_REPO as SONICMASTER_HF_REPO,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_HF_REVISION as SONICMASTER_HF_REVISION,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_LICENSE as SONICMASTER_LICENSE,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_LICENSE_URL as SONICMASTER_LICENSE_URL,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_MODEL_FILE as SONICMASTER_MODEL_FILE,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_MODEL_MIN_BYTES as SONICMASTER_MODEL_MIN_BYTES,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_MODEL_REPO_PATH as SONICMASTER_MODEL_REPO_PATH,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_SUBDIR as SONICMASTER_SUBDIR,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_FILE as SONICMASTER_VAE_FILE,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_LICENSE as SONICMASTER_VAE_LICENSE,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_LICENSE_URL as SONICMASTER_VAE_LICENSE_URL,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_MIN_BYTES as SONICMASTER_VAE_MIN_BYTES,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_REPO as SONICMASTER_VAE_REPO,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_REPO_PATH as SONICMASTER_VAE_REPO_PATH,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_REVISION as SONICMASTER_VAE_REVISION,
+)
+from voyage.registry_mastering import (
+    SONICMASTER_VAE_SUBFOLDER as SONICMASTER_VAE_SUBFOLDER,
+)
+from voyage.registry_mastering import (
+    _describe_mastering as _describe_mastering,
+)
+from voyage.registry_mastering import (
+    _record_mastering as _record_mastering,
+)
 from voyage.registry_realesrgan import (
     EXPECTED_REALESRGAN_SHA256 as EXPECTED_REALESRGAN_SHA256,
 )
@@ -801,3 +861,20 @@ from voyage.registry_sfx import (
 
 # RIFE describe helper lives in `voyage.registry_rife` (Phase 1 RIFE
 # port; re-exported at the top so existing importers keep working).
+
+
+# SonicMaster mastering pins live in `voyage.registry_mastering`
+# (Track A; re-exported at the top so existing importers keep working).
+
+
+# EXPECTED_SONICMASTER_* hashes live in `voyage.registry_mastering`
+# (Track A placeholders; re-exported at the top so existing importers
+# keep working).
+
+
+# SonicMaster record builder lives in `voyage.registry_mastering`
+# (Track A; re-exported at the top so existing importers keep working).
+
+
+# SonicMaster describe helper lives in `voyage.registry_mastering`
+# (Track A; re-exported at the top so existing importers keep working).

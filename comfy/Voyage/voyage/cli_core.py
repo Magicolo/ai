@@ -108,7 +108,7 @@ def _sfx_overrides(args: argparse.Namespace) -> dict[str, Any]:
 def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
     """Generate-only skip flags → canonical skip tuple (non-persistent).
 
-    Shorthands OR in: --no-audio = --no-music + --no-sfx,
+    Shorthands OR in: --no-audio = --no-music + --no-sfx + --no-master,
     --no-augment = --no-upscale + --no-interpolate. Every read goes
     through getattr so hand-built namespaces default to off, never crash.
     """
@@ -116,9 +116,11 @@ def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
     no_sfx = bool(getattr(args, "no_sfx", False))
     no_upscale = bool(getattr(args, "no_upscale", False))
     no_interpolate = bool(getattr(args, "no_interpolate", False))
+    no_master = bool(getattr(args, "no_master", False))
     if bool(getattr(args, "no_audio", False)):
         no_music = True
         no_sfx = True
+        no_master = True
     if bool(getattr(args, "no_augment", False)):
         no_upscale = True
         no_interpolate = True
@@ -127,6 +129,7 @@ def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
         "skip_sfx": no_sfx,
         "force_upscale_1": no_upscale,
         "force_interpolate_1": no_interpolate,
+        "skip_mastering": no_master,
     }
 
 
@@ -138,6 +141,7 @@ def generate_skip_key(
     stored_interpolate: int,
     stored_interp_backend: str = "rife",
     stored_sfx_dual_pan: bool = True,
+    stored_mastering: bool = True,
 ) -> str:
     """Canonical freshness key for the current generate finalize behavior.
 
@@ -149,7 +153,9 @@ def generate_skip_key(
     The dual-pan flag rides the key because a single-bed final is not
     the spatialized pair: toggling it re-finalizes by design (legacy
     single-bed coverages predate the key segment and miss once, which
-    heals them into the pair).
+    heals them into the pair). The mastering flag rides the key because
+    a mastered final is not the unmastered mix: toggling it re-finalizes
+    by design (legacy coverages predate the key segment and miss once).
     """
     effective_sfx_off = bool(manifest_no_sfx or skips.get("skip_sfx", False))
     effective_up = 1 if skips.get("force_upscale_1", False) else stored_upscale
@@ -158,9 +164,11 @@ def generate_skip_key(
     sfx = int(effective_sfx_off)
     backend = stored_interp_backend if effective_interp > 1 else "-"
     dual = int(bool(stored_sfx_dual_pan) and not effective_sfx_off)
+    mastering_off = bool(not stored_mastering or skips.get("skip_mastering", False))
+    master = int(mastering_off)
     return (
         f"music={music},sfx={sfx},up={effective_up},"
-        f"interp={effective_interp},backend={backend},dual={dual}"
+        f"interp={effective_interp},backend={backend},dual={dual},master={master}"
     )
 
 

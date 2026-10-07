@@ -804,17 +804,24 @@ def presented_frames(video: Path) -> int | None:
 def _model_pass_stage_rows(
     model_pass_timings: dict[str, float], model_start: float
 ) -> dict[str, float]:
-    """Timing-table rows for upscale/interpolate legs when known.
+    """Timing-table rows for upscale/interpolate (+ mastering) legs when known.
 
     The durable path records `upscale_poll_s` / `interp_poll_s`
     separately, so the table shows upscale vs interpolate instead of one
     aggregate. Legacy/tmpdir paths only know wall time — they keep one
-    combined `upscale + interpolate` row.
+    combined `upscale + interpolate` row. The mastering leg (Track C,
+    consumer `voyage/mastering.py` owned by Track B) adds a `mastering`
+    row only when `mastering_poll_s` is positive — absent/zero keeps the
+    historical shapes byte-identical.
     """
     up_seconds = float(model_pass_timings.get("upscale_poll_s", 0.0) or 0.0)
     ip_seconds = float(model_pass_timings.get("interp_poll_s", 0.0) or 0.0)
-    if up_seconds > 0 or ip_seconds > 0:
-        return {"upscale": up_seconds, "interpolate": ip_seconds}
+    mastering_seconds = float(model_pass_timings.get("mastering_poll_s", 0.0) or 0.0)
+    if up_seconds > 0 or ip_seconds > 0 or mastering_seconds > 0:
+        rows = {"upscale": up_seconds, "interpolate": ip_seconds}
+        if mastering_seconds > 0:
+            rows["mastering"] = mastering_seconds
+        return rows
     return {"upscale + interpolate": time.monotonic() - model_start}
 
 
@@ -881,6 +888,7 @@ def finalize_run(
     sfx_request: SfxParallelRequest | None = None,
     sfx_report: dict[str, Any] | None = None,
     no_music: bool = False,
+    no_master: bool = False,
 ) -> Path:
     """Concat committed segments → single normalized MP4 (DESIGN §56).
 
@@ -1741,7 +1749,9 @@ def finalize_run(
                 # Durable single-slot music cache (DESIGN §56): a no-change
                 # resume reuses the last published mix instead of re-slicing
                 # the takes ledger and re-joining. A later publish
-                # overwrites the same slot, so the cache never grows.
+                # overwrites the same slot, so the cache never grows. The
+                # slot holds pre-master bytes only — mastering applies
+                # after the hit at publish, every time.
                 if thread_music_digest is None:
                     music_digest = music_fingerprint(
                         run_dir,
@@ -2119,6 +2129,26 @@ def finalize_run(
                 # lines below degrade to plain lines, same as the legacy
                 # path after its join-time close.
                 sfx_display.close()
+            # SonicMaster mastering choke (Track B): the ship's audio IS
+            # the mixed bed when dubbed, else the music-only/silent
+            # `final_audio` content — one demux → master → remux covers
+            # all three paths before validate/publish. Effective flag is
+            # the stored `config.audio.mastering` unless the generate-only
+            # `--no-master` asked off (legacy direct callers pass no
+            # `audio_config`, which reads as off). Enabled fails loud,
+            # never a silent skip.
+            from voyage.mastering import maybe_master_ship_audio
+
+            mastering_effective = bool(getattr(audio_config, "mastering", False)) and not no_master
+            ship = maybe_master_ship_audio(
+                ship,
+                tmpdir,
+                settings.sample_rate,
+                settings.channels,
+                timings=final_stages,
+                progress=publish_progress,
+                enabled=mastering_effective,
+            )
             published = validate_video(ship, out_w, out_h, out_fps)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_copy(ship, output_path)

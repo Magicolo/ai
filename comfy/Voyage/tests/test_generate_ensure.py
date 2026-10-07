@@ -36,7 +36,14 @@ def test_ltxv_requires_own_spec_plus_audio_and_director() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen35-gguf", "rife", "realesrgan-anime"}
+    assert specs == {
+        "ltxv-2b",
+        "audio-acestep",
+        "audio-sonicmaster",
+        "director-qwen35-gguf",
+        "rife",
+        "realesrgan-anime",
+    }
 
 
 def test_video_backends_map_to_their_own_spec_only() -> None:
@@ -47,6 +54,7 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
     assert specs == {
         "ltxv-2b",
         "audio-acestep",
+        "audio-sonicmaster",
         "director-qwen35-gguf",
         "rife",
         "realesrgan-anime",
@@ -57,6 +65,7 @@ def test_video_backends_map_to_their_own_spec_only() -> None:
     assert specs == {
         "causvid",
         "audio-acestep",
+        "audio-sonicmaster",
         "director-qwen35-gguf",
         "rife",
         "realesrgan-anime",
@@ -83,7 +92,13 @@ def test_deterministic_director_needs_no_director_models() -> None:
     config = with_video_backend(_config_with_style(), "ltxv")
     config.director.backend = "deterministic"
     specs = {item.spec for item in required_specs(config, sfx_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "rife", "realesrgan-anime"}
+    assert specs == {
+        "ltxv-2b",
+        "audio-acestep",
+        "audio-sonicmaster",
+        "rife",
+        "realesrgan-anime",
+    }
 
 
 def test_sfx_is_opt_in_and_inspector_is_never_required() -> None:
@@ -143,6 +158,7 @@ def test_ltx_backends_require_own_spec_with_acestep() -> None:
             "realesrgan-anime",
             "sfx-mmaudio",
             "audio-acestep",
+            "audio-sonicmaster",
         }
 
 
@@ -151,7 +167,12 @@ def test_augment_disabled_excludes_rife_and_realesrgan() -> None:
 
     config = with_video_backend(_config_with_style(), "ltxv")
     specs = {item.spec for item in required_specs(config, sfx_enabled=False, augment_enabled=False)}
-    assert specs == {"ltxv-2b", "audio-acestep", "director-qwen35-gguf"}
+    assert specs == {
+        "ltxv-2b",
+        "audio-acestep",
+        "audio-sonicmaster",
+        "director-qwen35-gguf",
+    }
 
 
 def test_fake_stays_empty_with_augment_enabled() -> None:
@@ -196,7 +217,7 @@ def test_ensure_augment_disabled_skips_augment_downloads(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen35-gguf"}
+    present = {"audio-acestep", "audio-sonicmaster", "director-qwen35-gguf"}
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")
@@ -241,7 +262,13 @@ def test_ensure_downloads_only_missing_specs(
     import voyage.model_registry as registry
     from voyage.models_ensure import ensure_models
 
-    present = {"audio-acestep", "director-qwen35-gguf", "rife", "realesrgan-anime"}
+    present = {
+        "audio-acestep",
+        "audio-sonicmaster",
+        "director-qwen35-gguf",
+        "rife",
+        "realesrgan-anime",
+    }
 
     def _verify(_dir: Path, spec: str) -> tuple[bool, str]:
         return (spec in present, "OK" if spec in present else "missing")
@@ -402,12 +429,14 @@ def test_generate_ensure_receives_selective_scope(
         allow_download: bool = True,
         augment_enabled: bool = True,
         music_enabled: bool = True,
+        mastering_enabled: bool = True,
     ) -> int:
         seen["video"] = config.video.backend
         seen["sfx_enabled"] = sfx_enabled
         seen["allow_download"] = allow_download
         seen["augment_enabled"] = augment_enabled
         seen["music_enabled"] = music_enabled
+        seen["mastering_enabled"] = mastering_enabled
         return real_ensure(config, sfx_enabled, console, models_root)
 
     monkeypatch.chdir(tmp_path)
@@ -423,4 +452,7 @@ def test_generate_ensure_receives_selective_scope(
         "augment_enabled": False,
         # No --no-music/--no-audio on this run, so the music stack stays ensured.
         "music_enabled": True,
+        # No --no-master/--no-audio on this run, so mastering stays ensured
+        # (fake stays empty downstream regardless).
+        "mastering_enabled": True,
     }

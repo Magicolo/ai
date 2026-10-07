@@ -17,6 +17,7 @@ EXPECTED_SPEC_KEYS = (
     "director-qwen35-gguf",
     "inspector-qwen35",
     "audio-acestep",
+    "audio-sonicmaster",
     "sfx-mmaudio",
     "ltxv-2b",
     "causvid",
@@ -32,6 +33,7 @@ RECORD_BUILDERS = (
     "_record_director_awq",
     "_record_inspector",
     "_record_audio",
+    "_record_mastering",
     "_record_ltxv",
     "_record_causvid",
     "_record_ltx25",
@@ -47,6 +49,7 @@ DESCRIBE_HELPERS = (
     "_describe_director_awq",
     "_describe_inspector",
     "_describe_audio",
+    "_describe_mastering",
     "_describe_ltxv",
     "_describe_sfx",
     "_describe_causvid",
@@ -78,7 +81,7 @@ PIN_NAMES = (
 
 
 def test_model_specs_keys_unchanged() -> None:
-    """The registry assembly keeps all eleven bundles (issue 082)."""
+    """The registry assembly keeps all bundles (issue 082 + Track A mastering)."""
     assert tuple(sorted(model_registry.MODEL_SPECS)) == tuple(sorted(EXPECTED_SPEC_KEYS))
 
 
@@ -130,6 +133,7 @@ def spec_key(model_key: str) -> str:
         "director-qwen4b-awq": "director_awq",
         "inspector-qwen35": "inspector",
         "audio-acestep": "audio",
+        "audio-sonicmaster": "mastering",
         "sfx-mmaudio": "sfx",
         "ltxv-2b": "ltxv",
         "causvid": "causvid",

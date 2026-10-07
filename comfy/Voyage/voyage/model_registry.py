@@ -60,6 +60,8 @@ from voyage.registry_records import (
     EXPECTED_LTXV_UPSC_SHA256,
     EXPECTED_REALESRGAN_SHA256,
     EXPECTED_RIFE_SHA256,
+    EXPECTED_SONICMASTER_MODEL_SHA256,
+    EXPECTED_SONICMASTER_VAE_SHA256,
     FILM_FILE,
     FILM_HF_REPO,
     FILM_HF_REVISION,
@@ -189,6 +191,22 @@ from voyage.registry_records import (
     RIFE_MIN_BYTES,
     RIFE_REPO_PATH,
     RIFE_SUBDIR,
+    SONICMASTER_HF_REPO,
+    SONICMASTER_HF_REVISION,
+    SONICMASTER_LICENSE,
+    SONICMASTER_LICENSE_URL,
+    SONICMASTER_MODEL_FILE,
+    SONICMASTER_MODEL_MIN_BYTES,
+    SONICMASTER_MODEL_REPO_PATH,
+    SONICMASTER_SUBDIR,
+    SONICMASTER_VAE_FILE,
+    SONICMASTER_VAE_LICENSE,
+    SONICMASTER_VAE_LICENSE_URL,
+    SONICMASTER_VAE_MIN_BYTES,
+    SONICMASTER_VAE_REPO,
+    SONICMASTER_VAE_REPO_PATH,
+    SONICMASTER_VAE_REVISION,
+    SONICMASTER_VAE_SUBFOLDER,
     WAN21_ALLOW,
     WAN21_DIT_MIN_BYTES,
     WAN21_HF_REPO,
@@ -207,6 +225,7 @@ from voyage.registry_records import (
     _describe_ltx23,
     _describe_ltx25,
     _describe_ltxv,
+    _describe_mastering,
     _describe_realesrgan,
     _describe_rife,
     _describe_sfx,
@@ -219,6 +238,7 @@ from voyage.registry_records import (
     _record_ltx23,
     _record_ltx25,
     _record_ltxv,
+    _record_mastering,
     _record_realesrgan,
     _record_rife,
     _record_sfx,
@@ -269,6 +289,8 @@ __all__ = [
     "EXPECTED_LTXV_UPSC_SHA256",
     "EXPECTED_REALESRGAN_SHA256",
     "EXPECTED_RIFE_SHA256",
+    "EXPECTED_SONICMASTER_MODEL_SHA256",
+    "EXPECTED_SONICMASTER_VAE_SHA256",
     "ExpectedHash",
     "FILM_FILE",
     "FILM_HF_REPO",
@@ -409,6 +431,22 @@ __all__ = [
     "RIFE_MIN_BYTES",
     "RIFE_REPO_PATH",
     "RIFE_SUBDIR",
+    "SONICMASTER_HF_REPO",
+    "SONICMASTER_HF_REVISION",
+    "SONICMASTER_LICENSE",
+    "SONICMASTER_LICENSE_URL",
+    "SONICMASTER_MODEL_FILE",
+    "SONICMASTER_MODEL_MIN_BYTES",
+    "SONICMASTER_MODEL_REPO_PATH",
+    "SONICMASTER_SUBDIR",
+    "SONICMASTER_VAE_FILE",
+    "SONICMASTER_VAE_LICENSE",
+    "SONICMASTER_VAE_LICENSE_URL",
+    "SONICMASTER_VAE_MIN_BYTES",
+    "SONICMASTER_VAE_REPO",
+    "SONICMASTER_VAE_REPO_PATH",
+    "SONICMASTER_VAE_REVISION",
+    "SONICMASTER_VAE_SUBFOLDER",
     "RequiredFile",
     "RequiredGlob",
     "ShardFloor",
@@ -436,6 +474,7 @@ __all__ = [
     "_describe_ltx23",
     "_describe_ltx25",
     "_describe_ltxv",
+    "_describe_mastering",
     "_describe_realesrgan",
     "_describe_rife",
     "_describe_sfx",
@@ -451,6 +490,7 @@ __all__ = [
     "_record_ltx23",
     "_record_ltx25",
     "_record_ltxv",
+    "_record_mastering",
     "_record_realesrgan",
     "_record_rife",
     "_record_sfx",
@@ -466,6 +506,7 @@ __all__ = [
     "download_inspector_models",
     "download_ltxv_models",
     "download_model",
+    "download_mastering_models",
     "download_realesrgan_models",
     "download_rife_models",
     "download_sfx_models",
@@ -483,6 +524,7 @@ __all__ = [
     "verify_inspector_models",
     "verify_ltxv_models",
     "verify_model",
+    "verify_mastering_models",
     "verify_realesrgan_models",
     "verify_rife_models",
     "verify_sfx_models",
@@ -1218,6 +1260,43 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         ),
         manifest_checkpoint=f"{REALESRGAN_SUBDIR}/{REALESRGAN_ANIME_FILE}",
     ),
+    "audio-sonicmaster": ModelSpec(
+        name="audio-sonicmaster",
+        manifest_key="sonicmaster",
+        snapshots=(),
+        files=(
+            FileSpec(
+                SONICMASTER_HF_REPO,
+                SONICMASTER_HF_REVISION,
+                SONICMASTER_MODEL_FILE,
+                "",
+                SONICMASTER_SUBDIR,
+            ),
+            FileSpec(
+                SONICMASTER_VAE_REPO,
+                SONICMASTER_VAE_REVISION,
+                SONICMASTER_VAE_FILE,
+                SONICMASTER_VAE_SUBFOLDER,
+                SONICMASTER_SUBDIR,
+            ),
+        ),
+        record_builder=_record_mastering,
+        checks=(
+            RequiredFile(SONICMASTER_MODEL_REPO_PATH, SONICMASTER_MODEL_MIN_BYTES),
+            RequiredFile(SONICMASTER_VAE_REPO_PATH, SONICMASTER_VAE_MIN_BYTES),
+        ),
+        success_message=_describe_mastering,
+        expected_hashes=(
+            ExpectedHash(
+                SONICMASTER_MODEL_REPO_PATH,
+                EXPECTED_SONICMASTER_MODEL_SHA256,
+            ),
+            ExpectedHash(
+                SONICMASTER_VAE_REPO_PATH,
+                EXPECTED_SONICMASTER_VAE_SHA256,
+            ),
+        ),
+    ),
 }
 
 
@@ -1647,6 +1726,21 @@ def verify_realesrgan_models(models_dir: Path) -> tuple[bool, str]:
     return verify_model(models_dir, "realesrgan-anime")
 
 
+def download_mastering_models(models_dir: Path) -> dict[str, JsonValue]:
+    """Explicit download of the SonicMaster mastering weights (Track A).
+
+    Public model.safetensors plus the gated Stable Audio Open VAE into
+    <models>/sonicmaster/. Merges into the shared manifest; returns the
+    merged record.
+    """
+    return download_model(models_dir, "audio-sonicmaster")
+
+
+def verify_mastering_models(models_dir: Path) -> tuple[bool, str]:
+    """Check presence (+ size sanity) of the SonicMaster weights."""
+    return verify_model(models_dir, "audio-sonicmaster")
+
+
 def models_dir_layout(models_dir: Path) -> dict[str, str]:
     """Every models-tree root the registry downloads (086).
 
@@ -1654,7 +1748,7 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
     its PixArt text encoder, LTX-2.5 Q3 + LTX-2.3 Q3 stacks (shared Mode-A
     upscaler), Qwen3-8B director, Qwen3.5-9B inspector,
     MiniLM embeddings, ACE-Step music, MMAudio SFX, FILM interpolation,
-    Real-ESRGAN anime upscaler.
+    Real-ESRGAN anime upscaler, SonicMaster mastering.
     """
     return {
         "wan21_dir": str(models_dir / WAN21_SUBDIR),
@@ -1670,5 +1764,6 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
         "sfx_dir": str(models_dir / MMAUDIO_SUBDIR),
         "film_dir": str(models_dir / FILM_SUBDIR),
         "realesrgan_dir": str(models_dir / REALESRGAN_SUBDIR),
+        "sonicmaster_dir": str(models_dir / SONICMASTER_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),
     }

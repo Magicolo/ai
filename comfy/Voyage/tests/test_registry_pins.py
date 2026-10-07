@@ -27,6 +27,7 @@ from voyage import (
     registry_ltx23,
     registry_ltx25,
     registry_ltxv,
+    registry_mastering,
     registry_realesrgan,
     registry_rife,
 )
@@ -135,6 +136,7 @@ def test_all_expected_sha_pins_are_64_lower_hex() -> None:
             registry_ltx23,
             registry_ltx25,
             registry_ltxv,
+            registry_mastering,
             registry_realesrgan,
             registry_rife,
         )

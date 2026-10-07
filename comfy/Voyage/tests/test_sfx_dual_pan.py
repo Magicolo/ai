@@ -300,8 +300,8 @@ def test_skip_key_carries_dual_pan() -> None:
         stored_sfx_dual_pan=False,
     )
     assert on != off
-    assert on.endswith(",dual=1")
-    assert off.endswith(",dual=0")
+    assert on.endswith(",dual=1,master=0")
+    assert off.endswith(",dual=0,master=0")
     muted = generate_skip_key(
         {**base, "skip_sfx": True, "force_interpolate_1": False},
         manifest_no_sfx=False,
@@ -309,7 +309,7 @@ def test_skip_key_carries_dual_pan() -> None:
         stored_interpolate=1,
         stored_sfx_dual_pan=True,
     )
-    assert muted.endswith(",dual=0")
+    assert muted.endswith(",dual=0,master=0")
 
 
 def test_bed_fingerprint_misses_across_dual_flag(tmp_path: Path) -> None:

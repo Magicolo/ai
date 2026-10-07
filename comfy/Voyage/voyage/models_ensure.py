@@ -86,6 +86,7 @@ def required_specs(
     models_root: str | Path | None = None,
     augment_enabled: bool = True,
     music_enabled: bool = True,
+    mastering_enabled: bool = True,
 ) -> list[RequiredModel]:
     """Specs the effective generate config needs — nothing else.
 
@@ -104,6 +105,11 @@ def required_specs(
     stopped (DESIGN §140 GPU defaults). `music_enabled=False` (the
     generate-only --no-music/--no-audio skip) drops the ACE-Step stack:
     the finalize ships silent AAC, so no takes render.
+    `mastering_enabled=False` (the generate-only --no-master/--no-audio
+    skip) drops the SonicMaster stack: the finalize ships the unmastered
+    mix. The stack is also dropped when `config.audio.mastering` is False
+    (persistent opt-out). Fake video stays empty even when mastering is
+    enabled (weight-free offline runs).
     `VideoBackendName` is a closed Literal, so past the fake early-return
     the `_VIDEO_SPEC_FOR_BACKEND` index below is total (no KeyError).
     """
@@ -165,6 +171,16 @@ def required_specs(
             RequiredModel(
                 spec="sfx-mmaudio",
                 models_dir=_resolve_dir(models_root, config.sfx.models_dir),
+            )
+        )
+    if mastering_enabled and config.audio.mastering:
+        # SonicMaster mastering stage (Track A): public model + gated
+        # Stable Audio Open VAE. Fake video already returned empty above,
+        # so this branch only fires on CUDA backends.
+        required.append(
+            RequiredModel(
+                spec="audio-sonicmaster",
+                models_dir=_resolve_dir(models_root, config.audio.models_dir),
             )
         )
     return required
@@ -256,6 +272,7 @@ def ensure_models(
     allow_download: bool = True,
     augment_enabled: bool = True,
     music_enabled: bool = True,
+    mastering_enabled: bool = True,
 ) -> int:
     """Verify (+ download when allowed) every spec `generate` needs.
 
@@ -265,11 +282,14 @@ def ensure_models(
     `augment_enabled=False` skips the FILM/Real-ESRGAN floors (weight-free
     probes); the CLI never passes it today, so CUDA runs ensure them.
     `music_enabled=False` (generate-only --no-music/--no-audio) skips
-    the ACE-Step stack.
+    the ACE-Step stack. `mastering_enabled=False` (generate-only
+    --no-master/--no-audio) skips the SonicMaster stack.
     """
     from voyage import model_registry
 
-    required = required_specs(config, sfx_enabled, models_root, augment_enabled, music_enabled)
+    required = required_specs(
+        config, sfx_enabled, models_root, augment_enabled, music_enabled, mastering_enabled
+    )
     if not required:
         return 0
     checked = [

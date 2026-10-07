@@ -377,13 +377,19 @@ def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
         "--no-audio",
         action="store_true",
         default=False,
-        help="shorthand for --no-music --no-sfx (this generate only)",
+        help="shorthand for --no-music --no-sfx --no-master (this generate only)",
     )
     gen.add_argument(
         "--no-augment",
         action="store_true",
         default=False,
         help="shorthand for --no-upscale --no-interpolate (this generate only)",
+    )
+    gen.add_argument(
+        "--no-master",
+        action="store_true",
+        default=False,
+        help="skip the SonicMaster mastering stage for this generate only (non-persistent)",
     )
     _add_console_args(gen)
     gen.set_defaults(func=cmd_generate)

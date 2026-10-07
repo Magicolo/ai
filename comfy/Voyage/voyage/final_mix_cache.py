@@ -161,13 +161,22 @@ def music_fingerprint(
     overlap_cap_seconds: float,
     audio_stretch: float,
     audio_fps: float,
+    mastering_enabled: bool = False,
 ) -> str:
-    """Fingerprint everything the music mix (`build_final_audio`) reads."""
+    """Fingerprint everything the music mix (`build_final_audio`) reads.
+
+    `mastering_enabled` is accepted and ignored (kept for caller
+    compatibility): mastering applies after the cache hit at publish,
+    every time, so toggling it never invalidates this slot. The slot
+    always holds pre-master bytes — mastered bytes are never stored
+    here.
+    """
     takes_path = run_dir / "audio" / "takes.jsonl"
     try:
         takes_digest = _sha256_file(takes_path)
     except OSError:
         takes_digest = "missing"
+    del mastering_enabled
     return _fingerprint(
         {
             "version": CACHE_VERSION,
@@ -196,6 +205,7 @@ def bed_fingerprint(
     caption_override: str | None,
     music_digest: str,
     dual_pan: bool,
+    mastering_enabled: bool = False,
 ) -> str:
     """Fingerprint everything the SFX bed (`render_sfx_bed`) reads.
 
@@ -205,11 +215,15 @@ def bed_fingerprint(
     single bed is not the spatialized pair: toggling it misses by design.
     Both track ledgers hash (order-normalized like the single ledger
     before them); a missing right ledger hashes as "missing", which only
-    matches another missing one.
+    matches another missing one. `mastering_enabled` is accepted and
+    ignored (same rule as the music slot); the slot itself always
+    holds the pre-master bed — mastering applies after the cache
+    hit, every time, and mastered bytes are never stored here.
     """
     sfx_dir = run_dir / "audio" / "sfx"
     ledger_digest = _sha256_ledger_normalized(sfx_dir / "sfx.jsonl", "window_id")
     right_digest = _sha256_ledger_normalized(sfx_dir / "sfx_right.jsonl", "window_id")
+    del mastering_enabled
     return _fingerprint(
         {
             "version": CACHE_VERSION,

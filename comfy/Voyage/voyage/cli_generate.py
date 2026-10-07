@@ -115,6 +115,7 @@ def _expected_skip_key(
     skips = resolve_generate_skips(args)
     augment = getattr(effective, "augment", None)
     sfx_section = getattr(effective, "sfx", None)
+    audio_section = getattr(effective, "audio", None)
     return generate_skip_key(
         skips,
         manifest_no_sfx=bool(manifest.get("no_sfx", False)),
@@ -122,6 +123,7 @@ def _expected_skip_key(
         stored_interpolate=int(getattr(augment, "interpolate", 1)),
         stored_interp_backend=str(getattr(augment, "interp_backend", "rife")),
         stored_sfx_dual_pan=bool(getattr(sfx_section, "dual_pan", True)),
+        stored_mastering=bool(getattr(audio_section, "mastering", True)),
     )
 
 
@@ -135,8 +137,8 @@ def _finalize_run_dir(
 
     Generate-only skips are non-persistent: --no-upscale/--no-interpolate
     force multiplier 1 via explicit overrides (stored manifest untouched),
-    --no-sfx ORs with the manifest policy, --no-music rides the synthetic
-    namespace for `cmd_finalize` to consume.
+    --no-sfx ORs with the manifest policy, --no-music/--no-master ride
+    the synthetic namespace for `cmd_finalize` to consume.
     """
     from voyage.cli_finalize import cmd_finalize
 
@@ -151,6 +153,7 @@ def _finalize_run_dir(
             skip_bad=bool(manifest.get("skip_bad", False)),
             no_sfx=bool(manifest.get("no_sfx", False) or skips["skip_sfx"]),
             no_music=bool(skips["skip_music"]),
+            no_master=bool(skips.get("skip_mastering", False)),
             sfx_backend=None,
             sfx_caption=None,
             sfx_device=None,
@@ -259,6 +262,11 @@ def _finalize_feature_text(
     dual_off = not bool(getattr(getattr(effective, "sfx", None), "dual_pan", True))
     if not sfx_off and dual_off:
         parts.append("single bed")
+    mastering_off = bool(
+        skips.get("skip_mastering", False)
+        or not bool(getattr(getattr(effective, "audio", None), "mastering", True))
+    )
+    parts.append("no master" if mastering_off else "mastered")
     upscale = 1 if skips["force_upscale_1"] else effective.augment.upscale
     interpolate = 1 if skips["force_interpolate_1"] else effective.augment.interpolate
     parts.append(f"upscale x{upscale}" if upscale > 1 else "native size")
@@ -532,6 +540,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     )
     effective_upscale = 1 if skips["force_upscale_1"] else effective.augment.upscale
     effective_interpolate = 1 if skips["force_interpolate_1"] else effective.augment.interpolate
+    mastering_enabled = bool(effective.audio.mastering and not skips.get("skip_mastering", False))
     if (
         ensure_models(
             effective,
@@ -540,6 +549,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
             allow_download=True,
             augment_enabled=effective_upscale > 1 or effective_interpolate > 1,
             music_enabled=not skips["skip_music"],
+            mastering_enabled=mastering_enabled,
         )
         != 0
     ):

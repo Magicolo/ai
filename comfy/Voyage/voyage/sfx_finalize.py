@@ -1474,6 +1474,7 @@ def finalize_sfx_pass(
     caption_override: str | None = None,
     progress: VoyageConsole | None = None,
     dual_pan: bool = False,
+    mastering_enabled: bool = False,
 ) -> Path:
     """Full post-pass: bed over the shipped pixels, mixed, remuxed in place.
 
@@ -1485,7 +1486,9 @@ def finalize_sfx_pass(
     The `sfx_pass_completed` timing event fires inside `render_sfx_bed`
     (shared with the parallel-finalize path). With `dual_pan` true the
     bed is the spatialized pair (a legacy single-bed run heals by
-    rendering only the missing right track).
+    rendering only the missing right track). With `mastering_enabled`
+    true the remuxed mix runs through the mastering choke before the
+    atomic publish (same effective-flag rule as the in-finalize path).
     """
     import tempfile
 
@@ -1531,6 +1534,20 @@ def finalize_sfx_pass(
             mix_music_and_sfx(music, bed, mixed, sample_rate, channels)
             remuxed = tmpdir / "final_sfx.mp4"
             remux_video_with_audio(final_path, mixed, remuxed)
+            # SonicMaster mastering choke (Track B mirror): the remuxed
+            # audio IS the mixed bed here (legacy path always dubs), so
+            # one choke call masters it before the atomic publish.
+            # Off returns `remuxed` untouched.
+            from voyage.mastering import maybe_master_ship_audio
+
+            remuxed = maybe_master_ship_audio(
+                remuxed,
+                tmpdir,
+                sample_rate,
+                channels,
+                progress=progress,
+                enabled=mastering_enabled,
+            )
             from voyage.atomic import atomic_write_bytes
 
             atomic_write_bytes(final_path, remuxed.read_bytes())

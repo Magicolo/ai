@@ -45,6 +45,7 @@ in `docs/MODELS.md`); `--no-download` verifies without fetching:
 - audio-acestep checkpoints; sfx-mmaudio ~13 GB (CC-BY-NC-4.0);
   rife ~87 MB RIFE v4.25-heavy (MIT, default interp); film ~66 MB (MIT + Apache-2.0); realesrgan-anime ~18 MB (BSD-3-Clause);
   inspector-qwen35 ~19 GB VLM (optional)
+- audio-sonicmaster ~3.5 GB DiT (public) + gated Stable Audio Open VAE (see `docs/MODELS.md`)
 
 ## Basic run
 

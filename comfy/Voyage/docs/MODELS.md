@@ -167,6 +167,36 @@ Code: [hkchengrex/MMAudio](https://github.com/hkchengrex/MMAudio) at
 `clip/`). Ladder results 2026-09-29: small fits the 6 GB 2060
 (4.6 GiB peak), medium OOMs it, large needs the 4060 (6.2 GiB peak).
 
+## Mastering — SonicMaster (spec pinned by Track A, venv by Track D)
+
+| Artifact | Repo / file | Revision |
+|----------|-------------|----------|
+| Mastering DiT (`sonicmaster/model.safetensors`, ~3.45 GB, public, Apache-2.0) | [nateraw/sonicmaster](https://huggingface.co/nateraw/sonicmaster) (mirror of [amaai-lab/SonicMaster](https://huggingface.co/amaai-lab/SonicMaster)) | `a1765134e0808a8fb45e1a92874327e01d07cd75` |
+| Mastering VAE (`sonicmaster/vae.safetensors`, **gated** — needs a token with access, Stability AI Community License) | [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) | `9612befb10cc9992a2f82558bbb4735efaba3297` |
+
+IDs above are the live-probe winners (`output/sonicmaster-ab/METRICS.md`):
+isolated `sonicmaster-probe` container (pytorch 2.4.0 cu124 + transformers
+4.44.0 + diffusers 0.30.0), single 30 s chunk, 44.1 kHz stereo, Euler 10
+steps, guidance 1.0 (the probe additionally used the `google/flan-t5-large`
+text encoder — not part of the spec) — outputs render
+~2–4 LU quieter with ~-6 dB peaks (headroom a normalize-then-limit stage
+reclaims downstream). Full row: `MODEL_SPECS["audio-sonicmaster"]`
+(`voyage/registry_mastering.py`, pinned by Track A).
+
+Track D carries only the execution environment: the isolated
+`/opt/venvs/mastering` stack (torch 2.4.0/cu124 + transformers 4.44.0 +
+diffusers 0.30.0 + soundfile/safetensors/hub — the probe's exact core)
+baked into the `voyage-ltx` and `voyage-video` worker images and spawned
+via `VOYAGE_MASTERING_PYTHON` (unset on the slim image and on hosts falls
+back to the supervisor interpreter). The registry spec + ensure wiring
+are Track A's (`audio-sonicmaster`, ensured by default, `--no-master` /
+`--no-audio` opt out).
+
+Provisioning: sign in with a token that can access the gated VAE repo, then `configure` + `generate`
+verifies — and downloads when missing — only the stacks the effective
+config needs (`--no-download` verifies without fetching, failing loud
+offline instead of hanging on the hub).
+
 ## License notes
 
 - 4x-UltraSharp weights are a Zoomy concern, not Voyage's (Voyage pins the

@@ -203,6 +203,27 @@ RUN python3.10 -m venv /opt/venvs/director \
         "safetensors==0.8.0" "huggingface_hub[cli]==1.33.0" "pydantic==2.10.6" \
     && /opt/venvs/director/bin/pip install transformers==5.17.0
 
+# SonicMaster mastering venv (Track D, DESIGN §140): finalize runs under
+# this image too (ltxv/causvid backends), so it carries the same isolated
+# stack as the ltx image — same pip pins, on this image's existing
+# python3.10 (torch 2.4.0+cu124 ships cp310 wheels but NO cp313 wheel —
+# verified live against the cu124 index — so the requested python3.13 is
+# unbuildable with this torch pin; reusing 3.10 also needs no new apt
+# layer). huggingface_hub stays 0.36.2 (transformers 4.44 requires
+# hub<1.0); pydantic mirrors the other venvs (the future worker imports
+# voyage over PYTHONPATH, which needs it). The supervisor will spawn the
+# mastering worker with this interpreter via VOYAGE_MASTERING_PYTHON
+# below; unset (slim image, tests) falls back to the supervisor
+# interpreter. Placed after the slow layers so only the fast user-setup
+# layers rerun; the recursive chown below already covers /opt/venvs.
+RUN python3.10 -m venv /opt/venvs/mastering \
+    && /opt/venvs/mastering/bin/pip install "pip==25.0.1" \
+    && /opt/venvs/mastering/bin/pip install torch==2.4.0 \
+        --index-url https://download.pytorch.org/whl/cu124 \
+    && /opt/venvs/mastering/bin/pip install "transformers==4.44.0" "diffusers==0.30.0" \
+        "soundfile==0.14.0" "safetensors==0.8.0" "huggingface_hub==0.36.2" "pydantic==2.10.6" \
+    && test -x /opt/venvs/mastering/bin/python
+
 # llama-server sidecar (Qwen director, DESIGN §140 llama entry): built
 # from pinned SOURCE, not the prebuilt binaries. The b11146 release
 # binaries link GLIBC_2.38 (Ubuntu 24.04 build hosts) and die at startup
@@ -305,6 +326,7 @@ USER voyager
 
 ENV PYTHONPATH=/opt/ACE-Step-1.5:/opt/causvid:/opt/mmaudio:/app \
     VOYAGE_DIRECTOR_PYTHON=/opt/venvs/director/bin/python \
+    VOYAGE_MASTERING_PYTHON=/opt/venvs/mastering/bin/python \
     VOYAGE_MODELS_DIR=/models \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

@@ -438,6 +438,13 @@ class AudioConfig(BaseModel):
     # when None the director drives (captions evolve with the general
     # prompt). Empty string is falsy → falls back like an absent pin.
     music_caption: str | None = None
+    # SonicMaster mastering stage (Track A, DESIGN §140): when True the
+    # finalize masters the music mix through the SonicMaster weights
+    # (public model.safetensors + gated Stable Audio Open VAE,
+    # `audio-sonicmaster` registry row). Default on; the generate-only
+    # --no-master skip (non-persistent) opts out per-run without touching
+    # the stored manifest.
+    mastering: bool = True
 
     @field_validator("sample_rate", "channels")
     @classmethod
@@ -794,6 +801,7 @@ def resolve_config(
     sfx_caption: str | None | UnsetType = Unset,
     sfx_workers: int | None | UnsetType = Unset,
     sfx_dual_pan: bool | None | UnsetType = Unset,
+    mastering: bool | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issue 022): backend preset,
     then targeted overrides — in that order, so explicit flags always
@@ -877,6 +885,8 @@ def resolve_config(
         sfx = SfxConfig(**{**sfx.model_dump(), "sfx_caption": sfx_caption})
     if is_provided(sfx_workers):
         sfx = SfxConfig(**{**sfx.model_dump(), "num_workers": sfx_workers})
+    if is_provided(mastering):
+        audio = AudioConfig(**{**audio.model_dump(), "mastering": mastering})
     augment = config.augment
     if (
         is_provided(upscale)

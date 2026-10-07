@@ -75,6 +75,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         # Generate-only --no-music/--no-audio (getattr: hand-built
         # namespaces + the stop --finalize handoff lack the flag — off).
         "no_music": bool(getattr(args, "no_music", False)),
+        # Generate-only --no-master: rides `finalize_run`, which ANDs it
+        # with the stored `config.audio.mastering` into the effective
+        # mastering flag (legacy direct callers read as off).
+        "no_master": bool(getattr(args, "no_master", False)),
     }
     # Two-stream finalize: the SFX bed renders inside `finalize_run` while
     # the model pass publishes (stream A ∥ stream B — music, then the bed
@@ -130,6 +134,8 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 caption_override=sfx_caption_value,
                 progress=console,
                 dual_pan=dual_pan,
+                mastering_enabled=bool(config.audio.mastering)
+                and not bool(getattr(args, "no_master", False)),
             )
         except (MediaError, StateError) as exc:
             print(f"sfx pass failed (music-only kept at {output}): {exc}", file=sys.stderr)
@@ -138,9 +144,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     # finalize fix): records what final.mp4 actually presents, so a revisit
     # compares presented-against-presented. Only on full success — an SFX
     # failure returns above, and its music-only final must stay re-finalizable.
-    # The skip_key records the behavior (music/sfx/upscale/interpolate) so
-    # a revisit with different generate-only skips re-finalizes instead of
-    # reading a music-only diff as fresh. Format is owned by
+    # The skip_key records the behavior (music/sfx/upscale/interpolate/master)
+    # so a revisit with different generate-only skips re-finalizes instead
+    # of reading a music-only diff as fresh. Format is owned by
     # `generate_skip_key` (shared with the generate gate); legacy callers
     # without the flags stamp the all-off key over the resolved
     # multipliers — same shape as the generate gate computes for a
@@ -157,12 +163,14 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 "skip_sfx": False,
                 "force_upscale_1": False,
                 "force_interpolate_1": False,
+                "skip_mastering": bool(getattr(args, "no_master", False)),
             },
             manifest_no_sfx=bool(getattr(args, "no_sfx", False)),
             stored_upscale=config.augment.upscale,
             stored_interpolate=config.augment.interpolate,
             stored_interp_backend=config.augment.interp_backend,
             stored_sfx_dual_pan=dual_pan,
+            stored_mastering=bool(config.audio.mastering),
         )
         record_final_coverage(
             run_dir,
