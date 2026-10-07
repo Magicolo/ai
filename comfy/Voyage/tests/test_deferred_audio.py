@@ -201,6 +201,62 @@ def test_chained_take_renders_as_continuation_repaint(tmp_path: Path) -> None:
     assert [take["take_id"] for take in takes] == ["take_0000", "take_0001"]
 
 
+def test_pathologically_short_renders_fail_loud(tmp_path: Path) -> None:
+    """A renderer returning ~empty audio fails fast instead of minting takes forever.
+
+    Regression: the render loop shrank each take to its probed length on
+    any shortfall, so ~0.3 s renders crawled coverage forward and appended
+    takes without bound (140 takes observed for a 4-segment run). A
+    shortfall beyond max(1.0 s, 5% of requested) now raises MediaError on
+    the first bad render — the render count pins that no second render
+    is ever attempted. `chain_overlap_seconds=0.0` isolates the shortfall
+    guard: with overlap on, the second chained take would fail earlier in
+    `_build_continuation_src` (0.3 s tail < overlap), so the all-zeros
+    overlap is what pins THIS guard red on the old code (140 takes, no
+    error) and green on the new (one render, then MediaError).
+    """
+    segments = [_production_segment(tmp_path, index, 240, "hollow winds") for index in range(4)]
+    rendered: list[float] = []
+
+    def _short_render(payload: dict[str, Any], output_path: Path) -> None:
+        rendered.append(float(payload["duration_seconds"]))
+        _write_sine_wav(output_path, 0.3)
+
+    with pytest.raises(MediaError):
+        ensure_deferred_takes(
+            run_dir=tmp_path,
+            usable=segments,
+            source_fps=24.0,
+            run_seed=7,
+            render_take_fn=_short_render,
+            take_seconds=45.0,
+            ahead_seconds=20.0,
+            chain_overlap_seconds=0.0,
+        )
+    assert len(rendered) == 1, f"expected the first bad render to fail, got {len(rendered)} renders"
+
+
+def test_sane_renders_terminate_with_bounded_takes(tmp_path: Path) -> None:
+    """Healthy renders cover a 4-segment timeline with exactly two takes.
+
+    Pins the backstop the other way: the per-segment iteration cap must
+    never fire on a sane run (one 50 s take covers 0-50 s, the 30 s cursor
+    chains a second at 44 s exactly like the six-segment chain geometry).
+    """
+    segments = [_production_segment(tmp_path, index, 240, "hollow winds") for index in range(4)]
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_stub_render,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 2, f"expected exactly 2 takes, got {len(takes)}"
+    assert takes[1]["covers_from"] == 44.0
+
+
 def test_replay_converges_after_repaints(tmp_path: Path) -> None:
     """A re-finalize no-ops once repaints cover the timeline.
 

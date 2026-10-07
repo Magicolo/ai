@@ -25,6 +25,7 @@ every segment goes fresh (121f) instead of continuing (96f).
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -467,7 +468,15 @@ def ensure_deferred_takes(
     factor, e.g. 1.5 for 2x interp at 32 fps) so slices exist for the
     slow-mo mix. Appends each rendered take to `audio/takes.jsonl`
     before rendering the next; any render failure raises `MediaError`
-    with nothing appended for that take. Each rendered take carries the
+    with nothing appended for that take.
+
+    Two fail-loud guards bound the per-segment render loop: a take that
+    comes back more than max(1.0s, 5% of requested) short raises MediaError
+    instead of being recorded (a short stub would advance coverage by
+    ~nothing per take and mint takes forever), and a per-segment iteration
+    cap (4 + ceil(stretched / ahead)) aborts a loop that never converges.
+
+    Each rendered take carries the
     music caption of the segment where its coverage begins (repaints keep
     the current segment's caption — the new caption is their purpose).
     Chained takes overlap the previous take by `chain_overlap_seconds`
@@ -500,7 +509,15 @@ def ensure_deferred_takes(
             _, grid_bpm = beats_for_segment(stretched, beats_per_segment, max_bpm=_ACE_MAX_BPM)
             take_bpm = int(round(grid_bpm))
             end = start + stretched
+            # Backstop against a render loop that never advances coverage:
+            # each iteration must append exactly one ledger take, so a
+            # bounded number of takes always suffices. The base of 4 covers
+            # the keep/re-render/repaint/chain paths; the stretched/ahead
+            # term covers chained takes on long segments.
+            iterations = 0
+            max_iterations = 4 + math.ceil(stretched / max(ahead_seconds, 1.0))
             while True:
+                iterations += 1
                 seed = audio_seed(run_seed, number, len(takes))
                 plan = planner.plan(start, caption, seed, number)
                 if plan.action == "keep":
@@ -537,6 +554,14 @@ def ensure_deferred_takes(
                         if tracker is not None:
                             tracker.update()
                     break
+                if iterations > max_iterations:
+                    raise MediaError(
+                        f"deferred audio for {segment.name} did not converge: "
+                        f"{iterations} takes rendered but coverage "
+                        f"{planner.coverage_until():.3f}s still below segment end "
+                        f"{end:.3f}s (start {start:.3f}s) — a renderer is "
+                        "producing takes that do not advance coverage"
+                    )
                 take = plan.take
                 if take is None:
                     raise MediaError(f"deferred plan for {segment.name} rendered no take")
@@ -611,9 +636,20 @@ def ensure_deferred_takes(
                 if continuation_src is not None:
                     with contextlib.suppress(OSError):
                         continuation_src.unlink()
-                shortfall = take.duration - probed_take_seconds(take_file)
+                rendered_seconds = probed_take_seconds(take_file)
+                shortfall = take.duration - rendered_seconds
+                if shortfall > max(1.0, 0.05 * take.duration):
+                    # The renderer returned far less audio than requested.
+                    # Recording the stub would advance coverage by ~nothing
+                    # per take and the loop above would mint takes forever
+                    # (140 takes on a 4-segment run) — fail loud instead.
+                    raise MediaError(
+                        f"deferred take {take.take_id} for {segment.name} rendered "
+                        f"{rendered_seconds:.3f}s of {take.duration:.3f}s requested "
+                        f"(shortfall {shortfall:.3f}s)"
+                    )
                 if shortfall > 1e-3:
-                    take.duration = probed_take_seconds(take_file)
+                    take.duration = rendered_seconds
                 take.path = stored
                 planner.record(take)
                 takes.append(take)
