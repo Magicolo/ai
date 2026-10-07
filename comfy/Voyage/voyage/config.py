@@ -642,6 +642,10 @@ class VoyageConfig(BaseModel):
     # every Nth segment (1 = drift each segment). Non-drift segments hold
     # the current concept via the deterministic fallback (still recorded).
     drift_every_n_segments: int = 1
+    # Scene-cut cadence: every Nth segment renders fresh (a strong visual
+    # change) instead of continuing from the worker tail. 1 cuts every
+    # segment (no continuation at all); larger N holds shots longer.
+    scene_cut_every_n_segments: int = 3
     # Gauge sampling cadence (Stage C): resource snapshots cost one worker
     # health round-trip per tail (~5 s when a probe times out), so long
     # runs can thin them out. 1 keeps every-segment sampling.
@@ -651,6 +655,7 @@ class VoyageConfig(BaseModel):
         "blocks_per_prompt_stage",
         "novelty_max_attempts",
         "drift_every_n_segments",
+        "scene_cut_every_n_segments",
         "resource_gauge_interval_segments",
     )
     @classmethod
@@ -761,6 +766,7 @@ def resolve_config(
     beats_per_segment: int | None | UnsetType = Unset,
     definition: str | None | UnsetType = Unset,
     drift_every_n_segments: int | None | UnsetType = Unset,
+    scene_cut_every_n_segments: int | None | UnsetType = Unset,
     music_caption: str | None | UnsetType = Unset,
     video_caption: str | None | UnsetType = Unset,
     prompt_enhance: bool | None | UnsetType = Unset,
@@ -820,6 +826,13 @@ def resolve_config(
     if is_provided(drift_every_n_segments):
         voyage_config = VoyageConfig(
             **{**voyage_config.model_dump(), "drift_every_n_segments": drift_every_n_segments}
+        )
+    if is_provided(scene_cut_every_n_segments):
+        voyage_config = VoyageConfig(
+            **{
+                **voyage_config.model_dump(),
+                "scene_cut_every_n_segments": scene_cut_every_n_segments,
+            }
         )
     if is_provided(music_caption):
         audio = AudioConfig(**{**audio.model_dump(), "music_caption": music_caption})

@@ -99,6 +99,13 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         help="director drifts every Nth segment (must be positive; default 1); other segments hold",
     )
     parser.add_argument(
+        "--scene-cut-every-n",
+        type=int,
+        default=None,
+        help="fresh scene cut every Nth segment (must be positive; "
+        "default 3); other segments continue",
+    )
+    parser.add_argument(
         "--music-caption",
         default=None,
         help="pin the music caption family (default: director drives + evolves it)",
