@@ -171,6 +171,52 @@ def test_reencode_is_single_pass_with_crf(tmp_path: Path, monkeypatch: pytest.Mo
     assert "-vf" in only
 
 
+def test_publish_encodes_run_without_timeout_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final publish encodes must not inherit the 600 s probe bound.
+
+    Live incident (jango, 64 segments): the tensor-intermediate publish
+    (`encode upscale + interpolate video`, ~65k frames at 2432x1408
+    preset-slow) died with `ffmpeg timed out after 600.0s`. Publish wall
+    time scales with the timeline like the already-unbounded augment
+    chunk path, so all three publish encodes pass `timeout=None` while
+    probes keep the 600 s default.
+    """
+    import voyage.media as media_module
+    import voyage.media_audio as media_audio_module
+
+    seen: list[tuple[list[str], float | None]] = []
+    real_run_capture = media_module.run_capture
+
+    def _recording(argv: list[str], timeout: float | None = 600.0) -> Any:
+        seen.append((list(argv), timeout))
+        return real_run_capture(argv, timeout=timeout)
+
+    monkeypatch.setattr(media_module, "run_capture", _recording)
+    monkeypatch.setattr(media_audio_module, "run_capture", _recording)
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    _commit(run_dir, 1)
+    # Native path (default geometry matches the committed segment).
+    native_out = tmp_path / "final-native-unbounded.mp4"
+    assert media_module.finalize_run(run_dir, native_out).exists()
+    # VF path (above-native multiplier forces the concat-vf re-encode).
+    vf_out = tmp_path / "final-vf-unbounded.mp4"
+    options = media_module.FinalizeOptions(crf=18, preset="fast")
+    assert media_module.finalize_run(run_dir, vf_out, upscale=2, options=options).exists()
+
+    video_encodes = [timeout for argv, timeout in seen if "-c:v" in argv and "libx264" in argv]
+    assert len(video_encodes) == 2, f"expected two publishes, got {seen!r}"
+    assert all(timeout is None for timeout in video_encodes), (
+        f"publish encodes must be unbounded, got {video_encodes!r}"
+    )
+    probe_timeouts = {timeout for argv, timeout in seen if argv and argv[0] == "ffprobe"}
+    assert 600.0 in probe_timeouts and None not in probe_timeouts, (
+        f"probes must keep the 600 s bound, got {probe_timeouts!r}"
+    )
+
+
 def test_finalize_emits_stage_timings(tmp_path: Path) -> None:
     """`finalize_completed` carries parts/audio/final timings + effective knobs."""
     import voyage.media as media_module

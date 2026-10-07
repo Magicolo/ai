@@ -87,9 +87,9 @@ def test_single_graph_uses_one_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyP
     calls: list[list[str]] = []
     real = media_module.run_capture
 
-    def _recording(argv: list[str]) -> Any:
+    def _recording(argv: list[str], timeout: float | None = 600.0) -> Any:
         calls.append(list(argv))
-        return real(argv)
+        return real(argv, timeout=timeout)
 
     monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     _join_audio_single_graph(stems, tmp_path / "one.wav", 1.0)
@@ -110,10 +110,10 @@ def test_single_graph_has_s32_barriers_and_no_acrossfade(
     graphs: list[str] = []
     real = media_module.run_capture
 
-    def _recording(argv: list[str]) -> Any:
+    def _recording(argv: list[str], timeout: float | None = 600.0) -> Any:
         if "-filter_complex" in argv:
             graphs.append(argv[argv.index("-filter_complex") + 1])
-        return real(argv)
+        return real(argv, timeout=timeout)
 
     monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     _join_audio_single_graph(stems, tmp_path / "bar.wav", 1.0)

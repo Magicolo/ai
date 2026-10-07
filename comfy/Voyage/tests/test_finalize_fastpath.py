@@ -206,9 +206,9 @@ def test_native_publish_encodes_and_never_copies(
 
     real_run_capture = media_module.run_capture
 
-    def _recording(argv: list[str]) -> Any:
+    def _recording(argv: list[str], timeout: float | None = 600.0) -> Any:
         calls.append(argv)
-        return real_run_capture(argv)
+        return real_run_capture(argv, timeout=timeout)
 
     monkeypatch.setattr(media_module, "run_capture", _recording)
     out = tmp_path / "final-rec.mp4"
@@ -320,9 +320,9 @@ def test_final_blend_never_spawns_wide_acrossfade_graph(
     calls: list[list[str]] = []
     real_run_capture = media_module.run_capture
 
-    def _recording(argv: list[str]) -> Any:
+    def _recording(argv: list[str], timeout: float | None = 600.0) -> Any:
         calls.append(list(argv))
-        return real_run_capture(argv)
+        return real_run_capture(argv, timeout=timeout)
 
     monkeypatch.setattr(media_audio_module, "run_capture", _recording)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
