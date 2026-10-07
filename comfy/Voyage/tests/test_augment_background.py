@@ -618,3 +618,284 @@ def test_prewarm_resident_nets_bypass_cold_floor(tmp_path: Path, monkeypatch: An
     assert warm.skip_reason == ""
     assert warm.upscale_chunks_done == 2
     assert warm.interp_chunks_done == 2
+
+
+def _joint_ffmpeg(*argv: str) -> None:
+    import subprocess
+
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *argv], check=True)
+
+
+def _joint_clip(path: Path, frames: int, fps: int = 24) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _joint_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=size=64x64:rate={fps}:duration={frames / fps}",
+        "-frames:v",
+        str(frames),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        str(path),
+    )
+    return path
+
+
+def _joint_gray_png() -> bytes:
+    import struct
+    import zlib
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        framed = struct.pack(">I", len(data)) + tag + data
+        return framed + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)
+    raw = b"".join(b"\x00" + b"\x80\x80\x80" * 64 for _ in range(64))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(raw))
+        + _chunk(b"IEND", b"")
+    )
+
+
+_JOINT_PNG_BYTES = _joint_gray_png()
+
+
+def _stub_joint_interp(
+    png_a: Path, png_b: Path, weights: object, moment: float, device: str
+) -> bytes:
+    del weights, moment, device
+    assert png_a.exists() and png_b.exists()
+    return _JOINT_PNG_BYTES
+
+
+def _make_real_segment(
+    run_dir: Path, segment_id: str, *, frames: int = 12, checksum: str = "ck"
+) -> Path:
+    import json as _json
+
+    segment_dir = run_dir / "segments" / segment_id
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    _joint_clip(segment_dir / "video.mp4", frames)
+    manifest = {
+        "format": 1,
+        "transition": {},
+        "prompt_plan": {},
+        "audio_state": {},
+        "world_state": {},
+        "metrics": {"frames": frames},
+        "checksums": {"video.mp4": checksum},
+    }
+    (segment_dir / "manifest.json").write_text(_json.dumps(manifest), encoding="utf-8")
+    (segment_dir / "DONE").write_text("done\n", encoding="utf-8")
+    return segment_dir
+
+
+def _joint_prewarm_setup(tmp_path: Path, monkeypatch: Any, segments: int = 3) -> tuple[Any, Path]:
+    from voyage.augment import AugmentWeights
+
+    run_dir = tmp_path / "run"
+    for index in range(segments):
+        _make_real_segment(run_dir, f"{index:06d}", checksum=f"ck{index}")
+    config = _enabled_config()
+    film = tmp_path / "film.safetensors"
+    realesrgan = tmp_path / "realesrgan.pth"
+    film.write_bytes(b"f" * 64)
+    realesrgan.write_bytes(b"r" * 64)
+    rife = tmp_path / "rife.safetensors"
+    rife.write_bytes(b"i" * 64)
+    monkeypatch.setattr(
+        "voyage.augment.resolve_augment_weights",
+        lambda _models_dir: AugmentWeights(film=film, realesrgan=realesrgan, rife=rife),
+    )
+    monkeypatch.setattr("voyage.augment_background.model_pass_devices", lambda: ("cpu",))
+    monkeypatch.setattr("voyage.augment_background.device_free_gib", lambda _device: 5.0)
+    monkeypatch.setattr(
+        "voyage.augment_background.probe_segment_source",
+        lambda _video: (64, 64, 24.0),
+    )
+    return config, run_dir
+
+
+def _recording_joint_stubs(
+    calls: list[tuple[str, str, str]],
+) -> tuple[Any, Any]:
+    """Poll stubs recording (leg, scope, scope-id); render once, then settle."""
+    from voyage.augment_interp_poller import InterpPollResult
+    from voyage.augment_upscale_poller import UpscalePollResult
+
+    seen: set[Any] = set()
+
+    def _scope(kwargs: Any) -> tuple[str, str]:
+        ids = tuple(kwargs.get("segment_ids") or ())
+        unit_id = ids[0] if ids else "unknown"
+        if kwargs.get("sources") is not None:
+            return ("joint", unit_id)
+        return ("segment", unit_id)
+
+    def _upscale_stub(run_dir: Path, **kwargs: Any) -> Any:
+        scope, unit_id = _scope(kwargs)
+        calls.append(("up", scope, unit_id))
+        key = ("up", scope, unit_id)
+        if key in seen:
+            return UpscalePollResult(
+                segments_seen=1,
+                segments_skipped=0,
+                chunks_done=0,
+                chunks_skipped=1,
+                partials_pruned=0,
+                frames_done=0,
+                frames_skipped=4,
+            )
+        seen.add(key)
+        if kwargs.get("on_chunk") is not None:
+            kwargs["on_chunk"](unit_id, 0, 1)
+        if kwargs.get("on_chunk_frames") is not None:
+            kwargs["on_chunk_frames"](unit_id, 4)
+        return UpscalePollResult(
+            segments_seen=1,
+            segments_skipped=0,
+            chunks_done=1,
+            chunks_skipped=0,
+            partials_pruned=0,
+            frames_done=4,
+            frames_skipped=0,
+        )
+
+    def _interp_stub(run_dir: Path, **kwargs: Any) -> Any:
+        scope, unit_id = _scope(kwargs)
+        calls.append(("ip", scope, unit_id))
+        joint_ids: tuple[str, ...] = (
+            tuple(sorted(kwargs.get("segment_ids") or ())) if scope == "joint" else ()
+        )
+        key = ("ip", scope, unit_id, joint_ids)
+        if key in seen:
+            return InterpPollResult(
+                segments_seen=1,
+                segments_skipped=0,
+                chunks_done=0,
+                chunks_skipped=1,
+                chunks_waiting=0,
+                partials_pruned=0,
+                frames_done=0,
+                frames_skipped=4,
+            )
+        seen.add(key)
+        if kwargs.get("on_chunk") is not None:
+            kwargs["on_chunk"](unit_id, 0, 1)
+        if kwargs.get("on_chunk_frames") is not None:
+            kwargs["on_chunk_frames"](unit_id, 4)
+        return InterpPollResult(
+            segments_seen=1,
+            segments_skipped=0,
+            chunks_done=1,
+            chunks_skipped=0,
+            chunks_waiting=0,
+            partials_pruned=0,
+            frames_done=4,
+            frames_skipped=0,
+        )
+
+    return _upscale_stub, _interp_stub
+
+
+def test_prewarm_runs_joints_before_segments_with_joint_callbacks(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Joints-first: joint uniform polls precede segment polls, routed apart."""
+    from voyage import augment_background
+
+    config, run_dir = _joint_prewarm_setup(tmp_path, monkeypatch, segments=3)
+    calls: list[tuple[str, str, str]] = []
+    upscale_stub, interp_stub = _recording_joint_stubs(calls)
+    joint_events: list[tuple[str, str, int]] = []
+    shared_segments: list[str] = []
+
+    result = augment_background.prewarm_once(
+        run_dir,
+        config,
+        upscale_poll_fn=upscale_stub,
+        interp_poll_fn=interp_stub,
+        joint_interp_fn=_stub_joint_interp,
+        on_upscale_frames=lambda segment, frames: shared_segments.append(segment),
+        on_interp_frames=lambda segment, frames: shared_segments.append(segment),
+        on_joint_chunk=lambda unit, leg, index, total: joint_events.append((unit, leg, index)),
+        on_joint_frames=lambda unit, leg, frames, position, total: joint_events.append(
+            (unit, leg, frames)
+        ),
+    )
+    assert result is not None
+    assert result.joints_seen == 2
+    assert result.joint_fix_done == 2
+    assert result.joint_upscale_chunks_done == 2
+    assert result.joint_interp_chunks_done == 2
+    assert result.joint_frames_total == 2 * 3 * 4
+    # Every joint uniform poll precedes every segment poll, per leg.
+    joint_up = [call for call in calls if call[:2] == ("up", "joint")]
+    seg_up = [call for call in calls if call[:2] == ("up", "segment")]
+    joint_ip = [call for call in calls if call[:2] == ("ip", "joint")]
+    seg_ip = [call for call in calls if call[:2] == ("ip", "segment")]
+    assert len(joint_up) == 2 and len(seg_up) == 3
+    assert len(joint_ip) == 2 and len(seg_ip) == 3
+    assert max(calls.index(call) for call in joint_up) < min(calls.index(call) for call in seg_up)
+    assert max(calls.index(call) for call in joint_ip) < min(calls.index(call) for call in seg_ip)
+    # Routing: shared callbacks see segments only, joint callbacks see joints.
+    assert shared_segments != []
+    assert all(not segment.startswith("joint_") for segment in shared_segments)
+    joint_units = {unit for unit, _leg, _n in joint_events}
+    assert joint_units == {"joint_000000_000001", "joint_000001_000002"}
+    joint_legs = {leg for _unit, leg, _n in joint_events}
+    assert joint_legs == {"fix", "upscale", "interp"}
+
+
+def test_prewarm_stop_between_joint_units_resumes_next_pass(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A mid-joints stop abandons cleanly; the next pass finishes the rest."""
+    from voyage import augment_background
+
+    config, run_dir = _joint_prewarm_setup(tmp_path, monkeypatch, segments=3)
+    calls: list[tuple[str, str, str]] = []
+    upscale_stub, interp_stub = _recording_joint_stubs(calls)
+    joint_ip_calls = {"count": 0}
+
+    def _counting_interp(run_dir: Path, **kwargs: Any) -> Any:
+        scope = "joint" if kwargs.get("sources") is not None else "segment"
+        if scope == "joint":
+            joint_ip_calls["count"] += 1
+        return interp_stub(run_dir, **kwargs)
+
+    def _stop_after_first_joint_interp() -> bool:
+        return joint_ip_calls["count"] >= 1
+
+    stopped = augment_background.prewarm_once(
+        run_dir,
+        config,
+        upscale_poll_fn=upscale_stub,
+        interp_poll_fn=_counting_interp,
+        joint_interp_fn=_stub_joint_interp,
+        should_stop=_stop_after_first_joint_interp,
+    )
+    assert stopped is None
+    resumed = augment_background.prewarm_once(
+        run_dir,
+        config,
+        upscale_poll_fn=upscale_stub,
+        interp_poll_fn=interp_stub,
+        joint_interp_fn=_stub_joint_interp,
+    )
+    assert resumed is not None
+    assert resumed.joints_seen == 2
+    assert resumed.joint_fix_done == 0
+    assert resumed.joint_upscale_chunks_done == 1
+    assert resumed.joint_upscale_chunks_skipped == 1
+    assert resumed.joint_interp_chunks_done == 1
+    assert resumed.joint_interp_chunks_skipped == 1

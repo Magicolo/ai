@@ -540,3 +540,78 @@ def test_report_notes_held_back_skip_once(tmp_path: Path, monkeypatch: pytest.Mo
         assert stream.getvalue().count("pre-warm held back") == 1
     finally:
         supervisor._close_model_pass_bar()
+
+
+def test_joint_live_status_text() -> None:
+    """Pump-event side text names the leg, unit, and position."""
+    from voyage.supervisor import _joint_live_status
+
+    assert (
+        _joint_live_status(("joint_frames", "joint_000003_000004", "upscale", 4, 2, 63))
+        == "upscaling joint_000003_000004 (3/63)"
+    )
+    assert (
+        _joint_live_status(("joint_frames", "joint_000003_000004", "interp", 4, 2, 63))
+        == "interpolating joint_000003_000004 (3/63)"
+    )
+    assert (
+        _joint_live_status(("joint_frames", "joint_000003_000004", "fix", 4, 0, 63))
+        == "fixing joint_000003_000004 (1/63)"
+    )
+    assert _joint_live_status(("joint_frames",)) == "joints"
+
+
+def test_joint_frames_drain_advances_joints_bar_with_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drained joint events advance the combined bar and set its status."""
+    stream = io.StringIO()
+    supervisor = _live_supervisor(tmp_path, stream, monkeypatch)
+    try:
+        supervisor._enqueue_prewarm_event(
+            ("joint_frames", "joint_000000_000001", "upscale", 4, 0, 2)
+        )
+        supervisor._enqueue_prewarm_event(
+            ("joint_frames", "joint_000000_000001", "interp", 4, 0, 2)
+        )
+        supervisor._drain_prewarm_queue(block=False)
+        assert supervisor._pumped_joint_frames == 8
+        _bar_cm, tracker = supervisor._prewarm_bars["joints"]
+        assert tracker._done == 8
+        assert tracker._extra == "interpolating joint_000000_000001 (1/2)"
+    finally:
+        supervisor._close_model_pass_bar()
+
+
+def test_post_commit_report_advances_joints_bar_and_notes_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ledger delta minus pumped frames moves the joints bar once; note summarizes."""
+    stream = io.StringIO()
+    supervisor = _live_supervisor(tmp_path, stream, monkeypatch)
+    try:
+        supervisor._enqueue_prewarm_event(("joint_frames", "joint_000000_000001", "fix", 4, 0, 2))
+        supervisor._drain_prewarm_queue(block=False)
+        assert supervisor._pumped_joint_frames == 4
+        supervisor._background = SimpleNamespace(
+            ledgered_frames=lambda: (1, 0, 0, 0, 0, 0.0, 0.0),
+            ledgered_joint_frames=lambda: (4, 4, 4),
+            last_result=SimpleNamespace(
+                joints_seen=2,
+                joint_fix_done=1,
+                joint_upscale_chunks_done=1,
+                joint_upscale_chunks_skipped=0,
+                joint_interp_chunks_done=1,
+                joint_interp_chunks_skipped=0,
+                joint_frames_total=24,
+            ),
+        )
+        supervisor._report_background_prewarm()
+        assert supervisor._pumped_joint_frames == 0
+        assert supervisor._prewarm_bars == {}
+        assert (
+            "pre-warm joints: 1 fixes early, "
+            "1 up + 1 ip chunks ledgered (2 joints)" in stream.getvalue()
+        )
+    finally:
+        supervisor._close_model_pass_bar()

@@ -247,6 +247,31 @@ def scene_cut_for_segment(number: int, every_n: int) -> bool:
     return (number + 1) % every_n == 0
 
 
+_JOINT_LEG_VERBS = {"fix": "fixing", "upscale": "upscaling", "interp": "interpolating"}
+"""Live-status verb per joints-sweep leg (the combined bar's side text)."""
+
+
+def _joint_live_status(event: tuple[Any, ...]) -> str:
+    """Side text for one `joint_frames` pump event (never raises).
+
+    Event shape is `("joint_frames", unit_id, leg, frames, position,
+    total)`; the status reads e.g. `upscaling joint_000003_000004
+    (3/63)`. Malformed events degrade to the bare leg instead of
+    failing a render.
+    """
+    try:
+        unit_id = str(event[1])
+        leg = str(event[2])
+        position = int(event[4])
+        total = int(event[5])
+    except (IndexError, TypeError, ValueError):
+        return "joints"
+    verb = _JOINT_LEG_VERBS.get(leg, leg)
+    if total > 0:
+        return f"{verb} {unit_id} ({position + 1}/{total})"
+    return f"{verb} {unit_id}"
+
+
 #: How far a worker-reported frame count may exceed the configured
 #: segment size before it reads as corruption, not reality (issue 006):
 #: `1..10 * segment_frames`. Beyond that the audio-coverage loop would
@@ -410,6 +435,7 @@ class Supervisor:
         # ledger delta so live-advanced frames are never counted twice.
         self._pumped_upscale_frames = 0
         self._pumped_interp_frames = 0
+        self._pumped_joint_frames = 0
         # Post-commit motion sense (cheap tier): pixel-delta energy of the
         # just-committed segment, steering the NEXT proposal via the
         # measured_context/amendments path. Never gates a commit — a frozen
@@ -729,6 +755,14 @@ class Supervisor:
                 on_interp_frames=lambda segment, frames: self._enqueue_prewarm_event(
                     ("interp_frames", segment, frames)
                 ),
+                on_joint_chunk=lambda unit, leg, index, total: self._enqueue_prewarm_event(
+                    ("joint_chunk", unit, leg, index, total)
+                ),
+                on_joint_frames=(
+                    lambda unit, leg, frames, position, total: self._enqueue_prewarm_event(
+                        ("joint_frames", unit, leg, frames, position, total)
+                    )
+                ),
             )
             driver.start()
             self._background = driver
@@ -808,14 +842,28 @@ class Supervisor:
             seen_upf, seen_ipf, seen_ups, seen_ips = 0, 0, 0.0, 0.0
         self._reported_prewarm = (driver, _up, _ip, upf, ipf, ups, ips)
         latest = getattr(driver, "last_result", None)
-        if (
-            latest is not None
-            and latest is not getattr(self, "_reported_prewarm_result", None)
-            and int(getattr(latest, "seams_done", 0) or 0) > 0
-        ):
-            progress.note(
-                f"pre-warm seams: {int(getattr(latest, 'seams_done', 0) or 0)} rendered early"
+        if latest is not None and latest is not getattr(self, "_reported_prewarm_result", None):
+            joints_seen = int(getattr(latest, "joints_seen", 0) or 0)
+            fresh_fixes = int(getattr(latest, "joint_fix_done", 0) or 0)
+            up_chunks_done = int(getattr(latest, "joint_upscale_chunks_done", 0) or 0)
+            ip_chunks_done = int(getattr(latest, "joint_interp_chunks_done", 0) or 0)
+            up_chunks_led = up_chunks_done + int(
+                getattr(latest, "joint_upscale_chunks_skipped", 0) or 0
             )
+            ip_chunks_led = ip_chunks_done + int(
+                getattr(latest, "joint_interp_chunks_skipped", 0) or 0
+            )
+            if fresh_fixes > 0 or up_chunks_done > 0 or ip_chunks_done > 0:
+                progress.note(
+                    f"pre-warm joints: {fresh_fixes} fixes early, "
+                    f"{up_chunks_led} up + {ip_chunks_led} ip chunks "
+                    f"ledgered ({joints_seen} joints)"
+                )
+            elif joints_seen == 0 and int(getattr(latest, "seams_done", 0) or 0) > 0:
+                # Legacy drivers without joint fields: keep the old line.
+                progress.note(
+                    f"pre-warm seams: {int(getattr(latest, 'seams_done', 0) or 0)} rendered early"
+                )
         new_upf, new_ipf = upf - seen_upf, ipf - seen_ipf
         new_ups, new_ips = ups - seen_ups, ips - seen_ips
         # Frames already advanced live during the render (pump) must not
@@ -894,29 +942,89 @@ class Supervisor:
                 if skip_reason:
                     progress.note(f"pre-warm held back: {skip_reason}")
             self._reported_prewarm_result = last
+        # Joints leg: ledgered via `driver.ledgered_joint_frames()` —
+        # (fix, upscale, interp) source frames, segment legs excluded —
+        # while pumped frames already advanced live via
+        # `_drain_prewarm_queue`. The bar moves only by the unreported
+        # ledger remainder; the combined bar's total is the sweep's
+        # `joint_frames_total` (fix + upscale + interp over every seen
+        # unit). `getattr` guards keep older drivers without the joint
+        # reader working — live instances always carry it.
+        joint_reader = getattr(driver, "ledgered_joint_frames", None)
+        if callable(joint_reader):
+            try:
+                joint_values: Any = joint_reader()
+                joint_fix_frames = int(joint_values[0])
+                joint_up_frames = int(joint_values[1])
+                joint_ip_frames = int(joint_values[2])
+            except Exception:
+                joint_fix_frames, joint_up_frames, joint_ip_frames = 0, 0, 0
+        else:
+            joint_fix_frames, joint_up_frames, joint_ip_frames = 0, 0, 0
+        joint_baseline: Any = getattr(self, "_reported_joints", None)
+        if isinstance(joint_baseline, tuple) and len(joint_baseline) == 4:
+            seen_joint_driver, seen_fix, seen_up, seen_ip = joint_baseline
+        else:
+            seen_joint_driver, seen_fix, seen_up, seen_ip = None, 0, 0, 0
+        seen_fix, seen_up, seen_ip = int(seen_fix), int(seen_up), int(seen_ip)
+        if seen_joint_driver is not driver:
+            seen_fix, seen_up, seen_ip = 0, 0, 0
+        self._reported_joints = (driver, joint_fix_frames, joint_up_frames, joint_ip_frames)
+        pumped_joint = int(getattr(self, "_pumped_joint_frames", 0) or 0)
+        if hasattr(self, "_pumped_joint_frames"):
+            self._pumped_joint_frames = 0
+        new_joint_frames = (
+            (joint_fix_frames - seen_fix)
+            + (joint_up_frames - seen_up)
+            + (joint_ip_frames - seen_ip)
+        )
+        if new_joint_frames > 0:
+            unreported_joint = max(0, new_joint_frames - pumped_joint)
+            joint_result = getattr(driver, "last_result", None)
+            joint_total = int(getattr(joint_result, "joint_frames_total", 0) or 0)
+            self._advance_prewarm_leg_bar("joints", unreported_joint, joint_total or None)
         # Never hold a bar Live across segment stages: per-segment bars
         # close here (finish lines print), and the next segment reopens
         # them lazily on its first pump/report event.
         self._close_model_pass_bar()
 
-    def _advance_prewarm_leg_bar(self, leg: str, new_frames: int, total: int | None) -> None:
+    def _advance_prewarm_leg_bar(
+        self,
+        leg: str,
+        new_frames: int,
+        total: int | None,
+        status: str | None = None,
+    ) -> None:
         """Advance one per-leg pre-warm bar, opening it lazily.
 
-        `leg` is `upscale` (`upscale frames`) or `interp`
-        (`interpolate frames`). Each leg counts its own source frames
-        against committed frames, so upscale and interp never share one
-        X/Y total. Dict keys use the display spelling (`upscale` /
-        `interpolate`). No-op when augmentation is not demanded.
+        `leg` is `upscale` (`upscale frames`), `interp`
+        (`interpolate frames`), or `joints` (`joint frames`). Each leg
+        counts its own source frames against committed frames, so legs
+        never share one X/Y total. Dict keys use the display spelling
+        (`upscale` / `interpolate` / `joints`). No-op when augmentation
+        is not demanded.
+        `status`, when given, replaces the bar's side text (the joints
+        bar shows what the sweep is doing: fixing / upscaling /
+        interpolating which unit).
         """
         progress = self._progress
-        if progress is None or not self._model_pass_demanded():
+        if progress is None:
             return
         if leg == "upscale":
             label = "upscale frames"
             key = "upscale"
+            if not self._model_pass_demanded():
+                return
         elif leg == "interp":
             label = "interpolate frames"
             key = "interpolate"
+            if not self._model_pass_demanded():
+                return
+        elif leg == "joints":
+            label = "joint frames"
+            key = "joints"
+            if not self._model_pass_demanded():
+                return
         else:
             return
         try:
@@ -935,6 +1043,8 @@ class Supervisor:
                 tracker.set_total(total)
             if new_frames > 0 and tracker is not None:
                 tracker.update(new_frames)
+            if status is not None and tracker is not None:
+                tracker.set_extra(status)
         except Exception:  # noqa: BLE001 - display must never fail a commit
             bars = getattr(self, "_prewarm_bars", None)
             if isinstance(bars, dict):
@@ -978,6 +1088,10 @@ class Supervisor:
         mode sweeps stragglers after the render finishes. Frame events
         advance the bar live; chunk lifecycle events carry no frame
         counts — the pass-end ledger delta stays their source of truth.
+        Joint frame events (`joint_frames`,
+        carrying unit + leg + position) advance the combined `joint
+        frames` bar with a live status; joint chunk events stay
+        ledger-truth.
         """
         while True:
             try:
@@ -999,6 +1113,13 @@ class Supervisor:
                     if frames > 0:
                         self._pumped_interp_frames += frames
                         self._advance_prewarm_leg_bar("interp", frames, None)
+                elif kind == "joint_frames":
+                    frames = int(event[3])
+                    if frames > 0:
+                        self._pumped_joint_frames += frames
+                        self._advance_prewarm_leg_bar(
+                            "joints", frames, None, status=_joint_live_status(event)
+                        )
             except Exception:  # noqa: BLE001 - display must never fail a render
                 pass
 

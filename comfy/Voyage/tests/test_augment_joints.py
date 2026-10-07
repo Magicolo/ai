@@ -579,3 +579,210 @@ def test_run_durable_assembles_trim_joint_trim_order(tmp_path: Path, monkeypatch
         preset="veryfast",
     )
     assert joint_plan in drained
+
+
+def test_ensure_joint_units_stops_between_units_and_resumes(tmp_path: Path) -> None:
+    """A stop returns finished units; the next pass resumes the rest."""
+    run_dir = tmp_path / "run"
+    for index in range(4):
+        _make_segment(run_dir, f"{index:06d}", frames=12, checksum=f"ck{index}", real_clip=True)
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    sources, _skipped = committed_segment_sources(run_dir)
+    ordered = sorted(sources, key=lambda source: source.segment_id)
+    checks = {"count": 0}
+
+    def _stop_after_two_checks() -> bool:
+        checks["count"] += 1
+        return checks["count"] >= 3
+
+    kwargs: dict[str, Any] = {
+        "source_fps": 24,
+        "crf": 18,
+        "preset": "veryfast",
+        "interp_fn": _stub_interp,
+        "weights": None,
+        "device": "cpu",
+    }
+    partial = augment_joints.ensure_joint_units(
+        run_dir, ordered, should_stop=_stop_after_two_checks, **kwargs
+    )
+    assert [unit.joint_dir.name for unit in partial] == [
+        "joint_000000_000001",
+        "joint_000001_000002",
+    ]
+    assert all(unit.joint_video.is_file() for unit in partial)
+    full = augment_joints.ensure_joint_units(run_dir, ordered, **kwargs)
+    assert [unit.joint_dir.name for unit in full] == [
+        "joint_000000_000001",
+        "joint_000001_000002",
+        "joint_000002_000003",
+    ]
+    assert [unit.joint_video for unit in full[:2]] == [unit.joint_video for unit in partial]
+    assert all(unit.joint_video.is_file() for unit in full)
+
+
+class _FakeJointTracker:
+    def __init__(self) -> None:
+        self.updates: list[int] = []
+        self.total: int | None = None
+        self.extras: list[str] = []
+
+    def update(self, advance: int = 1) -> None:
+        self.updates.append(advance)
+
+    def set_total(self, total: int) -> None:
+        self.total = total
+
+    def set_extra(self, extra: str) -> None:
+        self.extras.append(extra)
+
+
+class _FakeJointBarCM:
+    def __init__(self, tracker: _FakeJointTracker) -> None:
+        self.tracker = tracker
+
+    def __enter__(self) -> _FakeJointTracker:
+        return self.tracker
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+
+class _FakeJointProgress:
+    def __init__(self) -> None:
+        self.bars: list[tuple[str, int | None, _FakeJointTracker]] = []
+        self.verbose = False
+
+    def bar(self, label: str, total: int | None = None) -> _FakeJointBarCM:
+        tracker = _FakeJointTracker()
+        self.bars.append((label, total, tracker))
+        return _FakeJointBarCM(tracker)
+
+
+def _settling_joint_stubs() -> tuple[Any, Any, list[tuple[str, str]]]:
+    """Poll stubs that render once per scope, then settle (ledger-hit)."""
+    from voyage.augment_interp_poller import InterpPollResult
+    from voyage.augment_upscale_poller import UpscalePollResult
+
+    calls: list[tuple[str, str]] = []
+    seen: set[Any] = set()
+
+    def _scope(kwargs: Any) -> tuple[str, tuple[str, ...]]:
+        ids = tuple(kwargs.get("segment_ids") or ())
+        if kwargs.get("sources") is not None:
+            return ("joint", ids)
+        return ("segment", ids)
+
+    def _upscale_stub(run_dir: Path, **kwargs: Any) -> Any:
+        scope = ("up", _scope(kwargs))
+        calls.append(("up", scope[1][0]))
+        if scope in seen:
+            return UpscalePollResult(
+                segments_seen=1,
+                segments_skipped=0,
+                chunks_done=0,
+                chunks_skipped=1,
+                partials_pruned=0,
+                frames_done=0,
+                frames_skipped=4,
+            )
+        seen.add(scope)
+        unit_id = scope[1][1][0] if scope[1][1] else "unknown"
+        kwargs["on_chunk"](unit_id, 0, 1)
+        kwargs["on_chunk_frames"](unit_id, 4)
+        return UpscalePollResult(
+            segments_seen=1,
+            segments_skipped=0,
+            chunks_done=1,
+            chunks_skipped=0,
+            partials_pruned=0,
+            frames_done=4,
+            frames_skipped=0,
+        )
+
+    def _interp_stub(run_dir: Path, **kwargs: Any) -> Any:
+        scope = ("ip", _scope(kwargs))
+        calls.append(("ip", scope[1][0]))
+        if scope in seen:
+            return InterpPollResult(
+                segments_seen=1,
+                segments_skipped=0,
+                chunks_done=0,
+                chunks_skipped=1,
+                chunks_waiting=0,
+                partials_pruned=0,
+                frames_done=0,
+                frames_skipped=4,
+            )
+        seen.add(scope)
+        unit_id = scope[1][1][0] if scope[1][1] else "unknown"
+        kwargs["on_chunk"](unit_id, 0, 1)
+        kwargs["on_pair_frames"](unit_id, 4.0)
+        return InterpPollResult(
+            segments_seen=1,
+            segments_skipped=0,
+            chunks_done=1,
+            chunks_skipped=0,
+            chunks_waiting=0,
+            partials_pruned=0,
+            frames_done=4,
+            frames_skipped=0,
+        )
+
+    return _upscale_stub, _interp_stub, calls
+
+
+def test_poll_joint_bar_combined_with_live_status(tmp_path: Path) -> None:
+    """The finalize joint sweep shows one bar with leg status, ending full."""
+    from voyage.augment_finalize import _poll_to_completion
+
+    run_dir = tmp_path / "run"
+    _make_segment(run_dir, "000000", frames=12, checksum="aa", real_clip=True)
+    _make_segment(run_dir, "000001", frames=12, checksum="bb", real_clip=True)
+    weights = SimpleNamespace(
+        realesrgan=tmp_path / "esrgan.pth",
+        film=tmp_path / "film.safetensors",
+        rife=tmp_path / "rife.safetensors",
+    )
+    (tmp_path / "esrgan.pth").write_bytes(b"e" * 32)
+    (tmp_path / "film.safetensors").write_bytes(b"f" * 32)
+    (tmp_path / "rife.safetensors").write_bytes(b"i" * 32)
+    upscale_stub, interp_stub, calls = _settling_joint_stubs()
+    progress = _FakeJointProgress()
+    _poll_to_completion(
+        run_dir,
+        weights=weights,
+        weights_key="weights-abc",
+        out_width=64,
+        out_height=64,
+        source_fps=24.0,
+        upscale_factor=1,
+        multiplier=1,
+        chunk_frames=8,
+        device="cpu",
+        crf=18,
+        preset="veryfast",
+        upscale_poll_fn=upscale_stub,
+        interp_poll_fn=interp_stub,
+        timings={},
+        progress=progress,  # type: ignore[arg-type]
+        joint_interp_fn=_stub_interp,
+    )
+    joint_bars = [bar for bar in progress.bars if bar[0] == "joint frames"]
+    # One bar per poll pass (the settle pass re-opens instant-full, same
+    # shape as the per-segment bars); the rendering pass carries the work.
+    assert len(joint_bars) == 2
+    _label, total, tracker = joint_bars[0]
+    assert total == 8
+    assert sum(tracker.updates) == 8
+    assert any(extra.startswith("upscaling joint_") for extra in tracker.extras)
+    assert any(extra.startswith("interpolating joint_") for extra in tracker.extras)
+    assert any(extra.endswith("(1/1)") for extra in tracker.extras)
+    _settle_label, _settle_total, settle_tracker = joint_bars[1]
+    # Settle pass: everything ledger-hit, so the remainder bump fills the
+    # bar with no live status (mirrors skipped segments).
+    assert sum(settle_tracker.updates) == 8
+    assert settle_tracker.extras == []
+    assert ("up", "joint") in calls
+    assert ("ip", "joint") in calls
