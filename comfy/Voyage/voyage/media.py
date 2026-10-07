@@ -864,6 +864,24 @@ def prune_stale_finalize_tmpdirs(run_dir: Path) -> int:
     return removed
 
 
+def _append_take_rendered_events(metrics_path: Path, facts: list[dict[str, Any]]) -> None:
+    """Flush per-take render facts as `ace_take_rendered` metric events (jango analysis).
+
+    Facts are collected on the music-takes thread via the
+    `ensure_deferred_for_finalize` observer and flushed here, next to the
+    `finalize_completed` write, so every metrics.jsonl write in finalize
+    stays single-threaded. One event per rendered take — the gaps between
+    consecutive `ts` values expose worker stalls (jango: a 62-minute ACE
+    death gap inside the 1.75h batch).
+    """
+    from voyage.logrotate import append_line
+
+    for fact in facts:
+        event = {"event": "ace_take_rendered", **fact}
+        event.setdefault("ts", time.time())
+        append_line(metrics_path, json.dumps(event))
+
+
 def finalize_run(
     run_dir: Path,
     output_path: Path,
@@ -1246,6 +1264,11 @@ def finalize_run(
         branch_progress: VoyageConsole | None = progress
         music_branch_progress: VoyageConsole | None = progress
         thread_music_digest: str | None = None
+        # Per-take render facts, collected on the music thread via the
+        # deferred-takes observer and flushed as `ace_take_rendered`
+        # events next to `finalize_completed` below (`list.append` is
+        # GIL-atomic; the flush runs after the fork-join).
+        take_render_facts: list[dict[str, Any]] = []
 
         # DESIGN §140 A/V stream: both legs provisioned runs two
         # parallel streams — Thread-A one interleaved upscale→interp
@@ -1454,6 +1477,7 @@ def finalize_run(
                 sample_rate=music_sample_rate,
                 channels=music_channels,
                 progress=music_branch_progress,
+                take_observer=take_render_facts.append,
             )
             from voyage.final_mix_cache import music_fingerprint
 
@@ -2211,8 +2235,20 @@ def finalize_run(
                         for key, value in model_pass_timings.items()
                         if not key.endswith("_s")
                     },
+                    # Console-only until now (jango analysis): the
+                    # per-stage finalize timings (`timing_table` shows
+                    # triage / music takes / sfx bed / mix audio /
+                    # publish video plus the model-pass legs) never
+                    # reached metrics.jsonl, so the 1.75h ACE-take batch
+                    # and the 20min SFX bed were mtime-reconstruction
+                    # only. Rounded seconds, same keys as the console
+                    # table — stage shares for future finalize analyses.
+                    "final_stages_s": {key: round(value, 3) for key, value in final_stages.items()},
                 }
             ),
+        )
+        _append_take_rendered_events(
+            run_dir / paths.LOGS_DIRNAME / "metrics.jsonl", take_render_facts
         )
         if progress is not None:
             progress.timing_table("finalize", final_stages)

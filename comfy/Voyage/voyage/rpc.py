@@ -208,6 +208,11 @@ class SubprocessWorker:
         # so stop() can close it instead of leaking one fd per restart.
         self._log_file: TextIO | None = None
         self._counter = 0
+        # Last init handshake result (None until the first successful
+        # start): workers report e.g. `load_seconds` in their init reply,
+        # and the supervisor reads it for `worker_started` metrics. Kept
+        # as data only — rpc never interprets worker payloads.
+        self.last_init_result: RpcResult | None = None
         # Serializes concurrent callers (the supervisor's parallel director
         # prefetch shares the director worker with the commit path — the
         # JSONL stream cannot interleave two requests). Single-threaded
@@ -240,7 +245,9 @@ class SubprocessWorker:
                 env=_spawn_env(self._alternate_executable),
             )
             if self._init_op is not None:
-                self.call(self._init_op, dict(self._init_payload))
+                self.last_init_result = self.call(self._init_op, dict(self._init_payload))
+            else:
+                self.last_init_result = None
         except (VoyageError, OSError):
             # Narrow on purpose: `call()` only raises the worker taxonomy
             # and `Popen` only raises `OSError` — anything else is a bug

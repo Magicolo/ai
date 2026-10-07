@@ -624,13 +624,37 @@ class Supervisor:
         started: list[SubprocessWorker] = []
         try:
             with self._stage("start workers", "video/audio/director"):
-                for worker in (self._video, self._audio, self._director):
+                for name, worker in (
+                    ("video", self._video),
+                    ("audio", self._audio),
+                    ("director", self._director),
+                ):
                     if worker is self._director:
                         # Sidecar readiness gates the director init: the worker
                         # must never initialize against a dead server.
                         self._start_llama_sidecar()
+                    boot_started = time.monotonic()
                     worker.start()
                     started.append(worker)
+                    # Worker-reported model-load time lives in the init
+                    # handshake reply (`SubprocessWorker.last_init_result`);
+                    # `boot_seconds` is the supervisor-side spawn+init wall.
+                    # Together they split the jango seg0 startup gap
+                    # (process spawn vs model weights) for future analyses.
+                    load_seconds: float | None = None
+                    init_result = worker.last_init_result
+                    if isinstance(init_result, dict):
+                        raw_load = init_result.get("load_seconds")
+                        if isinstance(raw_load, (int, float)):
+                            load_seconds = float(raw_load)
+                    self._log_metric(
+                        {
+                            "event": "worker_started",
+                            "worker": name,
+                            "boot_seconds": round(time.monotonic() - boot_started, 3),
+                            "load_seconds": load_seconds,
+                        }
+                    )
         except Exception:
             self._stop_llama_sidecar()
             for worker in reversed(started):
@@ -739,7 +763,7 @@ class Supervisor:
         except Exception:  # noqa: BLE001 - config shape is adopt-path tolerant
             return False
 
-    def _report_background_prewarm(self) -> None:
+    def _report_background_prewarm(self, segment_id: str | None = None) -> None:
         """One console line for newly pre-warm-ledgered frames (best-effort).
 
         The background thread never touches display code — it only
@@ -826,6 +850,22 @@ class Supervisor:
             if new_ipf > 0:
                 parts.append(f"+{new_ipf}f interp in {new_ips:.1f}s")
             progress.note(f"pre-warm ledgered {', '.join(parts)}{scope}")
+            # Metric twin of the console note (jango analysis): the note
+            # is the only record of background model-pass work done during
+            # this segment's render — metrics.jsonl had zero pre-warm
+            # presence, so generation-time upscale/interp was invisible.
+            # Fires only on new ledgered frames (same condition as the
+            # note), keeping the log clean on idle passes.
+            self._log_metric(
+                {
+                    "event": "prewarm_progress",
+                    "segment_id": segment_id,
+                    "upscale_frames": new_upf,
+                    "interp_frames": new_ipf,
+                    "upscale_seconds": round(new_ups, 3),
+                    "interp_seconds": round(new_ips, 3),
+                }
+            )
             last = getattr(driver, "last_result", None)
             if (
                 last is not None
@@ -1382,6 +1422,20 @@ class Supervisor:
         another process — or SIGINT via `request_stop()` — takes effect at
         the next segment boundary. Returns committed segment ids.
         """
+        # Run-level wall open (issue: jango analysis): `segment_committed`
+        # carries per-segment elapsed, but nothing brackets the whole run —
+        # worker boot, startup resume, and inter-commit gaps were invisible.
+        # `run_finished` closes the bracket in `finally` so it fires on
+        # every exit path (finite batch, pause/stop, failure).
+        run_wall_started = time.monotonic()
+        committed: list[str] = []
+        self._log_metric(
+            {
+                "event": "run_started",
+                "backend": self._config.video.backend,
+                "segments_planned": count,
+            }
+        )
         try:
             self.start_workers()
             self._restarts = {}
@@ -1406,8 +1460,15 @@ class Supervisor:
                 # segment) is a no-op inside `_resume_video_worker`.
                 try:
                     pending_start = read_state(self._run_dir)
+                    resume_started = time.monotonic()
                     self._resume_video_worker(
                         paths.format_segment_id(pending_start.next_segment_number)
+                    )
+                    self._log_metric(
+                        {
+                            "event": "video_startup_resumed",
+                            "resume_seconds": round(time.monotonic() - resume_started, 3),
+                        }
                     )
                 except VoyageError as exc:
                     failed = read_state(self._run_dir)
@@ -1428,7 +1489,6 @@ class Supervisor:
                     raise FatalWorkerError(
                         f"video startup resume failed with {type(exc).__name__}: {exc}"
                     ) from exc
-            committed: list[str] = []
             stopped = False
             while count is None or len(committed) < count:
                 control_started = time.monotonic()
@@ -1510,6 +1570,13 @@ class Supervisor:
         finally:
             self._close_model_pass_bar()
             self.stop_workers()
+            self._log_metric(
+                {
+                    "event": "run_finished",
+                    "wall_seconds": round(time.monotonic() - run_wall_started, 3),
+                    "segments_committed": len(committed),
+                }
+            )
 
     def _stop_requested_via_file(self) -> bool:
         return read_state(self._run_dir).status == "STOP_REQUESTED"
@@ -2668,6 +2735,23 @@ class Supervisor:
                 "stages": stage_seconds,
                 "director_tokens": dict(proposed.director_tokens),
                 "video_stage_ms": dict(rendered.video_stage_ms),
+                # Unaccounted video time (jango analysis): `stages.video`
+                # is the supervisor-side wall from render start to return,
+                # while `video_stage_ms` is what the worker measured inside
+                # its own pipeline. The difference is worker-side
+                # session/VAE-decode/tail overhead plus supervisor-side
+                # adapter/payload work — the ~13s/seg jango residual that
+                # no event previously explained. Clamped at zero: a worker
+                # clock running ahead of the supervisor's must not emit a
+                # negative gap.
+                "video_unaccounted_seconds": round(
+                    max(
+                        0.0,
+                        float(stage_seconds.get("video", 0.0))
+                        - sum(rendered.video_stage_ms.values()) / 1000.0,
+                    ),
+                    3,
+                ),
             }
         )
         gauges_started = time.monotonic()
@@ -2802,5 +2886,5 @@ class Supervisor:
         # report describes the previous pass (work done during this
         # segment's render) — the newly woken pass reports next commit.
         self._notify_background_committed()
-        self._report_background_prewarm()
+        self._report_background_prewarm(segment_id)
         return committed_id

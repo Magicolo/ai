@@ -28,6 +28,7 @@ import contextlib
 import math
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -529,6 +530,38 @@ def deferred_render_take_count(
     return count
 
 
+def _notify_take_rendered(
+    observer: Callable[[dict[str, Any]], None] | None,
+    *,
+    take_id: str,
+    action: str,
+    covers_from: float,
+    duration_seconds: float,
+    render_seconds: float,
+) -> None:
+    """Report one completed take render to the finalize observer (jango analysis).
+
+    Takes render inside a worker subprocess; without a per-take record the
+    1.75h ACE batch — including its 62-minute worker-death gap — collapses
+    to a single `final_stages` total. The observer gets action, coverage,
+    planned duration, and supervisor-side render wall per take, so gaps and
+    slow takes stay visible. `None` disables reporting; adopt/keep-hit paths
+    never render and never report.
+    """
+    if observer is None:
+        return
+    observer(
+        {
+            "take_id": take_id,
+            "action": action,
+            "covers_from": round(covers_from, 3),
+            "duration_seconds": round(duration_seconds, 3),
+            "render_seconds": round(render_seconds, 3),
+            "ts": time.time(),
+        }
+    )
+
+
 def ensure_deferred_takes(
     *,
     run_dir: Path,
@@ -546,6 +579,7 @@ def ensure_deferred_takes(
     channels: int = 2,
     progress: VoyageConsole | None = None,
     chain_overlap_seconds: float = _CHAIN_OVERLAP_SECONDS,
+    take_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Replay director decisions and render ACE takes at finalize.
 
@@ -558,6 +592,10 @@ def ensure_deferred_takes(
     slow-mo mix. Appends each rendered take to `audio/takes.jsonl`
     before rendering the next; any render failure raises `MediaError`
     with nothing appended for that take.
+    `take_observer`, when given,
+    receives one fact dict per completed render (take id, planner action,
+    coverage, planned duration, render wall) — adopt/keep-hit paths never
+    render and never report.
 
     Two fail-loud guards bound the per-segment render loop: a take that
     comes back more than max(1.0s, 5% of requested) short raises MediaError
@@ -644,11 +682,20 @@ def ensure_deferred_takes(
                             else float(take_bpm),
                         }
                         try:
+                            render_started = time.monotonic()
                             render_take_fn(rerender_payload, missing_file)
                         except Exception as exc:
                             raise MediaError(
                                 f"deferred take {keeping_take.take_id} re-render failed: {exc}"
                             ) from exc
+                        _notify_take_rendered(
+                            take_observer,
+                            take_id=keeping_take.take_id,
+                            action=plan.action,
+                            covers_from=keeping_take.covers_from,
+                            duration_seconds=keeping_take.duration,
+                            render_seconds=time.monotonic() - render_started,
+                        )
                         if not _take_output_complete(run_dir, keeping_take):
                             raise MediaError(
                                 f"deferred take {keeping_take.take_id} re-render "
@@ -733,10 +780,19 @@ def ensure_deferred_takes(
                     payload["reference_audio"] = str(continuation_src)
                     payload["repaint_start"] = chain_overlap_seconds
                     payload["repaint_end"] = take.duration
+                render_started = time.monotonic()
                 try:
                     render_take_fn(payload, take_file)
                 except Exception as exc:
                     raise MediaError(f"deferred take {take.take_id} render failed: {exc}") from exc
+                _notify_take_rendered(
+                    take_observer,
+                    take_id=take.take_id,
+                    action=plan.action,
+                    covers_from=take.covers_from,
+                    duration_seconds=take.duration,
+                    render_seconds=time.monotonic() - render_started,
+                )
                 if continuation_src is not None:
                     with contextlib.suppress(OSError):
                         continuation_src.unlink()
@@ -785,6 +841,7 @@ def ensure_deferred_for_finalize(
     channels: int = 2,
     progress: VoyageConsole | None = None,
     chain_overlap_seconds: float = _CHAIN_OVERLAP_SECONDS,
+    take_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> bool:
     """Render pending takes, spawning the audio worker only when needed.
 
@@ -834,6 +891,7 @@ def ensure_deferred_for_finalize(
                 run_seed=run_seed,
                 render_take_fn=render_fn,
                 progress=progress,
+                take_observer=take_observer,
                 **sizing,
             )
     finally:
