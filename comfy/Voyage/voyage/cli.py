@@ -180,6 +180,20 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
         help="1 = one worker (default); 2 = shard small_44k across cuda:0+cuda:1 "
         "(needs 2 visible GPUs, fails fast otherwise)",
     )
+    parser.add_argument(
+        "--sfx-dual-pan",
+        action="store_true",
+        default=None,
+        help="render the spatialized SFX pair: two same-caption seeds panned "
+        "75%% left/right, mixed with music to stereo (default on; "
+        "stored in the manifest, so generate honors it)",
+    )
+    parser.add_argument(
+        "--no-sfx-dual-pan",
+        action="store_true",
+        default=None,
+        help="single SFX bed (legacy; mutually exclusive with --sfx-dual-pan)",
+    )
 
 
 def _add_augment_args(parser: argparse.ArgumentParser) -> None:

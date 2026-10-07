@@ -44,6 +44,8 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     warn_if_outside_output_dir(output, flag="--output")
     sfx_backend = getattr(args, "sfx_backend", None) or config.sfx.backend
     sfx_will_run = not getattr(args, "no_sfx", False) and sfx_backend != "fake"
+    dual_raw = getattr(args, "sfx_dual_pan", None)
+    dual_pan = bool(dual_raw) if dual_raw is not None else bool(config.sfx.dual_pan)
     console = get_console(args)
     # Shared video-stage kwargs (both finalize paths take the same box):
     # finalize keeps the generation resolution (no downscale) — the run
@@ -85,6 +87,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             num_workers=getattr(args, "sfx_workers", 1),
             fps=config.video.fps,
             caption_override=getattr(args, "sfx_caption", None),
+            dual_pan=dual_pan,
         )
         if sfx_will_run
         else None
@@ -121,6 +124,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 fps=config.video.fps,
                 caption_override=getattr(args, "sfx_caption", None),
                 progress=console,
+                dual_pan=dual_pan,
             )
         except (MediaError, StateError) as exc:
             print(f"sfx pass failed (music-only kept at {output}): {exc}", file=sys.stderr)
@@ -153,6 +157,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             stored_upscale=config.augment.upscale,
             stored_interpolate=config.augment.interpolate,
             stored_interp_backend=config.augment.interp_backend,
+            stored_sfx_dual_pan=dual_pan,
         )
         record_final_coverage(
             run_dir,

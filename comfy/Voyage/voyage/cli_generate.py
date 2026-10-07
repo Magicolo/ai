@@ -114,12 +114,14 @@ def _expected_skip_key(
     """Canonical behavior key for this generate's finalize (freshness gate)."""
     skips = resolve_generate_skips(args)
     augment = getattr(effective, "augment", None)
+    sfx_section = getattr(effective, "sfx", None)
     return generate_skip_key(
         skips,
         manifest_no_sfx=bool(manifest.get("no_sfx", False)),
         stored_upscale=int(getattr(augment, "upscale", 1)),
         stored_interpolate=int(getattr(augment, "interpolate", 1)),
         stored_interp_backend=str(getattr(augment, "interp_backend", "rife")),
+        stored_sfx_dual_pan=bool(getattr(sfx_section, "dual_pan", True)),
     )
 
 
@@ -154,6 +156,7 @@ def _finalize_run_dir(
             sfx_device=None,
             sfx_model_size=None,
             sfx_workers=1,
+            sfx_dual_pan=None,
             upscale=1 if skips["force_upscale_1"] else None,
             interpolate=1 if skips["force_interpolate_1"] else None,
             interp_backend=None,
@@ -250,6 +253,9 @@ def _finalize_feature_text(
         or getattr(getattr(effective, "sfx", None), "backend", "fake") == "fake"
     )
     parts.append("no sfx" if sfx_off else "sfx")
+    dual_off = not bool(getattr(getattr(effective, "sfx", None), "dual_pan", True))
+    if not sfx_off and dual_off:
+        parts.append("single bed")
     upscale = 1 if skips["force_upscale_1"] else effective.augment.upscale
     interpolate = 1 if skips["force_interpolate_1"] else effective.augment.interpolate
     parts.append(f"upscale x{upscale}" if upscale > 1 else "native size")

@@ -53,6 +53,28 @@ def _prompt_enhance_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return {}
 
 
+def _sfx_dual_pan_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """CLI dual-pan flags → resolve_config kwargs (dual SFX pair).
+
+    Tri-state like the prompt-enhance pair: absent (None) means inherit
+    the stored manifest value (fresh creates default to True via
+    `SfxConfig`); exactly one of --sfx-dual-pan / --no-sfx-dual-pan
+    wins. Both set raises ValueError — `cmd_configure` pre-checks the
+    same conflict with a dedicated message, so this is belt-and-braces
+    for direct callers. Every read goes through getattr + `is_provided`
+    so hand-built namespaces resolve to absent, never to a value.
+    """
+    enabled = getattr(args, "sfx_dual_pan", None)
+    disabled = getattr(args, "no_sfx_dual_pan", None)
+    if is_provided(enabled) and is_provided(disabled):
+        raise ValueError("pass only one of --sfx-dual-pan or --no-sfx-dual-pan")
+    if is_provided(enabled):
+        return {"sfx_dual_pan": True}
+    if is_provided(disabled):
+        return {"sfx_dual_pan": False}
+    return {}
+
+
 def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
     """Generate-only skip flags → canonical skip tuple (non-persistent).
 
@@ -85,6 +107,7 @@ def generate_skip_key(
     stored_upscale: int,
     stored_interpolate: int,
     stored_interp_backend: str = "rife",
+    stored_sfx_dual_pan: bool = True,
 ) -> str:
     """Canonical freshness key for the current generate finalize behavior.
 
@@ -93,6 +116,10 @@ def generate_skip_key(
     stamped coverage (e.g. same segments but music-only diff). The interp
     backend rides the key because it changes interp pixels: switching
     backends re-finalizes by design (the sidecar weights key misses too).
+    The dual-pan flag rides the key because a single-bed final is not
+    the spatialized pair: toggling it re-finalizes by design (legacy
+    single-bed coverages predate the key segment and miss once, which
+    heals them into the pair).
     """
     effective_sfx_off = bool(manifest_no_sfx or skips.get("skip_sfx", False))
     effective_up = 1 if skips.get("force_upscale_1", False) else stored_upscale
@@ -100,7 +127,11 @@ def generate_skip_key(
     music = int(bool(skips.get("skip_music", False)))
     sfx = int(effective_sfx_off)
     backend = stored_interp_backend if effective_interp > 1 else "-"
-    return f"music={music},sfx={sfx},up={effective_up},interp={effective_interp},backend={backend}"
+    dual = int(bool(stored_sfx_dual_pan) and not effective_sfx_off)
+    return (
+        f"music={music},sfx={sfx},up={effective_up},"
+        f"interp={effective_interp},backend={backend},dual={dual}"
+    )
 
 
 def _augment_overrides(args: argparse.Namespace) -> dict[str, Any]:

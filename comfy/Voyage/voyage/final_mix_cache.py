@@ -195,20 +195,27 @@ def bed_fingerprint(
     seed: int,
     caption_override: str | None,
     music_digest: str,
+    dual_pan: bool,
 ) -> str:
     """Fingerprint everything the SFX bed (`render_sfx_bed`) reads.
 
     `music_digest` is included because the bed is dubbed against the music
     timeline — a different music mix means the bed alignment must rebuild
-    even when the stems match.
+    even when the stems match. `dual_pan` is included because the
+    single bed is not the spatialized pair: toggling it misses by design.
+    Both track ledgers hash (order-normalized like the single ledger
+    before them); a missing right ledger hashes as "missing", which only
+    matches another missing one.
     """
-    ledger_path = run_dir / "audio" / "sfx" / "sfx.jsonl"
-    ledger_digest = _sha256_ledger_normalized(ledger_path, "window_id")
+    sfx_dir = run_dir / "audio" / "sfx"
+    ledger_digest = _sha256_ledger_normalized(sfx_dir / "sfx.jsonl", "window_id")
+    right_digest = _sha256_ledger_normalized(sfx_dir / "sfx_right.jsonl", "window_id")
     return _fingerprint(
         {
             "version": CACHE_VERSION,
             "segments": _segment_identities(run_dir, usable),
             "sfx_ledger": ledger_digest,
+            "sfx_right_ledger": right_digest,
             "stem_files": _stem_file_identities(run_dir),
             "sample_rate": sample_rate,
             "channels": channels,
@@ -217,6 +224,7 @@ def bed_fingerprint(
             "seed": seed,
             "caption_override": caption_override,
             "music_digest": music_digest,
+            "dual_pan": dual_pan,
         }
     )
 

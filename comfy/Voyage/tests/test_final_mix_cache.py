@@ -171,6 +171,7 @@ def _bed_digest(run_dir: Path, usable: list[Path], music_digest: str) -> str:
         seed=11,
         caption_override=None,
         music_digest=music_digest,
+        dual_pan=False,
     )
 
 

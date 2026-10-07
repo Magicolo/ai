@@ -336,6 +336,8 @@ class SfxParallelRequest:
     the committed segments (same source timeline, no upscale/interp/morph)
     and dubs onto the staged publish on the main thread. `fps` is the
     source fps the SFX bounds walk (mirrors the legacy pass's `fps`).
+    `dual_pan` renders the spatialized pair (the product default); false
+    keeps the legacy single bed.
     """
 
     backend: str
@@ -345,6 +347,7 @@ class SfxParallelRequest:
     num_workers: int
     fps: int
     caption_override: str | None = None
+    dual_pan: bool = True
 
 
 def sfx_parallel_armed(sfx_request: SfxParallelRequest | None) -> bool:
@@ -1498,6 +1501,7 @@ def finalize_run(
                     seed=seed,
                     caption_override=armed_request.caption_override,
                     music_digest=_bed_music_digest,
+                    dual_pan=armed_request.dual_pan,
                 )
                 cached_bed = load_bed_cache(run_dir, bed_digest)
                 if cached_bed is not None:
@@ -1554,6 +1558,7 @@ def finalize_run(
                     progress=bed_view,
                     conditioning_source=SFX_CONDITIONING_PROXY,
                     conditioning_timeline=source_seconds,
+                    dual_pan=armed_request.dual_pan,
                 )
                 bed_outcome["bed"] = bed
                 bed_outcome["source_seconds"] = source_seconds

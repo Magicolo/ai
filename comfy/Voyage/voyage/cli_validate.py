@@ -343,10 +343,24 @@ def validate_run(run_dir: Path) -> list[str]:
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))
     try:
-        fps = read_effective_config(run_dir).video.fps
+        effective = read_effective_config(run_dir)
+        fps = effective.video.fps
+        # The right track only exists when the SFX pass runs: dual-pan on,
+        # a real effects backend, and no manifest opt-out. Fake-backend
+        # (CPU-only test) runs never render SFX, so expecting the second
+        # channel there would INVALIDate every one of them; same for the
+        # manifest no-sfx policy (the pass is skipped entirely).
+        try:
+            manifest_no_sfx = bool(read_manifest(run_dir).get("no_sfx", False))
+        except StateError:
+            manifest_no_sfx = False
+        expect_right = (
+            bool(effective.sfx.dual_pan) and effective.sfx.backend != "fake" and not manifest_no_sfx
+        )
     except StateError as exc:
         errors.append(str(exc))
         fps = 0
+        expect_right = False
     if not isinstance(fps, int) or fps <= 0:
         errors.append(f"config video fps is corrupt: {fps!r} (expected a positive integer)")
         fps = 0
@@ -354,7 +368,7 @@ def validate_run(run_dir: Path) -> list[str]:
     if timeline > 0.0:
         from voyage.sfx_finalize import validate_sfx_ledger
 
-        errors.extend(validate_sfx_ledger(run_dir, timeline))
+        errors.extend(validate_sfx_ledger(run_dir, timeline, expect_right=expect_right))
     return errors
 
 

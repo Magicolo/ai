@@ -104,12 +104,12 @@ def test_generate_skip_key_combines_manifest_and_flags(tmp_path: Path) -> None:
     # lifted stored config for the multiplier assertions.
     effective = resolve_config(read_effective_config(run_dir), upscale=2, interpolate=4)
     base = gen_ops._expected_skip_key(argparse.Namespace(), manifest, effective)
-    assert base == "music=0,sfx=0,up=2,interp=4,backend=rife"
+    assert base == "music=0,sfx=0,up=2,interp=4,backend=rife,dual=1"
     music = gen_ops._expected_skip_key(argparse.Namespace(no_music=True), manifest, effective)
     assert music.startswith("music=1,")
     assert music != base
     augment = gen_ops._expected_skip_key(argparse.Namespace(no_augment=True), manifest, effective)
-    assert augment.endswith(",up=1,interp=1,backend=-")
+    assert augment.endswith(",up=1,interp=1,backend=-,dual=1")
     assert augment != base
 
 

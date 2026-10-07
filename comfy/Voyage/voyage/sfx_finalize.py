@@ -10,6 +10,12 @@ at -6 dB (Zoomy parity). Stems persist under `audio/sfx/` with an
 `sfx.jsonl` ledger (immutable, versioned, fsynced — takes-philosophy);
 `validate_run` extends read-only.
 
+Dual-pan (default on, DESIGN §140): two same-caption tracks render
+with different seeds (track R offset by `SFX_DUAL_SEED_OFFSET`),
+each panned 75% out with a constant-power law, and pair-mixed into
+one stereo bed before the music dub — so a run finalized before
+dual-pan resumes by rendering only the missing right track.
+
 No torch/GPU imports here: workers are subprocesses behind the JSONL
 loop; this module only plans, spawns, blends, and mixes.
 """
@@ -68,6 +74,40 @@ stub tail into its predecessor instead, since counts must stay exact)."""
 
 SFX_VOLUME = 0.5
 """Bed level under the music (-6 dB, Zoomy parity)."""
+
+SFX_PAN_POSITION = 0.75
+"""Stereo pan position of each dual-pan SFX track (constant-power law).
+
+Track L sits 75% toward full-left, track R mirrored (±1 is a hard
+channel, 0 is center). Gains derive via `dual_pan_gains` — equal-power
+(cos/sin) so a centered source keeps its loudness through the
+downmix-then-pan chain instead of dipping like a linear balance would.
+"""
+
+SFX_DUAL_SEED_OFFSET = 100_000
+"""Seed separation between the two dual-pan SFX tracks (DESIGN §140).
+
+Track R plans the same windows and captions as track L with
+`seed_base + SFX_DUAL_SEED_OFFSET`: deterministic (a re-finalize
+renders identical bytes), and far beyond any plausible window count,
+so the two streams can never share a seed.
+"""
+
+SFX_RIGHT_STEM_SUFFIX = "_right"
+"""Stem filename suffix for the right dual-pan track (`w0003_right.wav`).
+
+Track L keeps the legacy `wNNNN.wav` names, so a run finalized before
+dual-pan resumes by rendering only the right track — the second
+channel completes the pair instead of rebuilding it.
+"""
+
+SFX_RIGHT_LEDGER_NAME = "sfx_right.jsonl"
+"""Right-track ledger (same record shape as `sfx.jsonl`, offset seeds).
+
+The legacy `sfx.jsonl` stays the left track; each ledger cache-hits
+independently, so a legacy single-bed run resumes with zero left-track
+re-renders. Stale right artifacts are inert when dual-pan is off.
+"""
 
 BOUNDS_RESCALE_IDENTITY_TOLERANCE = 1e-6
 """Timelines within this (seconds) count as identical — float noise from
@@ -387,33 +427,32 @@ def _record_covered_duration(record: dict[str, Any]) -> float:
     return float(record.get("duration", 0.0))
 
 
-def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
-    """Read-only SFX checks: files exist, windows tile the timeline.
+def _validate_one_ledger(
+    run_dir: Path,
+    ledger_name: str,
+    label: str,
+    timeline_seconds: float,
+    *,
+    required: bool,
+) -> list[str]:
+    """Read-only SFX checks for one track ledger: files exist, windows tile.
 
-    No ledger (SFX never ran / old run) is clean — the pass is optional.
-    Duplicate `window_id` lines (re-render appends) dedupe last-wins and
-    the walk sorts by start, so ledger order can never false-positive
-    coverage (153, mirroring the `existing` dict in `render_sfx_bed`).
-    Records group by conditioning source only (proxy vs shipped; legacy
-    lines read as shipped): `conditioning_timeline` is provenance, not
-    identity — `_stem_cache_hit` deliberately ignores it, so a timeline
-    extension reuses head stems (append-only proxy: head pixels unchanged)
-    and appends only the new tail. Splitting the walk per timeline would
-    then demand the tail group tile from zero, which it never can (kaolin:
-    fatal `w0117 starts at 819.00s, expected ~0.00s` on a complete bed).
-    The union per source must tile from zero (gaps stay fatal) and reach
-    the passed source timeline (shortfall stays healable via
-    `is_healable_sfx_shortfall`). Production always passes the source
-    timeline, which every conditioning timeline meets or precedes.
+    `label` prefixes every line (`sfx` for the left track — byte-identical
+    to the historical messages — `sfx-right` for the right track). A
+    missing ledger is clean unless `required` (the dual-pan run with no
+    right track yet), which reports the pure tail shortfall so finalize
+    heals it like any other short timeline.
     """
-    ledger = run_dir / "audio" / SFX_STEMS_DIRNAME / SFX_LEDGER_NAME
+    ledger = run_dir / "audio" / SFX_STEMS_DIRNAME / ledger_name
     if not ledger.exists():
-        return []
+        if not required:
+            return []
+        return [f"{label} coverage 0.00s short of timeline {timeline_seconds:.2f}s"]
     errors: list[str] = []
     try:
         records = load_sfx_ledger(ledger)
     except (OSError, ValueError) as exc:
-        return [f"sfx ledger unreadable: {exc}"]
+        return [f"{label} ledger unreadable: {exc}"]
     deduped = {}
     for record in records:
         key = (
@@ -432,31 +471,75 @@ def validate_sfx_ledger(run_dir: Path, timeline_seconds: float) -> list[str]:
             try:
                 stem = resolve_stored_path(run_dir, str(record.get("path", "")))
             except MediaError as exc:
-                errors.append(f"sfx {record.get('window_id')} escapes the run dir: {exc}")
+                errors.append(f"{label} {record.get('window_id')} escapes the run dir: {exc}")
                 stem = None
             if stem is None or not stem.exists():
-                errors.append(f"sfx {record.get('window_id')} missing {record.get('path')}")
+                errors.append(f"{label} {record.get('window_id')} missing {record.get('path')}")
             start = float(record.get("start", -1.0))
             if abs(start - cursor) > SFX_WINDOW_OVERLAP + 0.01:
                 errors.append(
-                    f"sfx coverage gap: window {record.get('window_id')} starts at "
+                    f"{label} coverage gap: window {record.get('window_id')} starts at "
                     f"{start:.2f}s, expected ~{cursor:.2f}s"
                 )
             covered_until = start + _record_covered_duration(record)
             cursor = covered_until - SFX_WINDOW_OVERLAP
         if covered_until < timeline_seconds - AV_ALIGNMENT_TOLERANCE_SECONDS:
             errors.append(
-                f"sfx coverage {covered_until:.2f}s short of timeline {timeline_seconds:.2f}s"
+                f"{label} coverage {covered_until:.2f}s short of timeline {timeline_seconds:.2f}s"
             )
     return errors
 
 
-#: Matches exactly the pure-shortfall line above (two `%.2f` seconds).
+def validate_sfx_ledger(
+    run_dir: Path, timeline_seconds: float, *, expect_right: bool = False
+) -> list[str]:
+    """Read-only SFX checks: files exist, windows tile the timeline.
+
+    No ledger (SFX never ran / old run) is clean — the pass is optional.
+    Duplicate `window_id` lines (re-render appends) dedupe last-wins and
+    the walk sorts by start, so ledger order can never false-positive
+    coverage (153, mirroring the `existing` dict in `render_sfx_bed`).
+    Records group by conditioning source only (proxy vs shipped; legacy
+    lines read as shipped): `conditioning_timeline` is provenance, not
+    identity — `_stem_cache_hit` deliberately ignores it, so a timeline
+    extension reuses head stems (append-only proxy: head pixels unchanged)
+    and appends only the new tail. Splitting the walk per timeline would
+    then demand the tail group tile from zero, which it never can (kaolin:
+    fatal `w0117 starts at 819.00s, expected ~0.00s` on a complete bed).
+    The union per source must tile from zero (gaps stay fatal) and reach
+    the passed source timeline (shortfall stays healable via
+    `is_healable_sfx_shortfall`). Production always passes the source
+    timeline, which every conditioning timeline meets or precedes.
+
+    Dual-pan (DESIGN §140): the right ledger validates under the same
+    rules with `sfx-right`-prefixed lines when `expect_right` (the run's
+    stored `sfx.dual_pan`) — a legacy single-bed run reports the healable
+    right-track shortfall, which finalize heals by rendering only the
+    second channel. With `expect_right` false the right track is inert
+    and ignored entirely, even when stale artifacts exist.
+    """
+    errors = _validate_one_ledger(run_dir, SFX_LEDGER_NAME, "sfx", timeline_seconds, required=False)
+    if expect_right:
+        errors.extend(
+            _validate_one_ledger(
+                run_dir,
+                SFX_RIGHT_LEDGER_NAME,
+                "sfx-right",
+                timeline_seconds,
+                required=True,
+            )
+        )
+    return errors
+
+
+#: Matches exactly the pure-shortfall line above (two `%.2f` seconds),
+#: for either track (`sfx-right` included — a legacy single-bed run heals
+#: its missing right track through the same finalize path).
 #: Generate's pre-finalize gate filters this line — and only this line —
 #: because the finalize SFX pass heals it (`render_sfx_bed` cache-hits old
 #: windows and renders the new ones; render failures raise). Gaps, missing
 #: stems, unreadable ledgers, and escapes stay fatal: nothing heals those.
-_SFX_SHORTFALL_RE = re.compile(r"^sfx coverage \d+\.\d{2}s short of timeline \d+\.\d{2}s$")
+_SFX_SHORTFALL_RE = re.compile(r"^sfx(-right)? coverage \d+\.\d{2}s short of timeline \d+\.\d{2}s$")
 
 
 def is_healable_sfx_shortfall(error: str) -> bool:
@@ -524,6 +607,93 @@ def _prune_stale_partials(sfx_dir: Path) -> int:
     return pruned
 
 
+def dual_pan_gains(pan: float) -> tuple[float, float]:
+    """Constant-power stereo gains for a mono source at `pan` (pure).
+
+    `pan` spans [-1, 1] (-1 = hard left, 0 = center, +1 = hard right);
+    the angle `(pan + 1) * pi / 4` maps that span onto the [0, pi/2]
+    quadrant, and (cos, sin) keeps total power constant — a centered
+    source renders at (1/sqrt(2), 1/sqrt(2)) instead of dipping like a
+    linear balance would. Non-finite or out-of-range positions fail
+    loud: a bogus pan must never silently ship centered audio.
+    """
+    if not math.isfinite(pan) or not -1.0 <= pan <= 1.0:
+        raise MediaError(f"sfx pan must be within [-1, 1] (got {pan})")
+    angle = (pan + 1.0) * math.pi / 4.0
+    return (math.cos(angle), math.sin(angle))
+
+
+def sfx_pair_filter_graph(left_gains: tuple[float, float], right_gains: tuple[float, float]) -> str:
+    """ffmpeg filter_complex marrying the two dual-pan beds (pure).
+
+    Each stereo bed downmixes to mono first (`0.5 * left + 0.5 * right` —
+    the beds may carry any channel correlation the model emitted), then
+    pans to its constant-power stereo position; amix with normalize=0
+    sums the pair without auto-gain. Unity pair levels are deliberate:
+    the music dub later applies `SFX_VOLUME` once to the pair, and
+    `0.5 * (left + right) == 0.5 * left + 0.5 * right` by linearity —
+    exactly the per-track 0.5 level the mix promises.
+    """
+    (left_left, left_right) = left_gains
+    (right_left, right_right) = right_gains
+    return (
+        "[0:a]pan=mono|c0=0.5*c0+0.5*c1,"
+        f"pan=stereo|c0={left_left:.6f}*c0|c1={left_right:.6f}*c0[panned_left];"
+        "[1:a]pan=mono|c0=0.5*c0+0.5*c1,"
+        f"pan=stereo|c0={right_left:.6f}*c0|c1={right_right:.6f}*c0[panned_right];"
+        "[panned_left][panned_right]"
+        "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[aout]"
+    )
+
+
+def mix_sfx_pair(
+    bed_left: Path, bed_right: Path, dest: Path, sample_rate: int, channels: int
+) -> Path:
+    """Spatialize the two dual-pan beds into one stereo bed (DESIGN §140).
+
+    Track L lands at `-SFX_PAN_POSITION`, track R mirrored; the result
+    is timeline-exact against the longer input (both tracks tile the
+    same windows, so they agree within probe noise). A failed mix
+    raises — a half-written bed must never dub under the music.
+    """
+    left_seconds = _audio_duration_seconds(bed_left)
+    right_seconds = _audio_duration_seconds(bed_right)
+    if abs(left_seconds - right_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(
+            f"sfx pair {left_seconds:.2f}s drifts from {right_seconds:.2f}s — "
+            "tracks tile the same windows, failing loud"
+        )
+    graph = sfx_pair_filter_graph(
+        dual_pan_gains(-SFX_PAN_POSITION), dual_pan_gains(SFX_PAN_POSITION)
+    )
+    proc = run_capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(bed_left),
+            "-i",
+            str(bed_right),
+            "-filter_complex",
+            graph,
+            "-map",
+            "[aout]",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-c:a",
+            "pcm_s16le",
+            str(dest),
+        ]
+    )
+    if proc.returncode != 0:
+        raise MediaError(f"sfx pair mix failed: {proc.stderr[-2000:]}")
+    return dest
+
+
 def render_sfx_bed(
     run_dir: Path,
     final_video: Path,
@@ -543,6 +713,7 @@ def render_sfx_bed(
     progress: VoyageConsole | None = None,
     conditioning_source: str = SFX_CONDITIONING_SHIPPED,
     conditioning_timeline: float | None = None,
+    dual_pan: bool = False,
 ) -> Path:
     """Render every window (reusing ledger-matching stems) and join the bed.
 
@@ -558,9 +729,18 @@ def render_sfx_bed(
     trending. `conditioning_source` pins the pixel identity the stems
     condition on (and ledger under); the timeline the bounds tile rides
     in `conditioning_timeline` (defaults to `timeline_seconds`).
+
+    Dual-pan (DESIGN §140, the product default via `SfxConfig.dual_pan`;
+    this building block stays single-track unless asked): with
+    `dual_pan` true the same windows render a second time with offset
+    seeds (`seed_base + SFX_DUAL_SEED_OFFSET`, same captions) into
+    `*_right.wav` stems under `sfx_right.jsonl`, and the two joined
+    tracks pair-mix (±`SFX_PAN_POSITION`, constant-power) into the one
+    returned stereo bed. Legacy left stems/ledger cache-hit untouched,
+    so an old single-bed run resumes by rendering only the second
+    channel. `dual_pan` false is the legacy single bed, byte-identical.
     """
     from voyage.logrotate import append_line
-    from voyage.rpc import SubprocessWorker
 
     started = time.perf_counter()
 
@@ -580,20 +760,127 @@ def render_sfx_bed(
                 f"--sfx-workers 2 needs 2 visible GPUs, saw {len(visible)} "
                 f"({seen}); use --sfx-workers 1 on a single-GPU box"
             )
+    del module
+    ledger_timeline = (
+        conditioning_timeline if conditioning_timeline is not None else timeline_seconds
+    )
+    windows = plan_sfx_windows(timeline_seconds, bounds, seed_base=seed_base)
+    sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
+    sfx_dir.mkdir(parents=True, exist_ok=True)
+    _prune_stale_partials(sfx_dir)
+    bed_left = _render_single_track(
+        run_dir,
+        final_video,
+        windows,
+        tmpdir,
+        "sfx_bed.wav" if not dual_pan else "sfx_bed_left.wav",
+        backend,
+        models_dir,
+        device,
+        model_size,
+        sample_rate,
+        channels,
+        num_workers,
+        stem_suffix="",
+        ledger_name=SFX_LEDGER_NAME,
+        load_label="load sfx workers",
+        bar_label="sfx windows",
+        blend_timings=blend_timings,
+        progress=progress,
+        conditioning_source=conditioning_source,
+        ledger_timeline=ledger_timeline,
+    )
+    if not dual_pan:
+        bed_seconds = _audio_duration_seconds(bed_left)
+        if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+            raise MediaError(
+                f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s"
+            )
+        _emit_sfx_pass_completed(
+            run_dir, windows, backend, device, model_size, started, append_line
+        )
+        return bed_left
+    right_windows = plan_sfx_windows(
+        timeline_seconds, bounds, seed_base=seed_base + SFX_DUAL_SEED_OFFSET
+    )
+    bed_right = _render_single_track(
+        run_dir,
+        final_video,
+        right_windows,
+        tmpdir,
+        "sfx_bed_right.wav",
+        backend,
+        models_dir,
+        device,
+        model_size,
+        sample_rate,
+        channels,
+        num_workers,
+        stem_suffix=SFX_RIGHT_STEM_SUFFIX,
+        ledger_name=SFX_RIGHT_LEDGER_NAME,
+        load_label="load sfx workers (right)",
+        bar_label="sfx windows (right)",
+        blend_timings=blend_timings,
+        progress=progress,
+        conditioning_source=conditioning_source,
+        ledger_timeline=ledger_timeline,
+    )
+    bed = tmpdir / "sfx_bed.wav"
+    mix_sfx_pair(bed_left, bed_right, bed, sample_rate, channels)
+    bed_seconds = _audio_duration_seconds(bed)
+    if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
+        raise MediaError(f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s")
+    _emit_sfx_pass_completed(
+        run_dir, windows, backend, device, model_size, started, append_line, dual_pan=True
+    )
+    return bed
+
+
+def _render_single_track(
+    run_dir: Path,
+    final_video: Path,
+    windows: list[SfxWindow],
+    tmpdir: Path,
+    out_name: str,
+    backend: str,
+    models_dir: str,
+    device: str,
+    model_size: str,
+    sample_rate: int,
+    channels: int,
+    num_workers: int,
+    *,
+    stem_suffix: str,
+    ledger_name: str,
+    load_label: str,
+    bar_label: str,
+    blend_timings: list[float] | None,
+    progress: VoyageConsole | None,
+    conditioning_source: str,
+    ledger_timeline: float,
+) -> Path:
+    """Render + join one dual-pan track (left or right) and return its bed.
+
+    The shared engine behind `render_sfx_bed`: per-window cache-hit or
+    worker render into `{window_id}{stem_suffix}.wav` stems ledgered
+    under `ledger_name` (left keeps the legacy names, right takes the
+    `_right` suffixed ones), orphan-stem adoption for killed batches,
+    then the single-graph join into `tmpdir / out_name`. Timeline
+    verification and the pass metric stay with the caller — the pair
+    mix verifies the joined pair, not each leg.
+    """
+    from voyage.rpc import SubprocessWorker
+
+    module = _sfx_worker_module(backend)
     sizes = [model_size] * num_workers
     devices = [device] * num_workers
     if num_workers == SFX_MAX_WORKERS:
         sizes = [SFX_DUAL_MODEL_SIZE, SFX_DUAL_MODEL_SIZE]
         devices = ["cuda:0", "cuda:1"]
-    windows = plan_sfx_windows(timeline_seconds, bounds, seed_base=seed_base)
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
-    ledger = sfx_dir / SFX_LEDGER_NAME
+    ledger = sfx_dir / ledger_name
     sfx_dir.mkdir(parents=True, exist_ok=True)
-    _prune_stale_partials(sfx_dir)
     existing = {record["window_id"]: record for record in load_sfx_ledger(ledger)}
-    ledger_timeline = (
-        conditioning_timeline if conditioning_timeline is not None else timeline_seconds
-    )
     ledger_lock = threading.Lock()
     # Orphan-stem adoption (SFX resume): batches killed before the old
     # serial-join append left completed stems with no ledger lines. Adopt
@@ -606,7 +893,7 @@ def render_sfx_bed(
     for adopt_index, adopt_window in enumerate(windows):
         if adopt_window.window_id in existing:
             continue
-        orphan = sfx_dir / f"{adopt_window.window_id}.wav"
+        orphan = sfx_dir / f"{adopt_window.window_id}{stem_suffix}.wav"
         if not orphan.exists():
             continue
         try:
@@ -616,7 +903,7 @@ def render_sfx_bed(
         if abs(probed_duration - adopt_window.duration) > SFX_ORPHAN_ADOPT_TOLERANCE:
             continue
         adopt_size = sizes[adopt_index % num_workers]
-        adopt_stored = f"audio/{SFX_STEMS_DIRNAME}/{adopt_window.window_id}.wav"
+        adopt_stored = f"audio/{SFX_STEMS_DIRNAME}/{adopt_window.window_id}{stem_suffix}.wav"
         append_sfx_window(
             ledger,
             adopt_window,
@@ -627,7 +914,7 @@ def render_sfx_bed(
             conditioning_timeline=ledger_timeline,
         )
         message = (
-            f"sfx orphan adopted: {adopt_window.window_id} "
+            f"sfx orphan adopted: {adopt_window.window_id}{stem_suffix} "
             f"(no ledger line, stem {probed_duration:.3f}s ~= request "
             f"{adopt_window.duration:.3f}s)"
         )
@@ -651,12 +938,12 @@ def render_sfx_bed(
     stems: list[Path] = []
     workers: list[Any] = []
     try:
-        with optional_stage(progress, "load sfx workers", f"{num_workers} worker(s)"):
+        with optional_stage(progress, load_label, f"{num_workers} worker(s)"):
             for slot in range(num_workers):
                 worker = SubprocessWorker(
                     module,
                     run_dir,
-                    run_dir / "logs" / f"sfx-{slot}.log",
+                    run_dir / "logs" / f"sfx{stem_suffix}-{slot}.log",
                     init_op="init",
                     init_payload={
                         "models_dir": models_dir,
@@ -684,8 +971,8 @@ def render_sfx_bed(
             window_id and validate dedupes last-wins. A kill/cancel/failure
             later in the batch can never orphan this window.
             """
-            stem = sfx_dir / f"{window.window_id}.wav"
-            stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}.wav"
+            stem = sfx_dir / f"{window.window_id}{stem_suffix}.wav"
+            stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}{stem_suffix}.wav"
             slot = index % num_workers
             record = existing.get(window.window_id)
             if (
@@ -699,7 +986,7 @@ def render_sfx_bed(
             # the old stem and ledger line intact — validate never sees a
             # half-written window, and the old stem stays the valid fallback.
             # The temp keeps the `.wav` suffix (format inference in workers).
-            tmp_stem = sfx_dir / f"{window.window_id}.partial.wav"
+            tmp_stem = sfx_dir / f"{window.window_id}{stem_suffix}.partial.wav"
             try:
                 result = workers[slot].call(
                     "generate_sfx",
@@ -746,7 +1033,7 @@ def render_sfx_bed(
                 )
             return _RenderedWindow(stem, None, "", "", probed)
 
-        with optional_bar(progress, "sfx windows", total=len(windows)) as tracker:
+        with optional_bar(progress, bar_label, total=len(windows)) as tracker:
             if num_workers == 1:
                 pending = []
                 for index, window in enumerate(windows):
@@ -769,7 +1056,7 @@ def render_sfx_bed(
             # render result (same discipline as the audio GPU swap).
             with contextlib.suppress(Exception):
                 worker.stop()
-    bed = tmpdir / "sfx_bed.wav"
+    bed = tmpdir / out_name
     if len(stems) == 1:
         proc = run_capture(
             [
@@ -786,15 +1073,12 @@ def render_sfx_bed(
         )
         if proc.returncode != 0:
             raise MediaError(f"sfx bed copy failed: {proc.stderr[-2000:]}")
-        _emit_sfx_pass_completed(
-            run_dir, windows, backend, device, model_size, started, append_line
-        )
         return bed
     # Stem durations ride along from `_render_one` (probed on both the
     # render and cache-hit paths) so the join never re-spawns ffprobe
     # per stem (issue 152 probe budget).
     stem_seconds = [row.probed for row in pending]
-    joined = tmpdir / "sfx_joined.wav"
+    joined = tmpdir / f"sfx_joined{stem_suffix}.wav"
     _join_audio_single_graph(
         stems,
         joined,
@@ -818,10 +1102,6 @@ def render_sfx_bed(
     )
     if proc.returncode != 0:
         raise MediaError(f"sfx bed convert failed: {proc.stderr[-2000:]}")
-    bed_seconds = _audio_duration_seconds(bed)
-    if abs(bed_seconds - timeline_seconds) > AV_ALIGNMENT_TOLERANCE_SECONDS:
-        raise MediaError(f"sfx bed {bed_seconds:.2f}s drifts from timeline {timeline_seconds:.2f}s")
-    _emit_sfx_pass_completed(run_dir, windows, backend, device, model_size, started, append_line)
     return bed
 
 
@@ -833,12 +1113,15 @@ def _emit_sfx_pass_completed(
     model_size: str,
     started: float,
     append_line: Any,
+    dual_pan: bool = False,
 ) -> None:
     """Emit `sfx_pass_completed` (bed windows + wall seconds, DESIGN §140).
 
     Single home so both the sequential `finalize_sfx_pass` and the
     parallel-finalize Thread B (both funnel through `render_sfx_bed`)
     report the SFX leg like `finalize_completed` reports the model pass.
+    `windows` counts one track's plan (both dual tracks tile the same
+    count); `dual_pan` tells whether the pair rendered.
     """
     append_line(
         run_dir / paths.LOGS_DIRNAME / "metrics.jsonl",
@@ -850,6 +1133,7 @@ def _emit_sfx_pass_completed(
                 "backend": backend,
                 "device": device,
                 "model_size": model_size,
+                "dual_pan": dual_pan,
                 "sfx_pass_s": round(time.perf_counter() - started, 3),
             }
         ),
@@ -1120,6 +1404,7 @@ def finalize_sfx_pass(
     fps: int,
     caption_override: str | None = None,
     progress: VoyageConsole | None = None,
+    dual_pan: bool = False,
 ) -> Path:
     """Full post-pass: bed over the shipped pixels, mixed, remuxed in place.
 
@@ -1129,7 +1414,9 @@ def finalize_sfx_pass(
     never strands a half-written final). Returns the final path.
 
     The `sfx_pass_completed` timing event fires inside `render_sfx_bed`
-    (shared with the parallel-finalize path).
+    (shared with the parallel-finalize path). With `dual_pan` true the
+    bed is the spatialized pair (a legacy single-bed run heals by
+    rendering only the missing right track).
     """
     import tempfile
 
@@ -1166,6 +1453,7 @@ def finalize_sfx_pass(
             channels,
             num_workers,
             progress=progress,
+            dual_pan=dual_pan,
         )
         with optional_stage(progress, "dub sfx onto final"):
             music = tmpdir / "final_music.wav"

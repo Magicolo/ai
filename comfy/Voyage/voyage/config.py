@@ -516,13 +516,17 @@ class SfxConfig(BaseModel):
     `backend="fake"` keeps old runs byte-identical (finalize without the
     SFX pass); `"mmaudio"` renders director-captioned windows at finalize
     (slice 3 wiring). `model_size` rides the ladder vocabulary — the 2060
-    ladder (slice 2c) locks the deployed value.
+    ladder (slice 2c) locks the deployed value. `dual_pan` renders the
+    spatialized pair (two same-caption seeds, ±75% constant-power pan,
+    mixed with music to stereo); the second channel completes a legacy
+    single-bed run instead of rebuilding it.
     """
 
     backend: SfxBackendName = "fake"
     device: str = "cpu"
     models_dir: str = "/models"
     model_size: SfxModelSize = "large_44k_v2"
+    dual_pan: bool = True
 
 
 class AugmentConfig(BaseModel):
@@ -774,6 +778,7 @@ def resolve_config(
     interpolate: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
     interp_backend: InterpBackendName | None | UnsetType = Unset,
+    sfx_dual_pan: bool | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issue 022): backend preset,
     then targeted overrides — in that order, so explicit flags always
@@ -840,6 +845,8 @@ def resolve_config(
         video = VideoConfig(**{**video.model_dump(), "video_caption": video_caption})
     if is_provided(prompt_enhance):
         video = VideoConfig(**{**video.model_dump(), "prompt_enhance": prompt_enhance})
+    if is_provided(sfx_dual_pan):
+        sfx = SfxConfig(**{**sfx.model_dump(), "dual_pan": sfx_dual_pan})
     augment = config.augment
     if (
         is_provided(upscale)

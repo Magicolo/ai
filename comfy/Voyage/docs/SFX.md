@@ -81,7 +81,29 @@ backend = "fake"        # "mmaudio" (CUDA) | "fake" (built-in, CPU-only)
 device = "cpu"          # CUDA backends pair "cuda:0"
 models_dir = "/models"
 model_size = "large_44k_v2"  # small_44k | medium_44k | large_44k_v2
+dual_pan = true         # spatialized pair (below); false = legacy single bed
 ```
+
+## Dual-pan pair (two seeds, ±75% pan, stereo mix)
+
+On by default (`SfxConfig.dual_pan`, `configure --no-sfx-dual-pan`
+opts a run back out to the legacy single bed): the same windows render
+twice with the same captions and different seeds (track R = track L
+seed + `SFX_DUAL_SEED_OFFSET = 100_000`, deterministic), each track
+joins independently, and the pair mixes into one stereo bed — track L
+at −75% / track R at +75% through a constant-power (cos/sin) law, each
+bed downmixed to mono first so any model channel correlation pans
+identically. The pair mixes at unity and the music dub applies
+`SFX_VOLUME = 0.5` once, which equals 0.5 per track by linearity.
+
+Track L keeps the legacy `wNNNN.wav` stems + `sfx.jsonl`; track R
+writes `wNNNN_right.wav` + `sfx_right.jsonl` (same record shape, offset
+seeds, independent cache-hits). A run finalized before dual-pan
+resumes by rendering only the missing right track — validate reports
+the healable `sfx-right coverage …` shortfall and finalize heals it.
+The bed-cache digest and the generate skip-key both carry the flag, so
+toggling it re-renders instead of false-hitting. Cost is ~2× SFX render
+time (tracks render sequentially through the existing worker pool).
 
 ## Finalize-time SFX pass and caption pins
 
@@ -103,6 +125,9 @@ Pins (all in-memory — the run manifest carries the effective config, no TOML):
 - `--sfx-backend fake|mmaudio`, `--sfx-device`, `--sfx-model-size`
   (`small_44k|medium_44k|large_44k_v2`), `--sfx-workers 1|2`
   (2 = shard `small_44k` across cuda:0+cuda:1, needs 2 visible GPUs).
+- `--sfx-dual-pan` / `--no-sfx-dual-pan` (`configure`, stored in the
+  manifest): the spatialized pair (default on) vs the legacy single
+  bed. `generate` honors the stored value.
 
 `generate` downloads the SFX stack only when the finalize pass will
 run (`fake` needs nothing and stays offline); `--no-download` fails

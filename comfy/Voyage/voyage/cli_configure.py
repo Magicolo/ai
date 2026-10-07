@@ -21,7 +21,12 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
-from voyage.cli_core import _augment_overrides, _prompt_enhance_overrides, get_console
+from voyage.cli_core import (
+    _augment_overrides,
+    _prompt_enhance_overrides,
+    _sfx_dual_pan_overrides,
+    get_console,
+)
 from voyage.cli_paths import _check_run_id, output_root
 from voyage.cli_planning import _frames_per_segment, segments_for_duration
 from voyage.config import (
@@ -177,6 +182,12 @@ def cmd_configure(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    if bool(getattr(args, "sfx_dual_pan", False)) and bool(getattr(args, "no_sfx_dual_pan", False)):
+        print(
+            "error: pass only one of --sfx-dual-pan or --no-sfx-dual-pan",
+            file=sys.stderr,
+        )
+        return 2
     if manifest_path.is_file() and is_provided(from_name):
         print(
             "error: --from only applies when creating a run "
@@ -286,6 +297,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 music_caption=getattr(args, "music_caption", None),
                 video_caption=getattr(args, "video_caption", None),
                 **_prompt_enhance_overrides(args),
+                **_sfx_dual_pan_overrides(args),
                 **_augment_overrides(args),
             )
         except (ValidationError, ValueError) as exc:
@@ -336,6 +348,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 music_caption=getattr(args, "music_caption", None),
                 video_caption=getattr(args, "video_caption", None),
                 **_prompt_enhance_overrides(args),
+                **_sfx_dual_pan_overrides(args),
                 **_augment_overrides(args),
             )
             if is_provided(getattr(args, "style", None)):
