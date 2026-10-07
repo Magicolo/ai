@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from voyage.config import ProjectConfig, with_video_backend
 from voyage.console import VoyageConsole
+
+if TYPE_CHECKING:
+    from voyage.model_registry import ModelSpec
 
 
 def _config_with_style() -> ProjectConfig:
@@ -215,7 +219,10 @@ def test_ensure_augment_disabled_skips_augment_downloads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import voyage.model_registry as registry
+    import voyage.models_ensure as ensure_module
     from voyage.models_ensure import ensure_models
+
+    monkeypatch.setattr(ensure_module, "_manifest_entry_complete", lambda _dir, _spec: True)
 
     present = {"audio-acestep", "audio-sonicmaster", "director-qwen35-gguf"}
 
@@ -242,9 +249,11 @@ def test_ensure_skips_download_when_everything_verified(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import voyage.model_registry as registry
+    import voyage.models_ensure as ensure_module
     from voyage.models_ensure import ensure_models
 
     monkeypatch.setattr(registry, "verify_model", lambda _dir, _spec: (True, "OK"))
+    monkeypatch.setattr(ensure_module, "_manifest_entry_complete", lambda _dir, _spec: True)
 
     def _fail_download(_dir: Path, _spec: str) -> dict[str, object]:
         raise AssertionError("must not download when verified")
@@ -260,8 +269,10 @@ def test_ensure_downloads_only_missing_specs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import voyage.model_registry as registry
+    import voyage.models_ensure as ensure_module
     from voyage.models_ensure import ensure_models
 
+    monkeypatch.setattr(ensure_module, "_manifest_entry_complete", lambda _dir, _spec: True)
     present = {
         "audio-acestep",
         "audio-sonicmaster",
@@ -409,6 +420,113 @@ def test_generate_aborts_when_ensure_fails(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(ensure, "ensure_models", lambda *args, **kwargs: 1)
     assert cli.main(["generate", "ensure"]) == 1
     assert not (tmp_path / "output" / "ensure" / "final.mp4").exists()
+
+
+def _stub_pinned_spec(manifest_key: str, relative_path: str, payload: bytes) -> ModelSpec:
+    """Registry row with one ingest pin over a tiny tmp file."""
+    import hashlib
+
+    from voyage.atomic import JsonValue
+    from voyage.model_registry import ExpectedHash, ModelSpec
+
+    digest = hashlib.sha256(payload).hexdigest()
+
+    def _record(_models_dir: Path) -> dict[str, JsonValue]:
+        return {"checkpoint_shas": {relative_path: hashlib.sha256(payload).hexdigest()}}
+
+    return ModelSpec(
+        name="stub-pinned",
+        manifest_key=manifest_key,
+        snapshots=(),
+        files=(),
+        record_builder=_record,
+        checks=(),
+        success_message=lambda _models_dir: "stub-pinned OK",
+        expected_hashes=(ExpectedHash(relative_path, digest),),
+    )
+
+
+def test_ensure_repairs_missing_manifest_without_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asporgue 2026-10-07: files present but no manifest entry.
+
+    `verify_model` passes on presence alone while the fail-closed worker
+    refuses `no manifest entry` — ensure must repair the record without
+    any hub download (files already match the ingest pins).
+    """
+    import json
+
+    import voyage.model_registry as registry
+    import voyage.models_ensure as ensure_module
+    from voyage.models_ensure import RequiredModel, _manifest_entry_complete, ensure_models
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    payload = b"honest-bytes"
+    candidate = models_dir / "stub/weights.bin"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(payload)
+    (models_dir / "manifest.json").write_text(json.dumps({"other": {}}), encoding="utf-8")
+    monkeypatch.setitem(
+        registry.MODEL_SPECS, "stub-pinned", _stub_pinned_spec("stub", "stub/weights.bin", payload)
+    )
+    monkeypatch.setattr(registry, "verify_model", lambda _dir, _spec: (True, "stub-pinned OK"))
+    assert not _manifest_entry_complete(models_dir, "stub-pinned")
+
+    def _fail_download(_dir: Path, _spec: str) -> dict[str, object]:
+        raise AssertionError("must not download when files already match pins")
+
+    monkeypatch.setattr(registry, "download_model", _fail_download)
+    stream = io.StringIO()
+    console = VoyageConsole(no_color=True, stream=stream)
+    monkeypatch.setattr(
+        ensure_module,
+        "required_specs",
+        lambda *args, **kwargs: [RequiredModel(spec="stub-pinned", models_dir=models_dir)],
+    )
+    assert ensure_models(_config_with_style(), False, console, str(tmp_path)) == 0
+    assert _manifest_entry_complete(models_dir, "stub-pinned")
+    assert "manifest repaired" in stream.getvalue()
+
+
+def test_ensure_refuses_to_attest_tampered_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repair never records a sha over mismatched bytes (fail loud)."""
+    import json
+
+    import voyage.model_registry as registry
+    import voyage.models_ensure as ensure_module
+    from voyage.models_ensure import RequiredModel, ensure_models
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    candidate = models_dir / "stub/weights.bin"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"tampered-bytes")
+    (models_dir / "manifest.json").write_text(json.dumps({"other": {}}), encoding="utf-8")
+    monkeypatch.setitem(
+        registry.MODEL_SPECS,
+        "stub-pinned",
+        _stub_pinned_spec("stub", "stub/weights.bin", b"honest-bytes"),
+    )
+    monkeypatch.setattr(registry, "verify_model", lambda _dir, _spec: (True, "stub-pinned OK"))
+
+    def _fail_download(_dir: Path, _spec: str) -> dict[str, object]:
+        raise AssertionError("tampered path must fail before any download")
+
+    monkeypatch.setattr(registry, "download_model", _fail_download)
+    stream = io.StringIO()
+    console = VoyageConsole(no_color=True, stream=stream)
+    monkeypatch.setattr(
+        ensure_module,
+        "required_specs",
+        lambda *args, **kwargs: [RequiredModel(spec="stub-pinned", models_dir=models_dir)],
+    )
+    assert ensure_models(_config_with_style(), False, console, str(tmp_path)) == 1
+    merged = json.loads((models_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert "stub" not in merged
 
 
 def test_generate_ensure_receives_selective_scope(

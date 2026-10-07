@@ -45,6 +45,7 @@ from voyage.config import ProjectConfig
 
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
+    from voyage.model_registry import ModelSpec
 
 _MANIFEST_LOCK = threading.Lock()
 """Serializes the manifest repair pass (never the hub fetches)."""
@@ -238,6 +239,85 @@ def _read_manifest_keys(models_dir: Path) -> dict[str, JsonValue] | None:
     return {str(key): value for key, value in raw.items()}
 
 
+def _manifest_entry_complete(models_dir: Path, spec_name: str) -> bool:
+    """True when the manifest carries a usable hash baseline for `spec_name`.
+
+    Fail-closed workers (`ltx25`/`ltx23`/`ltxv` via `verify_recorded_shas`,
+    `causvid` via `verify_checkpoint_against_manifest`) refuse to load
+    without a recorded sha, while `verify_model` only checks file presence
+    when no baseline exists — so a present-files/missing-entry volume
+    passes ensure and then dies in the worker (asporgue 2026-10-07:
+    `no manifest entry for 'ltx25'`). A missing key always reads
+    incomplete (race repair still restores unpinned rows); specs with
+    neither `expected_hashes` nor `manifest_checkpoint` need no hash
+    baseline beyond key presence.
+    Stale single-sha rows without any sha (pre-hash `film`/`realesrgan`
+    entries) read incomplete so they refresh to the recorded-sha shape.
+    """
+
+    from voyage import model_registry
+
+    spec = model_registry.MODEL_SPECS[spec_name]
+    present = _read_manifest_keys(models_dir)
+    if not present:
+        return False
+    return _manifest_key_complete(present, spec)
+
+
+def _manifest_key_complete(present: dict[str, JsonValue], spec: ModelSpec) -> bool:
+    """Completeness of one spec against an already-loaded manifest map.
+
+    Pure helper so the repair write-loop checks the `fresh` map it is
+    about to write instead of re-reading the file per entry (the file
+    read in `_manifest_entry_complete` is only the entry point).
+    """
+    entry = present.get(spec.manifest_key)
+    if not isinstance(entry, dict):
+        return False
+    if not spec.expected_hashes and spec.manifest_checkpoint is None:
+        return True
+    if spec.expected_hashes:
+        # Multi-file stacks gate on the full per-file dict: a lone
+        # `checkpoint_sha256` cannot attest every pinned file, so legacy
+        # single-sha rows read incomplete and refresh to the dict shape.
+        shas = entry.get("checkpoint_shas")
+        if not isinstance(shas, dict):
+            return False
+        for expected in spec.expected_hashes:
+            recorded = shas.get(expected.relative_path)
+            if not isinstance(recorded, str) or not recorded:
+                return False
+        return True
+    recorded = entry.get("checkpoint_sha256")
+    return isinstance(recorded, str) and bool(recorded)
+
+
+def _expected_hash_mismatches(models_dir: Path, spec_name: str) -> list[str]:
+    """Files disagreeing with the registry ingest pins (repair gate).
+
+    Mirrors `download_model`'s pre-merge check: whatever is on disk must
+    match `expected_hashes` before it becomes the attested-good manifest
+    record. A mismatch means tampered/truncated bytes — the caller must
+    not record the measured sha (that would attest bad bytes good) and
+    must fail loud so the download path re-fetches.
+    """
+
+    from voyage import model_registry
+
+    spec = model_registry.MODEL_SPECS[spec_name]
+    mismatched: list[str] = []
+    for expected in spec.expected_hashes:
+        candidate = models_dir / expected.relative_path
+        if not candidate.is_file():
+            mismatched.append(str(candidate))
+            continue
+        try:
+            model_registry.verify_checkpoint_sha256(candidate, expected.expected_sha256)
+        except ValueError:
+            mismatched.append(str(candidate))
+    return mismatched
+
+
 def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
     """Re-merge manifest entries lost to parallel-download races (fail-loud).
 
@@ -247,12 +327,15 @@ def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
     missing afterwards — `ensure_models` fails on them instead of
     reporting hash-less success.
 
-    Only manifests that EXIST but lack keys count as race evidence (a
-    parallel merge demonstrably dropped a record). An absent manifest is
-    skipped, not repaired: real `download_model` merges on every success
-    (a merge error fails the download outright), so absent-after-success
-    cannot happen outside custom downloaders — and last-writer-wins
-    always leaves the final writer's record behind, never an empty file.
+    Repairs both race-dropped records and stale-volume gaps (present
+    files, missing/stale manifest entry — asporgue 2026-10-07): an
+    absent manifest starts from `{}` and is created by the write. A
+    torn manifest is never overwritten (it stays missing so the caller
+    fails loud).
+
+    Entries whose files disagree with the registry ingest pins are never
+    recorded (that would attest tampered bytes good) — they stay in the
+    returned still-missing list so the caller fails loud.
     """
     from voyage import model_registry
 
@@ -262,8 +345,6 @@ def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
         for entry in entries:
             by_dir.setdefault(entry.models_dir, []).append(entry)
         for models_dir, dir_entries in by_dir.items():
-            if not (models_dir / "manifest.json").is_file():
-                continue
             for _attempt in range(_REPAIR_ATTEMPTS):
                 present = _read_manifest_keys(models_dir)
                 if present is None:
@@ -271,16 +352,34 @@ def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
                 pending = [
                     entry
                     for entry in dir_entries
-                    if model_registry.MODEL_SPECS[entry.spec].manifest_key not in present
+                    if not _manifest_entry_complete(models_dir, entry.spec)
                 ]
                 if not pending:
                     break
+                # Fail loud on tampered bytes: never attest mismatched files.
+                tainted = [
+                    entry for entry in pending if _expected_hash_mismatches(models_dir, entry.spec)
+                ]
+                pending = [entry for entry in pending if entry not in tainted]
+                if not pending:
+                    break
                 try:
+                    # Re-read under lock before writing (present may be stale
+                    # after the hashing above); completeness re-checked via
+                    # the fresh map so concurrent repairs do not clobber.
+                    fresh = _read_manifest_keys(models_dir)
+                    if fresh is None:
+                        break
+                    rewritten = False
                     for entry in pending:
                         spec = model_registry.MODEL_SPECS[entry.spec]
-                        present[spec.manifest_key] = spec.record_builder(models_dir)
-                    atomic_write_json(models_dir / "manifest.json", present)
-                    fsync_dir(models_dir)
+                        if _manifest_key_complete(fresh, spec):
+                            continue
+                        fresh[spec.manifest_key] = spec.record_builder(models_dir)
+                        rewritten = True
+                    if rewritten:
+                        atomic_write_json(models_dir / "manifest.json", fresh)
+                        fsync_dir(models_dir)
                 except OSError:
                     continue
                 break
@@ -289,7 +388,10 @@ def _repair_manifest(entries: list[RequiredModel]) -> list[RequiredModel]:
                 still_missing.extend(dir_entries)
                 continue
             for entry in dir_entries:
-                if model_registry.MODEL_SPECS[entry.spec].manifest_key not in verified:
+                if (
+                    not _manifest_entry_complete(models_dir, entry.spec)
+                    and entry not in still_missing
+                ):
                     still_missing.append(entry)
     return still_missing
 
@@ -328,6 +430,29 @@ def ensure_models(
     ]
     missing = [(entry, message) for entry, (ok, message) in checked if not ok]
     if not missing:
+        # Files present but the fail-closed workers still need a recorded
+        # sha baseline (asporgue 2026-10-07: `verify_model` passed on the
+        # ltx25 files while the worker refused `no manifest entry`). Repair
+        # incomplete entries without any download — files already match the
+        # checklist, so only the manifest record is missing/stale.
+        incomplete = [
+            entry
+            for entry, (_ok, _message) in checked
+            if not _manifest_entry_complete(entry.models_dir, entry.spec)
+        ]
+        if not incomplete:
+            return 0
+        unrepaired = _repair_manifest(incomplete)
+        if unrepaired:
+            for entry in unrepaired:
+                mismatched = _expected_hash_mismatches(entry.models_dir, entry.spec)[:3]
+                console.error(
+                    f"model {entry.spec} files present but hash baseline missing "
+                    f"or mismatched ({mismatched}) — re-run to download"
+                )
+            return 1
+        repaired = ", ".join(entry.spec for entry in incomplete)
+        console.ok(f"models ready: {repaired} (manifest repaired)")
         return 0
     if not allow_download:
         for entry, message in missing:
