@@ -93,3 +93,77 @@ None (in-tree `qualify.sh` fail-closed gates are the precedent).
 ### Log
 
 - 2026-10-07: filed from read-only Track E sweep; no code touched; consolidated into 205 the same day.
+
+## Evaluation (2026-10-07)
+
+Both claims still relevant; evidence re-verified fresh against the live tree before fixing:
+
+- (a) CONFIRMED: staged `output/__205_fakellama__/manifest.json` with
+  `{"video": {"backend": "fake"}, "director": {"backend": "llama"}}` →
+  `VOYAGE_DRY_RUN=1 bash scripts/run.sh generate __205_fakellama__`
+  printed `image=voyage:latest` (slim). Slim `Voyage/Dockerfile` bakes no
+  `llama-server` (only `worker/Dockerfile.video:206-259` and
+  `worker/Dockerfile.ltx:115-165` do), so the run would die late with
+  `cannot spawn llama-server ... Errno 2` at sidecar start instead of at
+  image selection. `DirectorConfig.backend` still defaults to `"llama"`
+  (`voyage/config.py:595`), so fake+llama is the default CPU-smoke shape.
+- (b) CONFIRMED: the old one-liner raises `AttributeError: 'str' object
+  has no attribute 'get'` on a non-dict section (reproduced verbatim),
+  and a truly unparseable manifest on the `run --run` path printed
+  nothing on stderr and exited 0 with `image=voyage:latest` — silent
+  wrong image, exactly as filed.
+
+## Resolution (2026-10-07)
+
+Design decision (picking fix candidate 1, first arm): include
+`director.backend == "llama"` in the image decision, selecting
+`voyage-video:latest` — NOT baking the sidecar into slim. Why slim is
+left alone: the sidecar is GPU-only by design (`-ngl 99`, needs a CUDA
+runtime), while slim is the CPU/offline image (`python:3.12-slim` +
+ffmpeg, no CUDA, no llama.cpp toolchain); baking a CUDA server into it
+would bloat the offline image for a workload that cannot run without a
+GPU anyway. Why `voyage-video` over `voyage-ltx`: both CUDA images bake
+the binary, but `-ltx` is reserved for the ComfyUI worker stack a
+fake-video run never needs; media CUDA backends keep precedence, so
+`ltx25+llama` still lands in `voyage-ltx` (which also carries the
+sidecar). Explicit `--backend` still wins over every sniffed value
+(unchanged guard). Only execution paths that resolve a `run_dir`
+(`generate NAME`, `--run/--name`) can hit the sniff; `configure` never
+sniffed and needs no change (it writes the manifest, never spawns the
+sidecar).
+
+Change (`Voyage/scripts/run.sh` only, no other files touched):
+
+- Sniff now reads `director.backend` too; token `llama` maps to
+  `needs_cuda=1` (→ `voyage-video:latest` + `--gpus all`).
+- Type-guarded snippet: non-dict sections / non-string backends warn on
+  stderr and are ignored (token still computed from the good sections);
+  unreadable JSON / non-dict root warns and yields no signal. `2>/dev/null`
+  removed — stderr stays loud.
+- No-signal policy: `generate` keeps the historical `ltx25` fallback
+  (warning already printed); other verbs exit 2 naming the manifest
+  (fail-closed, qualify.sh precedent).
+- Overclaiming comment corrected (director backends DO participate now).
+
+Dry-run matrix (all `VOYAGE_DRY_RUN=1`, post-fix):
+
+- `generate` fake+llama → `image=voyage-video:latest`, `gpus=--gpus all`
+  (was `voyage:latest`/`none` — the bug).
+- `generate` fake+deterministic → `image=voyage:latest`, `gpus=none`
+  (unchanged, correct).
+- `generate` ltx25+llama → `image=voyage-ltx:latest`, `gpus=--gpus all`
+  (unchanged, correct — media CUDA wins, sidecar present there too).
+- `generate` invalid-JSON manifest → stderr warning + `voyage-ltx`
+  fallback, rc 0. `run --run` invalid-JSON / non-dict root → stderr
+  warning + `run.sh: error: ... refusing to guess an image`, rc 2.
+- `run --run` non-dict `video` section → stderr warning, token from
+  remaining sections, rc 0. Explicit `--backend fake` still overrides a
+  llama manifest (slim).
+
+Verification: `bash -n scripts/run.sh` clean; matrix above on live
+`run.sh`; `tests/test_run_sh.py` in-container
+(`./scripts/test.sh tests/test_run_sh.py -m "not gpu" -q`):
+18 passed. Probe manifests under `Voyage/output/__205_*__/` removed
+afterwards; tree holds no stray files from this fix. No GPU workloads run.
+
+Status: RESOLVED.

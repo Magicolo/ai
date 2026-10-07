@@ -87,12 +87,17 @@ def test_rife_spec_row_points_at_family_builders() -> None:
 
 
 def test_rife_pin_is_best_quality_heavy() -> None:
-    """The pin is v4.25-heavy: sharpest and closest to FILM at zero VRAM cost."""
+    """The pin is v4.25-heavy: sharpest and closest to FILM at zero VRAM cost.
+
+    Issue 207: the digest below is the sha256 of the pinned-revision
+    bytes (downloaded + hashed 2026-10-07); the previous value was
+    truncated (63 hex) and matched nothing at the pinned revision.
+    """
     assert registry_rife.RIFE_FILE == "rife_v4.25_heavy.safetensors"
     assert registry_rife.RIFE_MIN_BYTES == 78_000_000
     assert (
         registry_rife.EXPECTED_RIFE_SHA256
-        == "8d0f6be4655a7c1814f27c9e299677454cb2d348dcd16d0e2107fd9899ac7a7"
+        == "40aa1838b91531f829caaac026f40d9d2e2f1eb12b65d1d6029a58ae4c703191"
     )
 
 

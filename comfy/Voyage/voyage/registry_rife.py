@@ -8,8 +8,11 @@ directly.
 
 - `RIFE_*`: Hub pin + layout + floors + license (Phase 1 RIFE port).
 - `EXPECTED_RIFE_SHA256`: ingest-time hash pin (issue 071 pattern;
-  measured live 2026-10-05 from the `/tmp` download at the pinned
-  revision, before provisioning into the volume).
+-   measured 2026-10-07 by downloading `RIFE_FILE` at `RIFE_HF_REVISION`
+-   and hashing the bytes (issue 207); it matches both on-disk copies.
+-   The 2026-10-05 value was truncated (63 hex) and matched nothing at
+-   the pinned revision, so `download_model("rife")` always failed
+-   closed — never re-pin by hand, always re-download + re-hash.
 - `_record_rife` / `_describe_rife`: manifest value + exact OK string.
 
 Why v4.25-heavy (not standard / 4.26 / lite): the 2026-10-05 best-quality
@@ -49,7 +52,11 @@ RIFE_LICENSE = "MIT (hzwer/Practical-RIFE)"
 
 RIFE_LICENSE_URL = "https://github.com/hzwer/Practical-RIFE"
 
-EXPECTED_RIFE_SHA256 = "8d0f6be4655a7c1814f27c9e299677454cb2d348dcd16d0e2107fd9899ac7a7"
+# Issue 207: full 64-hex digest of RIFE_FILE at RIFE_HF_REVISION
+# (downloaded + sha256 2026-10-07; matches the voyage-models and Comfy
+# on-disk copies). Must stay [0-9a-f]{64} — the gate in
+# tests/test_registry_pins.py fails closed on any truncated pin.
+EXPECTED_RIFE_SHA256 = "40aa1838b91531f829caaac026f40d9d2e2f1eb12b65d1d6029a58ae4c703191"
 
 
 def _record_rife(models_dir: Path) -> dict[str, JsonValue]:

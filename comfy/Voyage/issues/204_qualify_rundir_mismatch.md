@@ -98,3 +98,54 @@ artifact named `qual-q-<date>.json` with no record of the requested 9.
 
 ### Log (from 217)
 - Track E sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07)
+Both claims re-verified live against `Voyage/scripts/qualify.sh` before
+fixing: (a) the manifest gate (`[ ! -f "$run_dir/manifest.json" ]`) and
+`generate "$(basename "$run_dir")"` addressed different dirs with no
+equality check anywhere in the file; the header comment already
+REQUIRED `run_dir == $PWD/output/<basename>` but nothing enforced it.
+(b) `$segments` appeared only on the default/parse/validate lines and
+never on the `generate` line (`grep -n segments` confirmed). Both
+still-relevant, evidence fresh (same-day read of the live script).
+Additional finding during verification: `generate NAME --segments N`
+is ADDITIVE (`voyage/cli_generate.py::_extend_plan`: new plan =
+manifest segments + added), so naive forwarding would double a
+pre-configured plan under the default `segments=3` — the fix forwards
+only when the flag is explicitly passed. Out of scope (observed, not
+changed): `--backend` is likewise parsed/validated but never forwarded
+(same failure class — left for its owner; this fix touches only the two
+claimed defects).
+
+## Resolution (2026-10-07)
+- Design decision: enforce `run_dir == $PWD/output/<basename>`
+  (canonicalize + compare, exit 2) rather than accepting `--name`.
+  Rationale recorded in the script header: every contract (usage,
+  gates, artifact name, df preflight) is already run-dir shaped — a
+  second addressing mode doubles the drift surface.
+- `scripts/qualify.sh`: added `_canonical_dir` (`readlink -m` with
+  lexical fallback) binding gate AFTER the manifest gate (so a missing
+  dir still reports the configure hint, preserving the existing
+  rank-2 test); `segments_explicit` tracking with conditional
+  `generate "$name" [--segments "$segments"]`; `plan_before`
+  snapshot (JSON literal via env, never shell-interpolated); artifact
+  `summary["qualify"] = {run_name, segments_flag, plan_before,
+  rendered_segments}`; header usage/examples rewritten (the old
+  `/tmp/qual-*` examples demonstrated the bug).
+- `docs/BENCHMARKING.md`: §Backend qualification now states the
+  binding rule + additive `--segments` semantics in the same change.
+- Verification (all stubbed nvidia-smi/docker, no GPU workload):
+  `bash -n` clean; `/tmp` vs `output/` divergence rejected rc=2 with
+  the binding message and generate never invoked; valid
+  `$PWD/output/<name>` passes binding and calls `generate <name>`
+  without `--segments` (`QUALIFY_SEGMENTS_FLAG=` empty,
+  `QUALIFY_PLAN_BEFORE=2`); explicit `--segments 5` calls
+  `generate <name> --segments 5` (`FLAG=5`); trailing-slash, `..`,
+  and same-basename-symlink forms all pass; other-basename symlink
+  rejected; pre-existing gates unchanged (relative rc=2 absolute
+  message, missing-dir rc=2 manifest hint, empty-PATH rc=4);
+  qualify-block python fragment verified standalone for flag and
+  null-flag shapes.
+- Status: RESOLVED (code + docs + artifact record all landed;
+  full `gates.sh`/GPU qualify run not executed — GPU held by a
+  concurrent agent and no GPU workloads permitted for this fix).

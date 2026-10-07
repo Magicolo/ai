@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shlex
 import sys
 import types
@@ -21,6 +22,12 @@ from typing import Any
 import pytest
 
 from voyage import model_registry
+from voyage import registry_film
+from voyage import registry_ltx23
+from voyage import registry_ltx25
+from voyage import registry_ltxv
+from voyage import registry_realesrgan
+from voyage import registry_rife
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DOCKERFILE = REPO_ROOT / "worker" / "Dockerfile.video"
@@ -109,6 +116,30 @@ def test_wan22_pins_absent() -> None:
     """The floating Wan2.2 base is gone with its backend."""
     assert not hasattr(model_registry, "WAN_HF_REVISION")
     assert not hasattr(model_registry, "WAN_HF_REPO")
+
+
+def test_all_expected_sha_pins_are_64_lower_hex() -> None:
+    """Issue 207: every ingest hash pin is a syntactically valid sha256.
+
+    A truncated pin can never equal a real file digest, turning the
+    ingest gate into a liveness bug (every honest fetch fails closed,
+    pressuring operators to bypass the gate). Fails on any EXPECTED_*
+    pin that is not exactly 64 lowercase hex chars.
+    """
+    offenders = sorted(
+        f"{module.__name__}.{name} (len={len(str(value))})"
+        for module in (
+            registry_film,
+            registry_ltx23,
+            registry_ltx25,
+            registry_ltxv,
+            registry_realesrgan,
+            registry_rife,
+        )
+        for name, value in vars(module).items()
+        if name.startswith("EXPECTED_") and not re.fullmatch(r"[0-9a-f]{64}", str(value))
+    )
+    assert offenders == [], f"malformed sha256 pins: {offenders}"
 
 
 def test_floating_snapshot_set_is_empty() -> None:

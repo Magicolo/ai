@@ -47,6 +47,40 @@ preservation).
 
 - 2026-10-07: filed from read-only Track B sweep; no code touched.
 
+## Evaluation (2026-10-07, resolution pass)
+- Still relevant, half only: `_preset_int` (`voyage/config.py:720`) still has
+  zero callers live (repo-wide grep: the `def` is the sole hit outside this
+  issue file + index — no test, worker, or CLI references it), so deletion is
+  safe. The `models_dir` hardcode (`resolve_config`, `"/models"` on the audio
+  + sfx rebuilds) is confirmed live but admitted no-op (all three defaults are
+  already `"/models"`, no `--models-dir` flag exists) — removal would change
+  no behavior today but risks masking the trap tomorrow, so per the task brief
+  it stays as code with a warning comment instead.
+- Note: the finding header says MEDIUM while the task brief treats this as
+  LOW — the dead-helper half is LOW (no runtime effect); only the silent-
+  clobber half carries MEDIUM weight, and only once a models-dir override
+  path exists.
+
+## Resolution (2026-10-07)
+- Code changes (`voyage/config.py` only): deleted the dead `_preset_int`
+  helper (5 lines, zero callers — verified by repo-wide grep before removal);
+  left both `"models_dir": "/models"` hardcodes untouched and added a
+  5-line comment at the backend-switch branch documenting the no-op-today /
+  clobber-tomorrow trap with the preserve-custom-roots precondition.
+- Status: RESOLVED (dead code removed; hardcode deliberately kept + now
+  documented). Verification: scoped pytest + ruff in-container
+  (see verification below). No caller updates needed (there were none);
+  `resolve_config` behavior byte-identical (comment-only delta on that path).
+
+## Verification (2026-10-07, post-fix)
+- `grep -rn _preset_int Voyage/voyage Voyage/tests`: def gone, zero refs.
+- `./scripts/test.sh -m "not gpu" tests/test_registry_pins.py
+  tests/test_interp_backend.py tests/test_backend_registry.py` →
+  59 passed, 1 skipped (skip is pre-existing: torch-bearing leg, slim image).
+- In-container `ruff check` + `ruff format --check` on touched files: clean.
+  In-container `mypy voyage`: no issues in 97 files.
+- No GPU workloads run.
+
 ## Consolidated from 228_dead_presetint_modelsdir (2026-10-07)
 
 No unique content — 228 was a duplicate copy of this exact finding: identical technical description, rationale, live evidence, repro, source refs, online sources, and fix candidates; only the title's severity spelling and log wording differed. Nothing to fold.

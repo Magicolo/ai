@@ -6,7 +6,9 @@
 #                 auto-selected to voyage-video:latest when a CUDA backend
 #                 -- ltxv, acestep, mmaudio -- is requested, and to
 #                 voyage-ltx:latest when an LTX ComfyUI backend -- ltx25,
-#                 ltx23 -- is requested, unless set;
+#                 ltx23 -- is requested, and to voyage-video:latest when
+#                 director.backend is llama (the sidecar binary lives only
+#                 in the CUDA images), unless set;
 #                 bare `run.sh` (the launcher TUI, backend picked
 #                 interactively) also defaults to voyage-video when the host
 #                 has a GPU, so ltx25 works with no explicit variables)
@@ -83,18 +85,69 @@ fi
 # Manifest sniff via the stdlib JSON parser: reads the video/audio/sfx
 # backends from the flat manifest root (the effective config IS the
 # manifest root — segments/finalize policy ride alongside and are
-# ignored here), so [director] backends (or layout changes) can never
-# select the wrong image.
-# Unparseable/missing key -> empty (slim default), never a launcher
-# failure. Any CUDA backend in any of the three sections selects the
+# ignored here), plus director.backend: the default director is `llama`
+# (loopback llama-server sidecar, a GPU workload baked only into the
+# CUDA images — never the slim image), so video=fake + director=llama
+# must select a CUDA image (issue 205; the old comment here claimed
+# [director] backends could never select the wrong image — that
+# overclaimed: fake+llama sniffed `fake` and landed in slim, dying late
+# with `cannot spawn llama-server ... Errno 2`).
+# Non-dict sections / non-string backends warn on stderr and are ignored
+# (issue 240: the old comprehension raised AttributeError, hidden by
+# 2>/dev/null into a silent wrong-image pick — stderr now stays loud).
+# An unreadable manifest or non-dict root warns and yields no signal:
+# generate keeps the historical ltx25 fallback below, while other verbs
+# exit 2 naming the manifest (fail-closed, like the qualify.sh gates —
+# the CLI would fail loud on the same file anyway).
+# Any CUDA backend in any of the three media sections selects the
 # video image (issue 090: [audio].backend=acestep + video=fake used to
 # stay slim, then died late in cli._require_cuda_stack; the same holds
 # for [sfx].backend=mmaudio + fake/fake).
 if [ -z "${requested_backend:-}" ] && [ -n "${run_dir:-}" ] \
     && [ -f "$run_dir/manifest.json" ]; then
-  requested_backend="$(RUN_DIR="$run_dir" python3 -c \
-    'import json, os; cfg = json.load(open(os.path.join(os.environ["RUN_DIR"], "manifest.json"))); bs = [cfg.get(s, {}).get("backend", "") for s in ("video", "audio", "sfx")]; cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}; print(next((b for b in bs if b in cuda), bs[0] if bs else ""))' \
-    2>/dev/null || true)"
+  if sniff_output="$(RUN_DIR="$run_dir" python3 -c '
+import json, os, sys
+path = os.path.join(os.environ["RUN_DIR"], "manifest.json")
+try:
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+except (OSError, ValueError) as exc:
+    print(f"run.sh: warning: cannot parse {path}: {exc}; using default image selection", file=sys.stderr)
+    sys.exit(3)
+if not isinstance(config, dict):
+    print(f"run.sh: warning: {path} root is not an object; using default image selection", file=sys.stderr)
+    sys.exit(3)
+def section_backend(name):
+    section = config.get(name, {})
+    if not isinstance(section, dict):
+        print(f"run.sh: warning: {path} section [{name}] is not an object; ignoring it", file=sys.stderr)
+        return ""
+    backend = section.get("backend", "")
+    if not isinstance(backend, str):
+        print(f"run.sh: warning: {path} section [{name}] backend is not a string; ignoring it", file=sys.stderr)
+        return ""
+    return backend
+video = section_backend("video")
+audio = section_backend("audio")
+sfx = section_backend("sfx")
+director = section_backend("director")
+cuda = {"ltxv", "causvid", "acestep", "mmaudio", "ltx25", "ltx23"}
+for backend in (video, audio, sfx):
+    if backend in cuda:
+        print(backend)
+        break
+else:
+    print("llama" if director == "llama" else video)
+')"; then
+    requested_backend="$sniff_output"
+  elif [ "${1:-}" = "generate" ]; then
+    # Malformed/unreadable manifest (already warned on stderr above):
+    # keep the historical ltx25 fallback below, never a launcher failure.
+    requested_backend=""
+  else
+    echo "run.sh: error: cannot sniff a backend from $run_dir/manifest.json; refusing to guess an image" >&2
+    exit 2
+  fi
 fi
 # No signal at all (bare `generate` with no NAME, or a NAME whose manifest
 # is missing/unreadable): historical default is the LTX stack.
@@ -109,6 +162,12 @@ ltx_backend=0
 case "${requested_backend:-}" in
   ltxv|causvid|acestep|mmaudio) needs_cuda=1 ;;
   ltx25|ltx23) needs_cuda=1; ltx_backend=1 ;;
+  # Issue 205: the llama director sidecar is a GPU workload baked only
+  # into the CUDA images, so it needs a CUDA image even when every media
+  # backend is fake. voyage-video (not -ltx) is its home: both CUDA
+  # images carry the binary, but -ltx is reserved for the ComfyUI worker
+  # stack a fake-video run never needs.
+  llama) needs_cuda=1 ;;
 esac
 # Bare launcher TUI: the backend is picked interactively inside the TUI, so
 # no CLI signal exists. On a GPU box assume the CUDA stack so bare `run.sh`

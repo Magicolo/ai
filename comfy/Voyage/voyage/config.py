@@ -717,14 +717,6 @@ class ProjectConfig(BaseModel):
         return value
 
 
-def _preset_int(preset: dict[str, str | int | list[int]], key: str, default: int) -> int:
-    """Narrow a preset value to int (mypy-strict: the dict also holds lists)."""
-    value = preset.get(key, default)
-    if not isinstance(value, int):
-        raise ValueError(f"video preset key {key!r} must be an int (got {value!r})")
-    return value
-
-
 def preset_config(
     name: str,
     style: str,
@@ -803,6 +795,11 @@ def resolve_config(
     voyage_config = config.voyage
     if is_provided(backend):
         video = VideoConfig(**{**video.model_dump(), **_video_preset(backend)})
+        # Issue 244: the "/models" roots below are the image-fixed mount
+        # (no --models-dir CLI surface exists and every default is already
+        # "/models", so this is a no-op today) — but a customized root is
+        # silently clobbered on every backend switch. Preserve custom
+        # roots here before adding any models-dir override path.
         audio = AudioConfig(
             **{**audio.model_dump(), **_audio_preset(backend), "models_dir": "/models"}
         )

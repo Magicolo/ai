@@ -46,3 +46,47 @@ __import__('voyage.registry_rife', fromlist=['EXPECTED_RIFE_SHA256']).EXPECTED_R
 ## Log
 - Track F sweep, 2026-10-07. Verified live by orchestrator 2026-10-07.
   Read-only; nothing fixed.
+
+## Evaluation (2026-10-07, resolution pass)
+- Still relevant: pin still 63 chars live (`python3 -c` length check:
+  RIFE len=63, all other 14 EXPECTED_* len=64); fork unreconciled
+  (on-disk `40aa1838…` vs registry `8d0f6be4…`, different prefixes =
+  different files, not just truncation); `test_rife_pin_is_best_quality_heavy`
+  (`tests/test_interp_backend.py:89-96`) pins the bogus 63-char value, so the
+  suite was green over a broken gate.
+- True digest WAS determinable live: HEAD `curl` at pinned revision
+  `219da3c9…` returns `X-Linked-ETag: "40aa1838b91531f8…703191"` +
+  `X-Linked-Size: 86669816` (= both on-disk sizes); full 86,669,816-byte
+  download to `/tmp` hashes to
+  `40aa1838b91531f829caaac026f40d9d2e2f1eb12b65d1d6029a58ae4c703191`
+  (64 chars, matches both on-disk copies byte-for-byte). The old `8d0f6be4…`
+  value matched nothing at the pinned revision — doubly wrong, not just
+  truncated — so fix path (a) applies: replace the constant, no guessing.
+  Scratch download removed after hashing.
+
+## Resolution (2026-10-07)
+- 13:32 UTC: verified pin still truncated (RIFE len=63, others len=64).
+- 13:33 UTC: `sha256sum` both on-disk copies → `40aa1838…703191` (identical).
+- 13:34 UTC: pinned-revision HEAD → ETag/size match on-disk; downloaded
+  pinned bytes → same sha256. True digest established; no bytes guessed.
+- Code changes: `voyage/registry_rife.py` pin → `40aa1838…703191` + provenance
+  comment (never re-pin by hand) + corrected module docstring;
+  `tests/test_interp_backend.py` pin test updated to the true digest;
+  `tests/test_registry_pins.py` gained `test_all_expected_sha_pins_are_64_lower_hex`
+  (every EXPECTED_* across all six registry modules must fullmatch
+  `[0-9a-f]{64}` — the guard this issue asked for).
+- Status: RESOLVED. Fork reconciled as a side effect: the on-disk files ARE
+  the pinned-revision bytes, so no re-provisioning is needed. Verification:
+  scoped pytest + ruff in-container (see pass-2 verification below).
+- Deliberately left open: `Voyage/DESIGN.md:8704` still cites `sha 8d0f6be4`
+  (shared doc, out of scope — orchestrator to correct); `test_interp_backend`
+  exact-digest pin remains a second layer over the new syntactic gate.
+
+## Verification (2026-10-07, post-fix)
+- `python3 -c` length sweep: all 15 EXPECTED_* len=64 (RIFE now OK).
+- `./scripts/test.sh -m "not gpu" tests/test_registry_pins.py
+  tests/test_interp_backend.py tests/test_backend_registry.py` →
+  59 passed, 1 skipped (skip is pre-existing: torch-bearing leg, slim image).
+- In-container `ruff check` + `ruff format --check` on all 4 touched
+  code/test files: clean. In-container `mypy voyage`: no issues in 97 files.
+- No GPU workloads run (CPU-only pins/tests).

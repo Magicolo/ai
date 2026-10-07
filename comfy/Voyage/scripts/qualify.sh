@@ -2,13 +2,26 @@
 # GPU qualification driver (Stream B §137A; issue 090 generalized).
 #
 # Usage: ./scripts/qualify.sh [--backend ltxv|causvid|ltx25|ltx23] [--segments N] <run-dir>
-#   e.g. ./scripts/qualify.sh /tmp/qual-ltxv
-#        ./scripts/qualify.sh --backend causvid --segments 2 /tmp/qual-causvid
-#   <run-dir> MUST be absolute AND equal to $PWD/output/<basename>:
-#   the two-verb CLI addresses runs by NAME (`output/<name>` under the
-#   repo root — workers spawn with CWD=run_dir, so a relative dir
-#   doubles up inside payload paths (issue 064 leg b)). Default backend
-#   is ltx25 (the config default since 2026-10-02).
+#   e.g. ./scripts/qualify.sh "$PWD/output/qual-ltxv"
+#        ./scripts/qualify.sh --backend causvid --segments 2 "$PWD/output/qual-causvid"
+#   <run-dir> MUST be absolute AND equal to $PWD/output/<basename>
+#   (enforced below, exit 2 — issue 204): the two-verb CLI addresses runs
+#   by NAME (`output/<name>` under the repo root — workers spawn with
+#   CWD=run_dir, so a relative dir doubles up inside payload paths (issue
+#   064 leg b)). Checking one dir's manifest but generating
+#   output/<basename> would attest the wrong run in reports/qual-*.json,
+#   so the equality is canonicalized (symlinks, `.`, `..`, trailing
+#   slashes) and compared. A --name form was rejected: every contract here
+#   (usage, gates, artifact name, df preflight) is already run-dir shaped,
+#   and a second addressing mode doubles the drift surface.
+#   --segments N is ADDITIVE (issues 204/217): when passed it forwards to
+#   `generate <name> --segments N`, which extends the stored manifest plan
+#   by N — it never sets the total. Omitted, the stored plan generates
+#   as-is. To qualify an exact total, configure the plan first
+#   (`configure <name> --segments <N>`) and run qualify.sh without
+#   --segments. The artifact records the flag (or null), the stored plan
+#   before generate, and the rendered segment count.
+#   Default backend is ltx25 (the config default since 2026-10-02).
 #   The helper is
 #   backend-agnostic — it configures, generates, and tees the JSON
 #   summary for whatever backend the run dir was generated with.
@@ -32,6 +45,7 @@ cd "$SCRIPT_DIR/.."
 
 backend="ltx25"
 segments="3"
+segments_explicit=0
 run_dir=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,10 +59,12 @@ while [ $# -gt 0 ]; do
       ;;
     --segments)
       segments="${2:?--segments needs a value}"
+      segments_explicit=1
       shift 2
       ;;
     --segments=*)
       segments="${1#--segments=}"
+      segments_explicit=1
       shift
       ;;
     -h|--help)
@@ -123,18 +139,55 @@ if [ ! -f "$run_dir/manifest.json" ]; then
   echo "    --style 'pastel neon line-art, peaceful'" >&2
   exit 2
 fi
+# Run-dir binding (issue 204): the manifest gate above and `generate`
+# <name> below must address the SAME run — generate resolves
+# output/<basename> under the repo root, so any other dir attests the
+# wrong run in reports/qual-*.json. Canonicalize (symlinks, `.`, `..`,
+# trailing slashes) and compare; exit 2 otherwise. Placed AFTER the
+# manifest gate so a missing dir still reports the configure hint.
+_canonical_dir() {
+  readlink -m "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+name="$(basename "$run_dir")"
+expected_run_dir="$(_canonical_dir "$PWD/output/$name")"
+canonical_run_dir="$(_canonical_dir "$run_dir")"
+if [ "$canonical_run_dir" != "$expected_run_dir" ]; then
+  echo "qualify: <run-dir> must be \$PWD/output/<basename> (got '$run_dir', expected '$expected_run_dir')" >&2
+  exit 2
+fi
+# Stored plan before generate (issues 204/217): generate may extend it
+# below, so snapshot it now for the artifact's requested-vs-rendered
+# record. Emitted as a JSON literal ("3" or "null") — decoded inside the
+# summary snippet, never shell-interpolated. Tolerant (null on any
+# failure): generate re-validates the manifest itself below.
+plan_before="$(RUN_DIR="$run_dir" python3 -c 'import json, os; print(json.dumps(json.load(open(os.path.join(os.environ["RUN_DIR"], "manifest.json"), encoding="utf-8")).get("segments")))' 2>/dev/null || echo null)"
 # Two-verb CLI: the run dir must be the generate-addressable
 # output/<name> (configure + generate take NAME, not --run).
-./scripts/run.sh generate "$(basename "$run_dir")"
+# --segments is additive: generate extends the stored plan by N, it never
+# sets the total — forward only when explicitly passed, else the default
+# 3 would silently extend a pre-configured plan.
+if [ "$segments_explicit" = "1" ]; then
+  ./scripts/run.sh generate "$name" --segments "$segments"
+  segments_flag="$segments"
+else
+  ./scripts/run.sh generate "$name"
+  segments_flag=""
+fi
 # Artifact persistence (issue 064 leg c, 060): the summary used to be
 # stdout-only, so every qualification evaporated. Tee to reports/ and
 # print the path; the filename carries backend run id + date.
 # Run dir travels via the environment (never shell-interpolated into the
 # python snippet): paths with spaces/quotes would otherwise break the
 # quoting or inject code (single quotes inside double quotes do not expand).
-artifact="reports/qual-$(basename "$run_dir")-$(date +%F).json"
-docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" -w /app -v "$PWD:/app" -e RUN_DIR="$run_dir" voyage:latest \
+artifact="reports/qual-${name}-$(date +%F).json"
+docker run --rm "$(voyage_user_args)" "${VOYAGE_CACHE_ENV[@]}" -w /app -v "$PWD:/app" -e RUN_DIR="$run_dir" -e QUALIFY_SEGMENTS_FLAG="$segments_flag" -e QUALIFY_PLAN_BEFORE="$plan_before" voyage:latest \
   python -c 'import json, os; from tests.test_qualification import summarize_run; \
-print(json.dumps(summarize_run(os.environ["RUN_DIR"]), indent=2))' \
+run_dir = os.environ["RUN_DIR"]; summary = summarize_run(run_dir); \
+flag = os.environ.get("QUALIFY_SEGMENTS_FLAG") or None; \
+plan = json.loads(os.environ.get("QUALIFY_PLAN_BEFORE", "null")); \
+summary["qualify"] = {"run_name": os.path.basename(run_dir.rstrip("/")), \
+"segments_flag": (int(flag) if flag is not None else None), "plan_before": plan, \
+"rendered_segments": len(summary.get("segments", []))}; \
+print(json.dumps(summary, indent=2))' \
   | tee "$artifact"
 echo "qualify: summary saved to $artifact" >&2

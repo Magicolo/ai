@@ -77,8 +77,16 @@ driver:
 ./scripts/qualify.sh [--backend ltxv|causvid] [--segments N] <absolute-run-dir>
 ```
 
-`<run-dir>` must be absolute (workers spawn with CWD=run_dir, so a
-relative dir doubles up inside payload paths). The driver benchmarks,
+`<run-dir>` must be absolute AND equal to `$PWD/output/<basename>`
+(enforced, exit 2 — otherwise the manifest check and the generate call
+address different runs and the artifact attests the wrong run).
+`--segments N` is additive: when passed it forwards to
+`generate <name> --segments N`, extending the stored manifest plan by
+N (it never sets the total); omitted, the stored plan generates as-is.
+To qualify an exact total, configure the plan first
+(`configure <name> --segments <N>`) and omit the flag. The JSON
+summary records the flag (or null), the stored plan before generate,
+and the rendered segment count. The driver benchmarks,
 runs, validates, and tees the JSON summary to `reports/`; crash
 recovery (kill -9 the video worker mid-segment, then resume) and the
 eyeball visual review stay manual. Past qualification evidence lives in
