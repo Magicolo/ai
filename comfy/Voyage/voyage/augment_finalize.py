@@ -1286,6 +1286,181 @@ def _live_plan_dirs_for_sweep(
     return live
 
 
+def _resume_completed_pass(
+    run_dir: Path,
+    segments: list[Path],
+    *,
+    weights: Any,
+    weights_key: str,
+    out_width: int,
+    out_height: int,
+    source_fps: float,
+    source_fps_key: int,
+    upscale_factor: int,
+    multiplier: int,
+    chunk_frames: int,
+    crf: int,
+    preset: str,
+    device: str,
+    work_dir: Path,
+    interp_backend: str,
+    drain_fn: Callable[..., Any] | None,
+    concat_fn: Callable[[list[Path], Path], Path] | None,
+    assemble_fn: Callable[..., Any] | None,
+    joint_interp_fn: Callable[..., Any] | None,
+    timings: dict[str, float] | None,
+    progress: VoyageConsole | None,
+) -> tuple[Path, int] | None:
+    """Resume a fully-ledgered model pass without re-polling (stage-skip gate).
+
+    Computes the current `augment_plan_fingerprint` from the same recipe the
+    pollers use and compares it against the stored `augment_coverage`
+    marker: fingerprint match + segment/joint counts match + every fix
+    record and chunk mp4 verified by `augment_work_complete` means the
+    expensive poll stage is already done, so it is skipped entirely. Any
+    config change forks the fingerprint (weights, geometry, fps, factors,
+    crf/preset, backend, or any source/joint key) and re-evaluates by
+    construction; any gap returns None and the caller runs the full
+    poll+drain path.
+
+    Fix keys are derived without file hashing: `a_sha`/`b_sha` reuse the
+    poller `source_key`, which is the manifest `video.mp4` checksum —
+    `sha256_file` of the committed video recorded at commit, the exact
+    same bytes `joint_video_sha` hashes when `ensure_joint_units`
+    derives the key (committed segments are immutable). Geometry reuses
+    the plan derivation (`out // upscale_factor`); a non-divisible box
+    bails to the full path. A wrong derivation can only return None
+    (records never match), never a false skip.
+
+    Drain still runs when the timeline is not reusable: the lone-segment
+    intermediate lives in the transient work dir, and the joint timeline
+    is only reused when its sha still matches the marker. After a
+    drain, the marker is re-stamped so the next finalize skips again.
+    Returns the `(final, lifted_fps)` pair on the drain contract, else
+    None.
+    """
+    from voyage.augment_joints import joint_fix_key
+    from voyage.augment_upscale_poller import committed_segment_sources
+    from voyage.persistence import read_augment_coverage, record_augment_coverage
+
+    if out_width % upscale_factor or out_height % upscale_factor:
+        return None
+    sources, _skipped = committed_segment_sources(run_dir)
+    by_id = {source.segment_id: source for source in sources}
+    ordered: list[Any] = []
+    for segment in segments:
+        source = by_id.get(segment.name)
+        if source is None:
+            raise MediaError(
+                f"usable segment {segment.name} has no pollable source "
+                "(DONE + manifest with video checksum/frames required)"
+            )
+        ordered.append(source)
+    src_width = out_width // upscale_factor
+    src_height = out_height // upscale_factor
+    fix_keys = [
+        joint_fix_key(
+            a_sha=ordered[index].source_key,
+            b_sha=ordered[index + 1].source_key,
+            width=src_width,
+            height=src_height,
+            fps_key=source_fps_key,
+        )
+        for index in range(len(ordered) - 1)
+    ]
+    source_keys = [source.source_key for source in ordered]
+    current = augment_plan_fingerprint(
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=source_fps_key,
+        upscale_factor=upscale_factor,
+        multiplier=multiplier,
+        crf=crf,
+        preset=preset,
+        interp_backend=interp_backend,
+        segment_source_keys=source_keys,
+        joint_fix_keys=fix_keys,
+    )
+    try:
+        stored = read_augment_coverage(run_dir)
+        marker = stamp_augment_coverage(stored) if stored is not None else None
+    except (TypeError, ValueError):
+        return None
+    if (
+        marker is None
+        or marker["fingerprint"] != current
+        or marker["segments"] != len(ordered)
+        or marker["joints"] != len(fix_keys)
+    ):
+        return None
+    if not augment_work_complete(
+        run_dir,
+        current,
+        len(ordered),
+        len(fix_keys),
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=source_fps_key,
+        upscale_factor=upscale_factor,
+        multiplier=multiplier,
+        chunk_frames=chunk_frames,
+        crf=crf,
+        preset=preset,
+        interp_backend=interp_backend,
+        segment_source_keys=source_keys,
+        segment_frame_counts=[source.total_frames for source in ordered],
+        joint_fix_keys=fix_keys,
+    ):
+        return None
+    if len(ordered) > 1:
+        timeline = run_dir / "augment" / "joint_timeline" / "jointed_timeline.mp4"
+        try:
+            if timeline.is_file() and sha256_file(timeline) == marker["jointed_timeline_sha"]:
+                return (timeline, round(source_fps * multiplier))
+        except OSError:
+            pass
+    final, lifted_fps = _drain_to_intermediate(
+        run_dir,
+        segments,
+        weights=weights,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        source_fps=source_fps,
+        source_fps_key=source_fps_key,
+        upscale_factor=upscale_factor,
+        multiplier=multiplier,
+        chunk_frames=chunk_frames,
+        crf=crf,
+        preset=preset,
+        device=device,
+        work_dir=work_dir,
+        interp_backend=interp_backend,
+        drain_fn=drain_fn,
+        concat_fn=concat_fn,
+        assemble_fn=assemble_fn,
+        joint_interp_fn=joint_interp_fn,
+        timings=timings,
+        progress=progress,
+    )
+    record_augment_coverage(
+        run_dir,
+        stamp_augment_coverage(
+            {
+                "fingerprint": current,
+                "segments": len(ordered),
+                "joints": len(fix_keys),
+                "jointed_timeline_sha": sha256_file(final),
+                "interp_backend": interp_backend,
+                "weights_key": weights_key,
+            }
+        ),
+    )
+    return (final, lifted_fps)
+
+
 def run_durable_model_pass(
     run_dir: Path,
     usable: list[Path],
@@ -1315,6 +1490,7 @@ def run_durable_model_pass(
     morph_interp_fn: Callable[..., Any] | None = None,
     timings: dict[str, float] | None = None,
     progress: VoyageConsole | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[Path, int]:
     """Poll, drain, and concat the durable sidecar path (issue: independent workers).
 
@@ -1387,6 +1563,37 @@ def run_durable_model_pass(
     # the hash formats it via str(), so float 24.0 vs int 24 would fork
     # plan dirs — one normalization keeps all three on the same dir.
     source_fps_key = int(round(source_fps))
+    # Stage-skip gate (joints resume): a fully-ledgered pass for this exact
+    # fingerprint returns the drained intermediate without re-polling (and
+    # without re-draining when the joint timeline sha still matches); None
+    # falls through to the full prune/sweep/poll/drain path below. Any
+    # config change forks the fingerprint and re-evaluates by construction.
+    resumed = _resume_completed_pass(
+        run_dir,
+        segments,
+        weights=weights,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        source_fps=source_fps,
+        source_fps_key=source_fps_key,
+        upscale_factor=upscale_factor,
+        multiplier=multiplier,
+        chunk_frames=chunk_frames,
+        crf=crf,
+        preset=preset,
+        device=interp_device or device,
+        work_dir=work_dir,
+        interp_backend=interp_backend,
+        drain_fn=drain_fn,
+        concat_fn=concat_fn,
+        assemble_fn=assemble_fn,
+        joint_interp_fn=(joint_interp_fn if joint_interp_fn is not None else morph_interp_fn),
+        timings=timings,
+        progress=progress,
+    )
+    if resumed is not None:
+        return resumed
     prune_orphan_plan_dirs(
         run_dir,
         weights_key=weights_key,
@@ -1430,6 +1637,7 @@ def run_durable_model_pass(
         interp_device=interp_device,
         interp_backend=interp_backend,
         joint_interp_fn=(joint_interp_fn if joint_interp_fn is not None else morph_interp_fn),
+        should_stop=should_stop,
     )
     return _drain_to_intermediate(
         run_dir,

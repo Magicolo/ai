@@ -89,6 +89,68 @@ def record_final_coverage(
     write_manifest(run_dir, manifest)
 
 
+def record_augment_coverage(run_dir: Path, marker: dict[str, object]) -> None:
+    """Stamp the model-pass coverage marker into the manifest (stage-skip gate).
+
+    `augment_coverage` is the `stamp_augment_coverage` dict minted after a
+    successful drain+assemble (fingerprint + segment/joint counts +
+    `jointed_timeline_sha` + `interp_backend` + `weights_key`), so the next
+    finalize can skip `_poll_to_completion` (and the drain when the timeline
+    sha still matches) instead of re-walking all 127 plan ledgers. Same
+    invalidation deal as `final_coverage`: `build_manifest` never emits this
+    key, so every `configure` wipes it (conservative invalidation on any
+    plan/settings change for free); any field change forks the fingerprint
+    and re-evaluates by construction.
+    """
+    manifest = read_manifest(run_dir)
+    manifest["augment_coverage"] = dict(marker)
+    write_manifest(run_dir, manifest)
+
+
+def read_augment_coverage(run_dir: Path) -> dict[str, object] | None:
+    """Return the stored `augment_coverage` marker, or None when absent.
+
+    Fail-open by design: missing key, non-dict value, or torn manifest
+    (StateError) all read as None, i.e. 'coverage unknown, re-evaluate' —
+    the skip gate then re-runs the ledger-truth check instead of crashing
+    finalize or trusting a half-written stamp.
+    """
+    try:
+        marker = read_manifest(run_dir).get("augment_coverage")
+    except StateError:
+        return None
+    return dict(marker) if isinstance(marker, dict) else None
+
+
+def record_sfx_coverage(run_dir: Path, marker: dict[str, object]) -> None:
+    """Stamp the SFX bed coverage marker into the manifest (stage-skip gate).
+
+    `sfx_coverage` is the `stamp_sfx_coverage` dict minted after a successful
+    bed render/join (ms-quantized timeline + conditioning source + dual-pan +
+    bed/ledger digests + model size), so future runs can tell 'bed already
+    done for this exact timeline' without spawning workers or scanning
+    folders. Same invalidation deal as `final_coverage`: `build_manifest`
+    never emits this key, so every `configure` wipes it; any caption/seed/
+    model/knob change flips the digests and re-renders by construction.
+    """
+    manifest = read_manifest(run_dir)
+    manifest["sfx_coverage"] = dict(marker)
+    write_manifest(run_dir, manifest)
+
+
+def read_sfx_coverage(run_dir: Path) -> dict[str, object] | None:
+    """Return the stored `sfx_coverage` marker, or None when absent.
+
+    Fail-open like `read_augment_coverage`: missing/non-dict/torn reads as
+    None ('re-evaluate'), never a crash and never a false hit.
+    """
+    try:
+        marker = read_manifest(run_dir).get("sfx_coverage")
+    except StateError:
+        return None
+    return dict(marker) if isinstance(marker, dict) else None
+
+
 def read_manifest(run_dir: Path) -> dict[str, object]:
     path = run_dir / paths.MANIFEST_FILENAME
     if not path.exists():
