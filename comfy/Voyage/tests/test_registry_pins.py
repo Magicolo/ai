@@ -21,13 +21,15 @@ from typing import Any
 
 import pytest
 
-from voyage import model_registry
-from voyage import registry_film
-from voyage import registry_ltx23
-from voyage import registry_ltx25
-from voyage import registry_ltxv
-from voyage import registry_realesrgan
-from voyage import registry_rife
+from voyage import (
+    model_registry,
+    registry_film,
+    registry_ltx23,
+    registry_ltx25,
+    registry_ltxv,
+    registry_realesrgan,
+    registry_rife,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DOCKERFILE = REPO_ROOT / "worker" / "Dockerfile.video"
@@ -357,13 +359,36 @@ def test_ltxv_session_loads_te_from_local_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Issue 073: the session loads the TE from the pinned snapshot, offline-first."""
+    import hashlib
+
     from voyage.workers import video_ltxv
 
     models = tmp_path / "models"
     ltxv_dir = models / model_registry.LTXV_SUBDIR
     ltxv_dir.mkdir(parents=True)
-    (ltxv_dir / video_ltxv.DIT_FILENAME).write_bytes(b"dit")
-    (ltxv_dir / video_ltxv.UPSC_FILENAME).write_bytes(b"upscaler")
+    dit_bytes = b"dit"
+    upsc_bytes = b"upscaler"
+    (ltxv_dir / video_ltxv.DIT_FILENAME).write_bytes(dit_bytes)
+    (ltxv_dir / video_ltxv.UPSC_FILENAME).write_bytes(upsc_bytes)
+    # Issue 209: the session fail-closes without a manifest, so provision
+    # the recorded shas for the stub bytes before constructing it.
+    (models / "manifest.json").write_text(
+        json.dumps(
+            {
+                "ltxv": {
+                    "checkpoint_shas": {
+                        f"{video_ltxv.LTXV_SUBDIR}/{video_ltxv.DIT_FILENAME}": (
+                            hashlib.sha256(dit_bytes).hexdigest()
+                        ),
+                        f"{video_ltxv.LTXV_SUBDIR}/{video_ltxv.UPSC_FILENAME}": (
+                            hashlib.sha256(upsc_bytes).hexdigest()
+                        ),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     expected_te = _write_te_snapshot(models)
     seen: dict[str, Any] = {}
     _install_ltxv_session_stubs(monkeypatch, seen)
@@ -410,3 +435,33 @@ def test_no_bare_hub_id_from_pretrained_in_workers() -> None:
         for finding in _bare_hub_loads(candidate)
     ]
     assert offenders == [], f"bare hub-id from_pretrained in workers: {offenders}"
+
+
+@pytest.mark.parametrize(
+    ("spec_name", "record_builder"),
+    [
+        ("ltx25", registry_ltx25._record_ltx25),
+        ("ltx23", registry_ltx23._record_ltx23),
+        ("ltxv-2b", registry_ltxv._record_ltxv),
+    ],
+)
+def test_checkpoint_shas_cover_all_expected_hashes(
+    tmp_path: Path, spec_name: str, record_builder: Any
+) -> None:
+    """Issues 208/209: recorded shas equal the ingest pins (no wrong keys, no gaps).
+
+    Fails when a ``checkpoint_shas`` key omits a subfolder (208: the ltx23
+    DiT key resolved to a nonexistent path) or when the recorded set is a
+    strict subset of ``expected_hashes`` (210: VAEs/upscaler/connectors
+    were presence-only after ingest).
+    """
+    spec = model_registry.MODEL_SPECS[spec_name]
+    assert spec.expected_hashes, f"{spec_name} pins no ingest hashes"
+    for expected in spec.expected_hashes:
+        candidate = tmp_path / expected.relative_path
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"weight-bytes")
+    record = record_builder(tmp_path)
+    shas = record["checkpoint_shas"]
+    assert isinstance(shas, dict)
+    assert set(shas) == {expected.relative_path for expected in spec.expected_hashes}

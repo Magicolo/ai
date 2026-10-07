@@ -1706,6 +1706,12 @@ class Supervisor:
         Bounded by EMBED_TIMEOUT_SECONDS (issue 017): a wedged director
         degrades to the token-set fallback instead of stalling the commit.
         Hostile/non-finite worker vectors (issue 103) degrade the same way.
+        Transport hiccups outside the VoyageError taxonomy (issue 225:
+        OSError from a respawn path) degrade the same way — embeddings are
+        advisory, never commit-killing. Only the taxonomy-external,
+        non-recoverable BaseExceptions (MemoryError, KeyboardInterrupt)
+        propagate. Every fallback emits `director_embed_fallback` with the
+        exception class so the degradation stays visible.
         """
         try:
             result = self._director.call(
@@ -1713,7 +1719,14 @@ class Supervisor:
                 cast(dict[str, JsonValue], {"texts": texts}),
                 timeout=EMBED_TIMEOUT_SECONDS,
             )
-        except VoyageError:
+        except (VoyageError, OSError) as exc:
+            self._log_metric(
+                {
+                    "event": "director_embed_fallback",
+                    "error_class": type(exc).__name__,
+                    "error": str(exc)[:300],
+                }
+            )
             return None
         vectors = result.get("vectors")
         if not isinstance(vectors, list):

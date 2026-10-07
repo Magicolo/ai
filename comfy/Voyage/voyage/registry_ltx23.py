@@ -101,6 +101,9 @@ def _record_ltx23(models_dir: Path) -> dict[str, JsonValue]:
     ltx23_dir = models_dir / LTX23_SUBDIR
     dit_path = ltx23_dir / LTX23_DIT_SUBFOLDER / LTX23_DIT_FILE
     te_path = ltx23_dir / LTX23_TE_FILE
+    conn_path = ltx23_dir / LTX23_CONN_SUBFOLDER / LTX23_CONN_FILE
+    video_vae_path = ltx23_dir / LTX23_VIDEO_VAE_SUBFOLDER / LTX23_VIDEO_VAE_FILE
+    audio_vae_path = ltx23_dir / LTX23_AUDIO_VAE_SUBFOLDER / LTX23_AUDIO_VAE_FILE
     return {
         "repo": LTX23_DIT_REPO,
         "revision": LTX23_DIT_REVISION,
@@ -117,11 +120,21 @@ def _record_ltx23(models_dir: Path) -> dict[str, JsonValue]:
         "text_encoder_repo": LTX23_TE_REPO,
         "text_encoder_revision": LTX23_TE_REVISION,
         "shared_upscaler": LTX23_UPSC_RELATIVE_PATH,
-        # Per-file shas (071): verify_model checks each against these so a
-        # mutated weight fails ensure even though presence + floors pass.
+        # Per-file shas (071, issues 208/209): one entry per expected_hashes
+        # path, so verify_model checks the whole stack. The DiT key carries
+        # the distilled/ subfolder (208: the bare-subdir key never resolves);
+        # the shared Mode-A upscaler is pinned once in registry_ltx25 and is
+        # not re-recorded here.
         "checkpoint_shas": {
-            f"{LTX23_SUBDIR}/{LTX23_DIT_FILE}": sha256_file(dit_path),
+            f"{LTX23_SUBDIR}/{LTX23_DIT_SUBFOLDER}/{LTX23_DIT_FILE}": sha256_file(dit_path),
             f"{LTX23_SUBDIR}/{LTX23_TE_FILE}": sha256_file(te_path),
+            f"{LTX23_SUBDIR}/{LTX23_CONN_SUBFOLDER}/{LTX23_CONN_FILE}": (sha256_file(conn_path)),
+            f"{LTX23_SUBDIR}/{LTX23_VIDEO_VAE_SUBFOLDER}/{LTX23_VIDEO_VAE_FILE}": (
+                sha256_file(video_vae_path)
+            ),
+            f"{LTX23_SUBDIR}/{LTX23_AUDIO_VAE_SUBFOLDER}/{LTX23_AUDIO_VAE_FILE}": (
+                sha256_file(audio_vae_path)
+            ),
         },
     }
 

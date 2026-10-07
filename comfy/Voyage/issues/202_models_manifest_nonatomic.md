@@ -51,3 +51,41 @@ or `json.loads` raises raw (no taxonomy wrapper here, unlike
 
 ## Log
 - Track B sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07)
+Re-verified live against the current tree before fixing — all
+load-bearing claims hold, nothing stale:
+- Direct `manifest_path.write_text(...)` confirmed at
+  `voyage/model_registry.py:565` (only non-atomic manifest write in
+  the module; `json` import retained — still used by the merge read
+  and by `verify_checkpoint_against_manifest:530`).
+- `atomic_write_json` stages temp `*.partial` + flush + fsync +
+  `os.replace` + fsync dir, confirmed at `voyage/atomic.py:97-107`.
+- Raw read/parse confirmed: `_merge_manifest_record` called
+  `json.loads(manifest_path.read_text(...))` with no taxonomy
+  wrapper, unlike `persistence.read_manifest` (`voyage/persistence.py:91-97`,
+  `(OSError, ValueError)` → `StateError`). Adjacent same-shape raw
+  read at `verify_checkpoint_against_manifest:530` noted — left
+  untouched (outside this issue's file scope).
+- No existing test referenced `_merge_manifest_record` (grep clean).
+
+## Resolution (2026-10-07)
+- `_merge_manifest_record` stages through `atomic_write_json`
+  (`voyage/model_registry.py:554+`); unreadable manifests
+  (torn bytes/hand-edit corruption via `(OSError, ValueError)`,
+  non-object JSON) raise `StateError` per the error taxonomy.
+  Top-level imports gained `atomic_write_json` + `StateError` only —
+  no other function in `model_registry.py` touched.
+- Mode composition: the shared atomic path now preserves the
+  destination mode (issue 222), so merged manifests inherit it.
+- New `Voyage/tests/test_models_manifest_atomic_202.py` (6 tests):
+  merge round-trip + no `.partial` litter, routing through
+  `atomic_write_json` (monkeypatched recording wrapper), fresh
+  manifest lands 0644, torn/non-object manifests raise `StateError`
+  with the previous file untouched, fault-injected crash between
+  temp-stage and replace keeps the previous manifest byte-identical.
+- Verify (in-container): scoped pytest 49 passed (12 new + 37
+  `test_unit` incl. the existing atomic round-trip pins), `ruff
+  check` + `ruff format --check` clean on all touched files, `mypy`
+  strict clean on `voyage/atomic.py` + `voyage/model_registry.py`.
+- Uncommitted; left for orchestrator review.

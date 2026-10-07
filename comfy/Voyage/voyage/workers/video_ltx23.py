@@ -656,6 +656,41 @@ def _save_mp4(
         raise ValueError(f"LTX23 muxed mp4 is empty: {path}")
 
 
+def _verify_stack_manifest(models_dir: Path) -> None:
+    """Fail-closed load-time sha gate for the LTX-2.3 stack (issue 209).
+
+    Verifies every recorded weight against the download manifest before
+    ComfyUI ever loads it — the per-file-dict sibling of the causvid
+    single-sha call site. Runs first in ``__init__`` (before the torch /
+    ComfyUI imports) so a swapped file fails fast with stdlib only. The
+    shared Mode-A upscaler is pinned once in the ltx25 manifest entry, so
+    only this stack's five recorded files are gated here (presence-gated
+    below like today).
+    """
+    from voyage.registry_ltx25 import verify_recorded_shas
+
+    stack_dir = models_dir / LTX23_SUBDIR
+    verify_recorded_shas(
+        models_dir,
+        "ltx23",
+        {
+            f"{LTX23_SUBDIR}/{LTX23_DIT_SUBFOLDER}/{LTX23_DIT_FILE}": (
+                stack_dir / LTX23_DIT_SUBFOLDER / LTX23_DIT_FILE
+            ),
+            f"{LTX23_SUBDIR}/{LTX23_TE_FILE}": stack_dir / LTX23_TE_FILE,
+            f"{LTX23_SUBDIR}/{LTX23_CONN_SUBFOLDER}/{LTX23_CONN_FILE}": (
+                stack_dir / LTX23_CONN_SUBFOLDER / LTX23_CONN_FILE
+            ),
+            f"{LTX23_SUBDIR}/{LTX23_VIDEO_VAE_SUBFOLDER}/{LTX23_VIDEO_VAE_FILE}": (
+                stack_dir / LTX23_VIDEO_VAE_SUBFOLDER / LTX23_VIDEO_VAE_FILE
+            ),
+            f"{LTX23_SUBDIR}/{LTX23_AUDIO_VAE_SUBFOLDER}/{LTX23_AUDIO_VAE_FILE}": (
+                stack_dir / LTX23_AUDIO_VAE_SUBFOLDER / LTX23_AUDIO_VAE_FILE
+            ),
+        },
+    )
+
+
 class LTX23Session:
     """Resident LTX-2.3 stack: ComfyUI in-process, Q3 DiT + VAEs on CUDA, TE on CPU.
 
@@ -669,6 +704,7 @@ class LTX23Session:
 
     def __init__(self, models_dir: Path, device: str, work_root: Path) -> None:
         """Load the validated stack and build the executor (fails loud on missing files)."""
+        _verify_stack_manifest(models_dir)
         import torch
 
         stack_dir = models_dir / LTX23_SUBDIR

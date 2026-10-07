@@ -742,6 +742,36 @@ def _save_mp4(
         raise ValueError(f"LTX25 muxed mp4 is empty: {path}")
 
 
+def _verify_stack_manifest(models_dir: Path) -> None:
+    """Fail-closed load-time sha gate for the LTX-2.5 stack (issue 209).
+
+    Verifies every recorded weight against the download manifest before
+    ComfyUI ever loads it — the per-file-dict sibling of the causvid
+    single-sha call site. Runs first in ``__init__`` (before the torch /
+    ComfyUI imports) so a swapped file fails fast with stdlib only.
+    """
+    from voyage.registry_ltx25 import verify_recorded_shas
+
+    stack_dir = models_dir / LTX25_SUBDIR
+    verify_recorded_shas(
+        models_dir,
+        "ltx25",
+        {
+            f"{LTX25_SUBDIR}/{LTX25_DIT_FILE}": stack_dir / LTX25_DIT_FILE,
+            f"{LTX25_SUBDIR}/{LTX25_TE_FILE}": stack_dir / LTX25_TE_FILE,
+            f"{LTX25_SUBDIR}/{LTX25_VIDEO_VAE_SUBFOLDER}/{LTX25_VIDEO_VAE_FILE}": (
+                stack_dir / LTX25_VIDEO_VAE_SUBFOLDER / LTX25_VIDEO_VAE_FILE
+            ),
+            f"{LTX25_SUBDIR}/{LTX25_AUDIO_VAE_SUBFOLDER}/{LTX25_AUDIO_VAE_FILE}": (
+                stack_dir / LTX25_AUDIO_VAE_SUBFOLDER / LTX25_AUDIO_VAE_FILE
+            ),
+            f"{LTX25_SUBDIR}/{LTX25_UPSC_SUBFOLDER}/{LTX25_UPSC_FILE}": (
+                stack_dir / LTX25_UPSC_SUBFOLDER / LTX25_UPSC_FILE
+            ),
+        },
+    )
+
+
 class LTX25Session:
     """Resident LTX-2.5 stack: ComfyUI in-process, Q3 DiT + VAEs on CUDA, TE on CPU.
 
@@ -755,6 +785,7 @@ class LTX25Session:
 
     def __init__(self, models_dir: Path, device: str, work_root: Path) -> None:
         """Load the validated stack and build the executor (fails loud on missing files)."""
+        _verify_stack_manifest(models_dir)
         import torch
 
         stack_dir = models_dir / LTX25_SUBDIR

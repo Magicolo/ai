@@ -10,8 +10,10 @@ signatures; all fallible per-op checks live in `checked_request` /
 
 Error taxonomy over the wire (issue 007): deterministic failures carry
 `retryable=False` so the supervisor maps them straight to `FatalWorkerError`
-instead of burning restart budget; unexpected failures keep the default
-`retryable=True` so the supervisor restarts once. Upstream model code prints
+instead of burning restart budget; a handler raising
+`RecoverableWorkerError` keeps `retryable=True` by explicit contract (issue
+201); unexpected failures keep the default `retryable=True` so the
+supervisor restarts once. Upstream model code prints
 to stdout, so each handler runs under `redirect_stdout(sys.stderr)` — stdout
 is reserved for RPC framing (see `voyage/rpc.py`).
 """
@@ -25,7 +27,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from voyage.errors import VoyageError
+from voyage.errors import RecoverableWorkerError, VoyageError
 from voyage.rpc import decode_request, encode_response, failure, success
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -99,6 +101,15 @@ def serve(handlers: dict[str, Handler]) -> None:
                 encode_response(
                     failure(request.id, ERROR_NOT_IMPLEMENTED, str(exc), retryable=False)
                 )
+            )
+        except RecoverableWorkerError as exc:
+            # Explicitly recoverable by handler contract (issue 201): the
+            # worker asked for a restart, so the wire preserves
+            # retryable=True and the supervisor restarts instead of going
+            # Fatal. Must precede the generic VoyageError arm below (the
+            # recoverable class subclasses it).
+            stdout.write(
+                encode_response(failure(request.id, type(exc).__name__, str(exc), retryable=True))
             )
         except VoyageError as exc:
             # Preserve the error class over the wire (issue 007): the code

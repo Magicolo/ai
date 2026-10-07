@@ -102,3 +102,74 @@ paths ∪ `manifest_checkpoint`) AND the recorded set is a superset of the
 
 ### Log (from 210)
 - Track F sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07, resolving track)
+
+All load-bearing claims re-verified live against the working tree before
+fixing (concurrent agents have uncommitted changes elsewhere in the tree;
+none touched the files below):
+
+- DiT key bug TRUE: pre-fix `voyage/registry_ltx23.py:123` recorded
+  `f"{LTX23_SUBDIR}/{LTX23_DIT_FILE}"` (`ltx23/ltx-2.3…`) while `checks`
+  (`model_registry.py:1101-1104`), `expected_hashes`
+  (`model_registry.py:1127-1130`) and the session's own `dit_path`
+  (`registry_ltx23.py:102`, `workers/video_ltx23.py:676`) all resolve
+  `ltx23/distilled/ltx-2.3…`. `_manifest_hash_mismatches`
+  (`model_registry.py:1360-1363`) stats each recorded key, so every
+  provisioned ltx23 volume mismatched on the DiT entry. Confirmed by
+  reading all three sites, not just the issue text.
+- 2-of-5 incompleteness TRUE for both stacks: pre-fix `_record_ltx25`
+  (`registry_ltx25.py:121-124`) and `_record_ltx23` recorded DiT+TE only,
+  while `expected_hashes` pins 5 files per stack (`model_registry.py:1041-1056`
+  ltx25, `:1126-1144` ltx23). The reader (`model_registry.py:1365-1370`)
+  only checks recorded keys, so VAEs/upscaler/connectors were
+  presence-only after ingest — the repro direction (corrupt a VAE →
+  `verify_model` still True) follows directly from the reader code.
+- ltxv 2/2 correct TRUE: `_record_ltxv` (`registry_ltxv.py:74-77`) records
+  both files its `expected_hashes` pins (`model_registry.py:1951-1954`
+  shape, verified at `model_registry.py:1188-1195` in this tree). No
+  change needed there.
+- No live-weight measuring needed: all 5 `EXPECTED_LTX2*` pins already
+  exist (207-pattern), so the fix records against existing pins — no
+  digests invented.
+
+## Progress log (2026-10-07, resolving track)
+
+- `voyage/registry_ltx23.py`: DiT key now
+  `f"{LTX23_SUBDIR}/{LTX23_DIT_SUBFOLDER}/{LTX23_DIT_FILE}"`; `checkpoint_shas`
+  extended to all 5 `expected_hashes` paths (DiT+TE+connectors+video/audio
+  VAE; the shared Mode-A upscaler stays pinned once in `registry_ltx25`
+  by design, documented in the comment).
+- `voyage/registry_ltx25.py`: `checkpoint_shas` extended to all 5
+  `expected_hashes` paths (DiT+TE+video/audio VAE+upscaler). Also hosts
+  the new shared `verify_recorded_shas` helper (the 209 load-time gate;
+  see issue 209 for why the causvid helper could not be reused verbatim).
+- `tests/test_registry_pins.py`: new parametrized
+  `test_checkpoint_shas_cover_all_expected_hashes` (ltx25/ltx23/ltxv)
+  asserting recorded keys EQUAL the spec's `expected_hashes` paths —
+  covers both the distilled-key fix and the superset requirement
+  (208-candidate-2 + 210-candidate-3 merged). Pre-existing I001 import
+  sort failure on this file (present at HEAD, ruff-version drift) fixed
+  with `ruff check --fix` as fix-on-sight.
+- Gates (all in-container per `scripts/gates.sh` conventions):
+  `ruff check` + `ruff format --check` clean on all 7 touched/new files;
+  `mypy` clean on the 5 touched source modules;
+  `pytest tests/test_registry_pins.py tests/test_ltx_session_verify.py`
+  32 passed; neighbor scope
+  (`test_registry_ltxv_split`/`test_registry_split`/`test_tail_derive`/
+  `test_ltxv*`/`test_169_block_zero_fresh`/`test_perf_regressions`/
+  `test_checkpoint_safety`) 138 passed.
+- Not committed (per task instructions; concurrent agents hold
+  uncommitted changes in adjacent files — own hunks only, no staging).
+
+## Resolution (2026-10-07)
+
+Fixed. `checkpoint_shas` now equals `expected_hashes` paths for
+ltx25/ltx23 (ltxv was already exact), so every recorded key resolves and
+`verify_model` checks the whole stack.
+
+Migration note: volumes provisioned before this change carry 2-key
+manifests. `verify_model` on an old manifest keeps checking just those 2
+keys (reader only iterates recorded keys — no false positives), but the
+new session load-time gates (issue 209) fail closed on the 3 missing
+shas. Re-run `download_model` for the affected spec to re-record all 5.

@@ -21,6 +21,7 @@ spec (E5 deferred; conv is the default per S22).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from voyage.atomic import JsonValue
@@ -99,6 +100,9 @@ def _record_ltx25(models_dir: Path) -> dict[str, JsonValue]:
     ltx25_dir = models_dir / LTX25_SUBDIR
     dit_path = ltx25_dir / LTX25_DIT_FILE
     te_path = ltx25_dir / LTX25_TE_FILE
+    video_vae_path = ltx25_dir / LTX25_VIDEO_VAE_SUBFOLDER / LTX25_VIDEO_VAE_FILE
+    audio_vae_path = ltx25_dir / LTX25_AUDIO_VAE_SUBFOLDER / LTX25_AUDIO_VAE_FILE
+    upsc_path = ltx25_dir / LTX25_UPSC_SUBFOLDER / LTX25_UPSC_FILE
     return {
         "repo": LTX25_DIT_REPO,
         "revision": LTX25_DIT_REVISION,
@@ -116,13 +120,71 @@ def _record_ltx25(models_dir: Path) -> dict[str, JsonValue]:
         "text_encoder_revision": LTX25_TE_REVISION,
         "vae_repo": LTX25_VAE_REPO,
         "vae_revision": LTX25_VAE_REVISION,
-        # Per-file shas (071): verify_model checks each against these so a
-        # mutated weight fails ensure even though presence + floors pass.
+        # Per-file shas (071, issues 208/209): one entry per expected_hashes
+        # path, so verify_model checks the whole stack — a mutated VAE or
+        # upscaler fails ensure even though presence + floors pass.
         "checkpoint_shas": {
             f"{LTX25_SUBDIR}/{LTX25_DIT_FILE}": sha256_file(dit_path),
             f"{LTX25_SUBDIR}/{LTX25_TE_FILE}": sha256_file(te_path),
+            f"{LTX25_SUBDIR}/{LTX25_VIDEO_VAE_SUBFOLDER}/{LTX25_VIDEO_VAE_FILE}": (
+                sha256_file(video_vae_path)
+            ),
+            f"{LTX25_SUBDIR}/{LTX25_AUDIO_VAE_SUBFOLDER}/{LTX25_AUDIO_VAE_FILE}": (
+                sha256_file(audio_vae_path)
+            ),
+            f"{LTX25_SUBDIR}/{LTX25_UPSC_SUBFOLDER}/{LTX25_UPSC_FILE}": (sha256_file(upsc_path)),
         },
     }
+
+
+def verify_recorded_shas(models_dir: Path, manifest_key: str, paths: dict[str, Path]) -> None:
+    """Fail-closed per-file sha check against the download manifest (issues 208/209).
+
+    The ``checkpoint_shas``-dict sibling of
+    ``model_registry.verify_checkpoint_against_manifest`` (which only covers
+    the single-``checkpoint_sha256`` shape): reads
+    ``models_dir/manifest.json``, looks up each relative path in the
+    manifest entry's ``checkpoint_shas`` dict, and verifies the file bytes
+    before any weight load. A missing manifest, torn JSON, missing entry,
+    missing per-file sha, or a byte mismatch all raise ``ValueError`` —
+    deliberately with no ``allow_missing_manifest`` escape hatch and no
+    ``VOYAGE_ALLOW_MISSING_MANIFEST`` opt-in (provisioned workers never
+    opt in; the causvid single-sha call site is the posture template).
+    """
+    from voyage.model_registry import verify_checkpoint_sha256  # lazy: registry cycle
+
+    manifest_path = models_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(
+            f"no manifest at {manifest_path} — refusing to load weights "
+            "(re-provision the stack: `configure` re-records the manifest)"
+        )
+    try:
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"unreadable manifest at {manifest_path} — refusing to load") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(  # noqa: TRY004 — one fail-closed type with the sha-mismatch leg
+            f"unreadable manifest at {manifest_path} — refusing to load"
+        )
+    entry = loaded.get(manifest_key)
+    if not isinstance(entry, dict):
+        raise ValueError(  # noqa: TRY004 — same single-type fail-closed contract
+            f"no manifest entry for {manifest_key!r} in {manifest_path} — refusing to load"
+        )
+    shas = entry.get("checkpoint_shas")
+    if not isinstance(shas, dict):
+        raise ValueError(  # noqa: TRY004 — same single-type fail-closed contract
+            f"no checkpoint_shas for {manifest_key!r} in {manifest_path} — refusing to load"
+        )
+    for relative_path, path in paths.items():
+        recorded = shas.get(relative_path)
+        if not isinstance(recorded, str) or not recorded:
+            raise ValueError(
+                f"no recorded sha256 for {relative_path} in {manifest_path} — refusing "
+                f"to load {path}"
+            )
+        verify_checkpoint_sha256(path, recorded)
 
 
 def _describe_ltx25(models_dir: Path) -> str:

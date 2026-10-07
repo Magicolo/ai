@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from voyage.atomic import JsonValue
+from voyage.atomic import JsonValue, atomic_write_json
+from voyage.errors import StateError
 from voyage.hashing import sha256_file
 from voyage.registry_records import (
     _ACE_CHECKPOINTS_RELATIVE,
@@ -554,15 +555,28 @@ def verify_checkpoint_against_manifest(
 def _merge_manifest_record(
     models_dir: Path, key: str, value: dict[str, JsonValue]
 ) -> dict[str, JsonValue]:
-    """Merge one record into models_dir/manifest.json (DESIGN §85)."""
+    """Merge one record into models_dir/manifest.json (DESIGN §85).
+
+    Stages through `atomic_write_json` (temp `*.partial` + flush +
+    fchmod + fsync + `os.replace` + fsync dir, issue 202): SIGKILL
+    mid-write leaves the previous valid manifest in place, never torn
+    JSON. A present but unreadable manifest (torn bytes, hand-edit
+    corruption, non-object JSON) reads as `StateError` — the same
+    taxonomy as `persistence.read_manifest` (issue 002) — never a bare
+    `JSONDecodeError`/`OSError` escaping the download path.
+    """
     manifest_path = models_dir / "manifest.json"
     record: dict[str, JsonValue] = {}
     if manifest_path.exists():
-        loaded: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            record = loaded
+        try:
+            loaded: JsonValue = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise StateError(f"invalid models manifest {manifest_path}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise StateError(f"models manifest {manifest_path} is not a JSON object")
+        record = loaded
     record[key] = value
-    manifest_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(manifest_path, record)
     return record
 
 

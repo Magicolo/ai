@@ -332,10 +332,34 @@ def _resolve_te_source(models_dir: Path) -> str:
     return str(models_dir / ref.relative_dir)
 
 
+def _verify_stack_manifest(models_dir: Path) -> None:
+    """Fail-closed load-time sha gate for the LTXV stack (issue 209).
+
+    Verifies the DiT + upscaler against the download manifest before the
+    transformer ever loads them — the per-file-dict sibling of the causvid
+    single-sha call site. Runs first in ``__init__`` (before the torch /
+    ltx-video imports) so a swapped file fails fast with stdlib only. The
+    PixArt TE snapshot carries no per-file pins, so it stays
+    presence-gated via ``_resolve_te_source`` like today.
+    """
+    from voyage.registry_ltx25 import verify_recorded_shas
+
+    stack_dir = models_dir / LTXV_SUBDIR
+    verify_recorded_shas(
+        models_dir,
+        "ltxv",
+        {
+            f"{LTXV_SUBDIR}/{DIT_FILENAME}": stack_dir / DIT_FILENAME,
+            f"{LTXV_SUBDIR}/{UPSC_FILENAME}": stack_dir / UPSC_FILENAME,
+        },
+    )
+
+
 class LTXVSession:
     """Resident LTXV stack: bf16 DiT + VAE on CUDA, T5 on CPU, embed cache."""
 
     def __init__(self, models_dir: Path, device: str) -> None:
+        _verify_stack_manifest(models_dir)
         import torch
         from ltx_video.inference import (  # type: ignore[import-not-found]
             create_latent_upsampler,

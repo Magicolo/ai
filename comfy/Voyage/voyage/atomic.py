@@ -1,5 +1,12 @@
 """Atomic file writes (DESIGN §31). Never write critical state directly
-over the previous valid file: write temp + fsync + os.replace."""
+over the previous valid file: write temp + fsync + os.replace.
+
+Staged temps come from `tempfile.mkstemp` (always 0600), so every writer
+fchmods the temp to the destination's existing mode — 0644 for new
+files (issue 222) — before fsync: without it each rewrite silently
+narrows a scaffolded 0644 manifest to owner-only and locks out
+other-uid readers (bind-mounted output/, backup sidecars).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +14,7 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -35,6 +43,31 @@ def fsync_dir(directory: Path) -> None:
         os.close(fd)
 
 
+DEFAULT_FILE_MODE = 0o644
+"""Mode staged temps carry for brand-new destinations (issue 222).
+
+`tempfile.mkstemp` always creates 0600; `os.fchmod` sets the exact mode
+regardless of umask, so new manifests land 0644 deterministically and
+stay readable to other-uid readers — the go-atomic-write/atomicfile
+convention.
+"""
+
+
+def _replace_mode(destination: Path) -> int:
+    """Mode the staged temp must carry before `os.replace` (issue 222).
+
+    Existing destinations keep their mode (a deliberately locked-down
+    0600 stays 0600 — preserve, never widen); missing destinations get
+    `DEFAULT_FILE_MODE`. A destination vanishing between `stat` and
+    replace races to the default instead of failing the write.
+    """
+    try:
+        current = stat.S_IMODE(destination.stat().st_mode)
+    except OSError:
+        return DEFAULT_FILE_MODE
+    return current
+
+
 def atomic_write_bytes(destination: Path, data: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -44,6 +77,7 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
+            os.fchmod(handle.fileno(), _replace_mode(destination))
             os.fsync(handle.fileno())
         os.replace(tmp_name, destination)
         fsync_dir(destination.parent)
@@ -70,8 +104,8 @@ def atomic_copy(source: Path, destination: Path, *, chunk_bytes: int = COPY_CHUN
     through it materializes the whole file in the heap (plus the temp
     copy) — 2-3x transient RAM on hundred-MB finals. This streams
     `source` to a sibling `.partial` temp in `chunk_bytes` pieces, then
-    the same flush/fsync/replace/fsync_dir commit, so crash semantics
-    match `atomic_write_bytes` at constant memory. Returns `destination`.
+    the same flush/fchmod/fsync/replace/fsync_dir commit, so crash and
+    mode semantics match `atomic_write_bytes` at constant memory. Returns `destination`.
     """
     if chunk_bytes <= 0:
         raise ValueError(f"chunk_bytes must be positive (got {chunk_bytes})")
@@ -84,6 +118,7 @@ def atomic_copy(source: Path, destination: Path, *, chunk_bytes: int = COPY_CHUN
             with open(source, "rb") as incoming:
                 shutil.copyfileobj(incoming, out, chunk_bytes)
             out.flush()
+            os.fchmod(out.fileno(), _replace_mode(destination))
             os.fsync(out.fileno())
         os.replace(tmp_name, destination)
         fsync_dir(destination.parent)
