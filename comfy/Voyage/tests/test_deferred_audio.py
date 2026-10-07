@@ -25,6 +25,7 @@ from voyage.audio_finalize import (
     deferred_tail_frames,
     derive_conditioning_tail,
     ensure_deferred_takes,
+    trim_repaint_head,
 )
 from voyage.errors import MediaError
 from voyage.fake_backends import FakeVideoBackend
@@ -237,6 +238,71 @@ def test_pathologically_short_renders_fail_loud(tmp_path: Path) -> None:
     assert len(rendered) == 1, f"expected the first bad render to fail, got {len(rendered)} renders"
 
 
+def test_ledger_adopts_longer_rendered_length(tmp_path: Path) -> None:
+    """The ledger records the probed file length when the render runs long.
+
+    Regression (fett): the renderer returned 64.2 s for a 58.0 s plan and
+    the ledger kept 58.0, mis-slicing every downstream window by ~6 s. An
+    overshoot within max(1.0 s, 5% of requested) adopts the rendered length
+    into both the returned take and the ledger line, so coverage matches
+    the bytes the slice walk will read.
+    """
+    seg0 = _production_segment(tmp_path, 0, 96, "hollow winds")
+    requested_durations: list[float] = []
+
+    def _long_render(payload: dict[str, Any], output_path: Path) -> None:
+        requested = float(payload["duration_seconds"])
+        requested_durations.append(requested)
+        _write_sine_wav(output_path, requested + 1.0)
+
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=[seg0],
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_long_render,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 1, f"expected exactly one take, got {len(takes)}"
+    (requested,) = requested_durations
+    adopt_bound = max(1.0, 0.05 * requested)
+    assert adopt_bound >= 1.0, "1 s overshoot must sit inside the adopt bound"
+    assert abs(takes[0]["duration"] - (requested + 1.0)) < 0.15
+    ledger_line = json.loads((tmp_path / "audio" / "takes.jsonl").read_text().strip())
+    assert abs(ledger_line["duration"] - (requested + 1.0)) < 0.15
+
+
+def test_absurd_overshoot_fails_loud(tmp_path: Path) -> None:
+    """A renderer returning far more audio than requested raises MediaError.
+
+    Mirror of the shortfall guard: an overshoot beyond max(1.0 s, 5% of
+    requested) means the renderer ignored the plan — ledgering it would
+    silently stretch coverage, so the first bad render fails loud with
+    nothing appended, and the render count pins no second attempt.
+    """
+    seg0 = _production_segment(tmp_path, 0, 96, "hollow winds")
+    rendered: list[float] = []
+
+    def _huge_render(payload: dict[str, Any], output_path: Path) -> None:
+        rendered.append(float(payload["duration_seconds"]))
+        _write_sine_wav(output_path, float(payload["duration_seconds"]) + 10.0)
+
+    with pytest.raises(MediaError, match="overshoot"):
+        ensure_deferred_takes(
+            run_dir=tmp_path,
+            usable=[seg0],
+            source_fps=24.0,
+            run_seed=7,
+            render_take_fn=_huge_render,
+            take_seconds=45.0,
+            ahead_seconds=20.0,
+        )
+    assert len(rendered) == 1, f"expected the first bad render to fail, got {len(rendered)} renders"
+    ledger = tmp_path / "audio" / "takes.jsonl"
+    assert not ledger.exists() or ledger.read_text().strip() == ""
+
+
 def test_sane_renders_terminate_with_bounded_takes(tmp_path: Path) -> None:
     """Healthy renders cover a 4-segment timeline with exactly two takes.
 
@@ -264,7 +330,10 @@ def test_replay_converges_after_repaints(tmp_path: Path) -> None:
     Mutually-dissimilar captions force a repaint per segment; each
     repaint backdates its coverage, so without the serving bound every
     replay would repaint the early cursors again (unbounded ledger
-    growth). With it the dry walk keeps everywhere on replay.
+    growth). With it the dry walk keeps everywhere on replay. Repaint
+    takes re-anchor at their segment start (trimmed unplayed head), so
+    covers run [0.0, 4.0, 8.0] — one take per shifted segment, no
+    span ledgered twice.
     """
     from voyage import audio_finalize
 
@@ -280,7 +349,7 @@ def test_replay_converges_after_repaints(tmp_path: Path) -> None:
         ahead_seconds=20.0,
     )
     assert len(takes) == 3, f"expected one take per shifted segment, got {len(takes)}"
-    assert [take["covers_from"] for take in takes] == [0.0, 0.0, 0.0]
+    assert [take["covers_from"] for take in takes] == [0.0, 4.0, 8.0]
     assert not audio_finalize.deferred_render_pending(
         run_dir=tmp_path,
         usable=segments,
@@ -289,6 +358,54 @@ def test_replay_converges_after_repaints(tmp_path: Path) -> None:
         take_seconds=45.0,
         ahead_seconds=20.0,
     )
+
+
+def test_repaint_over_longer_source_requests_source_length(tmp_path: Path) -> None:
+    """A repaint across different-length segments requests the source length.
+
+    Regression (fett finalize): seg 0 (257f) minted a 64.2 s take while seg
+    1's (232f) quantum was 58.0 s; the repaint requested 58.0 s over the
+    64.2 s reference and ACE returned 64.2 s of audio, failing finalize
+    with `overshoot 6.200s`. The ACE-mimicking renderer below returns
+    reference-length audio for repaints (`repaint_end` seconds, like the
+    real worker returning its source length); the plan must therefore
+    request the source length, so request, `repaint_end`, and file agree
+    and the overshoot guard stays silent. Fails on the old code with the
+    exact fett signature (requested 45.0 s, rendered 50.0 s, overshoot
+    beyond max(1.0 s, 5%)). The ledgered take is then trimmed to its
+    fresh region (the unplayed preserved head never spans twice), so it
+    covers 10..50 while the request stays the full source 50 s.
+    """
+    segments = [
+        _production_segment(tmp_path, 0, 240, "crimson brass thunderstorm"),
+        _production_segment(tmp_path, 1, 120, "silent glass glacier"),
+    ]
+    seen: list[dict[str, Any]] = []
+
+    def _ace_like_render(payload: dict[str, Any], output_path: Path) -> None:
+        seen.append(dict(payload))
+        if payload.get("task_type") == "repaint":
+            _write_sine_wav(output_path, float(payload["repaint_end"]))
+        else:
+            _stub_render(payload, output_path)
+
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=segments,
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_ace_like_render,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 2, f"expected fresh take + repaint, got {len(takes)}"
+    repaints = [payload for payload in seen if payload.get("task_type") == "repaint"]
+    assert len(repaints) == 1, "exactly the second segment repaints its predecessor"
+    repaint = repaints[0]
+    assert repaint["duration_seconds"] == 50.0
+    assert repaint["duration_seconds"] == repaint["repaint_end"]
+    assert abs(takes[1]["duration"] - 40.0) < 0.15
+    assert abs(takes[1]["covers_from"] - 10.0) < 0.01
 
 
 def test_ensure_deferred_takes_forwards_sample_rate_and_channels(tmp_path: Path) -> None:
@@ -542,6 +659,68 @@ def test_build_final_audio_stretch_uses_stretched_timeline(tmp_path: Path) -> No
     )
     assert dest.exists()
     assert abs(probed_take_seconds(dest) - 6.0) < 0.6
+
+
+def _ledger_take(
+    run_dir: Path,
+    take_id: str,
+    covers_from: float,
+    duration: float,
+    segment_index: int,
+) -> None:
+    """Append one ledger take with a real sine wav behind it (asporgue sliver rig)."""
+    from voyage.audio.planner import AudioTake
+
+    audio_dir = run_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    wav = audio_dir / f"{take_id}.wav"
+    _write_sine_wav(wav, duration)
+    record = AudioTake(
+        take_id=take_id,
+        path=f"audio/{take_id}.wav",
+        caption="sliver rig",
+        seed=0,
+        covers_from=covers_from,
+        duration=duration,
+        segment_index=segment_index,
+    ).to_dict()
+    import json
+
+    with (audio_dir / "takes.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def test_build_final_audio_skips_tail_sliver(tmp_path: Path) -> None:
+    """Asporgue 2026-10-07: take coverage ending dust-short of the timeline mixes.
+
+    Frame-exact timeline 32.125 s (257 frames at fps 8) with takes ending
+    at 32.10 s leaves a 0.025 s tail served by the over-covering take —
+    previously `MediaError: sliver take piece`, aborting a healthy
+    finalize. The walk skips the sub-floor piece; the mix lands 0.025 s
+    short, inside the 0.6 s H3 budget.
+    """
+    from voyage.media_audio import build_final_audio, probed_take_seconds
+
+    run_dir = tmp_path / "run"
+    seg0 = _video_segment(run_dir, 0, frames=257, fps=24)
+    _ledger_take(run_dir, "take_0000", 0.0, 32.10, 0)
+    _ledger_take(run_dir, "take_0001", 32.0, 68.0, 0)
+    dest = build_final_audio(run_dir, [seg0], tmp_path / "tmp", 8, 48000, 2)
+    assert dest.exists()
+    assert abs(probed_take_seconds(dest) - 32.10) < 0.3
+
+
+def test_build_final_audio_skips_head_sliver(tmp_path: Path) -> None:
+    """A sub-floor piece at a window head is skipped the same way (timeline-exact)."""
+    from voyage.media_audio import build_final_audio, probed_take_seconds
+
+    run_dir = tmp_path / "run"
+    seg0 = _video_segment(run_dir, 0, frames=257, fps=24)
+    _ledger_take(run_dir, "take_short", 0.0, 0.03, 0)
+    _ledger_take(run_dir, "take_long", 0.0, 100.0, 0)
+    dest = build_final_audio(run_dir, [seg0], tmp_path / "tmp", 8, 48000, 2)
+    assert dest.exists()
+    assert abs(probed_take_seconds(dest) - 32.095) < 0.3
 
 
 def test_spawn_ace_render_fn_factory_exists() -> None:
@@ -855,3 +1034,98 @@ def test_dry_walk_count_matches_rendered_takes(tmp_path: Path) -> None:
     )
     assert expected > 0
     assert len(takes) == expected
+
+
+def test_trim_repaint_head_reanchors_take(tmp_path: Path) -> None:
+    """Trimming cuts the unplayed preserved head, keeping every played byte.
+
+    A repaint anchors at its source's covers_from, so its first seconds
+    replay music no window ever slices (fett: 32 s dead of 64.2). After
+    the trim the file holds exactly the fresh region, the returned
+    seconds pin the re-anchor, and the kept tail is byte-identical to
+    the render (no re-encode, no level shift).
+    """
+    source = tmp_path / "take.wav"
+    _write_sine_wav(source, 10.0)
+    with wave.open(str(source), "rb") as handle:
+        head_params = handle.getparams()
+        head_frames = handle.readframes(head_params.nframes)
+
+    def _frames(path: Path) -> bytes:
+        with wave.open(str(path), "rb") as handle:
+            return handle.readframes(handle.getnframes())
+
+    trimmed = trim_repaint_head(source, 4.0, 48000)
+    assert abs(trimmed - 4.0) < 1.0 / 48000
+    # The kept tail is byte-identical to the render (no re-encode, no
+    # level shift) — only the file header is rewritten, so compare
+    # frames, not raw bytes.
+    cut_bytes = int(round(4.0 * 48000)) * 2 * 2
+    assert _frames(source) == head_frames[cut_bytes:]
+    with wave.open(str(source), "rb") as handle:
+        assert handle.getnchannels() == 2
+        assert handle.getsampwidth() == 2
+        assert handle.getframerate() == 48000
+        assert abs(handle.getnframes() / 48000 - 6.0) < 1.0 / 48000
+
+
+def test_trim_repaint_head_zero_head_noop(tmp_path: Path) -> None:
+    """A zero head leaves the file byte-identical (fresh takes never trim)."""
+    source = tmp_path / "take.wav"
+    _write_sine_wav(source, 5.0)
+    before = source.read_bytes()
+    assert trim_repaint_head(source, 0.0, 48000) == 0.0
+    assert source.read_bytes() == before
+
+
+def test_trim_repaint_head_degenerate_raises(tmp_path: Path) -> None:
+    """Trimming past the end, or a missing file, fails loud (never silence)."""
+    source = tmp_path / "take.wav"
+    _write_sine_wav(source, 5.0)
+    with pytest.raises(MediaError):
+        trim_repaint_head(source, 5.0, 48000)
+    with pytest.raises(MediaError):
+        trim_repaint_head(source, 9.0, 48000)
+    with pytest.raises(MediaError):
+        trim_repaint_head(tmp_path / "absent.wav", 1.0, 48000)
+
+
+def test_trim_repaint_head_rate_mismatch_raises(tmp_path: Path) -> None:
+    """A file at an unexpected rate fails loud instead of mis-cutting."""
+    source = tmp_path / "take.wav"
+    _write_sine_wav(source, 5.0)
+    with pytest.raises(MediaError):
+        trim_repaint_head(source, 1.0, 44100)
+
+
+def test_repaint_take_trims_unplayed_head(tmp_path: Path) -> None:
+    """End to end: a repaint take ledgers at its first played sample.
+
+    seg1's dissimilar caption repaints take_0000 (anchored 0.0, source
+    length 50 s); the trim re-anchors the ledger to the seg1 start
+    (10.0 s) with the fresh 40 s, so no two ledger spans share played
+    content (fett: take_0000/0001 both spanned 0.0..64.2). Coverage is
+    invariant: the trimmed take still ends exactly where the render did.
+    """
+    seg0 = _production_segment(tmp_path, 0, 240, "hollow winds")
+    seg1 = _production_segment(tmp_path, 1, 240, "molten brass parade")
+    takes = ensure_deferred_takes(
+        run_dir=tmp_path,
+        usable=[seg0, seg1],
+        source_fps=24.0,
+        run_seed=7,
+        render_take_fn=_stub_render,
+        take_seconds=45.0,
+        ahead_seconds=20.0,
+    )
+    assert len(takes) == 2, f"expected fresh + repaint, got {len(takes)}"
+    fresh, repaint = takes
+    assert fresh["covers_from"] == 0.0
+    assert abs(repaint["covers_from"] - 10.0) < 0.01
+    assert abs(repaint["duration"] - 40.0) < 0.15
+    assert abs(repaint["covers_from"] + repaint["duration"] - 50.0) < 0.15
+    ledger_lines = (tmp_path / "audio" / "takes.jsonl").read_text().strip().splitlines()
+    assert len(ledger_lines) == 2
+    ledger_repaint = json.loads(ledger_lines[1])
+    assert abs(ledger_repaint["covers_from"] - 10.0) < 0.01
+    assert abs(ledger_repaint["duration"] - 40.0) < 0.15

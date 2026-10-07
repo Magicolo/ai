@@ -938,7 +938,21 @@ def build_final_audio_with_metrics(
             if piece_end <= cursor:
                 raise _fail("degenerate take window")
             if piece_end - cursor < MIN_SLICE_PIECE_SECONDS:
-                raise _fail("sliver take piece")
+                # Sliver skip (asporgue 2026-10-07): a take boundary lands
+                # less than one slice floor past the cursor — typically
+                # take coverage ending on float dust from a window or
+                # timeline edge (takes to 64.2 s, frame-exact timeline
+                # 64.25 s). Slicing that piece is unreliable, and failing
+                # aborts a healthy finalize, so skip ahead to the
+                # boundary: the next take serves from there (a real gap
+                # still fails on the next iteration), and the dropped
+                # hole stays under 0.05 s on a timeline the H3 gate
+                # budgets to 0.6 s. Counts toward the slice cap so a
+                # pathological boundary run still fails loud instead of
+                # looping.
+                cursor = piece_end
+                piece += 1
+                continue
             slice_path = tmpdir / f"{segment.name}_w{piece:02d}.wav"
             _cached_slice_take(
                 slice_cache,
