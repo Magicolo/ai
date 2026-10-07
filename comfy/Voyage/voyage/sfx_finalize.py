@@ -253,32 +253,48 @@ def segment_sfx_bounds(
 ) -> list[tuple[float, float, str]]:
     """Per-segment (start, end, sfx_caption) over the finalized timeline.
 
-    Bounds come from probed segment durations (same walk as the music
-    path's `_segment_timeline`); captions read each segment's committed
-    manifest transition audio.sfx_caption best-effort (missing/torn/legacy
-    → "" — a history read must never break a finalize). A
-    `caption_override` replaces every segment caption (old runs whose
-    decisions predate SFX captions, or a deliberate single-caption dub).
+    Bounds derive from committed manifest frame counts over `fps` (the
+    same frames/fps clock as the music path's `_segment_timeline`, so the
+    SFX captions tile the exact timeline the mix covers); the container
+    probe is fallback only (torn/legacy manifests without frame counts).
+    Captions read each segment's committed manifest transition
+    audio.sfx_caption best-effort (missing/torn/legacy → "" — a history
+    read must never break a finalize). A `caption_override` replaces
+    every segment caption (old runs whose decisions predate SFX captions,
+    or a deliberate single-caption dub).
 
     The duration fallback searches the *video* stream (issue 191: the old
     `streams[0]` read took whatever ffprobe listed first — routinely the
     audio stream on muxed segments — and divided its frame count by the
-    video fps). A segment with no container duration and no video frame
-    count raises MediaError like the music path's `_segment_timeline`
-    instead of tiling a zero-length bound that shifts every later caption.
+    video fps). A segment with no manifest frames, no container duration
+    and no video frame count raises MediaError like the music path's
+    `_segment_timeline` instead of tiling a zero-length bound that shifts
+    every later caption.
     """
     from voyage.models import EvolutionDecision
+    from voyage.segment_manifest import load_segment_manifest
 
     if fps <= 0:
         raise MediaError(f"sfx bounds need positive fps (got {fps})")
     bounds: list[tuple[float, float, str]] = []
     cursor = 0.0
     for segment in usable:
+        duration = 0.0
         try:
-            info = probe(segment / "video.mp4")
-            duration = float(info.get("format", {}).get("duration", 0.0) or 0.0)
-        except (MediaError, ValueError, KeyError, TypeError):
+            manifest = load_segment_manifest(segment)
+            metrics_any = manifest.get("metrics")
+            metrics = dict(metrics_any) if isinstance(metrics_any, dict) else {}
+            frames = int(metrics.get("frames", 0))
+            if frames > 0:
+                duration = frames / fps
+        except (ValueError, TypeError, MediaError, RecursionError):
             duration = 0.0
+        if duration <= 0.0:
+            try:
+                info = probe(segment / "video.mp4")
+                duration = float(info.get("format", {}).get("duration", 0.0) or 0.0)
+            except (MediaError, ValueError, KeyError, TypeError):
+                duration = 0.0
         if duration <= 0.0:
             try:
                 streams = probe(segment / "video.mp4").get("streams", [])
@@ -338,6 +354,34 @@ def _scale_bounds_to_timeline(
     return [(start * factor, end * factor, caption) for start, end, caption in bounds]
 
 
+def sfx_timeline_drift_seconds(
+    manifest_bounds: list[tuple[float, float, str]],
+    probed_bounds: list[tuple[float, float, str]],
+) -> float:
+    """Worst end-time skew between the manifest and probe clocks (214, pure).
+
+    Both walks must cover the same segments in order (manifest frames/fps
+    vs probed container durations); the return is the maximum absolute
+    end-time disagreement in seconds — the systematic component the
+    uniform `_scale_bounds_to_timeline` cannot correct, and the quantity
+    the 0.6s A/V alignment gate absorbs. Empty walks agree at 0.0; a
+    length mismatch raises (never silently compare misaligned timelines).
+    """
+    if len(manifest_bounds) != len(probed_bounds):
+        raise MediaError(
+            "sfx drift needs same-segment walks "
+            f"(got {len(manifest_bounds)} vs {len(probed_bounds)})"
+        )
+    drift = 0.0
+    for (_manifest_start, manifest_end, _manifest_caption), (
+        _probed_start,
+        probed_end,
+        _probed_caption,
+    ) in zip(manifest_bounds, probed_bounds, strict=True):
+        drift = max(drift, abs(float(manifest_end) - float(probed_end)))
+    return drift
+
+
 def append_sfx_window(
     ledger: Path,
     window: SfxWindow,
@@ -366,8 +410,9 @@ def append_sfx_window(
     `voyage/atomic.py`). Appends are lock-guarded per window from the
     render path, so a kill/cancel/failure can never orphan a completed
     stem: the line lands as soon as its window completes. Ledger order is
-    completion order and irrelevant — resume reads key by window_id and
-    validate dedupes last-wins (issue 054).
+    completion order and irrelevant — resume reads key by
+    (conditioning_source, window_id) and validate dedupes last-wins per
+    source (issue 054, issue 213).
     """
     ledger.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -588,6 +633,22 @@ def _stem_cache_hit(
     except (TypeError, ValueError):
         return False
     return abs(logged - window.duration) <= SFX_REQUEST_MATCH_TOLERANCE
+
+
+def _sfx_ledger_key(record: dict[str, Any]) -> tuple[str, str]:
+    """Dedupe key for one SFX ledger record (213).
+
+    `(conditioning_source, window_id)`: shipped-pixel and proxy-pixel
+    stems for the same window are never interchangeable (`_stem_cache_hit`
+    refuses cross-source hits and `validate` groups per source), so the
+    render-side lookup must keep both — keying by `window_id` alone kept
+    only the last line and re-rendered every window whose survivor was
+    the wrong source. Legacy lines predate the key and read as shipped.
+    """
+    return (
+        str(record.get("conditioning_source", SFX_CONDITIONING_SHIPPED)),
+        str(record.get("window_id", "")),
+    )
 
 
 def _prune_stale_partials(sfx_dir: Path) -> int:
@@ -880,18 +941,24 @@ def _render_single_track(
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     ledger = sfx_dir / ledger_name
     sfx_dir.mkdir(parents=True, exist_ok=True)
-    existing = {record["window_id"]: record for record in load_sfx_ledger(ledger)}
+    existing = {_sfx_ledger_key(record): record for record in load_sfx_ledger(ledger)}
     ledger_lock = threading.Lock()
     # Orphan-stem adoption (SFX resume): batches killed before the old
     # serial-join append left completed stems with no ledger lines. Adopt
     # stem files that match the current plan identity — window in plan, no
     # ledger line yet, file present with a probed duration within tolerance
     # of the request — and ledger them under the current conditioning
-    # source, so a rerun heals instead of re-rendering. Each adoption is
+    # source, so a rerun heals instead of re-rendering. A window_id the
+    # ledger already attributes to another conditioning source is never
+    # adopted (213: the stem file on disk belongs to that line's render —
+    # adopting it would false-hit across sources). Each adoption is
     # logged loudly; anything not matching re-renders through the normal
     # path below.
+    claimed_window_ids = {window_id for (_source, window_id) in existing}
     for adopt_index, adopt_window in enumerate(windows):
-        if adopt_window.window_id in existing:
+        if (conditioning_source, adopt_window.window_id) in existing:
+            continue
+        if adopt_window.window_id in claimed_window_ids:
             continue
         orphan = sfx_dir / f"{adopt_window.window_id}{stem_suffix}.wav"
         if not orphan.exists():
@@ -922,7 +989,7 @@ def _render_single_track(
             progress.warn(message)
         else:
             print(message, file=sys.stderr)
-        existing[adopt_window.window_id] = {
+        existing[(conditioning_source, adopt_window.window_id)] = {
             "window_id": adopt_window.window_id,
             "start": adopt_window.start,
             "duration": adopt_window.duration,
@@ -934,6 +1001,7 @@ def _render_single_track(
             "probed_duration": probed_duration,
             "conditioning_timeline": ledger_timeline,
         }
+        claimed_window_ids.add(adopt_window.window_id)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
     stems: list[Path] = []
     workers: list[Any] = []
@@ -968,13 +1036,14 @@ def _render_single_track(
             join reuses it). Stems land via atomic replace in the worker
             threads (distinct files, safe in parallel); the ledger append
             is lock-guarded, and order is irrelevant — resume reads key by
-            window_id and validate dedupes last-wins. A kill/cancel/failure
+            (conditioning_source, window_id) and validate dedupes last-wins
+            per source. A kill/cancel/failure
             later in the batch can never orphan this window.
             """
             stem = sfx_dir / f"{window.window_id}{stem_suffix}.wav"
             stored = f"audio/{SFX_STEMS_DIRNAME}/{window.window_id}{stem_suffix}.wav"
             slot = index % num_workers
-            record = existing.get(window.window_id)
+            record = existing.get((conditioning_source, window.window_id))
             if (
                 record is not None
                 and _stem_cache_hit(record, window, sizes[slot], conditioning_source)

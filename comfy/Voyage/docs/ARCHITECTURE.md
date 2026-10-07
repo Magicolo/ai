@@ -32,9 +32,13 @@
 
 [inspect previous segment + amendments →]
 director `decide` → staged prompt plan → video `generate_blocks` →
-audio coverage (slow loop: keep/render/repaint takes) → `validate_video`
-+ `validate_audio` + A/V drift check (±0.6 s) → metadata + `sha256.json`
-→ `DONE` → state advance → `resource_gauges` event.
+video-only cover (conditioning-tail derive on streaming backends — no
+`audio.wav` is ever written at commit, `voyage/supervisor.py:2359-2397`)
+→ `validate_video` (manifest checksum over `video.mp4` only,
+`REQUIRED_CHECKSUM_ARTIFACTS = ("video.mp4",)` at
+`voyage/segment_manifest.py:41`, plus frame range and duration —
+video-only, no A/V gate, `voyage/media_audio.py:451-461`) →
+`manifest.json` → `DONE` → state advance → `resource_gauges` event.
 
 The bracketed inspect stage runs only when `[experimental]
 visual_inspector` is on: it samples the previous segment's committed
@@ -59,17 +63,23 @@ ledger, so no per-segment audio swap ever runs.
 
 ## What lives where in a run dir
 
-`manifest.json` (`voyage/paths.py:29` — carries the effective config,
-CLI-is-config, no TOML), `state.json` (`:31`), `concepts.jsonl` (`:32`), `novelty/` (vectors +
-index + jsonl), `segments/NNNNNN/` (video.mp4,
-world/transition/prompt-plan/audio-state/metrics.json, sha256.json,
-recovery.pt on GPU backends, `video_tail.mp4` tail anchor on
-tail-chained backends, DONE), `audio/` (takes ledger + slices,
+`manifest.json` (`voyage/paths.py:32` — carries the effective config,
+CLI-is-config, no TOML), `state.json` (`:34`), `concepts.jsonl` (`:35`), `novelty/` (vectors +
+index + jsonl), `segments/NNNNNN/` (`video.mp4`,
+`manifest.json` — transition/prompt-plan/audio-state/world-state/
+metrics/checksums in one file, checksums video-only
+(`voyage/segment_manifest.py:41-48`; legacy `sha256.json` only via the
+fallback reader for old runs), `recovery.pt` on GPU backends,
+`video_tail.mp4` tail anchor on
+tail-chained backends, DONE), `audio/` (takes ledger — takes render at
+finalize, never at commit — plus
 `sfx/` stems + `sfx.jsonl` effects ledger — see `docs/SFX.md`),
 `logs/` (metrics.jsonl, *-worker.log, bench outputs), `final.mp4`
-after finalize (plus `final-sfx.mp4` when the SFX pass runs and the
-augmented presentation output — see `docs/AUGMENT.md`).
+after finalize (plus the augmented presentation output — see
+`docs/AUGMENT.md`).
 
-2-GPU pairing: video-augment chunks run on cuda:0 while the MMAudio
-SFX stack renders on cuda:1 (serial on 1-GPU boxes;
-`voyage/augment.py:14-18`).
+2-GPU pairing: video-augment chunks run on cuda:1 while the MMAudio
+SFX stack renders on cuda:0 (serial on 1-GPU boxes;
+`voyage/augment.py:18-26` contract, `model_pass_devices`/
+`upscale_pass_devices`/`interp_pass_devices` at
+`voyage/augment.py:514-571`).

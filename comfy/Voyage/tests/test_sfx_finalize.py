@@ -636,3 +636,135 @@ def test_orphan_stem_adopted_without_rerender(
     _COUNTED_SFX_CALLS.clear()
     render_sfx_bed(*args)  # type: ignore[arg-type]
     assert _COUNTED_SFX_CALLS == []
+
+
+def test_sfx_ledger_key_splits_conditioning_source() -> None:
+    """Issue 213: the dedupe key keeps proxy and shipped lines distinct."""
+    from voyage.sfx_finalize import _sfx_ledger_key
+
+    shipped = {"window_id": "w0000", "conditioning_source": "shipped"}
+    proxy = {"window_id": "w0000", "conditioning_source": "proxy"}
+    legacy = {"window_id": "w0000"}
+    assert _sfx_ledger_key(shipped) != _sfx_ledger_key(proxy)
+    assert _sfx_ledger_key(legacy) == _sfx_ledger_key(shipped)
+
+
+def test_proxy_then_shipped_ledger_still_hits_shipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 213: both sources for one window stay usable after the fix.
+
+    A parallel (proxy) finalize followed by a sequential (shipped) one
+    leaves two ledger lines under one window_id. Keying the render lookup
+    by window_id alone kept only the last (proxy) line — the shipped pass
+    then missed its own cache and re-rendered a GPU window on every
+    re-finalize.
+    """
+    from voyage.sfx_finalize import (
+        SFX_CONDITIONING_PROXY,
+        SFX_CONDITIONING_SHIPPED,
+        append_sfx_window,
+        load_sfx_ledger,
+        render_sfx_bed,
+    )
+
+    _COUNTED_SFX_CALLS.clear()
+    monkeypatch.setattr("voyage.rpc.SubprocessWorker", _CountingSfxWorker)
+    run_dir = tmp_path / "run"
+    final_video = tmp_path / "final.mp4"
+    final_video.write_bytes(b"fake-video")
+    sfx_dir = run_dir / "audio" / "sfx"
+    _write_silence_wav(sfx_dir / "w0000.wav", 7.0)
+    _write_silence_wav(sfx_dir / "w0000_proxy.wav", 7.0)
+    ledger = sfx_dir / "sfx.jsonl"
+    window = SfxWindow("w0000", 0.0, 7.0, "rain", 7)
+    append_sfx_window(
+        ledger,
+        window,
+        "audio/sfx/w0000.wav",
+        "small_44k",
+        probed_duration=7.0,
+        conditioning_source=SFX_CONDITIONING_SHIPPED,
+        conditioning_timeline=7.0,
+    )
+    append_sfx_window(
+        ledger,
+        window,
+        "audio/sfx/w0000_proxy.wav",
+        "small_44k",
+        probed_duration=7.0,
+        conditioning_source=SFX_CONDITIONING_PROXY,
+        conditioning_timeline=7.0,
+    )
+    bed = render_sfx_bed(
+        run_dir,
+        final_video,
+        7.0,
+        [(0.0, 7.0, "rain")],
+        tmp_path,
+        "fake",
+        "/models",
+        "cpu",
+        "small_44k",
+        7,
+        48000,
+        2,
+        1,
+        conditioning_source=SFX_CONDITIONING_SHIPPED,
+    )
+    assert bed.exists()
+    assert _COUNTED_SFX_CALLS == []
+    records = load_sfx_ledger(ledger)
+    assert len(records) == 2
+
+
+def test_sfx_bounds_prefer_manifest_frames_over_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 214: manifest frames/fps own the SFX timeline, probe is fallback.
+
+    The probe is monkeypatched to raise — under the old probe-first walk
+    this errors; with the manifest-first walk the bounds come from the
+    committed frame count over fps (the music path's `_segment_timeline`
+    clock) and the probe never runs.
+    """
+    import voyage.sfx_finalize as sfx_module
+
+    run_dir = tmp_path / "run"
+    _make_finalize_segment(run_dir, "000000", 4.0, "glass chimes")
+    (run_dir / "segments" / "000000" / "metrics.json").write_text('{"frames": 96}')
+
+    def _forbidden_probe(path: Path) -> dict[str, object]:
+        raise AssertionError(f"probe must not run when manifest frames exist ({path})")
+
+    monkeypatch.setattr(sfx_module, "probe", _forbidden_probe)
+    bounds = sfx_module.segment_sfx_bounds(run_dir, [run_dir / "segments" / "000000"], 24)
+    assert bounds == [(0.0, 96 / 24, "glass chimes")]
+
+
+def test_sfx_bounds_fall_back_to_probe_without_manifest_frames(tmp_path: Path) -> None:
+    """Issue 214: torn/legacy manifests without frame counts still probe."""
+    from voyage.sfx_finalize import segment_sfx_bounds
+
+    run_dir = tmp_path / "run"
+    _make_finalize_segment(run_dir, "000000", 4.0, "glass chimes")
+    (run_dir / "segments" / "000000" / "metrics.json").write_text('{"frames": 0}')
+    bounds = segment_sfx_bounds(run_dir, [run_dir / "segments" / "000000"], 24)
+    assert len(bounds) == 1
+    assert bounds[0][0] == 0.0
+    assert abs(bounds[0][1] - 4.0) < 0.05
+    assert bounds[0][2] == "glass chimes"
+
+
+def test_sfx_timeline_drift_seconds_measures_worst_skew() -> None:
+    """Issue 214: the drift metric reports the worst end-time disagreement."""
+    from voyage.errors import MediaError
+    from voyage.sfx_finalize import sfx_timeline_drift_seconds
+
+    assert sfx_timeline_drift_seconds([], []) == 0.0
+    manifest = [(0.0, 9.6667, "a"), (9.6667, 19.3334, "b")]
+    probed = [(0.0, 9.6662, "a"), (9.6662, 19.3324, "b")]
+    assert sfx_timeline_drift_seconds(manifest, probed) == pytest.approx(0.001, abs=1e-9)
+    assert sfx_timeline_drift_seconds(manifest, manifest) == 0.0
+    with pytest.raises(MediaError, match="same-segment"):
+        sfx_timeline_drift_seconds(manifest, manifest[:1])

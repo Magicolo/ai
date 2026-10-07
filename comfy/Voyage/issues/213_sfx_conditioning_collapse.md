@@ -55,3 +55,46 @@ construction) — one record is lost.
 ## Log
 - Track D sweep, 2026-10-07. Line verified live by orchestrator.
   Read-only; nothing fixed.
+
+## Evaluation (2026-10-07, live re-probe)
+- **Confirmed.** `voyage/sfx_finalize.py:883` built `existing` keyed by
+  `record["window_id"]` alone, while `_validate_one_ledger` groups by
+  `(conditioning_source, window_id)` and `_stem_cache_hit` refuses
+  cross-source hits. Reproduced the mechanism in code: ledger
+  `[shipped w0000, proxy w0000]` → lookup kept only the proxy line →
+  shipped pass missed and re-rendered.
+- **Refined (new):** the orphan-stem adoption block had the same collapse
+  in the other direction — it skipped adoption only when the window_id
+  was present at all, so after keying `existing` by tuple a proxy-led
+  ledger would ADOPT the proxy stem file as a shipped record (cross-source
+  false hit without rendering). Found via the neighbor pin
+  `test_proxy_then_shipped_rerenders_without_false_hits`, which failed
+  (`calls == []`, adoption stole the render) after the bare rekey.
+
+## Progress log (2026-10-07)
+- Added `_sfx_ledger_key(record)` (`(conditioning_source, window_id)`,
+  legacy lines read as shipped) and rekeyed all four `existing` sites
+  (construction, adoption skip, adoption store, render lookup).
+- Hardened orphan adoption with `claimed_window_ids`: a window_id the
+  ledger attributes to any source is never adopted under another source.
+- Updated the two `resume reads key by window_id` docstrings to the tuple
+  key. `_stem_cache_hit`'s source check stays as defense in depth.
+- Tests: `test_sfx_ledger_key_splits_conditioning_source` (pure) +
+  `test_proxy_then_shipped_ledger_still_hits_shipped` (both sources one
+  window, shipped pass renders zero windows) in
+  `tests/test_sfx_finalize.py`.
+- Verification (in-container `voyage:latest`): ruff check + format clean,
+  mypy clean on `voyage/sfx_finalize.py`; scoped pytest 78 passed
+  (`test_sfx_finalize`, new 213/214 tests, `test_sfx_parallel`
+  incl. the proxy-then-shipped pin, bounds/contract/dual-pan/timeline
+  suites). One failure in the wider sweep,
+  `test_sfx_dual_pan::test_skip_key_carries_dual_pan`, is foreign (a
+  concurrent agent's uncommitted `cli_core.py` skip-key `,master=0`
+  change) — untouched per §9.
+
+## Resolution (2026-10-07)
+- **RESOLVED.** Dedupe key is now `(conditioning_source, window_id)`
+  everywhere the renderer looks up or adopts, matching validate's
+  grouping; cross-source false hits are impossible at lookup AND at
+  adoption. Files: `voyage/sfx_finalize.py`,
+  `tests/test_sfx_finalize.py`. No commit (per mandate).

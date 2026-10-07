@@ -75,6 +75,36 @@ def _sfx_dual_pan_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return {}
 
 
+def _sfx_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """CLI SFX flags → resolve_config kwargs (issue 203).
+
+    Stored-run overrides for the finalize-time SFX pass: absent (None)
+    means inherit the stored manifest value (fresh creates take the
+    backend preset / SfxConfig defaults). Every read goes through
+    getattr + `is_provided` so hand-built namespaces resolve to absent,
+    never to a value. `--sfx-workers` defaults to None (not 1) so an
+    absent flag stays absent on updates instead of clobbering a
+    stored 2 back to 1.
+    """
+    overrides: dict[str, Any] = {}
+    backend = getattr(args, "sfx_backend", None)
+    if is_provided(backend):
+        overrides["sfx_backend"] = backend
+    device = getattr(args, "sfx_device", None)
+    if is_provided(device):
+        overrides["sfx_device"] = device
+    model_size = getattr(args, "sfx_model_size", None)
+    if is_provided(model_size):
+        overrides["sfx_model_size"] = model_size
+    caption = getattr(args, "sfx_caption", None)
+    if is_provided(caption):
+        overrides["sfx_caption"] = caption
+    workers = getattr(args, "sfx_workers", None)
+    if is_provided(workers):
+        overrides["sfx_workers"] = workers
+    return overrides
+
+
 def resolve_generate_skips(args: argparse.Namespace) -> dict[str, bool]:
     """Generate-only skip flags → canonical skip tuple (non-persistent).
 

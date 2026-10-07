@@ -58,7 +58,9 @@ def _configure_namespace(name: str, **overrides: object) -> argparse.Namespace:
         "sfx_caption": None,
         "sfx_device": None,
         "sfx_model_size": None,
-        "sfx_workers": 1,
+        # Parser-faithful: --sfx-workers defaults to None (absent), so an
+        # omitted flag never clobbers a stored value on updates (issue 203).
+        "sfx_workers": None,
         "verbose": False,
         "no_color": True,
     }

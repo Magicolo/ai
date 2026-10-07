@@ -529,8 +529,9 @@ class FinalizeOptions:
     (defaults 1/1 — ship at source resolution and frame count).
 
     Encode fields (`crf`/`preset`, issues 050): the single vf encode
-    quality (defaults crf 15 + veryfast match the validated Comfy
-    `video_export.json` recipe and `augment.ffmpeg_encode_chunk`).
+    quality (defaults crf 30 + slow, `FINALIZE_CRF_DEFAULT`/
+    `FINALIZE_PRESET_DEFAULT` — compression; chunk intermediates keep
+    their own 15/veryfast via `augment.ffmpeg_encode_chunk`).
 
     Presentation fps (`presentation_fps`, slow-mo finalize): pins the
     shipped frame rate instead of the interpolate rule — 24fps x2 content
@@ -889,8 +890,8 @@ def finalize_run(
     segments ship at native quality by default (upscale=1/interpolate=1)
     and are lifted only when asked. One uniform knob rule (issue 190):
     an explicit scalar wins over `options`, `None` means "use the
-    `options` value" (which defaults to 1/1 multipliers, crf 15 +
-    veryfast, blend joints at 0.10 overlap). An explicit
+    `options` value" (which defaults to 1/1 multipliers, crf 30 +
+    slow, blend joints at 0.10 overlap). An explicit
     `overlap_fraction=0` behaves as a hard splice (the blend falls back
     to concat below the audibility floor).
 
@@ -1242,7 +1243,8 @@ def finalize_run(
         # parallel streams — Thread-A one interleaved upscale→interp
         # pass on the 2060 (RIFE fits the llama-share budget) and
         # Thread-B deferred music then the SFX bed on the 4060.
-        # Partial legs keep the legacy all-or-nothing flow (unchanged).
+        # Partial legs fail loud in `_do_model_pass` (issue 215) instead
+        # of taking the legacy all-or-nothing flow.
         both_legs = (
             resolved_weights is not None
             and _interp_leg_path(resolved_weights, effective_interp_backend) is not None
@@ -1350,9 +1352,9 @@ def finalize_run(
 
         def _do_model_pass() -> None:
             nonlocal tensor_intermediate
-            # Legacy flow (partial legs, or tensor path without the
-            # phased split): the whole pass runs here, exactly as before.
-            # The extra conjuncts repeat the `tensor_path` contract for
+            # Full legs take the durable sidecar below; partial legs fail
+            # loud (issue 215, never the unbounded legacy flow). The extra
+            # conjuncts repeat the `tensor_path` contract for
             # the type checker (True already implies both); they never
             # change the branch outcome.
             if tensor_path and resolved_weights is not None and tensor_devices:
@@ -1389,21 +1391,27 @@ def finalize_run(
                         progress=branch_progress,
                     )
                 else:
-                    # Partial legs keep the legacy all-or-nothing tmpdir
-                    # flow (unchanged behavior for interp-only/ESRGAN-only).
-                    from voyage.augment import run_finalize_model_pass
-
-                    tensor_intermediate, _ = run_finalize_model_pass(
-                        [segment / "video.mp4" for segment in usable],
-                        resolved_weights,
-                        source_fps=source_fps,
-                        upscale_factor=effective_upscale,
-                        multiplier=effective_interpolate,
-                        interp_backend=effective_interp_backend,
-                        crf=effective_crf,
-                        preset=effective_preset,
-                        work_dir=model_work,
-                        devices=tensor_devices,
+                    # Partial legs (issue 215): exactly one of the interp
+                    # leg / ESRGAN leg resolved, so the durable sidecar
+                    # (which keys ledgers on both legs) cannot take this
+                    # run — and the legacy all-at-once flow would decode
+                    # every segment to PNGs and load every tensor at once
+                    # (~400 GB staging / TB-scale tensors at 256 segments).
+                    # Fail loud instead of OOMing: provision the missing
+                    # leg, or set upscale=1/interpolate=1 for the bounded
+                    # ffmpeg fallback.
+                    missing_legs: list[str] = []
+                    if _interp_leg_path(resolved_weights, effective_interp_backend) is None:
+                        missing_legs.append(f"{effective_interp_backend} interp weights")
+                    if resolved_weights.realesrgan is None:
+                        missing_legs.append("realesrgan weights")
+                    raise MediaError(
+                        "partial augment stack (missing: "
+                        + ", ".join(missing_legs)
+                        + ") cannot take the durable model pass (it keys ledgers "
+                        "on both legs) and the legacy all-at-once flow is "
+                        "unbounded — provision the missing leg or set "
+                        "upscale=1/interpolate=1 for the bounded ffmpeg fallback"
                     )
             if tensor_intermediate is not None:
                 final_stages.update(_model_pass_stage_rows(model_pass_timings, model_start))

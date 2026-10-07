@@ -44,6 +44,36 @@ Repro: read the two doc paragraphs, then `model_pass_devices(devices=("cuda:0","
   `augment.py:14-18` line ref (actual contract now at `augment.py:19-22,514+`); same
   inversion appears in `docs/SFX.md:146` run.sh sentence — update together.
 
-## Log
+## Evaluation (2026-10-07)
 
-- 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+Claim CONFIRMED live. Code side: `voyage/augment.py:18-26` module
+docstring pins model-pass to cuda:1 / SFX to cuda:0;
+`model_pass_devices` (`:514-531`), `upscale_pass_devices` (`:534-550`),
+`interp_pass_devices` (`:553-571`) all return
+`(AUGMENT_DEVICE_SECONDARY,)` = cuda:1 on 2-GPU; every registry CUDA
+row pairs `sfx_device="cuda:0"` (`voyage/config.py:158,176,199+`,
+ltxv/causvid/ltx25/ltx23); SFX worker default is cuda:0
+(`voyage/workers/sfx_mmaudio.py:51` — filed ref `:40` had drifted).
+Docs side: `docs/SFX.md:138-140` and `docs/ARCHITECTURE.md:73-75`
+both had the pairing backwards, with stale `augment.py:14-18` refs.
+The `SFX.md:146` run.sh sentence was stale a second way: it cited
+`scripts/run.sh:69-70` with a `ltxv|causvid|acestep|mmaudio` list and
+`[video]`/`[audio]`/`[sfx]` section syntax — `run.sh` actually sniffs
+the stored manifest backend (video/audio/sfx + director), selects
+`voyage-ltx:latest` for ltx25/ltx23 and `voyage-video:latest` otherwise
+(`Voyage/scripts/run.sh:106-196`), and the `_require_cuda_stack` ref
+had moved to `voyage/cli_planning.py:183`.
+
+## Progress log
+
+- 2026-10-07: rewrote both CUDA-pairing paragraphs (devices swapped,
+  refs corrected to `augment.py:18-26` + `:514-571` +
+  `config.py:158,176,199+` + `sfx_mmaudio.py:51`); rewrote the run.sh
+  sentence (manifest sniff, ltx image split, llama-director CUDA need,
+  explicit-env-wins; ref `cli_planning.py:183`). No code touched.
+
+## Resolution (2026-10-07)
+
+RESOLVED docs-only. Files: `Voyage/docs/SFX.md`, `Voyage/docs/ARCHITECTURE.md`.
+Verify: `grep -n "Video-augment chunks" Voyage/docs/SFX.md Voyage/docs/ARCHITECTURE.md`
+→ cuda:1/cuda:0 everywhere; code refs match live lines above.

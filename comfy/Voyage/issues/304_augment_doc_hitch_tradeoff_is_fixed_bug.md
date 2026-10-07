@@ -38,6 +38,25 @@ Repro: `chunk_windows(64, 32)` yields overlapping `(start,count)`; per-chunk
   legacy-lossy exception (code preserves it); cite `interpolated_chunk_frame_count`/
   `chunk_windows`.
 
-## Log
+## Evaluation (2026-10-07)
 
-- 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+Claim CONFIRMED live. `voyage/augment.py:136-158`
+(`interpolated_chunk_frame_count`: "no boundary pair is skipped") +
+`:161-187` (`chunk_windows`: stride `size - 1`, exact unchunked
+`(n-1)*m+1` total) implement the 2026-10-07 overlap fix; the filed refs
+(`:136-183`) still cover both functions. `docs/AUGMENT.md:104-108`
+verbatim described the retired lossy tradeoff. `size == 1` legacy
+exception confirmed in code (`:146-148,174`) and preserved in the fix.
+
+## Progress log
+
+- 2026-10-07: rewrote the paragraph to overlapping-windows + exact
+  totals + `size == 1` legacy-lossy exception, citing
+  `interpolated_chunk_frame_count` (`:136-158`) / `chunk_windows`
+  (`:161-187`). No code touched.
+
+## Resolution (2026-10-07)
+
+RESOLVED docs-only. File: `Voyage/docs/AUGMENT.md`.
+Verify: `grep -n "tiny hitch\|NOT sum" Voyage/docs/AUGMENT.md` → no hits;
+chunk size now documented as memory-vs-throughput only.

@@ -45,3 +45,46 @@ durations — gap grows linearly.
 
 ## Log
 - Track D sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07, live re-probe)
+- **Confirmed (with the reviewer's arithmetic-only caveat — no overclaim).**
+  `voyage/media_audio.py:518-546` (`_segment_timeline`) walks manifest
+  `frames / fps`; `voyage/sfx_finalize.py:248-313` (`segment_sfx_bounds`)
+  walked probed container `duration` first. The ~128 ms worst case was
+  not re-measured live (no GPU media run per mandate); it stands as the
+  filed arithmetic bound (0.5 ms/segment x 256), inside the 0.6 s gate —
+  the fix removes the systematic component rather than chasing the
+  measurement.
+- What WAS measured: pre-fix, a manifest holding `frames=96 @24fps` with
+  a skewed container duration produced probe-clock bounds; post-fix, the
+  same fixture produces exactly `96/24` and never spawns the probe
+  (probe monkeypatched to raise — pinned by test).
+
+## Progress log (2026-10-07)
+- `segment_sfx_bounds` now reads manifest `metrics.frames / fps` first
+  (same frames/fps clock as `_segment_timeline`; same tolerant read shape
+  — unreadable/torn manifests degrade to `{}` and fall through), probe
+  (container duration, then video `nb_frames / fps`) is fallback only.
+  Single timeline owner; legacy/torn-manifest runs behave byte-identically
+  to before (probe path untouched).
+- Added pure `sfx_timeline_drift_seconds(manifest_bounds, probed_bounds)`
+  → worst absolute end-time skew (length mismatch raises; empty walks
+  agree at 0.0) — the quantity the uniform rescale cannot correct and
+  the 0.6 s gate absorbs.
+- Tests in `tests/test_sfx_finalize.py`:
+  `test_sfx_bounds_prefer_manifest_frames_over_probe` (probe forbidden),
+  `test_sfx_bounds_fall_back_to_probe_without_manifest_frames`
+  (`frames: 0` legacy dir still probes), `test_sfx_timeline_drift_seconds_measures_worst_skew`.
+- Verification (in-container `voyage:latest`): ruff + format + mypy
+  clean on `voyage/sfx_finalize.py`; all bounds neighbors green
+  (`test_issue_191_sfx_bounds_streams`, `test_sfx_timeline_union`,
+  `test_fake_bed_end_to_end_over_junctions` inside `test_sfx_finalize`).
+- One-time upgrade note: ledgers planned under probe-clock durations can
+  miss the 1e-6 request-identity tolerance once (re-render one pass);
+  new lines carry manifest-clock durations and hit thereafter.
+
+## Resolution (2026-10-07)
+- **RESOLVED.** SFX bounds derive from the manifest frames/fps walk with
+  probe fallback only, plus a drift metric for the residual. Files:
+  `voyage/sfx_finalize.py`, `tests/test_sfx_finalize.py`. No commit
+  (per mandate).

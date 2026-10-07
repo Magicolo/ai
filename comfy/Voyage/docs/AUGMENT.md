@@ -101,12 +101,18 @@ Examples (live `plan_augmentation`):
 - `AUGMENT_DEVICE_PRIMARY = "cuda:0"`,
   `AUGMENT_DEVICE_SECONDARY = "cuda:1"`.
 
-`augment_plan` tiles the timeline into chunk windows with per-chunk
-output counts and round-robin devices. Chunk outputs do NOT sum to the
-unchunked `(n−1)*m+1` total — each chunk interpolates independently, so
-one boundary pair per chunk joint is skipped (a tiny hitch per 32
-frames; raise the chunk size for fewer hitches, lower it for less
-memory). `run_augment_chunks` owns the serial-vs-`ThreadPoolExecutor(2)`
+`augment_plan` tiles the timeline into overlapping chunk windows with
+per-chunk output counts and round-robin devices. Consecutive windows
+share exactly one source frame (stride `size − 1` in
+`chunk_windows`, `voyage/augment.py:161-187`), and every chunk after
+the first drops its duplicated boundary frame
+(`interpolated_chunk_frame_count`, `voyage/augment.py:136-158`) — so
+chunked output sums to the exact unchunked `(n−1)*m+1` total with no
+skipped boundary pair and no intra-segment hitch. Chunk size now trades
+memory against throughput only (raise for fewer chunks, lower for less
+memory). Exception: `size == 1` windows cannot overlap, so they keep the
+legacy stride-1 tiling, still lossy versus unchunked but byte-identical
+to before. `run_augment_chunks` owns the serial-vs-`ThreadPoolExecutor(2)`
 switch.
 
 Parallelism contract (two streams on a 2-GPU box, sequential

@@ -46,6 +46,11 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     sfx_will_run = not getattr(args, "no_sfx", False) and sfx_backend != "fake"
     dual_raw = getattr(args, "sfx_dual_pan", None)
     dual_pan = bool(dual_raw) if dual_raw is not None else bool(config.sfx.dual_pan)
+    # Workers/caption fall back to the stored run config the same way
+    # backend/device/model_size already do (issue 203): `generate` passes
+    # None sentinels so the manifest rules; explicit flags win.
+    sfx_workers_value = getattr(args, "sfx_workers", None) or config.sfx.num_workers
+    sfx_caption_value = getattr(args, "sfx_caption", None) or config.sfx.sfx_caption
     console = get_console(args)
     # Shared video-stage kwargs (both finalize paths take the same box):
     # finalize keeps the generation resolution (no downscale) — the run
@@ -84,9 +89,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             models_dir=config.sfx.models_dir,
             device=getattr(args, "sfx_device", None) or config.sfx.device,
             model_size=getattr(args, "sfx_model_size", None) or config.sfx.model_size,
-            num_workers=getattr(args, "sfx_workers", 1),
+            num_workers=sfx_workers_value,
             fps=config.video.fps,
-            caption_override=getattr(args, "sfx_caption", None),
+            caption_override=sfx_caption_value,
             dual_pan=dual_pan,
         )
         if sfx_will_run
@@ -120,9 +125,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 seed=config.seed,
                 sample_rate=config.audio.sample_rate,
                 channels=config.audio.channels,
-                num_workers=getattr(args, "sfx_workers", 1),
+                num_workers=sfx_workers_value,
                 fps=config.video.fps,
-                caption_override=getattr(args, "sfx_caption", None),
+                caption_override=sfx_caption_value,
                 progress=console,
                 dual_pan=dual_pan,
             )

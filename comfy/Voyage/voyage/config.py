@@ -519,7 +519,11 @@ class SfxConfig(BaseModel):
     ladder (slice 2c) locks the deployed value. `dual_pan` renders the
     spatialized pair (two same-caption seeds, ±75% constant-power pan,
     mixed with music to stereo); the second channel completes a legacy
-    single-bed run instead of rebuilding it.
+    single-bed run instead of rebuilding it. `sfx_caption` pins one
+    caption for the whole timeline (whole-timeline repair for runs
+    committed before SFX captions existed; None = per-window director
+    captions). `num_workers` shards small_44k across cuda:0+cuda:1
+    when 2 (needs 2 visible GPUs, fails fast otherwise).
     """
 
     backend: SfxBackendName = "fake"
@@ -527,6 +531,20 @@ class SfxConfig(BaseModel):
     models_dir: str = "/models"
     model_size: SfxModelSize = "large_44k_v2"
     dual_pan: bool = True
+    sfx_caption: str | None = None
+    num_workers: int = 1
+
+    @field_validator("num_workers", mode="before")
+    @classmethod
+    def workers_pair(cls, value: object) -> object:
+        # Shard vocabulary (mirrors the worker gate in sfx_finalize):
+        # 1 = one worker, 2 = shard small_44k across cuda:0+cuda:1.
+        # `before` on purpose: an `after` validator sees the parsed int,
+        # so a stored `true` would coerce to 1 silently — a bool is never
+        # a worker count, reject it before parsing.
+        if isinstance(value, bool) or value not in (1, 2):
+            raise ValueError(f"sfx workers must be 1 or 2 (got {value!r})")
+        return value
 
 
 class AugmentConfig(BaseModel):
@@ -770,6 +788,11 @@ def resolve_config(
     interpolate: int | None | UnsetType = Unset,
     presentation_fps: int | None | UnsetType = Unset,
     interp_backend: InterpBackendName | None | UnsetType = Unset,
+    sfx_backend: SfxBackendName | None | UnsetType = Unset,
+    sfx_device: str | None | UnsetType = Unset,
+    sfx_model_size: SfxModelSize | None | UnsetType = Unset,
+    sfx_caption: str | None | UnsetType = Unset,
+    sfx_workers: int | None | UnsetType = Unset,
     sfx_dual_pan: bool | None | UnsetType = Unset,
 ) -> ProjectConfig:
     """Single configuration resolver (issue 022): backend preset,
@@ -844,6 +867,16 @@ def resolve_config(
         video = VideoConfig(**{**video.model_dump(), "prompt_enhance": prompt_enhance})
     if is_provided(sfx_dual_pan):
         sfx = SfxConfig(**{**sfx.model_dump(), "dual_pan": sfx_dual_pan})
+    if is_provided(sfx_backend):
+        sfx = SfxConfig(**{**sfx.model_dump(), "backend": sfx_backend})
+    if is_provided(sfx_device):
+        sfx = SfxConfig(**{**sfx.model_dump(), "device": sfx_device})
+    if is_provided(sfx_model_size):
+        sfx = SfxConfig(**{**sfx.model_dump(), "model_size": sfx_model_size})
+    if is_provided(sfx_caption):
+        sfx = SfxConfig(**{**sfx.model_dump(), "sfx_caption": sfx_caption})
+    if is_provided(sfx_workers):
+        sfx = SfxConfig(**{**sfx.model_dump(), "num_workers": sfx_workers})
     augment = config.augment
     if (
         is_provided(upscale)

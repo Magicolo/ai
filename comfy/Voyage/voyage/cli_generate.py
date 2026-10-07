@@ -155,7 +155,10 @@ def _finalize_run_dir(
             sfx_caption=None,
             sfx_device=None,
             sfx_model_size=None,
-            sfx_workers=1,
+            # None = stored run config rules (`cmd_finalize` falls back to
+            # config.sfx.* — same sentinel pattern as the augment
+            # multipliers above and sfx_dual_pan below).
+            sfx_workers=None,
             sfx_dual_pan=None,
             upscale=1 if skips["force_upscale_1"] else None,
             interpolate=1 if skips["force_interpolate_1"] else None,

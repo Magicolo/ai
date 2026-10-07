@@ -45,6 +45,31 @@ As above.
   validate_video → manifest.json → DONE`; layout → `manifest.json` + `video.mp4` +
   `recovery.pt` (GPU) + `DONE`; move takes-ledger/SFX wording to finalize-only.
 
-## Log
+## Evaluation (2026-10-07)
 
-- 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+Claim CONFIRMED live. `voyage/supervisor.py:2359-2397` (`_cover_audio`:
+"No `audio.wav` is ever written at commit … video-only commit");
+`voyage/segment_manifest.py:41-48`
+(`REQUIRED_CHECKSUM_ARTIFACTS = ("video.mp4",)`, audio no longer
+required); `voyage/media_audio.py:451-461` (`_verify_segment`:
+"video-only … no A/V gate"); `voyage/paths.py:32-35` (manifest
+filenames — filed refs `:32-33` confirmed, doc's old `:29/:31/:32`
+had drifted). The §50 "GPU time-sharing" paragraph (`ARCHITECTURE.md:52-58`)
+already stated video-only commit and needed no change.
+
+## Progress log
+
+- 2026-10-07: rewrote pipeline → director decide → video
+  `generate_blocks` → video-only cover → `validate_video` →
+  `manifest.json` → `DONE` (with live code refs); rewrote layout →
+  `manifest.json` + `video.mp4` + `recovery.pt` (GPU) + `DONE`, takes
+  ledger/SFX as finalize-only, `sha256.json`/`final-sfx.mp4` retired to
+  legacy-fallback/absent; fixed `paths.py` line refs (`:32/:34/:35`).
+  No code touched.
+
+## Resolution (2026-10-07)
+
+RESOLVED docs-only. File: `Voyage/docs/ARCHITECTURE.md`.
+Verify: `grep -n "audio.wav\|validate_audio\|final-sfx.mp4" Voyage/docs/ARCHITECTURE.md`
+→ only the "no `audio.wav` ever written" + legacy-fallback mentions;
+no per-segment audio, no commit-time A/V gate remains.

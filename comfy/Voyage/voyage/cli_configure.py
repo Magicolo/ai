@@ -25,6 +25,7 @@ from voyage.cli_core import (
     _augment_overrides,
     _prompt_enhance_overrides,
     _sfx_dual_pan_overrides,
+    _sfx_overrides,
     get_console,
 )
 from voyage.cli_paths import _check_run_id, output_root
@@ -298,6 +299,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 video_caption=getattr(args, "video_caption", None),
                 **_prompt_enhance_overrides(args),
                 **_sfx_dual_pan_overrides(args),
+                **_sfx_overrides(args),
                 **_augment_overrides(args),
             )
         except (ValidationError, ValueError) as exc:
@@ -349,6 +351,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
                 video_caption=getattr(args, "video_caption", None),
                 **_prompt_enhance_overrides(args),
                 **_sfx_dual_pan_overrides(args),
+                **_sfx_overrides(args),
                 **_augment_overrides(args),
             )
             if is_provided(getattr(args, "style", None)):

@@ -3097,10 +3097,12 @@ Capture stderr and include the relevant last lines in `MediaError`.
 > As-built (batch-11-2026-09-30, issue 166): both pinned augment weights now strict-load and run end to end — Real-ESRGAN anime-6B upscales and FILM interpolates (fp16 on CUDA, fp32 on CPU, OOM-halving preserved) — so the augmentation floors are executable; the remaining step is wiring finalize weights→loader, plus a live-GPU fp16 numeric and quality eyeball the next time a CUDA box is available.
 > As-built (batch-13-2026-10-01, issue 166): finalize resolves its model pass through `resolve_augment_weights(config.video.models_dir)` — each leg is a loader-ready path or `None` when weights are absent, and absent legs keep the ffmpeg fallback (default-off unless provisioned); the registry-to-loader seam is production code.
 
-The final output is produced only by:
+The final output is produced only by (two-verb CLI — `finalize` is a
+library of `generate`, not a verb):
 
 ```bash
-voyage finalize --run RUN_DIR --output final.mp4
+voyage configure NAME [...]   # write/update output/NAME/manifest.json
+voyage generate NAME          # render the plan, then validate + finalize to final.mp4
 ```
 
 Finalizer steps:
@@ -3112,9 +3114,13 @@ Finalizer steps:
 5. validate monotonic frame ranges;
 6. validate audio/video duration alignment;
 7. create a concat manifest;
-8. attempt a stream-copy concat when codec/container compatibility is guaranteed;
-9. otherwise perform exactly one final encode;
-10. scale/pad to exact 768×432 if needed;
+8. encode the timeline with libx264 at the effective crf/preset —
+   every publish encodes, even native geometry (the stream-copy fast
+   path is retired for compression; `fast_path` metric reads False);
+9. single encode only — no intermediate per-segment parts
+   (concat-demuxer + vf over the originals);
+10. scale/pad to the presentation box from `plan_augmentation`
+    (native geometry ships unscaled);
 11. mux audio;
 12. validate final media;
 13. atomically publish final path.
@@ -3125,7 +3131,7 @@ Finalizer steps:
 > enforce the same 0.6 s A/V budget through the shared `av_drift_seconds`
 > helper — read-only error strings on the validate side.
 > As-built (§56-staging-2026-09-30, issue 102): staging uses `TemporaryDirectory(prefix="voyage-final-", dir=run_dir)` — preflighted filesystem, greppable names.
-> As-built (§56-single-pass-finalize-2026-09-30, issue 050): single concat-demuxer + vf libx264 pass over originals (`-preset`/`-crf` from FinalizeOptions, defaults veryfast/15); no intermediate parts; native runs stream-copy; every finalize appends `finalize_completed` (`parts_encode_ms` schema-stable 0.0 + `audio_blend_ms` + `final_encode_ms` + effective crf/preset/geometry) to `logs/metrics.jsonl`.
+> As-built (§56-single-pass-finalize-2026-09-30, issue 050 — pre-compression, superseded by finalize-compression-2026-10-06 below): single concat-demuxer + vf libx264 pass over originals (`-preset`/`-crf` from FinalizeOptions, then-defaults veryfast/15); no intermediate parts; native runs stream-copied; every finalize appends `finalize_completed` (`parts_encode_ms` schema-stable 0.0 + `audio_blend_ms` + `final_encode_ms` + effective crf/preset/geometry) to `logs/metrics.jsonl`.
 > As-built (finalize-compression-2026-10-06): the native branch no longer stream-copies — every publish encodes libx264 (`-preset slow -crf 30` defaults, AAC `-b:a 128k`), so a default finalize shrinks segments ~60× (measured 1024×576@24 line-art: ~20MB/min source → 6.1MB/min final, SSIM 0.967 / PSNR ~37dB vs source, ~10× realtime CPU); the stream-copy fast path is dead (gate still computes `native`, `fast_path` metric reads False).
 
 Never mutate the source segment files during finalization.

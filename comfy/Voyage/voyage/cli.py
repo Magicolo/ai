@@ -175,10 +175,11 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sfx-workers",
         type=int,
-        default=1,
+        default=None,
         choices=[1, 2],
-        help="1 = one worker (default); 2 = shard small_44k across cuda:0+cuda:1 "
-        "(needs 2 visible GPUs, fails fast otherwise)",
+        help="SFX worker override: 1 = one worker; 2 = shard small_44k across "
+        "cuda:0+cuda:1 (needs 2 visible GPUs, fails fast otherwise; "
+        "default: [sfx] num_workers, 1)",
     )
     parser.add_argument(
         "--sfx-dual-pan",

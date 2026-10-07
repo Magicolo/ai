@@ -135,19 +135,24 @@ instead of fetching.
 
 ## CUDA pairing
 
-Video-augment chunks run on `cuda:0` while the MMAudio SFX stack (when
-present) renders on `cuda:1` — the two stages share nothing but chunk
+Video-augment chunks run on `cuda:1` while the MMAudio SFX stack (when
+present) renders on `cuda:0` — the two stages share nothing but chunk
 boundaries, so a 2-GPU box runs them side by side and a 1-GPU box runs
-serially on `cuda:0` (`voyage/augment.py:14-18`). The SFX worker
-defaults to `cuda:0` (`voyage/workers/sfx_mmaudio.py:40`); the
+serially on `cuda:0` (`voyage/augment.py:18-26` contract,
+`model_pass_devices`/`upscale_pass_devices`/`interp_pass_devices` at
+`voyage/augment.py:514-571`; all registry CUDA rows pair
+`sfx_device="cuda:0"`, `voyage/config.py:158,176,199+`). The SFX worker
+defaults to `cuda:0` (`voyage/workers/sfx_mmaudio.py:51`); the
 `--sfx-device` override and `[sfx] device` TOML move it.
 
-`run.sh` selects `voyage-video:latest` + `--gpus all` for any CUDA
-backend in `[video]`/`[audio]`/`[sfx]` (`scripts/run.sh:69-70`,
-`ltxv|causvid|acestep|mmaudio`); `fake`/`fake`/`fake` stays
-slim. A CUDA backend in an image without torch fails fast with the
-`voyage-video` pointer (`_require_cuda_stack`, `voyage/cli.py:1386`),
-never a late worker error.
+`run.sh` sniffs the stored manifest backend (video/audio/sfx plus the
+director backend) and selects `voyage-ltx:latest` for `ltx25`/`ltx23`,
+`voyage-video:latest` + `--gpus all` for other CUDA backends
+(`ltxv|causvid|acestep|mmaudio`, or the `llama` director sidecar alone);
+all-`fake` stays slim, and explicit `VOYAGE_IMAGE`/`VOYAGE_GPUS` always
+win. A CUDA backend in an image without torch fails fast with the
+`voyage-video` pointer (`_require_cuda_stack`,
+`voyage/cli_planning.py:183`), never a late worker error.
 
 ## Failure modes
 
