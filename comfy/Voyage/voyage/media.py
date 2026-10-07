@@ -1502,11 +1502,33 @@ def finalize_run(
                     cached_wav, cached_seconds = cached_bed
                     bed = tmpdir / "sfx_bed.wav"
                     shutil.copyfile(cached_wav, bed)
-                    bed_outcome["bed"] = bed
-                    bed_outcome["source_seconds"] = cached_seconds
+                    cached_duration = 0.0
+                    try:
+                        cached_duration = _audio_duration_seconds(bed)
+                        cache_usable = (
+                            abs(cached_duration - cached_seconds)
+                            <= AV_ALIGNMENT_TOLERANCE_SECONDS
+                        )
+                    except MediaError:
+                        cache_usable = False
+                    if cache_usable:
+                        bed_outcome["bed"] = bed
+                        bed_outcome["source_seconds"] = cached_seconds
+                        if bed_view is not None:
+                            bed_view.info(
+                                f"sfx: cache hit — reusing last bed ({len(usable)} segments)"
+                            )
+                        return
+                    # Boba hardening: the dub stretches by shipped over
+                    # source_seconds, so a stale sidecar value retimes the
+                    # bed to the wrong length and fails the mix check.
+                    # A cached wav that disagrees with its sidecar is a
+                    # miss — fall through and re-render.
                     if bed_view is not None:
-                        bed_view.info(f"sfx: cache hit — reusing last bed ({len(usable)} segments)")
-                    return
+                        bed_view.info(
+                            "sfx: cached bed disagrees with its sidecar "
+                            f"({cached_duration:.3f}s vs {cached_seconds:.3f}s) — re-rendering"
+                        )
                 proxy_ref, source_seconds = build_proxy_reference(run_dir, usable, tmpdir)
                 bounds = segment_sfx_bounds(
                     run_dir,

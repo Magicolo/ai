@@ -1011,11 +1011,19 @@ def build_proxy_reference(run_dir: Path, usable: list[Path], tmpdir: Path) -> tu
 
 
 def atempo_chain_for_stretch(stretch: float) -> str | None:
-    """Build an atempo filter chain for a uniform retime factor (pure).
+    """Build an atempo filter chain for a duration ratio (pure).
+
+    `stretch` is a DURATION ratio (shipped/source, e.g. the staged video
+    over the source timeline): values below 1.0 mean the target is
+    shorter, so the bed must play faster. atempo takes a TEMPO (speed)
+    ratio — the inverse of a duration ratio — so the emitted chain
+    multiplies back to ``1/stretch`` (boba fix: passing the duration
+    ratio straight through played the bed slower instead of faster,
+    stretching a 39.70s bed to 40.66s and failing the dub mix check).
 
     Returns None when `stretch` is identity within float noise (the dub
     then skips the stretch leg byte-identically). Otherwise decomposes
-    the factor into atempo filters each inside the [0.5, 2.0] accepted
+    the tempo into atempo filters each inside the [0.5, 2.0] accepted
     range (halving/doubling the remainder until it fits). Non-finite or
     non-positive factors fail loud — a bogus stretch must never
     silently ship unstretched audio.
@@ -1024,8 +1032,9 @@ def atempo_chain_for_stretch(stretch: float) -> str | None:
         raise MediaError(f"sfx stretch needs a positive factor (got {stretch})")
     if abs(stretch - 1.0) <= BOUNDS_RESCALE_IDENTITY_TOLERANCE:
         return None
+    tempo = 1.0 / stretch
     factors: list[float] = []
-    remaining = stretch
+    remaining = tempo
     while remaining > ATEMPO_MAX_FACTOR:
         factors.append(ATEMPO_MAX_FACTOR)
         remaining /= ATEMPO_MAX_FACTOR

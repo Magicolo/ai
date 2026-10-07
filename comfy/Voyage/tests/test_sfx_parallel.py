@@ -48,17 +48,25 @@ def test_atempo_identity_returns_none() -> None:
     assert atempo_chain_for_stretch(1.0 - 1e-9) is None
 
 
-def test_atempo_simple_speedup_chain() -> None:
-    assert atempo_chain_for_stretch(1.5) == "atempo=1.5"
-    assert atempo_chain_for_stretch(4.0) == "atempo=2.0,atempo=2.0"
+def test_atempo_duration_ratio_maps_to_inverse_tempo() -> None:
+    """The helper takes a DURATION ratio, atempo takes a TEMPO ratio.
+
+    Boba regression: shipped/source = 38.77/39.71 < 1 must speed the
+    bed UP (tempo > 1), not slow it down — the old pass-through
+    lengthened the bed to 40.66s and failed the dub mix check.
+    """
+    assert atempo_chain_for_stretch(0.5) == "atempo=2.0"
+    assert atempo_chain_for_stretch(1.5) == "atempo=0.666667"
+    assert atempo_chain_for_stretch(4.0) == "atempo=0.5,atempo=0.5"
 
 
-def test_atempo_slowdown_chain_stays_in_range() -> None:
-    chain = atempo_chain_for_stretch(0.1)
-    assert chain is not None
-    factors = [float(part.split("=")[1]) for part in chain.split(",")]
-    assert all(0.5 <= factor <= 2.0 for factor in factors)
-    assert _chain_product(chain) == pytest.approx(0.1)
+def test_atempo_chain_product_is_inverse_stretch() -> None:
+    for stretch in (0.1, 0.5, 0.9764, 1.5, 4.0, 10.0):
+        chain = atempo_chain_for_stretch(stretch)
+        assert chain is not None
+        factors = [float(part.split("=")[1]) for part in chain.split(",")]
+        assert all(0.5 <= factor <= 2.0 for factor in factors)
+        assert _chain_product(chain) == pytest.approx(1.0 / stretch)
 
 
 def test_atempo_rejects_bogus_factors() -> None:
@@ -330,6 +338,64 @@ def test_stretch_and_dub_identity_and_slowmo(tmp_path: Path) -> None:
     assert _media_duration(identity) == pytest.approx(4.0, abs=0.2)
     slowed = stretch_and_dub_sfx_bed(staged, bed, music, tmp_path / "dub2.mp4", 48000, 2, 2.0)
     assert _media_duration(slowed) == pytest.approx(4.0, abs=0.3)
+
+
+def _retime_tone(src: Path, dest: Path, stretch: float) -> None:
+    chain = atempo_chain_for_stretch(stretch)
+    assert chain is not None
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(src),
+            "-af",
+            chain,
+            "-c:a",
+            "pcm_s16le",
+            str(dest),
+        ],
+        check=True,
+    )
+
+
+def test_atempo_chain_retimes_to_stretch_direction(tmp_path: Path) -> None:
+    """A duration ratio below 1 must SHORTEN the audio through real ffmpeg.
+
+    Boba direction pin: stretch 0.8 on a 4s tone lands at ~3.2s. The
+    old pass-through semantics produced ~5.0s (tempo and duration
+    ratios confused) — this test fails under that mapping.
+    """
+    tone = tmp_path / "tone.wav"
+    _synth_tone(tone, 4.0)
+    shorter = tmp_path / "shorter.wav"
+    _retime_tone(tone, shorter, 0.8)
+    assert _media_duration(shorter) == pytest.approx(3.2, abs=0.2)
+    longer = tmp_path / "longer.wav"
+    _retime_tone(tone, longer, 1.25)
+    assert _media_duration(longer) == pytest.approx(5.0, abs=0.2)
+
+
+def test_stretch_and_dub_short_staged_speeds_bed_up(tmp_path: Path) -> None:
+    """Boba shape at small scale: staged shorter than source must dub clean.
+
+    staged 4.0s, music 4.0s, bed 4.0s, stretch 0.8 (shipped/source):
+    the bed retimes to ~3.2s, the mix stays music-length, the dub
+    lands at staged length. Under the old inverted mapping the bed
+    retimed to ~5.0s and the mix raised MediaError (drift 1.0 > 0.6).
+    """
+    staged = tmp_path / "staged.mp4"
+    _synth_clip(staged, 4.0)
+    music = tmp_path / "music.wav"
+    _synth_tone(music, 4.0)
+    bed = tmp_path / "bed.wav"
+    _synth_tone(bed, 4.0)
+    dubbed = stretch_and_dub_sfx_bed(staged, bed, music, tmp_path / "dub.mp4", 48000, 2, 0.8)
+    assert _media_duration(dubbed) == pytest.approx(4.0, abs=0.3)
 
 
 def test_stream_view_emit_never_self_deadlocks() -> None:
