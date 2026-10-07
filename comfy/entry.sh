@@ -73,7 +73,15 @@ if [ ! -f "$SETTINGS" ]; then
   echo '{"Comfy.LinkRenderMode":"Straight"}' > "$SETTINGS"
 fi
 
-python /comfy/main.py --listen 0.0.0.0 --port 8188 &
+# --disable-dynamic-vram (2026-10-06): avoids the comfy-aimdo 0.5.5 native
+# malloc_graph crash ("aimdo memory compile error" at
+# comfy/model_prefetch.py cleanup_malloc_graph) seen with torch 2.14.1+cu132 on
+# CUDA 13.2. Dynamic VRAM is what sets aimdo_enabled=True (main.py:304, auto-on
+# for torch>=2.8); disabling it falls back to estimate-based model loading and
+# keeps the malloc_graph path off while CUDA graphs stay available (unlike
+# --disable-comfy-compiler which also forces disable_cuda_graphs). Revisit when
+# comfy-aimdo ships a cu13/torch-2.14-compatible build.
+python /comfy/main.py --listen 0.0.0.0 --port 8188 --disable-dynamic-vram &
 PID_COMFY=$!
 
 python - << 'PY' &

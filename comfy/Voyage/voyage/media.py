@@ -1508,8 +1508,7 @@ def finalize_run(
                     try:
                         cached_duration = _audio_duration_seconds(bed)
                         cache_usable = (
-                            abs(cached_duration - cached_seconds)
-                            <= AV_ALIGNMENT_TOLERANCE_SECONDS
+                            abs(cached_duration - cached_seconds) <= AV_ALIGNMENT_TOLERANCE_SECONDS
                         )
                     except MediaError:
                         cache_usable = False
