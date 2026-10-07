@@ -319,6 +319,8 @@ def _poll_to_completion(
                         "on_chunk": _up_chunk,
                         "on_chunk_frames": _up_frames,
                     }
+                    if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
+                        upscale_kwargs["interp_multiplier"] = multiplier
                     if up_takes_segments:
                         upscale_kwargs["segment_ids"] = [segment_id]
                     upscale_result = upscale_poll_fn(run_dir, **upscale_kwargs)
@@ -464,6 +466,8 @@ def _poll_to_completion(
                 "on_chunk_frames": _joint_up_frames,
                 "sources": joint_sources,
             }
+            if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
+                joint_up_kwargs["interp_multiplier"] = multiplier
             if up_takes_segments:
                 joint_up_kwargs["segment_ids"] = [unit.segment_id for unit in joint_sources]
             joint_up_result = upscale_poll_fn(run_dir, **joint_up_kwargs)
@@ -603,6 +607,7 @@ def run_durable_model_pass(
     interp_device: str | None = None,
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
+    chunk_encode_fn: Callable[..., Any] | None = None,
     drain_fn: Callable[..., Any] | None = None,
     concat_fn: Callable[[list[Path], Path], Path] | None = None,
     assemble_fn: Callable[..., Any] | None = None,
@@ -621,6 +626,15 @@ def run_durable_model_pass(
     matching the legacy `run_finalize_model_pass` contract. Pollers that
     scan `run_dir` may also finish skipped (non-usable) segments — the
     drain below only consumes `usable`, in order.
+
+    Finalize-start cleanup: `sweep_chunk_mp4s` first encodes (+ records
+    + prunes PNGs) every fully-interpolated chunk still missing its
+    durable mp4 — one-time catch-up for runs rendered before per-chunk
+    mp4s existed, so their gigabytes of PNGs collapse to megabytes
+    before polling starts — then `prune_orphan_plan_dirs` GCs plan dirs
+    no current segment or joint references. `chunk_encode_fn`, when
+    given, replaces the production chunk-ffmpeg encode inside the sweep
+    (tests stub it); None (default) encodes for real.
 
     `timings` (optional out-param) records per-phase seconds plus chunk
     counts for the elapsed-time report: `upscale_poll_s`,
@@ -663,10 +677,26 @@ def run_durable_model_pass(
         raise TypeError(f"work_dir must be a Path (got {type(work_dir).__name__})")
     _ensure_model_pass_timings(timings)
     weights_key = weights_key_for(weights, interp_backend)
+    # Finalize-start cleanup (see docstring): collapse any pre-cleanup
+    # PNGs to durable chunk mp4s first, then GC orphan plan dirs — both
+    # are idempotent, so a kill between them converges on retry.
+    from voyage.augment_drain import prune_orphan_plan_dirs, sweep_chunk_mp4s
+
+    sweep_chunk_mp4s(run_dir, encode_fn=chunk_encode_fn)
     # Integer fps key shared by the pollers and the plan derivation below:
     # the hash formats it via str(), so float 24.0 vs int 24 would fork
     # plan dirs — one normalization keeps all three on the same dir.
     source_fps_key = int(round(source_fps))
+    prune_orphan_plan_dirs(
+        run_dir,
+        weights_key=weights_key,
+        out_width=out_width,
+        out_height=out_height,
+        out_fps=source_fps_key,
+        upscale_factor=upscale_factor,
+        crf=crf,
+        preset=preset,
+    )
     _poll_to_completion(
         run_dir,
         weights=weights,

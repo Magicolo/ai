@@ -22,11 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from voyage import paths
-from voyage.augment import chunk_frames_match_size, chunk_windows
+from voyage.augment import chunk_frames_match_size, chunk_windows, interpolated_frame_count
 from voyage.augment_sidecar import (
     STAGE_UPSCALED,
     ChunkKey,
     append_chunk_record,
+    chunk_mp4_complete,
     chunk_output_complete,
     find_upscaled_donor,
     load_chunk_ledger,
@@ -301,6 +302,7 @@ def upscale_poll_once(
     chunk_ids: list[int] | None = None,
     prune_partials: bool = True,
     sources: list[SegmentSource] | None = None,
+    interp_multiplier: int | None = None,
 ) -> UpscalePollResult:
     """Upscale every missing chunk of every committed segment (one pass).
 
@@ -323,13 +325,30 @@ def upscale_poll_once(
     When `chunk_ids` is given, only those chunk indexes are rendered by
     this call (parallel workers split disjoint index sets; unowned
     missing chunks count as skipped, never as this worker's `done`).
-    None (default) renders every missing chunk. `prune_partials`
+    None (default) renders every missing chunk.
+    `prune_partials`
     (default True) sweeps stale `.partial` dirs per plan dir; the
     parallel driver passes False (it prunes once upfront — a
     per-call sweep would rmtree the other worker's live partial).
+    `interp_multiplier`, when given, enables the durable-mp4 fast path:
+    chunks with an exact-key `chunk_mp4` record (built with this
+    multiplier, mirroring the interp poller's key) plus a non-empty
+    `chunk_NN.mp4` skip before any PNG gate — their PNG dirs were
+    pruned by design after the mp4 superseded them, so without this
+    they would re-render pointlessly. None (default) keeps the legacy
+    PNG-truth skip. Drivers pass the interp multiplier guarded by
+    `_accepts_keyword`, so older fakes without the param keep working.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
+    if interp_multiplier is not None and (
+        isinstance(interp_multiplier, bool)
+        or not isinstance(interp_multiplier, int)
+        or interp_multiplier < 1
+    ):
+        raise ValueError(
+            f"interp_multiplier must be an int >= 1 or None (got {interp_multiplier!r})"
+        )
     decode = decode_fn or _default_decode_fn
     upscale = upscale_fn
     try:
@@ -377,6 +396,39 @@ def upscale_poll_once(
         records = load_chunk_ledger(ledger_path)
         windows = list(chunk_windows(source.total_frames, chunk_frames))
         indexes = list(range(len(windows)))
+        # Durable-mp4 fast path (see `interp_multiplier`): mp4-complete
+        # chunks skip before any PNG gate — their PNG dirs were pruned by
+        # design, so without this they would rejoin missing and
+        # re-render pointlessly on every poll.
+        if interp_multiplier is not None:
+            mp4_done = {
+                index
+                for index, (start, count) in enumerate(windows)
+                if chunk_mp4_complete(
+                    plan_dir,
+                    records,
+                    ChunkKey(
+                        chunk_index=index,
+                        start_frame=start,
+                        source_frames=count,
+                        expected_frames=interpolated_frame_count(count, interp_multiplier),
+                        upscale_factor=upscale_factor,
+                        multiplier=interp_multiplier,
+                        crf=crf,
+                        preset=preset,
+                        source_key=source.source_key,
+                        weights_key=weights_key,
+                        out_width=out_width,
+                        out_height=out_height,
+                        out_fps=out_fps * interp_multiplier,
+                        chunk_frames=chunk_frames,
+                    ),
+                )
+            }
+            if mp4_done:
+                chunks_skipped += len(mp4_done)
+                frames_skipped += sum(windows[index][1] for index in mp4_done)
+                indexes = [index for index in indexes if index not in mp4_done]
         ledger_missing = missing_chunk_indexes(records, indexes, stage=UPSCALE_STAGE)
         # Exact-window guard (see interp poller): a re-tiled plan dir
         # must re-render, never skip wrong outputs.

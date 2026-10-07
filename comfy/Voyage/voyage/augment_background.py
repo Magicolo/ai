@@ -369,6 +369,7 @@ def prewarm_once(
     *,
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
+    chunk_encode_fn: Callable[..., Any] | None = None,
     should_stop: Callable[[], bool] | None = None,
     joint_interp_fn: Callable[..., Any] | None = None,
     on_upscale_chunk: Callable[[str, int, int], None] | None = None,
@@ -385,7 +386,12 @@ def prewarm_once(
     (mirrors the finalize driver). Direct callers keep the default
     `include_interp=True` path; `include_interp=False` runs the upscale
     leg only (upscale-only by design — never a skip, never interp
-    progress).
+    progress). `chunk_encode_fn`, when given, replaces the production
+    chunk-ffmpeg encode inside the interp pollers' per-chunk
+    durable-mp4 step (tests stub it); forwarded only to pollers
+    accepting the param, and only when not None (a `functools.partial`
+    worker keeps showing bound kwargs in its signature, so an
+    unconditional forward would clobber a partial-bound stub).
 
     Returns None when pre-warm is moot (see `resolve_background_plan`)
     or when `should_stop` fires after a segment's upscale (lets `stop()`
@@ -526,6 +532,8 @@ def prewarm_once(
             "on_chunk": on_upscale_chunk,
             "on_chunk_frames": on_upscale_frames,
         }
+        if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
+            up_kwargs["interp_multiplier"] = plan.multiplier
         if up_takes_segments:
             up_kwargs["segment_ids"] = [segment_id]
         up_started = time.monotonic()
@@ -554,6 +562,8 @@ def prewarm_once(
                 "on_chunk": on_interp_chunk,
                 "on_chunk_frames": on_interp_frames,
             }
+            if chunk_encode_fn is not None and _accepts_keyword(interp_poll_fn, "chunk_encode_fn"):
+                ip_kwargs["chunk_encode_fn"] = chunk_encode_fn
             if ip_takes_segments:
                 ip_kwargs["segment_ids"] = [segment_id]
             ip_started = time.monotonic()
@@ -582,6 +592,8 @@ def prewarm_once(
             "on_chunk_frames": on_upscale_frames,
             "sources": joint_sources,
         }
+        if _accepts_keyword(upscale_poll_fn, "interp_multiplier"):
+            joint_up_kwargs["interp_multiplier"] = plan.multiplier
         if up_takes_segments:
             joint_up_kwargs["segment_ids"] = [unit.segment_id for unit in joint_sources]
         joint_up_started = time.monotonic()
@@ -610,6 +622,8 @@ def prewarm_once(
                 "on_chunk_frames": on_interp_frames,
                 "sources": joint_sources,
             }
+            if chunk_encode_fn is not None and _accepts_keyword(interp_poll_fn, "chunk_encode_fn"):
+                joint_ip_kwargs["chunk_encode_fn"] = chunk_encode_fn
             if ip_takes_segments:
                 joint_ip_kwargs["segment_ids"] = [unit.segment_id for unit in joint_sources]
             joint_ip_started = time.monotonic()

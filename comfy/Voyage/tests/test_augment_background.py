@@ -247,6 +247,10 @@ def test_resume_skips_ledgered_chunks(tmp_path: Path, monkeypatch: Any) -> None:
                 written.append(dest)
         return written
 
+    def _stub_encode(png_dir: Path, dest: Path, fps: float) -> Path:
+        dest.write_bytes(b"fake-chunk")
+        return dest
+
     import voyage.augment_interp_poller as interp_module
     import voyage.augment_upscale_poller as upscale_module
 
@@ -254,7 +258,7 @@ def test_resume_skips_ledgered_chunks(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(upscale_module, "_default_upscale_pngs", _stub_upscale)
     monkeypatch.setattr(interp_module, "_default_interp_pngs", _stub_interp)
 
-    first = augment_background.prewarm_once(tmp_path, config)
+    first = augment_background.prewarm_once(tmp_path, config, chunk_encode_fn=_stub_encode)
     assert first is not None
     assert first.upscale_chunks_done > 0
     assert first.interp_chunks_done > 0
@@ -266,7 +270,7 @@ def test_resume_skips_ledgered_chunks(tmp_path: Path, monkeypatch: Any) -> None:
         return _stub_decode(source_video, dest_dir, start, count)
 
     monkeypatch.setattr(upscale_module, "_default_decode_fn", _counting_decode)
-    second = augment_background.prewarm_once(tmp_path, config)
+    second = augment_background.prewarm_once(tmp_path, config, chunk_encode_fn=_stub_encode)
     assert second is not None
     assert second.upscale_chunks_done == 0
     assert second.upscale_chunks_skipped > 0

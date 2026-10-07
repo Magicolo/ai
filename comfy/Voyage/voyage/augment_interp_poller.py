@@ -37,11 +37,13 @@ from voyage.augment import (
     chunk_windows,
     interpolated_frame_count,
 )
+from voyage.augment_drain import EncodeFn, ensure_chunk_mp4
 from voyage.augment_sidecar import (
     STAGE_INTERPOLATED,
     STAGE_UPSCALED,
     ChunkKey,
     append_chunk_record,
+    chunk_mp4_complete,
     chunk_output_complete,
     completed_stages,
     load_chunk_ledger,
@@ -181,6 +183,7 @@ def interp_poll_once(
     preset: str = "veryfast",
     interp_fn: Callable[[list[Path], Path, int], list[Path]] | None = None,
     interp_backend: str = "rife",
+    chunk_encode_fn: EncodeFn | None = None,
     on_chunk: Callable[[str, int, int], None] | None = None,
     on_chunk_frames: Callable[[str, int], None] | None = None,
     on_pair_frames: Callable[[str, float], None] | None = None,
@@ -221,10 +224,23 @@ def interp_poll_once(
     When `chunk_ids` is given, only those chunk indexes are rendered by
     this call (parallel workers split disjoint index sets; unowned
     missing chunks count as skipped, never as this worker's `done`).
-    None (default) renders every missing chunk. `prune_partials`
+    None (default) renders every missing chunk.
+    `prune_partials`
     (default True) sweeps stale `.partial` dirs per plan dir; the
     parallel driver passes False (it prunes once upfront — a
     per-call sweep would rmtree the other worker's live partial).
+    `chunk_encode_fn`, when given, replaces the production chunk-ffmpeg
+    encode inside the per-chunk durable-mp4 step (tests stub it); None
+    (default) encodes for real.
+
+    Per-segment cleanup: every rendered chunk is immediately encoded to
+    its durable `chunk_NN.mp4` (`ensure_chunk_mp4`: exact-key `chunk_mp4`
+    record + atomic replace) and then both PNG dirs are pruned — the
+    mp4 supersedes ~20x its PNG weight, so a long generation run holds
+    megabytes per finished chunk instead of gigabytes. Chunks already
+    mp4-complete skip before any PNG gate (pruned PNGs never rejoin),
+    which covers the pre-warm, finalize, parallel, and joint-uniform
+    passes uniformly — no driver changes needed.
     """
     if not weights_key:
         raise ValueError("weights_key must be a non-empty string")
@@ -253,6 +269,26 @@ def interp_poll_once(
     frames_waiting = 0
     pruned_total = 0
     final_fps = out_fps * multiplier
+
+    def _interp_key(source: Any, index: int, start: int, count: int) -> ChunkKey:
+        """Exact interp ledger key for one chunk window (single construction site)."""
+        return ChunkKey(
+            chunk_index=index,
+            start_frame=start,
+            source_frames=count,
+            expected_frames=interpolated_frame_count(count, multiplier),
+            upscale_factor=upscale_factor,
+            multiplier=multiplier,
+            crf=crf,
+            preset=preset,
+            source_key=source.source_key,
+            weights_key=weights_key,
+            out_width=out_width,
+            out_height=out_height,
+            out_fps=final_fps,
+            chunk_frames=chunk_frames,
+        )
+
     for source in sources:
         plan_dir = plan_dir_for_segment(
             run_dir,
@@ -278,6 +314,19 @@ def interp_poll_once(
         done = completed_stages(records)
         windows = list(chunk_windows(source.total_frames, chunk_frames))
         indexes = list(range(len(windows)))
+        # Durable-mp4 fast path first: mp4-complete chunks skip before
+        # any PNG gate — their PNG dirs were pruned by design after the
+        # mp4 superseded them, so without this they would wedge as
+        # `waiting` (upscaled inputs gone) or re-render pointlessly.
+        mp4_done = {
+            index
+            for index, (start, count) in enumerate(windows)
+            if chunk_mp4_complete(plan_dir, records, _interp_key(source, index, start, count))
+        }
+        if mp4_done:
+            chunks_skipped += len(mp4_done)
+            frames_skipped += sum(windows[index][1] for index in mp4_done)
+            indexes = [index for index in indexes if index not in mp4_done]
         ledger_ready = [index for index in indexes if STAGE_UPSCALED in done.get(index, set())]
         # Output-truth on the upscaled inputs: a ledgered chunk whose
         # upscaled output is gone or short waits (the upscale poller
@@ -327,6 +376,7 @@ def interp_poll_once(
                 missing.append(index)
                 missing_set.add(index)
         missing.sort()
+        owned: set[int] | None = None
         if chunk_ids is not None:
             if not isinstance(chunk_ids, list) or not all(
                 isinstance(item, int) and not isinstance(item, bool) for item in chunk_ids
@@ -335,6 +385,24 @@ def interp_poll_once(
             owned = set(chunk_ids)
             missing = [index for index in missing if index in owned]
             missing_set = set(missing)
+        # Heal mp4 gaps without re-rendering: a ready chunk whose interp
+        # PNGs are complete but whose durable mp4 is missing (kill between
+        # the record append and the per-chunk ensure) encodes here; the
+        # ensure fast path also converges PNGs a killed prune left
+        # behind. Scoped to owned chunks like the render loop.
+        for index in ready:
+            if index in missing_set:
+                continue
+            if owned is not None and index not in owned:
+                continue
+            start, count = windows[index]
+            ensure_chunk_mp4(
+                plan_dir,
+                _interp_key(source, index, start, count),
+                out_fps=final_fps,
+                run_dir=run_dir,
+                encode_fn=chunk_encode_fn,
+            )
         chunks_skipped += len(ready) - len(missing)
         frames_skipped += sum(windows[index][1] for index in ready if index not in missing_set)
         for index in missing:
@@ -419,24 +487,17 @@ def interp_poll_once(
                         f"interp output missing: {frame_file} ({source.segment_id} chunk {index})"
                     )
             os.replace(partial_dir, output_dir)
-            key = ChunkKey(
-                chunk_index=index,
-                start_frame=start,
-                source_frames=count,
-                expected_frames=expected,
-                upscale_factor=upscale_factor,
-                multiplier=multiplier,
-                crf=crf,
-                preset=preset,
-                source_key=source.source_key,
-                weights_key=weights_key,
-                out_width=out_width,
-                out_height=out_height,
-                out_fps=final_fps,
-                chunk_frames=chunk_frames,
-            )
+            key = _interp_key(source, index, start, count)
             relative = os.path.relpath(output_dir, run_dir).replace(os.sep, "/")
             append_chunk_record(ledger_path, key, stage=INTERP_STAGE, path=relative)
+            # Durable chunk mp4 + per-segment cleanup, right after the
+            # render: encode once, record it, prune both PNG dirs. A
+            # kill between the append above and this ensure re-runs only
+            # the encode on the next poll (interp PNGs are still intact
+            # until the record lands and the prune runs).
+            ensure_chunk_mp4(
+                plan_dir, key, out_fps=final_fps, run_dir=run_dir, encode_fn=chunk_encode_fn
+            )
             records = load_chunk_ledger(ledger_path)
             done = completed_stages(records)
             chunks_done += 1

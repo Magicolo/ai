@@ -6,15 +6,17 @@ to a chunk mp4, and concats them in plan order. All GPU work stays in the
 pollers (`augment_upscale_poller`, `augment_interp_poller`); the drain is
 stdlib-only with `encode_fn` / `concat_fn` seams so tests never need ffmpeg.
 
-Ledger-truth resume: a non-empty `chunk_<NN>.mp4` beside a ledgered
-`interpolated` record is complete work and is never re-encoded; anything
-else (missing/empty mp4, `*.partial` leftovers pruned at entry) is redone.
-A chunk the upscale poller started but the interp poller never finished
-fails loud — finalize must run the pollers to completion first.
+Ledger-truth resume: an exact-key `chunk_mp4` record plus a non-empty
+`chunk_<NN>.mp4` is complete work and is never re-encoded; anything
+else (missing/empty mp4, `*.partial` leftovers pruned at entry) is
+redone through `ensure_chunk_mp4`. A chunk the upscale poller started
+but the interp poller never finished fails loud — finalize must run
+the pollers to completion first.
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import shutil
@@ -27,9 +29,6 @@ from typing import Any
 from voyage import augment_sidecar as sidecar
 from voyage.atomic import fsync_dir
 from voyage.errors import MediaError
-
-CHUNK_MP4_TEMPLATE = "chunk_{index:02d}.mp4"
-"""Per-chunk intermediate filename (mirrors the finalize model pass)."""
 
 INTERMEDIATE_FILENAME = "model_intermediate.mp4"
 """Concat output the presentation encode consumes downstream."""
@@ -119,6 +118,168 @@ def _interpolated_records(records: list[dict[str, Any]]) -> dict[int, dict[str, 
     return by_index
 
 
+def _chunk_key_from_record(record: dict[str, Any]) -> sidecar.ChunkKey:
+    """Rebuild the interp `ChunkKey` a ledger record was recorded with (fail-loud).
+
+    The drain never invents keys: the exact recorded key drives both the
+    mp4-record match (any settings change misses and re-encodes) and the
+    PNG-count expectation. A record missing fields, or carrying a
+    non-positive `expected_frames`, is not drainable.
+    """
+    try:
+        index = record["chunk_index"]
+    except KeyError as exc:
+        raise MediaError(f"chunk record carries a bad key ({exc}; not drainable)") from exc
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise MediaError(f"chunk record carries a bad chunk_index {index!r} (not drainable)")
+    try:
+        key = sidecar.ChunkKey(
+            chunk_index=index,
+            start_frame=int(record["start_frame"]),
+            source_frames=int(record["source_frames"]),
+            expected_frames=int(record["expected_frames"]),
+            upscale_factor=int(record["upscale_factor"]),
+            multiplier=int(record["multiplier"]),
+            crf=int(record["crf"]),
+            preset=str(record["preset"]),
+            source_key=str(record["source_key"]),
+            weights_key=str(record["weights_key"]),
+            out_width=int(record["out_width"]),
+            out_height=int(record["out_height"]),
+            out_fps=int(record["out_fps"]),
+            chunk_frames=int(record.get("chunk_frames", 32)),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MediaError(f"chunk record carries a bad key ({exc}; not drainable)") from exc
+    if key.expected_frames <= 0:
+        raise MediaError(
+            f"chunk {key.chunk_index} has a bad expected_frames "
+            f"{key.expected_frames} (not drainable)"
+        )
+    return key
+
+
+def _prune_chunk_png_dirs(plan_dir: Path, chunk_index: int) -> None:
+    """Best-effort removal of a chunk's superseded PNG dirs (the mp4 is truth).
+
+    Runs only after the durable `chunk_NN.mp4` plus its ledger record are
+    in place, so a crash before this point re-encodes from intact PNGs
+    and a crash inside it converges on the next `ensure_chunk_mp4` call
+    (which prunes again on its fast path).
+    """
+    for prefix in (f"upscaled_{chunk_index:02d}", f"interpolated_{chunk_index:02d}"):
+        child = plan_dir / prefix
+        with contextlib.suppress(OSError):
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+
+
+def ensure_chunk_mp4(
+    plan_dir: Path,
+    key: sidecar.ChunkKey,
+    *,
+    out_fps: float,
+    run_dir: Path | None = None,
+    encode_fn: EncodeFn | None = None,
+) -> Path:
+    """Encode `chunk_NN.mp4` from `interpolated_NN/` PNGs when incomplete.
+
+    Idempotent resume: an exact-key `chunk_mp4` record plus a non-empty
+    mp4 returns immediately (never re-encoded — same fast path the drain
+    has always had, now ledger-backed); otherwise the interp PNGs must be
+    complete (fail-loud like the drain) and are encoded via `encode_fn`
+    (default chunk ffmpeg) through a `.partial.mp4` + atomic replace,
+    recorded under `run_dir` (default: the `run/augment/<hash>` layout
+    parent, fail-loud elsewhere), and then both PNG dirs are pruned —
+    the mp4 supersedes ~20x its PNG weight. Pruning runs on the fast
+    path too, so every call converges PNGs to deleted. Called per chunk
+    by the interp poller right after rendering (cleanup during
+    generation) and by the drain (cleanup at finalize time).
+    """
+    if not isinstance(plan_dir, Path):
+        raise TypeError(f"plan_dir must be a Path (got {type(plan_dir).__name__})")
+    rate = _require_out_fps(out_fps)
+    render = encode_fn if encode_fn is not None else _default_encode
+    if run_dir is None:
+        if plan_dir.parent.name != sidecar.AUGMENT_DIRNAME:
+            raise MediaError(
+                f"chunk mp4 needs run_dir outside {sidecar.AUGMENT_DIRNAME}/<hash>: {plan_dir}"
+            )
+        run_dir = plan_dir.parent.parent
+    ledger = plan_dir / sidecar.CHUNKS_LEDGER_FILENAME
+    records = sidecar.load_chunk_ledger(ledger)
+    if not sidecar.chunk_mp4_complete(plan_dir, records, key):
+        interp_dir = plan_dir / f"interpolated_{key.chunk_index:02d}"
+        if not sidecar.chunk_output_complete(interp_dir, key.expected_frames):
+            raise MediaError(
+                f"interpolated dir missing or short for chunk {key.chunk_index}: {interp_dir} "
+                f"(expected {key.expected_frames} PNGs; rerun the interp poller)"
+            )
+        dest = sidecar.chunk_mp4_path(plan_dir, key.chunk_index)
+        # SFX convention (`<name>.partial.wav`): the temp keeps the real
+        # suffix so ffmpeg infers the format; `<name>.mp4.partial` breaks
+        # format inference ("Unable to find a suitable output format").
+        partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
+        render(interp_dir, partial, rate)
+        if not partial.exists() or partial.stat().st_size == 0:
+            raise MediaError(f"chunk encode produced empty output {partial}")
+        os.replace(partial, dest)
+        fsync_dir(plan_dir)
+        relative = os.path.relpath(dest, run_dir).replace(os.sep, "/")
+        sidecar.append_chunk_record(ledger, key, stage=sidecar.STAGE_CHUNK_MP4, path=relative)
+    _prune_chunk_png_dirs(plan_dir, key.chunk_index)
+    return sidecar.chunk_mp4_path(plan_dir, key.chunk_index)
+
+
+def sweep_chunk_mp4s(
+    run_dir: Path,
+    *,
+    encode_fn: EncodeFn | None = None,
+) -> tuple[int, int]:
+    """Retroactive chunk-mp4 pass over every plan dir (finalize-start sweep).
+
+    Encodes (+ records + prunes PNGs, via `ensure_chunk_mp4`) each
+    fully-interpolated chunk still missing its durable mp4 — one-time
+    catch-up for runs rendered before per-chunk mp4s existed, so their
+    gigabytes of PNGs collapse to megabytes before polling starts.
+    Chunks with incomplete interp PNGs are skipped, never fail-loud
+    (the pollers below heal them); returns `(ensured, skipped)`.
+    """
+    if not isinstance(run_dir, Path):
+        raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
+    try:
+        plan_dirs = sorted(
+            child for child in (run_dir / sidecar.AUGMENT_DIRNAME).iterdir() if child.is_dir()
+        )
+    except OSError:
+        return (0, 0)
+    ensured = 0
+    skipped = 0
+    for plan_dir in plan_dirs:
+        if plan_dir.is_symlink() or plan_dir.name == "morph_joints":
+            continue
+        ledger = plan_dir / sidecar.CHUNKS_LEDGER_FILENAME
+        records = sidecar.load_chunk_ledger(ledger)
+        for _index, record in sorted(_interpolated_records(records).items()):
+            try:
+                key = _chunk_key_from_record(record)
+            except MediaError:
+                skipped += 1
+                continue
+            if sidecar.chunk_mp4_complete(plan_dir, records, key):
+                continue
+            interp_dir = plan_dir / f"interpolated_{key.chunk_index:02d}"
+            if not sidecar.chunk_output_complete(interp_dir, key.expected_frames):
+                skipped += 1
+                continue
+            ensure_chunk_mp4(
+                plan_dir, key, out_fps=float(key.out_fps), run_dir=run_dir, encode_fn=encode_fn
+            )
+            records = sidecar.load_chunk_ledger(ledger)
+            ensured += 1
+    return (ensured, skipped)
+
+
 def drain_interpolated_plan(
     plan_dir: Path,
     *,
@@ -149,34 +310,13 @@ def drain_interpolated_plan(
         )
     chunk_mp4s: list[Path] = []
     for index in started:
-        expected = rendered[index].get("expected_frames")
-        if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
-            raise MediaError(
-                f"chunk {index} has a bad expected_frames {expected!r} (not drainable)"
-            )
-        png_dir = plan_dir / f"interpolated_{index:02d}"
-        if not png_dir.is_dir():
-            raise MediaError(f"interpolated dir missing for chunk {index}: {png_dir}")
-        found = sorted(png_dir.glob("frame_*.png"))
-        if len(found) != expected:
-            raise MediaError(
-                f"{png_dir.name} holds {len(found)} PNGs "
-                f"(ledger expects {expected}; rerun the interp poller)"
-            )
-        dest = plan_dir / CHUNK_MP4_TEMPLATE.format(index=index)
-        if dest.exists() and dest.stat().st_size > 0:
-            chunk_mp4s.append(dest)
-            continue
-        # SFX convention (`<name>.partial.wav`): the temp keeps the real
-        # suffix so ffmpeg infers the format; `<name>.mp4.partial` breaks
-        # format inference ("Unable to find a suitable output format").
-        partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
-        render(png_dir, partial, rate)
-        if not partial.exists() or partial.stat().st_size == 0:
-            raise MediaError(f"chunk encode produced empty output {partial}")
-        os.replace(partial, dest)
-        fsync_dir(plan_dir)
-        chunk_mp4s.append(dest)
+        # Ledger-backed mp4 fast path: a complete durable mp4 is never
+        # re-encoded, and encoding one prunes its ~20x PNG weight — the
+        # drain is the finalize-time half of the per-segment cleanup
+        # (the interp poller ensures each chunk the same way during
+        # generation, so a fully pre-warmed plan drains PNG-free).
+        key = _chunk_key_from_record(rendered[index])
+        chunk_mp4s.append(ensure_chunk_mp4(plan_dir, key, out_fps=rate, encode_fn=render))
     intermediate = plan_dir / INTERMEDIATE_FILENAME
     join(chunk_mp4s, intermediate)
     if not intermediate.exists() or intermediate.stat().st_size == 0:

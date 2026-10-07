@@ -205,9 +205,13 @@ def _check_sidecar_plan_consistency(run_dir: Path) -> list[str]:
     Why read-only: a ledgered stage whose PNG dir is gone or short means
     the next poller pass will heal it (ledger-truth + output-truth rejoin)
     — finalize has not run yet, so validate reports instead of healing.
-    Skips `morph_joints` (record.json ledger, not sidecar) and plan dirs
-    with no ledger (empty/forked dirs are GC's concern, not corruption).
-    Torn ledger tails are already skipped by the sidecar loader.
+    `chunk_mp4`-stage groups check the durable mp4 file instead of a PNG
+    dir, and PNG-stage findings are suppressed for chunks with a complete
+    durable mp4 (their dirs were pruned by design after the mp4
+    superseded them). Skips `morph_joints` (record.json ledger, not
+    sidecar) and plan dirs with no ledger (empty/forked dirs are GC's
+    concern, not corruption). Torn ledger tails are already skipped by
+    the sidecar loader.
     """
     from voyage import augment_sidecar as sidecar
 
@@ -228,12 +232,33 @@ def _check_sidecar_plan_consistency(run_dir: Path) -> list[str]:
         for record in records:
             stage = record.get("stage")
             index = record.get("chunk_index")
-            if stage not in (sidecar.STAGE_UPSCALED, sidecar.STAGE_INTERPOLATED):
+            if stage not in (
+                sidecar.STAGE_UPSCALED,
+                sidecar.STAGE_INTERPOLATED,
+                sidecar.STAGE_CHUNK_MP4,
+            ):
                 continue
             if isinstance(index, bool) or not isinstance(index, int):
                 continue
             latest[(index, str(stage))] = record
+        # Chunks with a complete durable mp4 keep ledgered PNG stages
+        # whose dirs were pruned by design — suppress their findings
+        # (mirrors the heal exemption in `augment_sidecar`).
+        mp4_ok = {
+            index
+            for (index, stage) in latest
+            if stage == sidecar.STAGE_CHUNK_MP4 and sidecar.chunk_mp4_file_complete(plan_dir, index)
+        }
         for (index, stage), record in sorted(latest.items()):
+            if stage == sidecar.STAGE_CHUNK_MP4:
+                if index not in mp4_ok:
+                    errors.append(
+                        f"augment plan {plan_dir.name} chunk {index} stage {stage} "
+                        "ledgered but output missing or empty"
+                    )
+                continue
+            if index in mp4_ok:
+                continue
             expected = record.get("expected_frames")
             if isinstance(expected, bool) or not isinstance(expected, int) or expected <= 0:
                 continue

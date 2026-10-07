@@ -44,6 +44,8 @@ from voyage.augment import (
 from voyage.augment_sidecar import (
     STAGE_INTERPOLATED,
     STAGE_UPSCALED,
+    ChunkKey,
+    chunk_mp4_complete,
     chunk_output_complete,
     load_chunk_ledger,
     missing_chunk_indexes,
@@ -185,6 +187,34 @@ def build_parallel_tasks(
                 and chunk_frames_match_size(ip_dir, (out_width, out_height))
             ):
                 pending.add(index)
+        # Durable-mp4 fast path: a chunk with an exact-key `chunk_mp4`
+        # record plus a non-empty mp4 needs no leg work — drop it from
+        # pending even when its PNGs are pruned (the output-truth loop
+        # above just requeued them).
+        pending -= {
+            index
+            for index in set(indexes)
+            if chunk_mp4_complete(
+                plan_dir,
+                records,
+                ChunkKey(
+                    chunk_index=index,
+                    start_frame=windows[index][0],
+                    source_frames=windows[index][1],
+                    expected_frames=interpolated_frame_count(windows[index][1], multiplier),
+                    upscale_factor=upscale_factor,
+                    multiplier=multiplier,
+                    crf=crf,
+                    preset=preset,
+                    source_key=source_key,
+                    weights_key=weights_key,
+                    out_width=out_width,
+                    out_height=out_height,
+                    out_fps=source_fps_key * multiplier,
+                    chunk_frames=chunk_frames,
+                ),
+            )
+        }
         for index in sorted(pending):
             start, count = windows[index]
             tasks.append(
@@ -255,6 +285,7 @@ def run_parallel_model_pass(
     joint_interp_fn: Callable[..., Any] | None = None,
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
+    chunk_encode_fn: Callable[..., Any] | None = None,
     timings: dict[str, float] | None = None,
     progress: VoyageConsole | None = None,
     task_builder: Callable[..., collections.deque[ParallelChunkTask]] | None = None,
@@ -273,6 +304,11 @@ def run_parallel_model_pass(
     `interpolate chunks` bars track every queued chunk per leg (one advance
     per finished chunk half), so finalize shows live upscale vs interpolate
     progress.
+
+    `chunk_encode_fn`, when given, replaces the production chunk-ffmpeg
+    encode inside the workers' per-chunk durable-mp4 step (tests stub
+    it); forwarded only to workers accepting the param (older fakes
+    keep working unmodified).
 
     `second_worker_gate` (finalize 2-stream only): when set, worker B
     waits on it — re-checking errors/drained-tasks every second — before
@@ -343,7 +379,9 @@ def run_parallel_model_pass(
         return
     interp_weights = _interp_weights_path(weights, interp_backend)
     up_takes_prune = _takes_keyword(upscale_poll_fn, "prune_partials")
+    up_takes_interp_multiplier = _takes_keyword(upscale_poll_fn, "interp_multiplier")
     ip_takes_prune = _takes_keyword(interp_poll_fn, "prune_partials")
+    ip_takes_chunk_encode = _takes_keyword(interp_poll_fn, "chunk_encode_fn")
     up_takes_segments = _takes_keyword(upscale_poll_fn, "segment_ids")
     ip_takes_segments = _takes_keyword(interp_poll_fn, "segment_ids")
     up_takes_sources = _takes_keyword(upscale_poll_fn, "sources")
@@ -419,6 +457,8 @@ def run_parallel_model_pass(
                     upscale_kwargs["chunk_ids"] = [task.chunk_index]
                 if up_takes_prune:
                     upscale_kwargs["prune_partials"] = False
+                if up_takes_interp_multiplier:
+                    upscale_kwargs["interp_multiplier"] = multiplier
                 upscale_result = upscale_poll_fn(run_dir, **upscale_kwargs)
                 upscale_seconds = time.monotonic() - upscale_start
                 up_frames = int(getattr(upscale_result, "frames_done", 0) or 0)
@@ -447,6 +487,12 @@ def run_parallel_model_pass(
                     interp_kwargs["chunk_ids"] = [task.chunk_index]
                 if ip_takes_prune:
                     interp_kwargs["prune_partials"] = False
+                # None means "no opinion": a `functools.partial` worker
+                # keeps showing bound kwargs in its signature, so an
+                # unconditional forward would clobber a partial-bound
+                # stub with None.
+                if ip_takes_chunk_encode and chunk_encode_fn is not None:
+                    interp_kwargs["chunk_encode_fn"] = chunk_encode_fn
                 interp_result = interp_poll_fn(run_dir, **interp_kwargs)
                 interp_seconds = time.monotonic() - interp_start
                 ip_frames = int(getattr(interp_result, "frames_done", 0) or 0)

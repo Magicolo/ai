@@ -266,6 +266,11 @@ def _parallel_interp(frame_paths: list[Path], dest_dir: Path, multiplier: int) -
     return written
 
 
+def _parallel_encode(png_dir: Path, dest: Path, fps: float) -> Path:
+    dest.write_bytes(b"fake-chunk")
+    return dest
+
+
 def _parallel_upscale_kwargs(**overrides):  # type: ignore[no-untyped-def]
     params = {
         "weights_path": Path("/models/realesrgan/realesr-animevideov3.pth"),
@@ -351,6 +356,7 @@ def test_chunk_ids_scopes_interp(tmp_path: Path) -> None:
         chunk_frames=4,
         multiplier=4,
         interp_fn=_parallel_interp,
+        chunk_encode_fn=_parallel_encode,
         chunk_ids=[1],
     )
     assert result.chunks_done == 1
@@ -401,6 +407,7 @@ def test_parallel_tasks_and_settle(tmp_path: Path) -> None:
         chunk_frames=4,
         multiplier=4,
         interp_fn=_parallel_interp,
+        chunk_encode_fn=_parallel_encode,
     )
     _verify_parallel_settle(tmp_path, **settle_kwargs)
 
@@ -586,6 +593,7 @@ def test_parallel_driver_reports_chunk_progress(
         interp_poll_fn=functools.partial(
             interp_poll_once,
             interp_fn=_parallel_interp,
+            chunk_encode_fn=_parallel_encode,
         ),
         progress=progress,
     )
@@ -708,6 +716,7 @@ def _run_gated_pass(
         interp_poll_fn=functools.partial(
             interp_poll_once,
             interp_fn=_parallel_interp,
+            chunk_encode_fn=_parallel_encode,
         ),
         progress=progress,
         second_worker_gate=gate,

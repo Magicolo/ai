@@ -69,6 +69,11 @@ def _stub_interp(frame_paths: list[Path], dest_dir: Path, multiplier: int) -> li
     return written
 
 
+def _stub_encode(png_dir: Path, dest: Path, fps: float) -> Path:
+    dest.write_bytes(b"fake-chunk")
+    return dest
+
+
 def _pair_aware_interp(
     frame_paths: list[Path],
     dest_dir: Path,
@@ -107,6 +112,7 @@ def _interp_kwargs(**overrides):  # type: ignore[no-untyped-def]
         "chunk_frames": 4,
         "multiplier": 4,
         "interp_fn": _stub_interp,
+        "chunk_encode_fn": _stub_encode,
     }
     params.update(overrides)
     return params

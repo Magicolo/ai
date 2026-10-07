@@ -38,7 +38,17 @@ STAGE_UPSCALED = "upscaled"
 STAGE_INTERPOLATED = "interpolated"
 """Ledger stage: the interp poller finished this chunk."""
 
-_KNOWN_STAGES = frozenset({STAGE_UPSCALED, STAGE_INTERPOLATED})
+STAGE_CHUNK_MP4 = "chunk_mp4"
+"""Ledger stage: the durable per-chunk mp4 is encoded (PNG-independent).
+
+Appended by `ensure_chunk_mp4` (drain) with the SAME `ChunkKey` as the
+chunk's interp record, right before both PNG dirs are pruned: the mp4
+supersedes ~20x its PNG weight, and an exact-key record plus a
+non-empty `chunk_NN.mp4` lets every poller skip the chunk before any
+PNG-count gate (pruned PNGs never rejoin the missing set).
+"""
+
+_KNOWN_STAGES = frozenset({STAGE_UPSCALED, STAGE_INTERPOLATED, STAGE_CHUNK_MP4})
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,35 @@ def chunk_output_complete(output_dir: Path, expected: int) -> bool:
     return True
 
 
+def chunk_mp4_path(plan_dir: Path, chunk_index: int) -> Path:
+    """Durable chunk-mp4 path (the per-chunk encoded artifact)."""
+    return plan_dir / f"chunk_{chunk_index:02d}.mp4"
+
+
+def chunk_mp4_file_complete(plan_dir: Path, chunk_index: int) -> bool:
+    """Whether the durable chunk mp4 exists and is non-empty (pure file truth)."""
+    try:
+        mp4 = chunk_mp4_path(plan_dir, chunk_index)
+        return mp4.is_file() and mp4.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def chunk_mp4_complete(plan_dir: Path, records: list[dict[str, Any]], key: ChunkKey) -> bool:
+    """Whether chunk `key` needs no further PNG work (record + file truth).
+
+    Complete means an exact-key `chunk_mp4`-stage record exists (the same
+    `ChunkKey` the interp record carries, so any settings change still
+    re-renders) plus a non-empty `chunk_NN.mp4` beside it. Pollers check
+    this BEFORE any PNG-count gate: pruned PNG dirs must skip, never
+    rejoin the missing set. The drain encodes through `ensure_chunk_mp4`
+    instead of checking this directly (it must also produce the mp4).
+    """
+    if not chunk_cache_hit(records, key, stage=STAGE_CHUNK_MP4):
+        return False
+    return chunk_mp4_file_complete(plan_dir, key.chunk_index)
+
+
 def prune_stale_partials(target: Path) -> int:
     """Remove crashed-render partial leftovers (best-effort, returns pruned count).
 
@@ -444,6 +483,10 @@ def _strip_stale_interpolated_records(ledger: Path, *, other_sha: str) -> bool:
     records stay untouched: they remain valid cross-backend donors. Only
     records whose interp leg keys to `other_sha` are stripped; anything
     unparseable or foreign stays (never delete unknown provenance).
+    `chunk_mp4`-stage records keyed to the stale leg go with the
+    interpolated ones (their pixels are the stale backend's); the prune
+    deletes the matching `chunk_*.mp4` files alongside the
+    `interpolated_*` dirs.
     Atomic rewrite (temp + fsync + replace + fsync_dir); OSError →
     False (best-effort, retried on the next prune pass).
     """
@@ -463,7 +506,7 @@ def _strip_stale_interpolated_records(ledger: Path, *, other_sha: str) -> bool:
             continue
         if (
             isinstance(record, dict)
-            and record.get("stage") == STAGE_INTERPOLATED
+            and record.get("stage") in (STAGE_INTERPOLATED, STAGE_CHUNK_MP4)
             and _interp_sha_from_weights_key(record.get("weights_key")) == other_sha
         ):
             stripped_any = True
@@ -493,15 +536,16 @@ def prune_stale_interp_plans(
     dirs with current-backend records never match either.
 
     Two modes: with `whole_dir=False` (default) only the
-    `interpolated_*` output subdirs are deleted (the upscaled pixels
-    and the dir itself stay — the dir remains a valid upscale donor
-    for cross-key adoption and the interp leg re-renders into it) and
-    the orphaned `interpolated`-stage ledger records are stripped
+    `interpolated_*` output subdirs and the `chunk_*.mp4` files are
+    deleted (the upscaled pixels and the dir itself stay — the dir
+    remains a valid upscale donor for cross-key adoption and the interp
+    leg re-renders into it) and the orphaned `interpolated`- and
+    `chunk_mp4`-stage ledger records are stripped
     (same atomic-rewrite durability as every ledger append; upscaled
     records stay, so donors survive). Without the strip the ledger
     would keep pointing at deleted pixels and the next restart's
-    sidecar validator would abort before the pollers that would heal
-    the gap ever run. With `whole_dir=True` the whole plan dir goes.
+    sidecar validator would abort before the pollers heal it). With
+    `whole_dir=True` the whole plan dir goes.
     Use False at finalize start (frees the bulk under disk pressure
     while keeping donors) and True pre-publish once every poll and
     drain on every path has finished.
@@ -564,6 +608,19 @@ def prune_stale_interp_plans(
                     with contextlib.suppress(OSError):
                         shutil.rmtree(child)
                         removed_any = True
+                elif (
+                    child.is_file()
+                    and not child.is_symlink()
+                    and child.name.startswith("chunk_")
+                    and child.name.endswith(".mp4")
+                ):
+                    # Stale-leg chunk mp4s (and their `.partial.mp4`
+                    # leftovers): encoded from the deleted interp pixels,
+                    # so they must go with them — otherwise the drain
+                    # would concat the wrong backend's frames.
+                    with contextlib.suppress(OSError):
+                        child.unlink()
+                        removed_any = True
             stripped = _strip_stale_interpolated_records(
                 plan_dir / CHUNKS_LEDGER_FILENAME, other_sha=other_sha
             )
@@ -580,6 +637,10 @@ def _strip_dangling_chunk_records(ledger: Path) -> int:
     known stages, resolves the output dir as
     `ledger.parent / f"{stage}_{index:02d}"`, and requires
     `chunk_output_complete` for the latest record's `expected_frames`.
+    Two `chunk_mp4`-stage exceptions: those groups resolve to
+    `chunk_NN.mp4` file truth instead of a PNG dir, and PNG-stage groups
+    of a chunk with a complete durable mp4 are exempt (their PNG dirs
+    were pruned by design after the mp4 superseded them).
     Records whose frames additionally fail `chunk_frames_match_size`
     against the record's own `out_width`/`out_height` (valid ints only)
     are stripped too — donor adoption once propagated a mixed-geometry
@@ -627,8 +688,23 @@ def _strip_dangling_chunk_records(ledger: Path) -> int:
         if group is not None:
             latest[group] = record
     dangling: set[tuple[int, str]] = set()
+    # Chunks with a complete durable mp4 keep their PNG-stage records:
+    # the PNG dirs were pruned BY DESIGN after the mp4 superseded them,
+    # so PNG-missing must not read as dangling (the pollers skip
+    # mp4-complete chunks before any PNG gate for the same reason).
+    mp4_exempt = {
+        index
+        for (index, stage) in latest
+        if stage == STAGE_CHUNK_MP4 and chunk_mp4_file_complete(ledger.parent, index)
+    }
     for group, record in latest.items():
         index, stage = group
+        if stage == STAGE_CHUNK_MP4:
+            if not chunk_mp4_file_complete(ledger.parent, index):
+                dangling.add(group)
+            continue
+        if index in mp4_exempt:
+            continue
         expected = int(record["expected_frames"])
         chunk_dir = ledger.parent / f"{stage}_{index:02d}"
         if not chunk_output_complete(chunk_dir, expected):

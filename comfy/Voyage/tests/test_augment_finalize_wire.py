@@ -328,6 +328,13 @@ def _stub_interp_pngs(upscaled: list[Path], dest_dir: Path, multiplier: int) -> 
     return out
 
 
+def _stub_encode_chunk(png_dir: Path, dest: Path, fps: float) -> Path:
+    """Chunk-encode seam stub: non-empty mp4 bytes, no ffmpeg."""
+    del png_dir, fps
+    dest.write_bytes(b"ip-chunk")
+    return dest
+
+
 def _poll_kwargs() -> dict[str, Any]:
     return {
         "weights_key": "test-key",
@@ -382,6 +389,7 @@ def test_interp_on_chunk_fires_per_chunk(tmp_path: Path) -> None:
         tmp_path,
         weights_path=weights.film,
         interp_fn=_stub_interp_pngs,
+        chunk_encode_fn=_stub_encode_chunk,
         on_chunk=lambda sid, idx, total: seen.append((sid, idx, total)),
         out_fps=24,
         **_poll_kwargs(),

@@ -69,6 +69,11 @@ def _stub_interp(frame_paths: list[Path], dest_dir: Path, multiplier: int) -> li
     return written
 
 
+def _stub_encode(png_dir: Path, dest: Path, fps: float) -> Path:
+    dest.write_bytes(b"fake-chunk")
+    return dest
+
+
 def _upscale_kwargs(**overrides: Any) -> Any:
     params = {
         "weights_path": Path("/models/realesrgan/realesr-animevideov3.pth"),
@@ -94,6 +99,7 @@ def _interp_kwargs(**overrides: Any) -> Any:
         "chunk_frames": 4,
         "multiplier": 4,
         "interp_fn": _stub_interp,
+        "chunk_encode_fn": _stub_encode,
     }
     params.update(overrides)
     return params
@@ -152,14 +158,19 @@ def test_interp_rerenders_when_output_deleted_but_ledger_intact(tmp_path: Path) 
     assert upscale_poll_once(tmp_path, **_upscale_kwargs()).chunks_done == 2
     assert interp_poll_once(tmp_path, **_interp_kwargs()).chunks_done == 2
     plan_dir = next(iter((tmp_path / "augment").iterdir()))
-    doomed = plan_dir / "interpolated_01"
-    for frame in doomed.glob("*.png"):
-        frame.unlink()
-    doomed.rmdir()
-    rerun = interp_poll_once(tmp_path, **_interp_kwargs())
-    assert rerun.chunks_done == 1
-    assert rerun.chunks_skipped == 1
-    assert len(list(doomed.glob("frame_*.png"))) == 13
+    # The durable output is the chunk mp4 now: delete it (all records
+    # stay intact) — the chunk rejoins through the heal path below.
+    (plan_dir / "chunk_01.mp4").unlink()
+    waiting = interp_poll_once(tmp_path, **_interp_kwargs())
+    assert waiting.chunks_done == 0
+    assert waiting.chunks_waiting == 1
+    healed = upscale_poll_once(tmp_path, **_upscale_kwargs(interp_multiplier=4))
+    assert healed.chunks_done == 1
+    assert healed.chunks_skipped == 1
+    resumed = interp_poll_once(tmp_path, **_interp_kwargs())
+    assert resumed.chunks_done == 1
+    assert resumed.chunks_skipped == 1
+    assert (plan_dir / "chunk_01.mp4").stat().st_size > 0
 
 
 def test_interp_waits_when_upscaled_output_deleted_but_ledger_intact(
@@ -177,7 +188,7 @@ def test_interp_waits_when_upscaled_output_deleted_but_ledger_intact(
     waiting = interp_poll_once(tmp_path, **_interp_kwargs())
     assert waiting.chunks_done == 1
     assert waiting.chunks_waiting >= 1
-    healed = upscale_poll_once(tmp_path, **_upscale_kwargs())
+    healed = upscale_poll_once(tmp_path, **_upscale_kwargs(interp_multiplier=4))
     assert healed.chunks_done == 1
     resumed = interp_poll_once(tmp_path, **_interp_kwargs())
     assert resumed.chunks_done == 1

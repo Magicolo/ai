@@ -288,3 +288,47 @@ def test_esrgan_sha_from_weights_key_shapes() -> None:
     assert _esrgan_sha_from_weights_key(None) is None
     assert _esrgan_sha_from_weights_key("a|b|c|d") is None
     assert _esrgan_sha_from_weights_key("rife||bbb") is None
+
+
+def test_mp4_complete_chunks_skip_with_interp_multiplier(tmp_path: Path) -> None:
+    """Upscale skips mp4-complete chunks (pruned PNGs) when told the multiplier."""
+    from voyage.augment_interp_poller import interp_poll_once
+
+    def _stub_interp(frame_paths: list[Path], dest_dir: Path, multiplier: int) -> list[Path]:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        expected = (len(frame_paths) - 1) * multiplier + 1
+        written = []
+        for position in range(expected):
+            frame = dest_dir / f"frame_{position + 1:06d}.png"
+            frame.write_bytes(b"fake-interp")
+            written.append(frame)
+        return written
+
+    def _stub_encode(png_dir: Path, dest: Path, fps: float) -> Path:
+        dest.write_bytes(b"fake-chunk")
+        return dest
+
+    _make_segment(tmp_path, frames=8)
+    assert upscale_poll_once(tmp_path, **_poll_kwargs()).chunks_done == 2
+    interp_result = interp_poll_once(
+        tmp_path,
+        weights_path=Path("/models/frame_interpolation/film_net_fp16.safetensors"),
+        weights_key="weights-abc",
+        out_width=1216,
+        out_height=704,
+        out_fps=24,
+        chunk_frames=4,
+        multiplier=4,
+        interp_fn=_stub_interp,
+        chunk_encode_fn=_stub_encode,
+    )
+    assert interp_result.chunks_done == 2
+    plan_dir = next(iter((tmp_path / "augment").iterdir()))
+    assert not (plan_dir / "upscaled_00").exists()
+    # With the interp multiplier known, both pruned chunks skip without
+    # re-rendering; without it the legacy PNG-truth path re-renders.
+    skipped = upscale_poll_once(tmp_path, **_poll_kwargs(interp_multiplier=4))
+    assert skipped.chunks_done == 0
+    assert skipped.chunks_skipped == 2
+    rerendered = upscale_poll_once(tmp_path, **_poll_kwargs())
+    assert rerendered.chunks_done == 2
