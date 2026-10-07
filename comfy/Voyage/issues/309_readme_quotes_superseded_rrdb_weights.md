@@ -80,3 +80,30 @@ Repro: compare header vs config default; license bullet vs the pinned SRVGG file
 - 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
 - 2026-10-07: consolidated into 309 (same stale-pin docs-drift class across README +
   MODELS.md).
+
+## Evaluation (2026-10-07)
+
+Both claims re-verified live. (a) README: `README.md:46` listed
+`realesrgan-anime ~18 MB` while `voyage/registry_realesrgan.py:24-30,39` pins
+`realesr-animevideov3.pth` (2,504,012 bytes SRVGGNetCompact XS, ~11.5x faster
+than the RRDB) and `docs/MODELS.md:83-93` documents ~2.5 MB with the 18 MB
+`RealESRGAN_x4plus_anime_6B` RRDB marked superseded. (b) Consolidated 311:
+`docs/MODELS.md:15` headed LTXV-2B as "(default)" while `voyage/config.py:240`
+defaults to `ltx25`, and `docs/MODELS.md:209-210` said "pins the Real-ESRGAN
+anime 6B mirror above" while the artifact above (`:83-87`) is the SRVGG XS file.
+All file:line refs fresh. No downgrade: fixed README + both MODELS.md spots
+(311's consolidation into 309 covers them in this scope).
+
+## Progress log
+
+- 2026-10-07: `README.md:47` → `realesrgan-anime ~2.5 MB SRVGG (BSD-3-Clause)`;
+  `docs/MODELS.md:15` header → "`ltxv` preset; config default is `ltx25`";
+  `docs/MODELS.md:209-210` license bullet → "pins the realesr-animevideov3 SRVGG
+  mirror above instead". Grep-verified against
+  `voyage/registry_realesrgan.py:39` + `voyage/config.py:240`; no `~18 MB` /
+  stale-default remnants.
+
+## Resolution (2026-10-07)
+
+RESOLVED. Provisioning/size/license references match the pinned SRVGG weight and
+the ltx25 default; nothing left open.

@@ -46,3 +46,19 @@ Repro: time 31-pair RIFE sweep vs batched-stacked equivalent on synthetic tensor
 ## Log
 
 - 2026-10-07: filed from read-only Track D sweep; no code touched, no GPU work run.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: `interpolate_rife_mids` still looped pairs one by one
+  with a per-mid `.cpu()` sync and no batching knob. Fix candidate adopted
+  (stacked pairs with OOM-halving, `pair_batch=1` default).
+
+## Progress log
+- Batch-6 Group Q added RIFE pair-batching in
+  `voyage/workers/augment_worker.py`, mirroring the FILM `_run_pair_window`
+  pattern with OOM-halving and a bit-exact `pair_batch=1` default. New
+  `tests/test_issue_257_rife_batching.py` pins batching + default exactness.
+  Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. RIFE throughput can now scale with free VRAM via `pair_batch` while
+  the default stays bit-exact with the old serial behavior.

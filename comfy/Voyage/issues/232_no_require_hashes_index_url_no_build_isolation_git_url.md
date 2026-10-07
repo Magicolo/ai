@@ -83,6 +83,37 @@ Repro: `grep -n "Pillow tqdm" worker/Dockerfile.ltx` → line 215.
 ### Fix candidates (from 236)
 - Pin all four `==` to the current freeze (`pip freeze` in a good build), note in
   `docs/INSTALL.md` per the file's own procedure.
-
 ### Log (from 236)
+
 - 2026-10-07: filed from read-only Track F sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live check confirmed `worker/Dockerfile.ltx:233` (now shifted by the
+230 comment hunk) ended with bare `Pillow tqdm huggingface_hub numpy`
+while every neighboring row is `==`-pinned. The "current freeze" the
+issue asks for IS determinable from file context:
+`worker/requirements-ltx.txt` (2026-10-01 validated experiment freeze)
+pins `pillow==12.3.0`, `tqdm==4.70.1`, `huggingface_hub==1.33.0`,
+`numpy==2.4.6` — adopted verbatim. `--require-hashes` /
+`--only-binary` / tarball-vendoring the PEP-508 git URL are full
+lockfile restructures: explicitly out of scope (not attempted).
+`--index-url` review done comments-only, no install reshaped.
+
+## Progress log
+
+- 2026-10-07: pinned the four SFX-venv rows `==` to the
+  requirements-ltx freeze values with a provenance comment (incl. the
+  huggingface_hub v1→v2 drift warning). No other row touched.
+- 2026-10-07: added an index-scope review note at the cu130 torch
+  trio: `--index-url` lines stay torch-only (torch/torchvision/
+  torchaudio alone), which is why the single-index form resolves —
+  never append a leaf dep to one. Comments only.
+
+## Resolution (2026-10-07)
+
+Resolved (232-half in scope): zero bare pip rows remain in the ltx
+SFX venv; index scope reviewed and documented. Open (out of scope):
+`--require-hashes` lockfiles per image, `--no-build-isolation` build
+closure pin, and tarball-vendoring `ltx-video@4b2d053` — each needs a
+GPU-box rebuild to freeze hashes, none attempted here.

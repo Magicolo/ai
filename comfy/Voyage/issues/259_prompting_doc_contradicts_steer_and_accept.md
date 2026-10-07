@@ -51,3 +51,28 @@ cannot both be true.
 
 - 2026-10-07: filed from read-only Track C sweep (scope gates green: ruff + mypy clean);
   no code touched.
+
+## Evaluation (2026-10-07)
+
+Claim re-verified live: `docs/PROMPTING.md:27-33` described reject-with-feedback +
+bounded retry with best-candidate-wins, while `voyage/supervisor.py:2748-2752,2864-2883`
+(Item 1: novelty never rejects; first schema/style-valid generation always renders;
+revisit carries `novelty_accepted=False`), `voyage/director.py:119-130` (NOVELTY
+STEERING section, sentinel-gated), and `tests/test_novelty_steer_accept.py` (7 tests)
+all implement steer-and-accept since 2026-10-01. File:line refs in the issue were
+fresh (PROMPTING novelty paragraph, supervisor docstring + accept loop, director
+steering builder). No downgrade: full fix scope applied.
+
+## Progress log
+
+- 2026-10-07: rewrote the `## Novelty system` paragraph in `docs/PROMPTING.md` to
+  steer-and-accept (steering section + sentinel omission, `novelty_scored` score vs
+  threshold, `novelty_accepted`/`hold` semantics, bounded retries now schema/style
+  only with deterministic fallback, `allow_concept_revisit = false` kept,
+  pre-2026-10-01 regime marked retired with test pin). Grep-verified no
+  "rejected with feedback" remnant; PROMPTING claims cross-checked against
+  `voyage/supervisor.py:7,2748,2864` + `voyage/director.py:36,126`.
+
+## Resolution (2026-10-07)
+
+RESOLVED. Docs now match the steer-and-accept code; nothing left open.

@@ -5506,6 +5506,7 @@ The supervisor must not depend on a concrete backend implementation.
 
 > **As-built note (2026-09-24):** only `longlive2` (persistent KV, `recovery.pt` with tail latents + prompt embeds + `noise_rng_state`) and `ltxv` (reconstructable prefix, `recovery.pt{profile:ltxv, tail_png}` + `<stem>_tail.png`, 768×512, `25+(B-1)*24` frames, bf16-first, `generate --backend ltxv` default) are wired. `CausVidBackend` is still spec-only.
 > As-built (§118-unity-2026-09-30, issue 025): backend-set unity across registries is test-guarded (streaming triple-equality, worker-module keys, CUDA projections).
+> As-built (five-backend-2026-10-07, issue 313): `fake`/`ltxv`/`causvid`/`ltx25`/`ltx23` are all wired (`voyage/workers/video_*.py`; `BACKEND_REGISTRY` in `voyage/config.py` is the single preset source, `ltx25` 1216×704@24 the default row). CausVid ships a worker (`reconstructable_prefix`, 832×480@16). The 2026-09-24 note above is historical (`longlive2` removed 2026-10-04).
 # 119. Generator upgrade and benchmark policy
 
 LongLive 2.0, LTX-Video 0.9.8, and CausVid are all explicit generator profiles. Their selection must be driven by local benchmark evidence rather than a permanent ranking in this document. New model releases may be added behind the same interface.
@@ -5582,6 +5583,8 @@ Final:
 ```
 
 This profile is a **starting point**, not a promise that every element will fit on every 16 GB/8 GB hardware combination.
+
+> Historical note (2026-10-07, issue 313): the profiles above are the 2026-09-24 starting points, not current defaults — the director default is now the `llama` Qwen3.5 sidecar (not Qwen3-8B on CPU), the video default is `ltx25` 1216×704@24 joint A/V (not 768×432@24), geometry follows definition tiers (`--low/medium/high-definition`), and novelty is steer-and-accept (never rejects), so the threshold below is a scoring input, not a rejection gate.
 
 Hardware probing and benchmark results must supersede this document's initial assumptions.
 

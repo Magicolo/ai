@@ -116,6 +116,15 @@ transient (pruned after drain), so size trades for speed. Still
 lossless — pixel-identical to level 6.
 """
 
+_PNG_TRANSIENT_BUDGET_BYTES = 2 * 1024**3
+"""Cap for one bridge direction's transient frames (issue 256).
+
+Each pooled worker transiently holds ~2 full frames (uint8 + float32);
+without a RAM bound an 8-wide pool on 2432x1408 chunks peaks ~2 GB
+extra on top of the already-materialized lists. Workers past the
+budget serialize — same bytes, less peak.
+"""
+
 
 def _require_count(name: str, value: int, minimum: int) -> int:
     """Validate an integer count: ints only (bools rejected), at least `minimum`."""
@@ -933,9 +942,29 @@ def model_pass_active(weights: AugmentWeights) -> bool:
     return bool(film_present or rife_present or weights.realesrgan is not None)
 
 
-def _png_io_workers(count: int) -> int:
-    """Thread pool width for the PNG bridge (never more workers than frames)."""
-    return max(1, min(_PNG_IO_WORKERS, count))
+def _png_io_workers(count: int, per_frame_bytes: int = 0) -> int:
+    """Thread pool width for the PNG bridge (never more workers than frames).
+
+    Issue 256: `per_frame_bytes` (transient bytes per frame, ~2 full
+    frames) additionally bounds the pool by `_PNG_TRANSIENT_BUDGET_BYTES`
+    of transient RAM — workers past the budget serialize instead of
+    contending. Zero (unknown geometry) keeps the legacy count-only
+    bound.
+    """
+    workers = max(1, min(_PNG_IO_WORKERS, count))
+    if per_frame_bytes > 0:
+        workers = max(1, min(workers, _PNG_TRANSIENT_BUDGET_BYTES // per_frame_bytes))
+    return workers
+
+
+def _tensor_transient_bytes(frame: Any) -> int:
+    """Estimated transient bytes for one bridge frame (pool budget, issue 256)."""
+    try:
+        count = int(frame.numel())
+    except (AttributeError, TypeError, ValueError):
+        size = getattr(frame, "size", 0)
+        count = int(size) if isinstance(size, int) else 0
+    return count * 4 * 2 if count > 0 else 0
 
 
 def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
@@ -948,7 +977,12 @@ def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
     fallback never imports them). All frames must share dimensions; mismatch
     fails loud instead of mixing silently into a chunk. Decodes run on a
     thread pool: the RIFE finalize is PNG-codec-bound (~85-90% of chunk
-    wall), and PIL decode releases the GIL well enough to scale.
+    wall), and PIL decode releases the GIL well enough to scale. The pool
+    is additionally RAM-bounded (issue 256) from the lead frame's header
+    size. Copy budget per frame: one PIL extraction (API floor) made
+    writable for `from_numpy`, one f32 conversion divided in place —
+    three buffers instead of the old four (the out-of-place divide is
+    gone).
     """
     if not isinstance(frame_paths, list) or not frame_paths:
         raise ValueError(f"frame_paths needs at least one PNG path (got {frame_paths!r})")
@@ -967,6 +1001,12 @@ def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
         raise MediaError(f"model pass needs torch for tensors ({exc})") from exc
     import numpy
 
+    lead_size = _cached_png_size(frame_paths[0])
+    per_frame = 0
+    if lead_size is not None:
+        lead_width, lead_height = lead_size
+        per_frame = lead_width * lead_height * 3 * 4 * 2
+
     def _decode(frame_path: Path) -> Any:
         with Image.open(frame_path) as opened:
             converted = opened.convert("RGB")
@@ -974,12 +1014,13 @@ def load_png_frames_as_tensors(frame_paths: list[Path]) -> list[Any]:
             raw = converted.tobytes()
         flat = numpy.frombuffer(raw, dtype=numpy.uint8)
         try:
+            # Writable (from_numpy rejects the read-only frombuffer view).
             shaped = flat.reshape((height, width, 3)).copy()
         except ValueError as exc:
             raise MediaError(f"cannot reshape PNG {frame_path} to RGB ({exc})") from exc
-        return torch.from_numpy(shaped).permute(2, 0, 1).to(dtype=torch.float32).div(255.0)
+        return torch.from_numpy(shaped).permute(2, 0, 1).to(dtype=torch.float32).div_(255.0)
 
-    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frame_paths))) as pool:
+    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frame_paths), per_frame)) as pool:
         tensors = list(pool.map(_decode, frame_paths))
     expected_size: tuple[int, int] | None = None
     for frame_path, tensor in zip(frame_paths, tensors, strict=True):
@@ -1002,10 +1043,12 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
     (same stdlib-only rule as the load bridge); clamps to [0, 1] like the
     worker's native scale-4 path so bicubic-downscaled legs cannot ring past
     the range. Returns the written paths in order (`frame_%06d.png`).
-    Saves run on a thread pool at fast zlib level (same PNG-bound issue
-    as the load bridge — the pool + level 1 cut the save phase ~8-11x);
-    `pool.map` preserves order and surfaces the first bad frame's
-    `MediaError` at its position, matching the old serial semantics.
+    Saves run on a RAM-bounded thread pool at fast zlib level (same
+    PNG-bound issue as the load bridge — the pool + level 1 cut the save
+    phase ~8-11x); `pool.map` preserves order and surfaces the first bad
+    frame's `MediaError` at its position, matching the old serial
+    semantics. Scale + round fuse in place on the fresh clamped tensor
+    (issue 256) — same bytes as the old out-of-place chain.
     """
     if not isinstance(frames, list) or not frames:
         raise ValueError(f"frames needs at least one tensor (got {frames!r})")
@@ -1024,6 +1067,7 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
     import numpy
 
     dest_dir.mkdir(parents=True, exist_ok=True)
+    per_frame = max((_tensor_transient_bytes(frame) for frame in frames), default=0)
 
     def _save(position_frame: tuple[int, Any]) -> Path:
         position, frame = position_frame
@@ -1032,7 +1076,7 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
             raise MediaError(
                 f"enhanced frame {position} must be (3, H, W) (got shape {tuple(tensor.shape)})"
             )
-        array = tensor.permute(1, 2, 0).mul(255.0).round().byte().cpu().numpy()
+        array = tensor.permute(1, 2, 0).mul_(255.0).round_().byte().cpu().numpy()
         if not isinstance(array, numpy.ndarray):
             raise MediaError(f"enhanced frame {position} did not render to an array")
         height, width, _ = array.shape
@@ -1043,7 +1087,7 @@ def write_tensors_as_png_frames(frames: list[Any], dest_dir: Path) -> list[Path]
             raise MediaError(f"enhanced PNG write produced empty output {dest}")
         return dest
 
-    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frames))) as pool:
+    with ThreadPoolExecutor(max_workers=_png_io_workers(len(frames), per_frame)) as pool:
         return list(pool.map(_save, enumerate(frames)))
 
 

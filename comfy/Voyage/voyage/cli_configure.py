@@ -66,25 +66,48 @@ def _definition_tier(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _resolve_segments(args: argparse.Namespace, fps: int, frames_per_segment: int) -> int | None:
-    """Planned segment count from --segments XOR --duration (None if neither)."""
+def _resolve_segments_triple(
+    args: argparse.Namespace, fps: int, frames_per_segment: int
+) -> tuple[bool, int | None, str | None]:
+    """Triple form of the plan-size resolver (issue 243).
+
+    Returns `(ok, value, error)`: `ok=False` means invalid (caller prints
+    `error` once and exits 2); `(True, None, None)` means absent (caller
+    falls back to `--from`/stored plan or prints the missing-plan error);
+    `(True, N, None)` is the resolved count. Separates absent from
+    invalid so `configure --segments 0` prints exactly one line (the old
+    `None`-for-both shape forced the caller to print `pass one of ...`
+    on top of `must be positive`). Reads via `getattr` so hand-built
+    namespaces resolve missing attrs to absent, never to a value.
+    """
     segments = getattr(args, "segments", None)
     duration = getattr(args, "duration", None)
     if segments is not None and duration is not None:
-        print("error: pass only one of --segments or --duration", file=sys.stderr)
-        return None
+        return (False, None, "error: pass only one of --segments or --duration")
     if segments is not None:
         if isinstance(segments, bool) or not isinstance(segments, int) or segments <= 0:
-            print(f"error: --segments must be positive, got {segments}", file=sys.stderr)
-            return None
-        return segments
+            return (False, None, f"error: --segments must be positive, got {segments}")
+        return (True, segments, None)
     if duration is not None:
         try:
-            return segments_for_duration(float(duration), fps, frames_per_segment)
+            return (True, segments_for_duration(float(duration), fps, frames_per_segment), None)
         except (TypeError, ValueError) as exc:
-            print(f"error: bad --duration: {exc}", file=sys.stderr)
-            return None
-    return None
+            return (False, None, f"error: bad --duration: {exc}")
+    return (True, None, None)
+
+
+def _resolve_segments(args: argparse.Namespace, fps: int, frames_per_segment: int) -> int | None:
+    """Planned segment count from --segments XOR --duration (None if neither).
+
+    Legacy wrapper over `_resolve_segments_triple` for direct callers:
+    prints the triple error (when invalid) and returns the value, so
+    absent and invalid both read as None here. `cmd_configure` uses the
+    triple directly to print exactly one line (issue 243).
+    """
+    ok, value, error = _resolve_segments_triple(args, fps, frames_per_segment)
+    if not ok and error is not None:
+        print(error, file=sys.stderr)
+    return value
 
 
 def _acquire_run_lock_for_trim(run_dir: Path) -> Any:
@@ -460,7 +483,12 @@ def cmd_configure(args: argparse.Namespace) -> int:
         except (ValidationError, ValueError) as exc:
             print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
-        planned = _resolve_segments(args, effective.video.fps, _frames_per_segment(effective))
+        ok, planned, resolve_error = _resolve_segments_triple(
+            args, effective.video.fps, _frames_per_segment(effective)
+        )
+        if not ok:
+            print(resolve_error, file=sys.stderr)
+            return 2
         if (
             planned is None
             and source_segments is not None
@@ -534,11 +562,11 @@ def cmd_configure(args: argparse.Namespace) -> int:
         except (ValidationError, ValueError) as exc:
             print(f"error: invalid numeric override: {exc}", file=sys.stderr)
             return 2
-        planned = _resolve_segments(args, effective.video.fps, _frames_per_segment(effective))
-        if planned is None and (
-            getattr(args, "segments", None) is not None
-            or getattr(args, "duration", None) is not None
-        ):
+        ok, planned, resolve_error = _resolve_segments_triple(
+            args, effective.video.fps, _frames_per_segment(effective)
+        )
+        if not ok:
+            print(resolve_error, file=sys.stderr)
             return 2
         if planned is None:
             try:

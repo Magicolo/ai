@@ -61,6 +61,30 @@ CUDA server examples)."""
 LLAMA_SERVER_BINARY_NAME = "llama-server"
 """Binary name on PATH (installed by worker/Dockerfile.video and worker/Dockerfile.ltx)."""
 
+LLAMA_SERVER_BAKED_PATHS = (
+    "/opt/llama.cpp/bin/llama-server",
+    "/usr/local/bin/llama-server",
+)
+"""Allowlisted absolute sidecar binaries (issue 237).
+
+Both worker images install the same source build twice: the real path
+plus a `/usr/local/bin` symlink (see the `ln -sfn` step in each
+Dockerfile). The `VOYAGE_LLAMA_SERVER_BIN` override must name one of
+these or spawn refuses — an arbitrary absolute path (e.g. a planted
+`/tmp` binary) never executes. Build-side integrity is the existing
+source-tarball sha256 gate in the Dockerfiles; this list is the
+run-side half of the same trust boundary.
+"""
+
+LLAMA_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+"""Endpoint hosts the sidecar may serve (issue 237, fail-closed).
+
+The server always binds the loopback interface, so a non-loopback
+endpoint would probe (and later route director traffic at) a server this
+module never started — the "never leaves the box" contract inverts
+silently. Anything outside this set raises instead of connecting.
+"""
+
 LLAMA_SERVER_BINARY_ENVIRONMENT_VARIABLE = "VOYAGE_LLAMA_SERVER_BIN"
 """Explicit binary override (tests/dev): an absolute path wins over PATH."""
 
@@ -100,9 +124,39 @@ class LlamaSidecar:
 
 
 def server_binary() -> str:
-    """Resolve the server binary: explicit env path or the PATH name."""
+    """Resolve the server binary: explicit env path or the PATH name.
+
+    The override is allowlisted (issue 237): it must name one of
+    `LLAMA_SERVER_BAKED_PATHS` or spawn refuses with `LlamaServerError`.
+    The bare `PATH` name keeps its exact previous behavior.
+    """
     override = os.environ.get(LLAMA_SERVER_BINARY_ENVIRONMENT_VARIABLE, "").strip()
-    return override or LLAMA_SERVER_BINARY_NAME
+    if not override:
+        return LLAMA_SERVER_BINARY_NAME
+    if override not in LLAMA_SERVER_BAKED_PATHS:
+        raise LlamaServerError(
+            f"refusing llama-server binary override {override!r} — "
+            f"not in the baked allowlist {list(LLAMA_SERVER_BAKED_PATHS)} "
+            "(tests/dev must use a baked path; production never overrides)"
+        )
+    return override
+
+
+def validate_endpoint_host(endpoint: str) -> str:
+    """Fail-closed loopback check for a sidecar endpoint (issue 237).
+
+    Returns the normalized hostname when it is in `LLAMA_ALLOWED_HOSTS`;
+    raises `LlamaServerError` for anything else (including a missing
+    host), so a non-loopback endpoint can never be probed or served.
+    """
+    hostname = urlparse(endpoint).hostname or ""
+    normalized = hostname.strip().lower()
+    if normalized not in LLAMA_ALLOWED_HOSTS:
+        raise LlamaServerError(
+            f"llama endpoint {endpoint!r} names non-loopback host {hostname!r} — "
+            f"refusing (allowed: {sorted(LLAMA_ALLOWED_HOSTS)})"
+        )
+    return normalized
 
 
 def endpoint_for(port: int) -> str:
@@ -114,11 +168,14 @@ def port_for_endpoint(endpoint: str) -> int:
     """Parse the spawn port out of the configured endpoint (single source).
 
     The supervisor stores one `llama_endpoint` string; the spawn port
-    derives from it so the two can never disagree.
+    derives from it so the two can never disagree. The host is validated
+    fail-closed first (issue 237): a non-loopback endpoint raises instead
+    of probing a server this module never started.
     """
     parsed = urlparse(endpoint)
     if not parsed.hostname:
         raise LlamaServerError(f"llama endpoint {endpoint!r} has no host")
+    validate_endpoint_host(endpoint)
     if parsed.port is None:
         return LLAMA_SERVER_PORT
     if not 1 <= parsed.port <= 65535:
@@ -243,6 +300,45 @@ def resolve_port(port: int) -> int:
     if 1 <= port <= 65535 and not is_port_in_use(port):
         return port
     return find_free_port()
+
+
+def port_file_for(run_directory: str | Path) -> Path:
+    """Per-run port record beside the run (issue 237).
+
+    The resolved sidecar port is written here by `claim_sidecar_port` so
+    operators (and a restarted supervisor) can see which port the run's
+    server actually owns instead of assuming the fixed default.
+    """
+    return Path(run_directory) / "llama-sidecar.port"
+
+
+def claim_sidecar_port(port: int, *, lock_path: str | Path, port_file: str | Path) -> int:
+    """Resolve the sidecar port under a shared file lock (issue 237).
+
+    `resolve_port` alone races: two concurrent supervisors can both probe
+    a free 8080 and both spawn onto it. Serializing the probe + record
+    on `lock_path` (one shared file, e.g. under the models mount every
+    run on the box already shares) closes the race; the winner records
+    its port in its own `port_file` (see `port_file_for`). Returns the
+    claimed port. The supervisor wiring (claim, then `start(port=claimed)`,
+    then route director traffic at the claimed endpoint) is the follow-up —
+    this helper plus `validate_endpoint_host` and the binary allowlist are
+    the in-scope halves that need no caller change to take effect.
+    """
+    import fcntl as file_lock
+
+    resolved_path = Path(lock_path)
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(resolved_path, "a+") as lock_handle:
+        file_lock.flock(lock_handle.fileno(), file_lock.LOCK_EX)
+        try:
+            claimed = resolve_port(port)
+            target = Path(port_file)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"{claimed}\n", encoding="utf-8")
+            return claimed
+        finally:
+            file_lock.flock(lock_handle.fileno(), file_lock.LOCK_UN)
 
 
 def is_owned_by(handle: LlamaSidecar | None, pid: int | None) -> bool:

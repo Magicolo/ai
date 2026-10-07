@@ -40,3 +40,26 @@ neither introduced on the front page.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Claim re-verified live: `README.md:8-14` front bullets listed video as
+"fake, LTXV 2B, or CausVid" and director as "deterministic built-in, or Qwen3-8B
++ MiniLM", while `voyage/config.py:240,333` default video to `ltx25`
+(5 backends at `:20`) and `DirectorConfig.backend = "llama"` at `:620`.
+Deeper README sections (`:40-44` model list, `:63` native note, `:72` backend
+flag incl. default) already documented ltx25 — the drift was confined to the
+front bullets, as filed. No downgrade.
+
+## Progress log
+
+- 2026-10-07: `README.md:8-13` bullets rewritten per the fix candidate —
+  director: "deterministic built-in, llama Qwen3.5 sidecar by default, or opt-in
+  Qwen AWQ on CUDA, all with MiniLM novelty embeddings"; video: "fake testsrc
+  built-in, LTXV 2B tail-chained extensions, CausVid DMD causal rollouts, or
+  LTX-2.5 / LTX-2.3 joint A/V — ltx25 is the default — all but fake on CUDA".
+  Grep-verified against `voyage/config.py:20,240,333,620`.
+
+## Resolution (2026-10-07)
+
+RESOLVED. Quick-start readers meet the default path on the front page; nothing left open.

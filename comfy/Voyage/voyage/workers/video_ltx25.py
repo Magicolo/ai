@@ -1118,6 +1118,19 @@ _SESSION: LTX25Session | None = None
 _INIT_PARAMS: dict[str, Any] = {}
 
 
+def _benchmark_staging_parent() -> Path | None:
+    """Run scratch for benchmark probes, None for the TMPDIR default (287).
+
+    Reads the `scratch_dir` recorded at init (run `tmp/` in production);
+    a missing value (legacy/test callers) keeps today's behavior instead
+    of failing a benchmark over plumbing.
+    """
+    raw = _INIT_PARAMS.get("scratch_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw)
+    return None
+
+
 def _build_session(work_root: Path) -> LTX25Session:
     models_dir = _INIT_PARAMS["models_dir"]
     assert isinstance(models_dir, Path)
@@ -1281,6 +1294,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             probe,
             reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
             read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
+            staging_parent=_benchmark_staging_parent(),
         )
     finally:
         session._conditioning_tail_path = saved_tail

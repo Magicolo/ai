@@ -5,11 +5,12 @@ one **segment** at a time, forever (or until paused/stopped). A supervisor
 process owns run state and drives three worker subprocesses over a typed
 JSONL-RPC protocol:
 
-- **director** — picks the next concept/shot (deterministic built-in, or
-  Qwen3-8B + MiniLM novelty embeddings);
-- **video** — renders frames (fake testsrc built-in,
-  LTXV 2B tail-chained extensions, or CausVid DMD causal
-  rollouts — all on CUDA);
+- **director** — picks the next concept/shot (deterministic built-in,
+  llama Qwen3.5 sidecar by default, or opt-in Qwen AWQ on CUDA, all with
+  MiniLM novelty embeddings);
+- **video** — renders frames (fake testsrc built-in, LTXV 2B
+  tail-chained extensions, CausVid DMD causal rollouts, or LTX-2.5 /
+  LTX-2.3 joint A/V — ltx25 is the default — all but fake on CUDA);
 - **audio** — renders a slow loop of music takes (fake sine built-in, or
   ACE-Step 1.5 on CUDA) plus video-synced SFX.
 
@@ -43,7 +44,7 @@ in `docs/MODELS.md`); `--no-download` verifies without fetching:
 - director-qwen8b ~16 GB LLM; director-qwen4b-awq ~2.6 GB GPU decider;
   director-qwen35-gguf ~3 GB llama-server sidecar GGUF
 - audio-acestep checkpoints; sfx-mmaudio ~13 GB (CC-BY-NC-4.0);
-  rife ~87 MB RIFE v4.25-heavy (MIT, default interp); film ~66 MB (MIT + Apache-2.0); realesrgan-anime ~18 MB (BSD-3-Clause);
+   rife ~87 MB RIFE v4.25-heavy (MIT, default interp); film ~66 MB (MIT + Apache-2.0); realesrgan-anime ~2.5 MB SRVGG (BSD-3-Clause);
   inspector-qwen35 ~19 GB VLM (optional)
 - audio-sonicmaster ~3.5 GB DiT (public) + gated Stable Audio Open VAE (see `docs/MODELS.md`)
 
@@ -108,7 +109,7 @@ extends the stored plan before rendering.
 - `docs/PROMPTING.md` — style charter, novelty, staged prompts.
 - `docs/AUDIO.md` — ACE-Step slow loop, continuation, final mix.
 - `docs/SFX.md` — finalize-time video-synced effects (captions, windows).
-- `docs/AUGMENT.md` — finalize presentation floors (≥24 fps, ≥1216×704), chunked runner.
+- `docs/AUGMENT.md` — explicit finalize quality (`--upscale`/`--interpolate`/`--presentation-fps`/`--interp-backend`, 1/1 ships source), chunked runner.
 - `docs/OPERATIONS.md` — runbook: configure/generate/recover.
 - `docs/TROUBLESHOOTING.md` — OOM, CUDA, disk-full, corruption, …
 - `docs/BENCHMARKING.md` — worker benchmark ops and soak protocol.

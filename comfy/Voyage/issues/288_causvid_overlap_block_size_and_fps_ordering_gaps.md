@@ -55,3 +55,22 @@ with `overlap_frames: 3` → init passes, session raises post-load. (b) With no 
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 worker-tails sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Both claims CURRENT on re-read: init validated against the constant while the
+  session used the YAML config value, and `handle_generate_blocks` checked
+  session-before-payload. Both fix candidates adopted.
+
+## Progress log
+- Batch-6 Group Q fixed `voyage/workers/video_causvid.py`: `handle_init` now
+  validates `overlap_frames` against the loaded config's block size
+  (`config_block_size`, cheap, no torch), and `handle_generate_blocks` runs the
+  `validate_fps` pre-check first, matching the ltxv/ltx25 fail-fast convention
+  (bad fps now raises `ValueError` CPU-testably instead of session
+  `RuntimeError`). New `tests/test_issue_288_causvid_overlap_fps.py` pins both.
+  Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. CausVid is no longer the odd one out: overlap is validated against
+  the config that will actually be used, and fps fails fast before the session
+  check.

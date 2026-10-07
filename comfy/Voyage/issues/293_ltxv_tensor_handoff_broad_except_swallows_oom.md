@@ -51,3 +51,21 @@ line, result payload reports nothing.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 worker-tails sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: the `except Exception` still covered the whole
+  GPU→CPU bottling, swallowing OOM into a silent mp4-tail downgrade. Fix
+  candidate adopted as written.
+
+## Progress log
+- Batch-6 Group Q narrowed the handler in
+  `voyage/workers/video_ltxv.py::_tail_clip_to_handoff_frames` to
+  `(AttributeError, TypeError, ValueError)` — the layout-drift class the fallback
+  exists for — so `MemoryError`/`torch.cuda.OutOfMemoryError` now propagate to
+  the worker's OOM path instead of degrading silently. New
+  `tests/test_issue_293_ltxv_handoff_errors.py` pins narrow-fallback vs OOM
+  propagation. Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. Resource failures are failures again; the mp4 fallback only covers
+  the tensor-API drift it was built for.

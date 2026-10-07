@@ -180,3 +180,38 @@ def test_scoreboard_main_is_read_only(tmp_path: Path, capsys: pytest.CaptureFixt
     assert main(["--run", str(run_dir), "--json"]) == 0
     capsys.readouterr()
     assert sorted(str(path) for path in run_dir.rglob("*")) == before
+
+
+def _write_visual_segment(run_dir: Path, segment_id: str, cells: dict[str, float]) -> None:
+    """Committed segment carrying §43 visual metric cells (271 helper)."""
+    from voyage.segment_manifest import write_segment_manifest
+
+    segment = run_dir / paths.SEGMENTS_DIRNAME / segment_id
+    segment.mkdir(parents=True, exist_ok=True)
+    (segment / paths.DONE_MARKER).write_text("", encoding="utf-8")
+    write_segment_manifest(
+        segment,
+        {
+            "metrics": {"video": {"frames": 48}, "visual": {"metrics": cells}},
+            "transition": {
+                "destination": {"canonical_name": "probe harbor"},
+                "phase": "HOLD",
+            },
+            "prompt_plan": {},
+            "audio_state": {"take_ids": []},
+            "world_state": {},
+            "checksums": {},
+        },
+    )
+
+
+def test_scoreboard_new_metric_key_deltas_none(tmp_path: Path) -> None:
+    """A metric key with no baseline deltas None, never masked as 0.0 (271)."""
+    run_dir = tmp_path / "run"
+    _init_run(run_dir)
+    _write_visual_segment(run_dir, "000000", {"motion_energy": 0.4})
+    _write_visual_segment(run_dir, "000001", {"motion_energy": 0.5, "palette_distance": 0.9})
+    rows = scoreboard_rows(run_dir)
+    by_id = {str(row["segment_id"]): row for row in rows}
+    assert by_id["000001"]["deltas"] == {"motion_energy": 0.1, "palette_distance": None}
+    assert by_id["000001"]["baseline_segment_id"] == "000000"

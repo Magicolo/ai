@@ -18,6 +18,7 @@ from voyage.models import (
     DirectorNovelty,
     DirectorVideoPlan,
     EvolutionDecision,
+    RunState,
     StyleSpec,
     TransitionPhase,
     TransitionPlan,
@@ -286,7 +287,7 @@ def format_measured_context(style: StyleSpec, measured: dict[str, float]) -> str
 
 
 def director_input_from_state(
-    state: Any,
+    state: RunState,
     style_charter: str,
     recent_summary: str,
     forbidden_summary: str,
@@ -294,7 +295,14 @@ def director_input_from_state(
     measured_context: str = "",
     previous_captions: str = "",
 ) -> dict[str, Any]:
-    """Assemble the bounded §20 input from supervisor state (no transcript)."""
+    """Assemble the bounded §20 input from supervisor state (no transcript).
+
+    `state` is the real `RunState` (issue 260, no cycle: this module
+    already imports `voyage.models`): the six touched attributes
+    (`current_concept`, `destination_concept`, `phase`, `decision_index`,
+    `committed_segments`, `timeline_frames`) typecheck under strict mypy,
+    so a typo'd attribute fails at typecheck instead of at runtime.
+    """
     return {
         "style_charter": style_charter,
         "current_world": state.current_concept or "(voyage start: no world yet)",

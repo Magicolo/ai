@@ -1504,14 +1504,21 @@ def upscale_frames(
     infer_started = time.monotonic()
     try:
         with torch.no_grad(), _inference_stream_context(torch_device, cuda_stream):
-            natives: list[Any] = []
             for cpu_frame in cpu_frames:
                 _, frame_h, frame_w = cpu_frame.shape
                 tile_size = tile
                 if tile_size is None and needs_upscale_tiling(frame_w, frame_h):
                     tile_size = UPSCALE_TILE_SIZE
                 if tile_size is None:
-                    natives.extend(_run_frame_batches(model, [cpu_frame], torch_device, dtype))
+                    # Finish inline (never accumulate device natives: a
+                    # full chunk of x4-native device tensors sits outside
+                    # the batch-halving loop and OOMs small GPUs — issue
+                    # 212; same shape as the tiled path below, one live
+                    # native per frame instead of one chunk).
+                    batch = _run_frame_batches(model, [cpu_frame], torch_device, dtype)
+                    for single in batch:
+                        results.append(_finish_upscaled(single, functional, target))
+                    del batch
                 else:
                     # Postprocess inline (never accumulate device tiles: the
                     # interp-first order hands this path 4x the frames, and
@@ -1519,8 +1526,7 @@ def upscale_frames(
                     # GPUs — measured 2026-10-01 on the 6 GB 2060).
                     native = _upscale_frame_tiled(model, cpu_frame, torch_device, dtype, tile_size)
                     results.append(_finish_upscaled(native, functional, target))
-        for single in natives:
-            results.append(_finish_upscaled(single, functional, target))
+                    del native
     finally:
         del cpu_frames
     if timings is not None:
@@ -1752,6 +1758,17 @@ Sides below this fail loud instead of hitting torch's reflect-pad limits.
 
 INTERP_BACKENDS = ("film", "rife")
 """Selectable interpolation backends (`AugmentConfig.interp_backend`)."""
+
+RIFE_PAIR_BATCH = 1
+"""Pairs per RIFE forward in `interpolate_rife_mids` (same contract as FILM).
+
+Batch 1 matches the old serial per-pair loop bit-exactly (same shapes →
+same kernels); larger batches are deterministic per config but may shift
+pixels slightly (different kernels per batch shape), so they stay opt-in
+via `pair_batch` until a provisioned GPU shows a real speedup. A window
+that OOMs halves to single pairs via `_run_rife_window`, so larger
+`pair_batch` values stay safe.
+"""
 
 
 def validate_interp_backend(backend: str) -> str:
@@ -2013,11 +2030,47 @@ def _load_rife_net(weights_path: Path) -> Any:
     return model
 
 
+def _run_rife_window(model: Any, firsts: Any, seconds: Any, blends: list[float]) -> list[Any]:
+    """Run one RIFE pair window at every blend, halving the pair count on OOM.
+
+    Window-local mirror of `_run_pair_window` (FILM, issue 257): the
+    stacked dim-0 is the pair count, so a failed window splits into
+    whole-pair halves (left-then-right, order-preserving) and each half
+    re-encodes + re-runs the full blend list. Returned rows are
+    pair-major — pair 0 at every blend, then pair 1, and so on — so the
+    caller demuxes without tracking half boundaries. Non-OOM failures and
+    single-pair OOMs propagate unchanged.
+    """
+    import torch
+
+    try:
+        cache = {"img0": model.encode(firsts), "img1": model.encode(seconds)}
+        per_pair: list[list[Any]] = [[] for _ in range(int(firsts.shape[0]))]
+        for blend in blends:
+            mids = model(firsts, seconds, timestep=float(blend), cache=cache)
+            for index in range(int(mids.shape[0])):
+                per_pair[index].append(mids[index])
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower() or int(firsts.shape[0]) <= 1:
+            raise
+        gc.collect()
+        # Unconditional (issue 157): `empty_cache` is a no-op without
+        # CUDA, so no availability guard — same rationale as `_run_stacked`.
+        torch.cuda.empty_cache()
+        half = int(firsts.shape[0]) // 2
+        return [
+            *_run_rife_window(model, firsts[0:half], seconds[0:half], blends),
+            *_run_rife_window(model, firsts[half:], seconds[half:], blends),
+        ]
+    return [mid for pair in per_pair for mid in pair]
+
+
 def interpolate_rife_mids(
     frames: list[Any],
     weights: Path | str,
     *,
     moments: list[float] | tuple[float, ...],
+    pair_batch: int = RIFE_PAIR_BATCH,
     device: str = "cuda:0",
     timings: dict[str, float] | None = None,
     on_pair: Callable[[int, int], None] | None = None,
@@ -2030,18 +2083,19 @@ def interpolate_rife_mids(
     `frames[i]` + that slice exactly like the FILM loop. Outputs are
     float32 CPU tensors. Differences from the FILM path: one forward per
     pair x moment (RIFE has no flow-once factorization — each timestep needs
-    its own flow), so there is no `pair_batch`; the per-pair feature encode
-    is shared across moments instead (3 forwards share 1 encode pair at
-    m=4). Inputs reflect-pad to `RIFE_PAD_ALIGN` and crop back, so sizes
-    that are not multiples of 64 (e.g. 832x480) just work. OOM propagates —
-    a single pair is already the minimal unit (measured peaks 0.65 GiB at
-    2x on the 4060 Ti, 0.17 GiB at 1x), so there is nothing to halve to.
+    its own flow), so there is no flow sharing across moments; the per-pair
+    feature encode is still shared across moments instead (3 forwards share
+    1 encode pair at m=4). Inputs reflect-pad to `RIFE_PAD_ALIGN` and crop
+    back, so sizes that are not multiples of 64 (e.g. 832x480) just work.
+    `pair_batch` stacks that many pairs per encode+forward set (default 1,
+    bit-exact with the old serial loop); a window that OOMs halves to
+    single pairs via `_run_rife_window`, so larger batches stay safe.
     `on_pair`, when given, fires per finished pair with
     `(pair_index, pair_count)`.
 
-    Validation order (before any torch import): moments, frame count
-    (>= 2 — a bare length check, so it stays torch-free), weights, then
-    torch, then frame shapes and the `RIFE_MIN_SIDE` floor.
+    Validation order (before any torch import): moments, pair batch, frame
+    count (>= 2 — a bare length check, so it stays torch-free), weights,
+    then torch, then frame shapes and the `RIFE_MIN_SIDE` floor.
 
     `cuda_stream` optionally pins the forward loop to a caller-owned CUDA
     stream (same threading contract as `upscale_frames`); `None` default.
@@ -2053,6 +2107,7 @@ def interpolate_rife_mids(
     if not moments:
         raise ValueError("interpolate_rife_mids needs at least one blend moment (got none)")
     blends = [validate_blend_time(moment) for moment in moments]
+    batch = validate_pair_batch(pair_batch)
     if on_pair is not None and not callable(on_pair):
         raise TypeError(f"on_pair must be callable or None (got {type(on_pair).__name__})")
     if not isinstance(frames, list) or len(frames) < 2:
@@ -2079,33 +2134,53 @@ def interpolate_rife_mids(
     load_ms = (time.monotonic() - load_started) * 1000.0
     pair_count = len(frames) - 1
     mids: list[Any] = []
+    blend_count = len(blends)
     infer_started = time.monotonic()
     with torch.no_grad(), _inference_stream_context(torch_device, cuda_stream):
-        for pair_index in range(pair_count):
-            first = torch.as_tensor(frames[pair_index], dtype=torch.float32).unsqueeze(0)
-            second = torch.as_tensor(frames[pair_index + 1], dtype=torch.float32).unsqueeze(0)
-            height, width = int(first.shape[2]), int(first.shape[3])
-            pad_right = -width % RIFE_PAD_ALIGN
-            pad_bottom = -height % RIFE_PAD_ALIGN
-            if pad_right or pad_bottom:
-                first = functional.pad(first, (0, pad_right, 0, pad_bottom), mode="reflect")
-                second = functional.pad(second, (0, pad_right, 0, pad_bottom), mode="reflect")
-            first = first.to(torch_device, dtype=dtype)
-            second = second.to(torch_device, dtype=dtype)
+        for window_start in range(0, pair_count, batch):
+            window_end = min(window_start + batch, pair_count)
+            window_firsts = [
+                torch.as_tensor(frames[pair_index], dtype=torch.float32)
+                for pair_index in range(window_start, window_end)
+            ]
+            window_seconds = [
+                torch.as_tensor(frames[pair_index + 1], dtype=torch.float32)
+                for pair_index in range(window_start, window_end)
+            ]
+            pair_sizes = [(int(first.shape[1]), int(first.shape[2])) for first in window_firsts]
+            # Pad to the window max (uniform chunks — the production case —
+            # pad exactly like the serial loop, so batch 1 stays bit-exact).
+            window_height = max(height for height, _width in pair_sizes)
+            window_width = max(width for _height, width in pair_sizes)
+            pad_right = -window_width % RIFE_PAD_ALIGN
+            pad_bottom = -window_height % RIFE_PAD_ALIGN
+
+            def _pad(frame: Any, right: int = pad_right, bottom: int = pad_bottom) -> Any:
+                """Reflect-pad one (3, H, W) frame to the window geometry."""
+                batched = frame.unsqueeze(0)
+                if right or bottom:
+                    return functional.pad(batched, (0, right, 0, bottom), mode="reflect")
+                return batched
+
+            firsts = torch.cat([_pad(frame) for frame in window_firsts], dim=0).to(
+                torch_device, dtype=dtype
+            )
+            seconds = torch.cat([_pad(frame) for frame in window_seconds], dim=0).to(
+                torch_device, dtype=dtype
+            )
             if cuda_stream is not None and torch_device.type == "cuda":
-                first.record_stream(cuda_stream)
-                second.record_stream(cuda_stream)
+                firsts.record_stream(cuda_stream)
+                seconds.record_stream(cuda_stream)
             try:
-                # One encode per pair, shared across moments (the RIFE
-                # feature-cache win — moments only re-run the flow cascade).
-                cache = {"img0": model.encode(first), "img1": model.encode(second)}
-                for blend in blends:
-                    mid = model(first, second, timestep=float(blend), cache=cache)
-                    mids.append(mid[:, :, :height, :width].float().cpu().squeeze(0))
+                rows = _run_rife_window(model, firsts, seconds, blends)
+                for row_index, row in enumerate(rows):
+                    pair_height, pair_width = pair_sizes[row_index // blend_count]
+                    mids.append(row[:, :pair_height, :pair_width].float().cpu())
             finally:
-                del first, second
+                del firsts, seconds, window_firsts, window_seconds
             if on_pair is not None:
-                on_pair(pair_index, pair_count)
+                for pair_index in range(window_start, window_end):
+                    on_pair(pair_index, pair_count)
     if timings is not None:
         timings["load_ms"] = load_ms
         timings["infer_ms"] = (time.monotonic() - infer_started) * 1000.0

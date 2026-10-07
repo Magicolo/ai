@@ -328,6 +328,8 @@ def test_enhance_many_off_returns_zeroed_summary() -> None:
         "expanded_chars": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "transport_failures": 0,
+        "parse_failures": 0,
     }
 
 

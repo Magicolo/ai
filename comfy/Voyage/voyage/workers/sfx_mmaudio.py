@@ -249,6 +249,44 @@ def derive_clip_indices(frame_total: int, wanted_clip: int) -> list[int]:
     return [round(index * (frame_total - 1) / (wanted_clip - 1)) for index in range(wanted_clip)]
 
 
+def _drain_in_background(stream: Any, sink: list[bytes]) -> Any:
+    """Read `stream` to EOF on a daemon thread, appending one chunk (issue 286).
+
+    The single-pass extract streams ffmpeg stdout frame-by-frame while
+    stderr would otherwise sit undrained — past the ~64 KiB OS pipe
+    buffer the child blocks on stderr while the parent blocks on stdout
+    (textbook pipe deadlock, biting hardest on the failure path that most
+    needs a loud error). A daemon drain keeps the pipe empty; the
+    trailing `communicate()` still reaps the process and collects any
+    tail the drainer did not see. The thread never raises (a dead stream
+    reads as EOF) and is daemon, so a wedged child cannot pin worker
+    teardown.
+    """
+    import threading
+
+    def _drain() -> None:
+        try:
+            data = stream.read()
+        except Exception:  # noqa: BLE001 — drain is best-effort; the returncode check reports failures
+            return
+        if data:
+            sink.append(data)
+
+    drainer = threading.Thread(target=_drain, name="sfx-ffmpeg-stderr-drain", daemon=True)
+    drainer.start()
+    return drainer
+
+
+_SFX_EXTRACT_WAIT_SECONDS = 30.0
+"""Bound for the trailing extract reap (issue 286).
+
+The stdout read loop ends at EOF/truncation; `communicate()` after that
+only reaps an already-dead ffmpeg, so 30 s is generous — a wedged child
+is killed and reaped instead of hanging the worker until the 600 s
+supervisor RPC deadline.
+"""
+
+
 def _read_frame_bytes(stdout: Any, stride: int) -> bytes | None:
     """Read exactly one frame; None on clean EOF, loud on a short tail."""
     chunks: list[bytes] = []
@@ -299,6 +337,8 @@ def _extract_frames(
         raise RuntimeError(f"sfx frame extract could not capture ffmpeg pipes ({video_path})")
     stride = SINGLE_PASS_SIZE * SINGLE_PASS_SIZE * 3
     raw_frames: list[Any] = []
+    stderr_chunks: list[bytes] = []
+    drainer = _drain_in_background(proc.stderr, stderr_chunks)
     try:
         while len(raw_frames) < wanted_sync:
             chunk = _read_frame_bytes(proc.stdout, stride)
@@ -312,7 +352,13 @@ def _extract_frames(
     finally:
         if proc.poll() is None:
             proc.kill()
-        _, stderr = proc.communicate()
+        try:
+            _, tail = proc.communicate(timeout=_SFX_EXTRACT_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, tail = proc.communicate()
+        drainer.join(timeout=_SFX_EXTRACT_WAIT_SECONDS)
+        stderr = b"".join(stderr_chunks) + (tail or b"")
     if not raw_frames:
         raise RuntimeError(f"sfx frame extract yielded no frames ({video_path})")
     if proc.returncode != 0 and len(raw_frames) < wanted_sync:

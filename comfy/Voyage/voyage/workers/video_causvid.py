@@ -48,6 +48,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -73,6 +74,7 @@ from voyage.model_registry import (
     verify_checkpoint_against_manifest,
 )
 from voyage.workers import video_common
+from voyage.workers._validators import validate_fps as validate_fps
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
 from voyage.workers.video_causvid_frames import dropped_tail_frames as dropped_tail_frames
 from voyage.workers.video_causvid_frames import novel_frames_per_rollout as novel_frames_per_rollout
@@ -148,6 +150,31 @@ def validate_overlap_frames(overlap_frames: int, num_frame_per_block: int) -> No
             "CausVid num_overlap_frames must be divisible by num_frame_per_block "
             f"(got overlap {overlap_frames}, block {num_frame_per_block})"
         )
+
+
+def config_block_size(config_path: Path) -> int:
+    """Block size from the CausVid YAML without omegaconf (init-time, torch-free).
+
+    Issue 288: `handle_init` must validate `overlap_frames` against the
+    block size the session will actually use — not the module constant.
+    omegaconf (and torch) load minutes later inside the session, so the
+    pin is read with a stdlib regex over the single
+    `num_frame_per_block: N` line. A missing file/key or an unparseable
+    value falls back to `NUM_FRAME_PER_BLOCK` (the same default the
+    session applies via `getattr`).
+    """
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return NUM_FRAME_PER_BLOCK
+    match = re.search(r"(?m)^\s*num_frame_per_block\s*:\s*(\d+)\s*(?:#.*)?$", text)
+    if match is None:
+        return NUM_FRAME_PER_BLOCK
+    try:
+        block = int(match.group(1))
+    except ValueError:
+        return NUM_FRAME_PER_BLOCK
+    return block if block > 0 else NUM_FRAME_PER_BLOCK
 
 
 def decoded_frames_for_latents(latent_frames: int) -> int:
@@ -1011,6 +1038,19 @@ _SESSION: CausvidSession | None = None
 _INIT_PARAMS: dict[str, Any] = {}
 
 
+def _benchmark_staging_parent() -> Path | None:
+    """Run scratch for benchmark probes, None for the TMPDIR default (287).
+
+    Reads the `scratch_dir` recorded at init (run `tmp/` in production);
+    a missing value (legacy/test callers) keeps today's behavior instead
+    of failing a benchmark over plumbing.
+    """
+    raw = _INIT_PARAMS.get("scratch_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw)
+    return None
+
+
 def _build_session() -> CausvidSession:
     models_dir = _INIT_PARAMS["models_dir"]
     assert isinstance(models_dir, Path)
@@ -1044,9 +1084,12 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
         else list(LATENT_SHAPE)
     )
     overlap_frames = int(payload.get("overlap_frames", DEFAULT_OVERLAP_FRAMES))
-    validate_overlap_frames(overlap_frames, NUM_FRAME_PER_BLOCK)
     raw_config = payload.get("config_path")
     config_path = Path(str(raw_config)) if raw_config is not None else default_config_path()
+    # Issue 288: validate against the config the session will actually use
+    # (cheap regex read, no torch) — not the module constant, which the
+    # session overrides with the YAML value after minutes of model load.
+    validate_overlap_frames(overlap_frames, config_block_size(config_path))
     require_weight_files(models_dir)
     if not config_path.is_file():
         raise FileNotFoundError(
@@ -1064,6 +1107,7 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
             f"({torch.cuda.device_count()} CUDA device(s) visible)"
         )
     started = time.monotonic()
+    scratch_parent = video_common.session_scratch_parent(payload)
     _INIT_PARAMS.update(
         {
             "models_dir": models_dir,
@@ -1071,6 +1115,7 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
             "latent_shape": latent_shape,
             "overlap_frames": overlap_frames,
             "config_path": config_path,
+            "scratch_dir": str(scratch_parent),
         }
     )
     _SESSION = _build_session()
@@ -1108,6 +1153,10 @@ def handle_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_generate_blocks(payload: dict[str, Any]) -> dict[str, Any]:
+    # Issue 288 (mirrors ltxv/ltx25 issue 064): reject a bad frame rate
+    # before the session check so the boundary fails fast (and stays
+    # CPU-testable without a GPU session).
+    validate_fps(int(payload["fps"]))
     if _SESSION is None:
         raise RuntimeError("video_causvid not initialized — send `init` first")
     # One validated struct (issue 045): payload forms + shape checks live
@@ -1189,6 +1238,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             probe,
             reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
             read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
+            staging_parent=_benchmark_staging_parent(),
         )
     finally:
         session._start_latents = saved_start

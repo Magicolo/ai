@@ -12,7 +12,7 @@ config needs (programmatic entry
 parenthesized name on each section header below); `configure
 --no-download` verifies without fetching (verify-only).
 
-## Video — LTXV 2B distilled (`ltxv-2b`, ~7 GB, default)
+## Video — LTXV 2B distilled (`ltxv-2b`, ~7 GB, `ltxv` preset; config default is `ltx25`)
 
 | Artifact  | Repo / file | Revision |
 |-----------|-------------|----------|
@@ -207,7 +207,7 @@ offline instead of hanging on the hub).
 ## License notes
 
 - 4x-UltraSharp weights are a Zoomy concern, not Voyage's (Voyage pins the
-  Real-ESRGAN anime 6B mirror above instead).
+  realesr-animevideov3 SRVGG mirror above instead).
 - FILM repack is MIT + Apache 2.0; Real-ESRGAN anime is BSD-3-Clause —
   both permissive, unlike the non-commercial stacks below.
 - MMAudio weights are CC-BY-NC-4.0 (non-commercial) — same class as the

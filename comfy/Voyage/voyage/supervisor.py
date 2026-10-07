@@ -1765,20 +1765,23 @@ class Supervisor:
                     # The restart itself replays `init` over RPC
                     # (rpc.restart = stop + start), so it can raise the same
                     # RecoverableWorkerError the budget gates on (bad
-                    # weights, wedged binary, init OOM). Route it through
-                    # the same accounting instead of escaping raw (issue
-                    # 014): the failed restart consumes an attempt, emits
-                    # `worker_restart_failed`, and re-enters the gate, so
-                    # the terminal error is still FatalWorkerError with a
-                    # `circuit_breaker_open` event.
+                    # weights, wedged binary, init OOM) or an OSError from
+                    # Popen (ENOENT/EACCES/ENOMEM, issue 219). Route it
+                    # through the same accounting instead of escaping raw
+                    # (issue 014): the failed restart consumes an attempt,
+                    # emits `worker_restart_failed`, and re-enters the gate,
+                    # so the terminal error is still FatalWorkerError with
+                    # a `circuit_breaker_open` event.
                     worker.restart()
                     if restart_hook is not None:
                         restart_hook(segment_id)
-                except RecoverableWorkerError as restart_exc:
-                    # A Recoverable failure from the restart or the resume
-                    # hook is a second failure on the same attempt, not a
-                    # free retry. A FatalWorkerError from the hook still
-                    # propagates without further retries (not Recoverable).
+                except (RecoverableWorkerError, OSError) as restart_exc:
+                    # A Recoverable/OSError failure from the restart or the
+                    # resume hook is a second failure on the same attempt,
+                    # not a free retry (issue 219: Popen OSError routes
+                    # through the same budget gate). A FatalWorkerError
+                    # from the hook still propagates without further
+                    # retries (not Recoverable).
                     used = self._restarts.get(worker_name, 0)
                     if used >= budget:
                         self._log_metric(

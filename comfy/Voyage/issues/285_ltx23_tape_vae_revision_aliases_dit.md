@@ -58,3 +58,19 @@ independent of the VAE files on disk (host import of the worker fails — import
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 worker-tails sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: no `LTX23_*VAE*REVISION` symbol existed and the tape
+  carried the DiT revision in `vae_revision`. Fix candidate (a) adopted, plus a
+  resume-time trust check.
+
+## Progress log
+- Batch-6 Group Q added `LTX23_VAE_REVISION` to `voyage/registry_ltx23.py` and
+  wired it into `build_recovery_tape` in `voyage/workers/video_ltx23.py`, plus a
+  resume-time tape-trust comparison so a VAE swap no longer resumes silently. New
+  `tests/test_issue_285_ltx23_vae_revision.py` pins the tape field and the trust
+  check. Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. The ltx23 tape now carries true VAE provenance and resume enforces
+  it, matching the ltx25 numerics contract.

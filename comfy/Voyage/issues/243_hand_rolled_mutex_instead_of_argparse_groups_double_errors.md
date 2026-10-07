@@ -60,3 +60,43 @@ not allowed with argument --prompt-enhance` + usage.
 - 227's Live evidence section read "See grep/site list above." (the same grep/site list already reproduced in this file) and its log read: "Track B sweep, 2026-10-07. No-group verified live by orchestrator. Read-only; nothing fixed."
 
 Everything else in 227 (technical description, rationale, repro, source refs, online sources, fix candidates) is already present verbatim-equivalent above.
+
+## Evaluation (2026-10-07)
+Live probe in-container: `add_mutually_exclusive_group` count in
+`voyage/cli.py` is 0; the five conflicts live hand-checked in
+`cmd_configure`/`_resolve_segments`/`_extend_plan`/`resolve_run_dir`
+(`cli_configure.py:72,173,181,187`-class sites). `configure --segments 0`
+prints twice (`must be positive` from `_resolve_segments` + `pass one of
+--segments or --duration` from the caller, both mapping to `None`).
+Confirmed as filed. Fix adds parser groups in `cli.py` (parsed CLI gets
+standard usage errors) while keeping `is_provided` + belt-and-braces
+pre-checks for hand-built namespaces, plus the `(ok, value, error)`
+triple in `cli_configure.py` so absent vs invalid no longer conflate.
+The legacy `--run`/`--name` pair needs no group: the two-verb CLI takes
+a positional NAME only and `cli_paths.resolve_run_dir` already enforces
+its mutex with single-error returns.
+
+## Progress log
+- `cli.py`: `add_mutually_exclusive_group` for plan-size (configure +
+  generate), definition-tier triple, prompt-enhance pair, sfx-dual-pan
+  pair (docstrings note parser vs hand-built split + run/name rationale).
+- `cli_configure.py`: added `_resolve_segments_triple` returning
+  `(ok, value, error)`; kept `_resolve_segments` as a printing wrapper
+  for direct callers; both `cmd_configure` call sites use the triple so
+  invalid prints exactly once (absent still falls back to `--from`/
+  stored plan or the missing-plan error).
+- New tests in `tests/test_issue_243_mutex_groups.py` (6 tests): group
+  presence pins, parsed conflicts exit 2 via argparse, triple
+  absent/invalid/both-set/valid separation, `configure --segments 0`
+  single-error pin, `is_provided` hand-built-namespace pins.
+- Verified: `ruff check` + `format --check` clean; `mypy` strict clean
+  on `cli.py`/`cli_configure.py`; scoped pytest 113 passed (the one
+  `test_configure` shrink failure reproduces on clean HEAD — pre-existing
+  foreign, untouched).
+
+## Resolution (2026-10-07)
+Fixed as proposed: parser groups own parsed-CLI exclusion, the triple
+owns absent-vs-invalid, hand-built namespaces still resolve via
+`is_provided` with pre-checks as belt-and-braces. No open items;
+`_extend_plan` keeps its single-error shape (its caller never
+double-prints) and `resolve_run_dir` keeps its single-error mutex.

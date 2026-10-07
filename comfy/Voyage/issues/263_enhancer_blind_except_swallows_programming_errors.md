@@ -60,3 +60,38 @@ sidecar.
 ## Log
 
 - 2026-10-07: filed from read-only Track C sweep; no code touched.
+
+## Evaluation (2026-10-07)
+Live probe in-container: `enhance` catches bare `Exception` over
+`_post_chat` + `_parse_expansion` together, returning input-with-zeros —
+a `_parse_expansion` bug (`TypeError`) degrades to the same zero-count
+non-engagement as sidecar-down, matching the ambiguous 0-token incident.
+Confirmed as filed. Fix narrows to sidecar-shaped failures with a
+transport/parse split: `_post_chat` normalizes missing httpx +
+`httpx.HTTPError` to `RuntimeError` (no module-scope httpx import, slim
+safe), so `enhance` needs only `(RuntimeError, OSError)` for transport
+(`ConnectionError` included) and `(ValueError, TypeError)` for parse;
+programming errors propagate. `OSError` is required beyond the issue's
+literal list or the existing `ConnectionError` fail-soft test breaks.
+
+## Progress log
+- `prompt_enhancer.py`: `_post_chat` converts missing httpx
+  (`ImportError`) + `httpx.HTTPError` (dynamic type, narrow-by-re-raise)
+  to `RuntimeError`; added `enhance_with_failure_kind` returning
+  `(text, counts, kind)` with `transport`/`parse`/`None`; rewrote
+  `enhance` as a narrow delegating wrapper (no blind except);
+  `enhance_many` summary gains `transport_failures`/`parse_failures`.
+- Updated the one exact-equality pin in `tests/test_prompt_enhancer.py`
+  (off-path summary now carries the two zeroed counters).
+- New tests in `tests/test_issue_263_enhancer_kinds.py` (4 tests):
+  transport vs parse kind split, programming-error loudness,
+  `enhance_many` counter split, expected-failure softness.
+- Verified: `ruff check` + `format --check` clean (one `TRY004` noqa
+  for the transport convert, `TRY300` else-block); `mypy` strict clean;
+  scoped pytest 113 passed.
+
+## Resolution (2026-10-07)
+Fixed as proposed (with `OSError` added for the `ConnectionError`
+contract and httpx normalized in `_post_chat` so no module-scope import
+is needed). No open items; supervisor's budget loop keeps its own broad
+catch (out of scope) while the enhancer boundary is now narrow.

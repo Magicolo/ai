@@ -43,3 +43,18 @@ worker start/stop `voyage/workers/sfx_mmaudio.py:149-182,497-504`.
 ## Log
 
 - 2026-10-07: filed from read-only Track D sweep; no code touched, no GPU work run.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: `render_sfx_bed(dual_pan=True)` still constructed and
+  tore down a worker pool per track. Fix candidate (hoist + share pool) adopted.
+
+## Progress log
+- Batch-6 Group Q hoisted the pool in `voyage/sfx_finalize.py`: new
+  `_sfx_pool_layout` / `_start_sfx_workers` helpers and a `shared_workers` path so
+  both tracks render through one pool (one `start()`/model load, one `stop()`).
+  New `tests/test_issue_255_dual_pan_single_pool.py` pins single-start behavior.
+  Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. One model load serves both pan tracks; 2× load latency + 2× H2D
+  traffic eliminated, and the transient-load-OOM failure window halved.

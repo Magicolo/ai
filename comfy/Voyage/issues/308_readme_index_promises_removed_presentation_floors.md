@@ -38,3 +38,24 @@ Repro: read README index, then `configure` help — no floor flags exist.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Claim re-verified live: `README.md:111` indexed AUGMENT.md as "finalize presentation
+floors (≥24 fps, ≥1216×704)" while `docs/AUGMENT.md:3-8` states explicit quality
+with no floors (`upscale=1/interpolate=1` defaults ship source; old
+`min_fps`/`min_*`/`use_model_pass` fail loud at `:52-54`) and
+`voyage/config.py` `AugmentConfig` defaults to `upscale = 1, interpolate = 1,
+interp_backend = "rife", presentation_fps = None`. File:line refs fresh
+(README index line had drifted 110→111, immaterial). No downgrade.
+
+## Progress log
+
+- 2026-10-07: `README.md` docs-index entry re-indexed per the fix candidate as
+  "explicit finalize quality (`--upscale`/`--interpolate`/`--presentation-fps`/
+  `--interp-backend`, 1/1 ships source), chunked runner". Grep-verified against
+  `docs/AUGMENT.md`; no "presentation floors" remnant in README.
+
+## Resolution (2026-10-07)
+
+RESOLVED. Entry-point doc routes to the live knob model; nothing left open.

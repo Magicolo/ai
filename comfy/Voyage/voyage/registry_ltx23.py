@@ -76,6 +76,16 @@ LTX23_AUDIO_VAE_FILE = "ltx-2.3-22b-distilled_audio_vae.safetensors"
 
 LTX23_AUDIO_VAE_MIN_BYTES = 300_000_000
 
+LTX23_VAE_REVISION = LTX23_DIT_REVISION
+"""Hub revision of both distilled VAEs (issue 285).
+
+Video + audio VAEs ship in the same `unsloth/LTX-2.3-GGUF` repo as the
+DiT, so one repo-level pin versions all three files — unlike ltx25,
+whose VAEs live in the separate gated `Lightricks/LTX-2.5` repo with
+its own `LTX25_VAE_REVISION`. A future split (VAEs moving repos) must
+promote this to an independent literal.
+"""
+
 # Shared Mode-A upscaler (lives in the ltx25 volume — not duplicated).
 LTX23_UPSC_RELATIVE_PATH = f"{LTX25_SUBDIR}/{LTX25_UPSC_FILE}"
 

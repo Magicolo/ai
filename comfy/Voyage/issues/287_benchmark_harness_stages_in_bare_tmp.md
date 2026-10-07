@@ -51,3 +51,35 @@ no caller passes a directory, the harness signature has no directory parameter.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 worker-tails sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live check half-confirmed the finding: `run_benchmark_harness`
+ALREADY takes `staging_parent` (`video_common.py:767`, `dir=` goes to
+`TemporaryDirectory`) — that half landed with a prior track. What was
+still missing was every caller: ltx25/ltx23 recorded `scratch_dir` at
+init but never passed it, and ltxv/causvid never recorded it at all,
+so all four benchmark paths staged in bare /tmp. Recording scratch in
+ltxv/causvid init is trivially safe (same
+`session_scratch_parent(payload)` call ltx25/ltx23 already make —
+mkdir + store a string, no GPU, no behavior change otherwise), so no
+follow-up was needed.
+
+## Progress log
+
+- 2026-10-07: `video_ltxv.py` + `video_causvid.py` `handle_init` now
+  record `scratch_dir` via `session_scratch_parent(payload)` (mirrors
+  ltx25/ltx23 exactly); all four `handle_benchmark`s pass
+  `staging_parent=` via a new `_benchmark_staging_parent()` helper
+  (missing/blank → None, keeping today's TMPDIR behavior for
+  legacy/test callers). `run_benchmark_harness` itself untouched.
+  The fake `video.py` bench stays on the default (CPU, tiny artifacts).
+- 2026-10-07: new `tests/test_issue_287_bench_scratch.py` (4 tests:
+  harness stages inside the given parent; helpers return None
+  without init, the recorded path with init, None on blank).
+
+## Resolution (2026-10-07)
+
+Resolved: all four GPU video-worker benchmark paths now stage under
+run `tmp/` in production and keep the old default elsewhere. No open
+items.

@@ -82,6 +82,39 @@ with no Dockerfile diff (contrast the video image's re-query procedure,
 - Run the documented re-query (`dpkg-query -W`) once and pin every row `=` like the
   video image; pin the PPA key fingerprint or vendor a python3.11 base instead of adding
   an archive mid-build.
-
 ### Log (from 233)
+
 - 2026-10-07: filed from read-only Track F sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live check confirmed the finding verbatim: `worker/Dockerfile.ltx:33-42`
+installs ten apt rows with zero `=` pins, and `grep -n "ffmpeg="`
+shows slim `7:7.1.5-0+deb13u1` vs video `7:4.4.2-0ubuntu0.22.04.1`.
+Exact noble `=` values are NOT determinable from file context (no
+versions recorded anywhere in-tree) and no image build was allowed, so
+inventing pins would be a false pin. The deadsnakes key fingerprint is
+likewise unmeasurable without a build. Decision: record the exact
+procedure + pin what is known (the digest-pinned FROM, already frozen),
+per the issue's own "else" branch.
+
+## Progress log
+
+- 2026-10-07: rewrote the `Dockerfile.ltx` apt comment into an exact
+  re-query procedure (`dpkg-query -W` with the full ten-package list),
+  a PPA-fingerprint recording procedure, the vendored-python3.11
+  alternative, and the three-way ffmpeg provenance note. Text-only;
+  install rows untouched.
+- 2026-10-07: extended the `Dockerfile.video` apt-pin comment with the
+  provenance decision record — majors stay unaligned (jammy vs trixie
+  base stacks), per-stage `ffmpeg_version` recording
+  (`doctor._ffmpeg_version` exists) is the chosen path, manifest +
+  `finalize_completed` wiring is a media.py follow-up (out of scope).
+
+## Resolution (2026-10-07)
+
+Partial (docs/procedure half): both Dockerfiles now record the exact
+re-query/provenance procedures; no `=` values invented. Open: run the
+recorded `dpkg-query -W` on the next GPU build and pin every ltx apt
+row; wire `ffmpeg_version` into the run manifest + `finalize_completed`
+(manuscript change in `voyage/media.py`, needs its owner's scope).

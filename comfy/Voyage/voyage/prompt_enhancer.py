@@ -106,11 +106,30 @@ def _post_chat(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any]
 
     `httpx` imports lazily (the slim gate image has no httpx; a
     module-scope import would break every slim import of this module).
-    Non-200 and misshapen replies raise; transport errors propagate —
-    `enhance` converts all of them to the fail-soft input text.
+    Non-200 and misshapen replies raise; transport errors propagate as
+    `RuntimeError`/`OSError` so `enhance` can stay narrow (issue 263)
+    without importing httpx at module scope. A missing httpx install
+    reads as transport-down (`RuntimeError`), never as an import crash.
     """
-    httpx_client: Any = importlib.import_module("httpx")
-    response: Any = httpx_client.post(url, json=body, timeout=timeout)
+    try:
+        httpx_client: Any = importlib.import_module("httpx")
+    except ImportError as exc:
+        raise RuntimeError(f"enhancer httpx unavailable for {url}: {exc}") from exc
+    candidate = getattr(httpx_client, "HTTPError", None)
+    http_error_type: type[BaseException] | None = None
+    if isinstance(candidate, type) and issubclass(candidate, BaseException):
+        http_error_type = candidate
+    if http_error_type is not None:
+        try:
+            response: Any = httpx_client.post(url, json=body, timeout=timeout)
+        except BaseException as exc:
+            if isinstance(exc, http_error_type):
+                raise RuntimeError(  # noqa: TRY004 - transport failure, not a type error
+                    f"enhancer transport failed for {url}: {exc}"
+                ) from exc
+            raise
+    else:
+        response = httpx_client.post(url, json=body, timeout=timeout)
     if response.status_code != 200:
         raise RuntimeError(f"enhancer {url} answered status {response.status_code}")
     parsed: Any = response.json()
@@ -145,6 +164,42 @@ def _parse_expansion(parsed: dict[str, Any], url: str) -> tuple[str, dict[str, i
     }
 
 
+def enhance_with_failure_kind(
+    text: str,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    endpoint: str = DEFAULT_ENDPOINT,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[str, dict[str, int], str | None]:
+    """Expand one prompt, reporting the fail-soft kind (issue 263).
+
+    Returns `(expanded_text, counts, failure_kind)` where `failure_kind`
+    is None on success (including blank-input skip), `"transport"` when
+    the sidecar was unreachable or answered non-200 (`RuntimeError` from
+    `_post_chat`, including normalized `httpx.HTTPError` and missing
+    httpx, plus `OSError` such as `ConnectionError`), and `"parse"` when
+    the reply was misshapen (`ValueError`/`TypeError` from
+    `_parse_expansion` or the non-object guard in `_post_chat`).
+    Programming errors (`AttributeError`, `KeyError`, ...) propagate
+    loud — they are bugs, not sidecar-down. The split lets engagement
+    accounting separate "down" from "malformed" instead of merging both
+    into zero-count non-engagement.
+    """
+    zero_counts = {"prompt_tokens": 0, "completion_tokens": 0}
+    if not text.strip():
+        return text, dict(zero_counts), None
+    body = build_enhancer_body(text, system_prompt)
+    try:
+        url = endpoint.rstrip("/") + COMPLETIONS_PATH
+        parsed = _post_chat(url, body, timeout)
+        expanded, counts = _parse_expansion(parsed, url)
+    except (RuntimeError, OSError):
+        return text, dict(zero_counts), "transport"
+    except (ValueError, TypeError):
+        return text, dict(zero_counts), "parse"
+    else:
+        return expanded, counts, None
+
+
 def enhance(
     text: str,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
@@ -154,21 +209,15 @@ def enhance(
     """Expand one prompt through the sidecar; fail soft to the input text.
 
     Returns `(expanded_text, {"prompt_tokens": n, "completion_tokens": m})`.
-    Blank input skips the HTTP call (nothing to expand); any server
-    absence, non-200, malformed body, missing content, or empty expansion
-    returns the input unchanged with zero counts — the commit must never
-    fail because an advisory prototype stage is unavailable.
+    Blank input skips the HTTP call (nothing to expand); transport
+    (`RuntimeError`/`OSError`, including normalized `httpx.HTTPError`)
+    and parse (`ValueError`/`TypeError`) failures return the input
+    unchanged with zero counts — the commit must never fail because an
+    advisory prototype stage is unavailable. Programming errors propagate
+    loud (issue 263). See `enhance_with_failure_kind` for the kind split.
     """
-    zero_counts = {"prompt_tokens": 0, "completion_tokens": 0}
-    if not text.strip():
-        return text, dict(zero_counts)
-    body = build_enhancer_body(text, system_prompt)
-    try:
-        url = endpoint.rstrip("/") + COMPLETIONS_PATH
-        parsed = _post_chat(url, body, timeout)
-        return _parse_expansion(parsed, url)
-    except Exception:  # noqa: BLE001 — fail-soft prototype stage, never fails a commit
-        return text, dict(zero_counts)
+    expanded, counts, _kind = enhance_with_failure_kind(text, system_prompt, endpoint, timeout)
+    return expanded, counts
 
 
 def enhance_for_backend(
@@ -214,9 +263,12 @@ def enhance_many(
     Same gating as `enhance_for_backend`, but returns `(expanded,
     summary)` where summary carries `prompts_total`, `prompts_changed`
     (expansion differs from input), `expanded_chars`, `prompt_tokens`,
-    and `completion_tokens` — so a run's metrics prove whether the
+    `completion_tokens`, plus `transport_failures` and `parse_failures`
+    (issue 263: distinct counters so engagement accounting separates
+    "sidecar down" from "malformed reply" instead of merging both into
+    zero-count non-engagement) — so a run's metrics prove whether the
     sidecar engaged, instead of leaving ON-vs-OFF pairs to wall-time
-    guesswork. Never raises for transport reasons (see `enhance`).
+    guesswork. Never raises for transport/parse reasons (see `enhance`).
     """
     total = len(prompts)
     summary = {
@@ -225,16 +277,24 @@ def enhance_many(
         "expanded_chars": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "transport_failures": 0,
+        "parse_failures": 0,
     }
     if not enabled or backend not in ENHANCER_BACKENDS:
         return list(prompts), summary
     expanded: list[str] = []
     for prompt in prompts:
-        text, counts = enhance(prompt, system_prompt, endpoint, timeout)
+        text, counts, failure_kind = enhance_with_failure_kind(
+            prompt, system_prompt, endpoint, timeout
+        )
         expanded.append(text)
         summary["expanded_chars"] += len(text)
         summary["prompt_tokens"] += counts["prompt_tokens"]
         summary["completion_tokens"] += counts["completion_tokens"]
+        if failure_kind == "transport":
+            summary["transport_failures"] += 1
+        elif failure_kind == "parse":
+            summary["parse_failures"] += 1
         if text != prompt:
             summary["prompts_changed"] += 1
     return expanded, summary

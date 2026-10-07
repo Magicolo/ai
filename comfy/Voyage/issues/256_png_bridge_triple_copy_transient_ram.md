@@ -49,3 +49,19 @@ on 32 synthetic frames — peak >> 1× frame bytes.
 ## Log
 
 - 2026-10-07: filed from read-only Track D sweep; no code touched, no GPU work run.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: the PNG bridge still ran the full copy chain on an
+  8-wide pool with no RAM budget. Fix approach adopted: bound the pool by RAM and
+  cut copies with in-place ops (zero-copy decode left as future work).
+
+## Progress log
+- Batch-6 Group Q reworked the bridge in `voyage/augment.py`: RAM-bounded worker
+  pool plus in-place tensor ops on the decode/encode path, reducing transient peak
+  per chunk leg. New `tests/test_issue_256_png_bridge.py` covers the new behavior.
+  Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. Pool size now honors a RAM budget instead of a fixed 8 threads, and
+  the per-frame copy chain is shortened in place. Full zero-copy decode remains
+  open but is no longer required to bound the transient peak.

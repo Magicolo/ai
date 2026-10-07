@@ -60,6 +60,7 @@ from voyage.registry_ltx23 import (
     LTX23_SUBDIR,
     LTX23_TE_FILE,
     LTX23_TE_REVISION,
+    LTX23_VAE_REVISION,
     LTX23_VIDEO_VAE_FILE,
     LTX23_VIDEO_VAE_SUBFOLDER,
 )
@@ -234,8 +235,8 @@ def build_recovery_tape(
 
     Extra ``last_prompt`` field (beyond the spec minimum) lets a resumed
     session keep reporting prompt changes truthfully. Model revisions pin
-    the exact validated stack (ComfyUI + GGUF commits, DiT + TE revisions)
-    so a tape never resumes across numerics.
+    the exact validated stack (ComfyUI + GGUF commits, DiT + TE + VAE
+    revisions) so a tape never resumes across numerics.
     """
     tape: dict[str, Any] = {
         "backend": RECOVERY_PROFILE,
@@ -248,7 +249,7 @@ def build_recovery_tape(
         "last_prompt": prompts[-1] if prompts else "",
         "model_revision": LTX23_DIT_REVISION,
         "text_encoder_revision": LTX23_TE_REVISION,
-        "vae_revision": LTX23_DIT_REVISION,
+        "vae_revision": LTX23_VAE_REVISION,
         "pipeline_revision": f"{LTX23_COMMIT}+gguf@{LTX23_GGUF_COMMIT}",
         "profile_hash": generation_profile_hash(
             width, height, fps, segment_target_frames, conditioning_tail_frames
@@ -1035,6 +1036,19 @@ _SESSION: LTX23Session | None = None
 _INIT_PARAMS: dict[str, Any] = {}
 
 
+def _benchmark_staging_parent() -> Path | None:
+    """Run scratch for benchmark probes, None for the TMPDIR default (287).
+
+    Reads the `scratch_dir` recorded at init (run `tmp/` in production);
+    a missing value (legacy/test callers) keeps today's behavior instead
+    of failing a benchmark over plumbing.
+    """
+    raw = _INIT_PARAMS.get("scratch_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw)
+    return None
+
+
 def _build_session(work_root: Path) -> LTX23Session:
     models_dir = _INIT_PARAMS["models_dir"]
     assert isinstance(models_dir, Path)
@@ -1194,6 +1208,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             probe,
             reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
             read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
+            staging_parent=_benchmark_staging_parent(),
         )
     finally:
         session._conditioning_tail_path = saved_tail
@@ -1233,7 +1248,15 @@ def _load_tape_json(recovery_path: str) -> dict[str, Any]:
 
 
 def _validate_tape_trust(tape: dict[str, Any]) -> dict[str, Any]:
-    """Resume-trust gate: profile + geometry + tail + revision (Track D)."""
+    """Resume-trust gate: profile + geometry + tail + revision (Track D).
+
+    The VAE leg is enforced here, not in `video_common.validate_resume_trust`
+    (that helper has no VAE axis — extending it would touch every backend's
+    trust call): a swapped/upgraded VAE fails loud instead of resuming
+    silently (issue 285). Legacy tapes grandfather in — the old builder
+    wrote the DiT revision into `vae_revision`, which equals
+    `LTX23_VAE_REVISION` while VAEs share the DiT repo.
+    """
     parsed = parse_recovery_tape(tape)
     width = parsed.get("width")
     height = parsed.get("height")
@@ -1259,6 +1282,12 @@ def _validate_tape_trust(tape: dict[str, Any]) -> dict[str, Any]:
             parsed,
             expected_tail_frames=CONDITIONING_TAIL_FRAMES,
             expected_model_revision=LTX23_DIT_REVISION,
+        )
+    vae_revision = parsed.get("vae_revision")
+    if vae_revision != LTX23_VAE_REVISION:
+        raise ValueError(
+            "LTX23 recovery tape vae_revision mismatch "
+            f"(taped {vae_revision!r} vs session {LTX23_VAE_REVISION!r}) — re-render from seed"
         )
     return parsed
 

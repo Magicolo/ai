@@ -66,7 +66,10 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
     """In-memory run overrides for `configure` (issue 020).
 
     One helper so the flag set stays in one place; order matches the
-    historical layout (help output unchanged).
+    historical layout (help output unchanged). The prompt-enhance pair
+    lives in a mutually exclusive group (issue 243) so parsed CLI gets
+    the standard argparse usage error; hand-built namespaces bypass the
+    parser and still resolve via `is_provided` in `cli_core`.
     """
     parser.add_argument(
         "--blocks",
@@ -115,7 +118,8 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="pin the video caption family (default: director drives + evolves it)",
     )
-    parser.add_argument(
+    enhance_group = parser.add_mutually_exclusive_group()
+    enhance_group.add_argument(
         "--prompt-enhance",
         action="store_true",
         default=None,
@@ -123,7 +127,7 @@ def _add_generation_overrides(parser: argparse.ArgumentParser) -> None:
         "the LTX video render (default on; "
         "stored in the manifest, so generate honors it)",
     )
-    parser.add_argument(
+    enhance_group.add_argument(
         "--no-prompt-enhance",
         action="store_true",
         default=None,
@@ -142,7 +146,9 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
     """Finalize-time SFX flags for `configure` (092).
 
     The SFX pass runs inside `generate`'s finalize step; the stored
-    `[sfx]` section plus these overrides decide it.
+    `[sfx]` section plus these overrides decide it. The dual-pan pair
+    lives in a mutually exclusive group (issue 243); hand-built
+    namespaces still resolve via `is_provided` in `cli_core`.
     """
     parser.add_argument(
         "--no-sfx",
@@ -181,7 +187,8 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
         "cuda:0+cuda:1 (needs 2 visible GPUs, fails fast otherwise; "
         "default: [sfx] num_workers, 1)",
     )
-    parser.add_argument(
+    dual_pan_group = parser.add_mutually_exclusive_group()
+    dual_pan_group.add_argument(
         "--sfx-dual-pan",
         action="store_true",
         default=None,
@@ -189,7 +196,7 @@ def _add_sfx_args(parser: argparse.ArgumentParser) -> None:
         "75%% left/right, mixed with music to stereo (default on; "
         "stored in the manifest, so generate honors it)",
     )
-    parser.add_argument(
+    dual_pan_group.add_argument(
         "--no-sfx-dual-pan",
         action="store_true",
         default=None,
@@ -236,7 +243,17 @@ def _add_augment_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
-    """`configure` verb: init or update a run manifest (all run options live here)."""
+    """`configure` verb: init or update a run manifest (all run options live here).
+
+    Plan-size (`--segments`/`--duration`) and definition-tier triples live
+    in mutually exclusive groups (issue 243) so parsed CLI gets the
+    standard argparse usage error; hand-built namespaces bypass the parser
+    and still resolve via `is_provided` + the belt-and-braces pre-checks in
+    `cmd_configure`. The legacy `--run`/`--name` pair needs no group: the
+    two-verb CLI takes a positional NAME only, and the old dual-flag
+    resolver (`cli_paths.resolve_run_dir`) already enforces its mutex with
+    single-error returns.
+    """
     conf = sub.add_parser(
         "configure", help="Init or update a run manifest (all run options live here)"
     )
@@ -247,19 +264,20 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         default=None,
         help="video backend preset written into the run config",
     )
-    conf.add_argument(
+    tier_group = conf.add_mutually_exclusive_group()
+    tier_group.add_argument(
         "--low-definition",
         action="store_true",
         help="lowest native reasonable resolution for the effective backend "
         "(mutually exclusive with --medium-definition and --high-definition)",
     )
-    conf.add_argument(
+    tier_group.add_argument(
         "--medium-definition",
         action="store_true",
         help="use the medium native reasonable resolution for the effective backend "
         "(mutually exclusive with --low-definition and --high-definition)",
     )
-    conf.add_argument(
+    tier_group.add_argument(
         "--high-definition",
         action="store_true",
         help="highest native reasonable resolution for the effective backend "
@@ -275,7 +293,8 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         "explicit flags override inherited values, seed stays fresh "
         "unless --seed is passed",
     )
-    conf.add_argument(
+    plan_group = conf.add_mutually_exclusive_group()
+    plan_group.add_argument(
         "--duration",
         type=parse_duration,
         required=False,
@@ -283,7 +302,7 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
         help=f"target length, e.g. {_DURATION_EXAMPLES} (converts to a segment count; "
         "exactly one of --duration/--segments on first configure)",
     )
-    conf.add_argument(
+    plan_group.add_argument(
         "--segments",
         type=int,
         default=None,
@@ -326,20 +345,26 @@ def _add_configure_parser(sub: argparse._SubParsersAction[Any]) -> None:
 
 
 def _add_generate_parser(sub: argparse._SubParsersAction[Any]) -> None:
-    """`generate` verb: reconcile a configured run to its manifest plan."""
+    """`generate` verb: reconcile a configured run to its manifest plan.
+
+    The additive `--segments`/`--duration` extension lives in a mutually
+    exclusive group (issue 243); hand-built namespaces still resolve via
+    the belt-and-braces check in `_extend_plan`.
+    """
     gen = sub.add_parser(
         "generate",
         help="Generate (or resume) a configured run to its manifest plan",
     )
     gen.add_argument("name", help="run name (flat folder name → output/<name>)")
-    gen.add_argument(
+    extend_group = gen.add_mutually_exclusive_group()
+    extend_group.add_argument(
         "--segments",
         type=int,
         default=None,
         help="extend the stored plan by this many segments (additive: "
         "new plan = manifest segments + N; exactly one of --segments/--duration)",
     )
-    gen.add_argument(
+    extend_group.add_argument(
         "--duration",
         type=parse_duration,
         required=False,

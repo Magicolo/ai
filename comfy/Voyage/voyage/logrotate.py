@@ -490,9 +490,12 @@ def read_all_metric_events(run_dir: Path) -> list[dict[str, object]]:
 
     Rotation splits history across dated siblings; readers needing full
     history must use this instead of opening the live file directly. Torn
-    lines are skipped; a missing/unreadable logs dir yields whatever
-    subset exists. (Moved from the deleted `cli_status` module: the
-    `status` verb is gone but rotation-tolerant reading stays.)
+    lines are skipped silently — a documented convenience for callers
+    that surface log health separately; use
+    `read_all_metric_events_counted` (issue 231) when the torn count must
+    ride into the `errors` cell. A missing/unreadable logs dir yields
+    whatever subset exists. (Moved from the deleted `cli_status` module:
+    the `status` verb is gone but rotation-tolerant reading stays.)
 
     Schema-tolerant like `parse_metric_lines` (issue 224): v1 lines and
     v0 legacy lines mix freely in one stream.
@@ -514,6 +517,30 @@ def read_all_metric_events(run_dir: Path) -> list[dict[str, object]]:
             if isinstance(event, dict):
                 events.append(event)
     return events
+
+
+def read_all_metric_events_counted(run_dir: Path) -> tuple[list[dict[str, object]], int]:
+    """Counted twin of `read_all_metric_events` with loud torn accounting (231).
+
+    Returns `(events, torn)`: `events` matches the silent variant exactly
+    (live + rotated siblings, oldest-first, dict-only), `torn` sums the
+    `parse_metric_lines` torn counts per file (non-empty, non-object
+    lines). Scoreboard/status readers route through this into their
+    `errors` cells so a crash-torn tail surfaces instead of silently
+    shorting history (§60: torn lines are never silently dropped).
+    Never raises: a missing/unreadable logs dir reads as ([], 0).
+    """
+    events: list[dict[str, object]] = []
+    torn = 0
+    for events_path in iter_metric_files(run_dir):
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        file_events, file_torn = parse_metric_lines(lines)
+        events.extend(file_events)
+        torn += file_torn
+    return (events, torn)
 
 
 def last_commit_stages(run_dir: Path) -> tuple[str, dict[str, object]] | None:

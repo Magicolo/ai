@@ -58,10 +58,12 @@ finalizes under manifest policy. Duration is human-readable (`5s`,
 `90`, `1m30s`, `2m`, `1h`, `1h2m3.5s`; fractional/combined/bare/
 whitespace-padded all parse) and converts to a segment count at
 configure time (rounds **up**, so the video never runs short).
-Backend presets set geometry/device automatically (`ltxv`: 768×512 on
-`cuda:0`; `causvid`: 832×480 @ 16 fps on `cuda:0`; `fake`: CPU smoke
-runs) and pair the audio backend too (`ltxv`/`causvid` get real
-ACE-Step music on `cuda:0`; `fake` keeps the sine test tone). Add
+Backend presets set geometry/device automatically (`ltx25`: 1216×704 @
+24 fps on `cuda:0`, the default; `ltx23`: 1216×704 @ 24 fps on `cuda:0`;
+`ltxv`: 768×512 on `cuda:0`; `causvid`: 832×480 @ 16 fps on `cuda:0`;
+`fake`: CPU smoke runs) and pair the audio backend too
+(`ltx25`/`ltx23`/`ltxv`/`causvid` get real ACE-Step music on `cuda:0`;
+`fake` keeps the sine test tone). Add
 `--low-definition` for the lowest native reasonable resolution of the
 effective backend instead (fresh creates default to high;
 `--medium-definition` selects the middle tier, `--high-definition`
@@ -72,8 +74,11 @@ run flags (`--director`, `--blocks`, `--take-seconds`,
 before finalize unless `--skip-bad`; on a GPU box with no visible GPU
 a warning is printed (the worker will fail at init). `run.sh` selects
 the container automatically: a CUDA backend (`ltxv`, `causvid`,
-`acestep` — from `--backend` or the run's `manifest.json`) switches
-to `voyage-video:latest` with `--gpus all` and pins `-w /app`, unless
+`acestep`, `mmaudio`, `ltx25`, `ltx23` — from `--backend` or the run's
+`manifest.json`) switches to a CUDA image with `--gpus all` and pins
+`-w /app` (`ltx25`/`ltx23` → `voyage-ltx:latest`; `ltxv`/`causvid`/
+`acestep`/`mmaudio` — or the `llama` director sidecar — →
+`voyage-video:latest`), unless
 `VOYAGE_IMAGE`/`VOYAGE_GPUS` are set explicitly. A CUDA backend in an
 image without torch fails fast with a pointer to `voyage-video`
 instead of a cryptic worker error. Before the banner, `generate`

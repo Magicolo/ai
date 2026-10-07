@@ -49,3 +49,40 @@ supervisor spawns attacker binary; two concurrent `generate` on one box → seco
 ## Log
 
 - 2026-10-07: filed from read-only Track F sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live check confirmed all three sub-findings in
+`voyage/llama_server.py`: `server_binary()` returned any absolute env
+path unchecked; `port_for_endpoint()` parsed any host while the bind
+stayed loopback; first-start (`Supervisor._start_llama_sidecar`) used
+the fixed endpoint port with no `resolve_port` (only the heal path
+resolved). `resolve_port`/`find_free_port`/`is_port_in_use` already
+existed, so the missing pieces were validation + allowlist + a
+race-free claim. A start-side auto-resolve alone was rejected as
+incorrect: the director payload routes on the *config* endpoint, so a
+silently remapped spawn port would misroute without supervisor
+propagation (supervisor is out of scope here).
+
+## Progress log
+
+- 2026-10-07 (`voyage/llama_server.py` only): added
+  `LLAMA_ALLOWED_HOSTS` (`127.0.0.1`, `localhost`) +
+  `validate_endpoint_host()` fail-closed, wired into
+  `port_for_endpoint()` (active immediately on the supervisor path);
+  added `LLAMA_SERVER_BAKED_PATHS` allowlist (both baked install
+  paths) with `server_binary()` refusing anything else (the issue's
+  `/tmp/evil-llama` repro now raises); added `port_file_for()` +
+  `claim_sidecar_port()` (shared-lock probe + per-run port record).
+- 2026-10-07: new `tests/test_issue_237_llama_hardening.py` (8 tests:
+  host validation, port-parse fail-closed, binary default/allow/
+  refuse, port-file shape, claim free/occupied).
+
+## Resolution (2026-10-07)
+
+Resolved in scope: hostname fail-closed and binary allowlist are live
+(no caller change needed); the port-collision half lands as the tested
+`claim_sidecar_port()` helper. Open follow-up (supervisor scope):
+wire claim → `start(port=claimed)` → route director traffic at the
+claimed endpoint in `_start_llama_sidecar`, and validate
+`llama_endpoint` in the director worker client too.

@@ -45,3 +45,31 @@ listed home; compare `MODEL_SPECS.keys()` vs layout values to see the gap.
 ## Log
 
 - 2026-10-07: filed from read-only Track B sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Live check confirmed the gap: `models_dir_layout()` returned 14 roots
+with no `rife`, no GGUF, no AWQ dir, while `MODEL_SPECS` ships all
+three rows. `RIFE_SUBDIR == FILM_SUBDIR == "frame_interpolation"`,
+so the two interpolation specs genuinely share one dir. Minimal-hunk
+fix chosen: name all three (rife as an alias key), document the
+sharing in the docstring. Out of scope noted: sibling subdirs the
+layout also omits (ACE LM gate-only snapshot, MMAudio CLIP/vocoder
+subdirs) — untouched, same intentional-unlisted class as before.
+
+## Progress log
+
+- 2026-10-07 (`voyage/model_registry.py`, layout hunk only): added
+  `rife_dir`, `director_gguf_dir`, `director_awq_dir` + docstring lines
+  recording the film/rife sharing. No other function touched (file is
+  shared — unique-anchor edit).
+- 2026-10-07: new `tests/test_issue_245_layout.py` (3 tests: rife/film
+  alias equality, GGUF/AWQ dirs, per-spec relative_dir coverage for
+  the three 245 rows).
+
+## Resolution (2026-10-07)
+
+Resolved: every 245 spec's `relative_dir` now appears in the layout
+values. Open (different finding, not filed here): decide whether the
+ACE-LM / MMAudio-CLIP / vocoder subdirs belong in the layout or stay
+intentionally unlisted like before.

@@ -182,6 +182,9 @@ def _tail_clip_to_handoff_frames(tail_clip: Any) -> NDArray[np.uint8] | None:
     the next block then falls back to the chain mp4 path, which is today's
     behavior, and the miss is noted on stderr so a layout drift degrades
     to the status quo instead of silently corrupting the anchor.
+    Resource failures (`MemoryError`, including torch's CUDA OOM) never
+    take this fallback (issue 293) — they propagate to the worker's
+    OOM-retry path instead of degrading continuity silently.
     """
     try:
         tail_video = tail_clip[0]
@@ -193,7 +196,7 @@ def _tail_clip_to_handoff_frames(tail_clip: Any) -> NDArray[np.uint8] | None:
         if tail_clipped.shape[-1] == 4:
             tail_clipped = tail_clipped[..., :3]
         return tail_frames_for_conditioning(tail_clipped)
-    except Exception as exc:  # noqa: BLE001 — fallback is today's mp4 path
+    except (AttributeError, TypeError, ValueError) as exc:
         print(f"ltxv tensor handoff unavailable ({exc}); using chain mp4", file=sys.stderr)
         return None
 
@@ -332,6 +335,48 @@ def _resolve_te_source(models_dir: Path) -> str:
     return str(models_dir / ref.relative_dir)
 
 
+def _assert_te_snapshot_enforced(models_dir: Path, te_source: str) -> None:
+    """Load-time presence gate for the PixArt TE snapshot (issue 238).
+
+    The `revision=` kwarg on the `from_pretrained` calls below is
+    documentary for local directories (transformers skips git resolution
+    for plain paths, so it enforces nothing) — this checklist is the pin
+    that actually binds the load. `_resolve_te_source` already enforces on
+    its own path (fetch-when-absent, then re-check); this postcondition
+    keeps the guarantee load-time even if the resolver is ever stubbed or
+    bypassed, so a stale or hand-rolled snapshot at the path fails here
+    instead of loading silently under a "pinned" log line.
+    """
+    from voyage import model_registry  # lazy: attribute access stays monkeypatchable (§12)
+
+    ref = model_registry.resolve_snapshot(LTXV_TE_REPO)
+    if ref is None:
+        raise RuntimeError(
+            f"PixArt TE repo {LTXV_TE_REPO!r} has no registry snapshot — "
+            "refusing an unpinned text-encoder load"
+        )
+    expected = str(models_dir / ref.relative_dir)
+    if te_source != expected or not model_registry.snapshot_present(models_dir, ref):
+        raise RuntimeError(
+            f"stale or incomplete PixArt TE snapshot at {te_source!r} "
+            f"(expected checklist-clean {expected!r}) — re-provision via "
+            '`model_registry.download_model(models_dir, "ltxv-2b")`'
+        )
+
+
+def _benchmark_staging_parent() -> Path | None:
+    """Run scratch for benchmark probes, None for the TMPDIR default (287).
+
+    Reads the `scratch_dir` recorded at init (run `tmp/` in production);
+    a missing value (legacy/test callers) keeps today's behavior instead
+    of failing a benchmark over plumbing.
+    """
+    raw = _INIT_PARAMS.get("scratch_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw)
+    return None
+
+
 def _verify_stack_manifest(models_dir: Path) -> None:
     """Fail-closed load-time sha gate for the LTXV stack (issue 209).
 
@@ -398,8 +443,11 @@ class LTXVSession:
         # bare hub id — `local_files_only` keeps every session init
         # offline-first, and `revision` (supported by the pinned
         # transformers 4.57.6, probe-verified) documents the pin for any
-        # hub-shaped input.
+        # hub-shaped input. It enforces nothing for local directories
+        # (transformers skips git resolution for plain paths) — the
+        # load-time checklist below is the enforcing pin (issue 238).
         te_source = _resolve_te_source(models_dir)
+        _assert_te_snapshot_enforced(models_dir, te_source)
         tokenizer = T5Tokenizer.from_pretrained(
             te_source,
             subfolder="tokenizer",
@@ -956,7 +1004,10 @@ def handle_init(payload: dict[str, Any]) -> dict[str, Any]:
             f"({torch.cuda.device_count()} CUDA device(s) visible)"
         )
     started = time.monotonic()
-    _INIT_PARAMS.update({"models_dir": models_dir, "device": device})
+    scratch_parent = video_common.session_scratch_parent(payload)
+    _INIT_PARAMS.update(
+        {"models_dir": models_dir, "device": device, "scratch_dir": str(scratch_parent)}
+    )
     _SESSION = _build_session()
     device_arg = video_common.torch_device_arg(device_index)
     name = torch.cuda.get_device_name(device)
@@ -1081,6 +1132,7 @@ def handle_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
             probe,
             reset_peak_memory=lambda: torch.cuda.reset_peak_memory_stats(*device_arg),
             read_peak_gib=lambda: torch.cuda.max_memory_allocated(*device_arg) / 1024**3,
+            staging_parent=_benchmark_staging_parent(),
         )
     finally:
         session._conditioning_tail_path = saved_tail

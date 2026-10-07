@@ -21,10 +21,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     CUDA_HOME=/usr/local/cuda
 
-# Apt rows are intentionally unpinned (noble versions were not pre-resolved;
-# the digest-pinned FROM above keeps the snapshot reproducible). Re-query
-# procedure: rebuild, run `dpkg-query -W <pkgs>` in the image, pin exact
-# with `=`, note in docs/INSTALL.md. python3.11 comes from the deadsnakes
+# Apt rows are intentionally unpinned (issue 230): noble versions were not
+# pre-resolved at authoring time — no GPU build was available to run the
+# re-query, and inventing `=` versions without measuring them would be a
+# false pin. The digest-pinned FROM above keeps the base snapshot
+# reproducible. Re-query procedure (same contract as
+# worker/Dockerfile.video:26-32): rebuild, then run
+#   docker run --rm voyage-ltx:latest dpkg-query -W software-properties-common \
+#     python3.11 python3.11-venv python3.11-dev git gcc g++ ffmpeg curl ca-certificates
+# and pin every row exact with `=`, note in docs/INSTALL.md. PPA trust
+# procedure for the same rebuild: record the deadsnakes key fingerprint
+# (`gpg --show-keys` over the keyring add-apt-repository installs) in this
+# comment next to the pins; the accepted heavier alternative is vendoring a
+# python3.11 base instead of adding an archive mid-build (noble ships only
+# 3.12). Provenance note: noble's ffmpeg major trails the slim trixie pin
+# (7.1.5) and the video jammy pin (4.4.2) — per-stage `ffmpeg_version`
+# recording (doctor already captures `_ffmpeg_version`) is the chosen
+# provenance path, same decision as worker/Dockerfile.video.
+# python3.11 comes from the deadsnakes
 # PPA (noble ships only 3.12; same deadsnake provenance as the TE-2 host
 # toolchain fix). python3.11-dev is here (not late) because triton
 # JIT-compiles its CUDA utils on first Gemma RoPE use and gcc + Python.h
@@ -43,6 +57,13 @@ RUN apt-get update \
 
 # pip + torch trio from the cu130 index (torch 2.14.0+cu130 is NOT on the
 # default index; the cp311 x86_64 wheel was confirmed present pre-build).
+# Index-scope review (issue 232): `--index-url` (not `--extra-index-url`)
+# means the cuTorch index is the ONLY index consulted on these rows — every
+# package on the line must resolve there. That holds because these rows
+# carry torch/torchvision/torchaudio alone (same for the cu128 director
+# row, the cu130 ACE/SFX rows and the cu124 mastering row below) — no
+# restructuring needed; keep torch-only rows on `--index-url` lines and
+# never append a leaf dep to one.
 # Explicit `python3.11 -m pip`: no python3-pip is installed (that would be
 # noble's 3.12 pip — wrong interpreter), so no bare `pip` binary exists.
 RUN python3.11 -m pip install "pip==25.0.1" \
@@ -218,7 +239,12 @@ RUN git clone --depth 1 https://github.com/ace-step/ACE-Step-1.5.git /opt/ACE-St
 # pattern as above): torch trio matching the main env (cu130) + the video
 # image's MMAudio inference closure (no-deps editable clone + open_clip
 # tower + audio/math leaf deps); finalize spawns the SFX worker with this
-# interpreter via VOYAGE_SFX_PYTHON below. Verified-fetch clone (same
+# interpreter via VOYAGE_SFX_PYTHON below. The four previously bare rows
+# (issue 232) are pinned `==` to the worker/requirements-ltx.txt freeze
+# (2026-10-01 validated experiment venv: Pillow 12.3.0, tqdm 4.70.1,
+# huggingface_hub 1.33.0, numpy 2.4.6) — a bare rebuild must never float
+# them (notably `huggingface_hub`, whose v1→v2 migration renames httpx and
+# changes offline/cache behavior). Verified-fetch clone (same
 # contract as above). Placed after the slow layers so only the fast
 # user-setup layers rerun; the recursive chown below covers venv + clone.
 RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
@@ -230,7 +256,7 @@ RUN git clone --depth 1 https://github.com/hkchengrex/MMAudio.git /opt/mmaudio \
     && /opt/venvs/sfx/bin/pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 \
         --index-url https://download.pytorch.org/whl/cu130 \
     && /opt/venvs/sfx/bin/pip install --no-deps -e /opt/mmaudio \
-    && /opt/venvs/sfx/bin/pip install "open_clip_torch==3.3.0" "librosa==0.11.0" "torchdiffeq==0.2.5" "accelerate==1.15.0" "colorlog==6.12.0" soundfile==0.14.0 "einops==0.8.2" "safetensors==0.8.0" "pydantic==2.10.6" "av==13.1.0" Pillow tqdm huggingface_hub numpy "omegaconf==2.3.1" "easydict==1.13" "ftfy==6.3.1" \
+    && /opt/venvs/sfx/bin/pip install "open_clip_torch==3.3.0" "librosa==0.11.0" "torchdiffeq==0.2.5" "accelerate==1.15.0" "colorlog==6.12.0" soundfile==0.14.0 "einops==0.8.2" "safetensors==0.8.0" "pydantic==2.10.6" "av==13.1.0" "Pillow==12.3.0" "tqdm==4.70.1" "huggingface_hub==1.33.0" "numpy==2.4.6" "omegaconf==2.3.1" "easydict==1.13" "ftfy==6.3.1" \
     && test -d /opt/mmaudio/.git \
     && test -x /opt/venvs/sfx/bin/python
 

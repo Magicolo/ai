@@ -43,3 +43,26 @@ As above.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 docs-drift sweep; no code touched.
+
+## Evaluation (2026-10-07)
+
+Claim re-verified live: `docs/OPERATIONS.md:61-64` presets listed only
+ltxv/causvid/fake and `:74-76` image selection listed ltxv/causvid/acestep, while
+`voyage/config.py:117-240` carries 5 rows with `_DEFAULT_ROW =
+BACKEND_REGISTRY["ltx25"]` (`:240`, `VideoConfig.backend = "ltx25"` at `:333`)
+and `scripts/run.sh:144` CUDA set is `{ltxv,causvid,acestep,mmaudio,ltx25,ltx23}`
+plus the `llama` director branch (`:195-200`, ltx→`voyage-ltx:latest`). File:line
+refs fresh. No downgrade: full fix scope applied.
+
+## Progress log
+
+- 2026-10-07: `docs/OPERATIONS.md` presets paragraph now lists `ltx25` (1216×704 @
+  24 fps on `cuda:0`, the default) + `ltx23` rows and pairs ACE-Step music on
+  `ltx25`/`ltx23`/`ltxv`/`causvid`; image-selection sentence now mirrors run.sh's
+  full CUDA set with the `voyage-ltx` vs `voyage-video` split (`ltx25`/`ltx23` →
+  `voyage-ltx:latest`; rest + `llama` sidecar → `voyage-video:latest`).
+  Grep-verified against `voyage/config.py` + `scripts/run.sh`.
+
+## Resolution (2026-10-07)
+
+RESOLVED. Default-config geometry/device/image choice is documented; nothing left open.

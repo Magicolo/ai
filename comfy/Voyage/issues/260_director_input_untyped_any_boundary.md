@@ -51,3 +51,28 @@ stays silent.
 ## Log
 
 - 2026-10-07: filed from read-only Track C sweep; no code touched.
+
+## Evaluation (2026-10-07)
+Live probe in-container: `director_input_from_state` signature is
+`(state: 'Any', ...)` (stringified by `from __future__ import
+annotations`); it touches six attributes (`current_concept`,
+`destination_concept`, `phase`, `decision_index`, `committed_segments`,
+`timeline_frames`) unchecked. Cycle check: `director.py` already imports
+`voyage.models` and `models.py` never imports `director`, so the real
+`RunState` import is free — no `Protocol` needed. `RunState` carries all
+six fields. Confirmed as filed; fix is option (a) with the real type.
+
+## Progress log
+- `director.py`: imported `RunState` from `voyage.models`; typed
+  `state: RunState` with a docstring naming the six attributes + no-cycle
+  rationale (kept `Protocol` import for the existing `DirectorBackend`).
+- New tests in `tests/test_issue_260_director_state.py` (2 tests):
+  `get_type_hints` pins `state is RunState`; six-attribute flow pin
+  through a real `RunState` (world/transition/metrics strings).
+- Verified: `ruff check` + `format --check` clean; `mypy` strict clean
+  on `director.py`; scoped pytest 113 passed.
+
+## Resolution (2026-10-07)
+Fixed as proposed via the real type (no `Protocol` fallback needed).
+No open items; `ANN401` adoption for the remaining dark-list sites
+(`console.py`, `boundary_metrics.py`) stays with the owning passes.

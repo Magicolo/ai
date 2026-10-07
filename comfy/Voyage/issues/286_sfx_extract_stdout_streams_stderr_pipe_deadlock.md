@@ -55,3 +55,19 @@ bound.
 ## Log
 
 - 2026-10-07: filed from read-only pass-2 worker-tails sweep; no code touched.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: `_extract_frames` still read stdout in a loop with
+  `stderr=PIPE` undrained and a timeout-less trailing `communicate()`. Fix
+  candidates (b)+(c) adopted in combination.
+
+## Progress log
+- Batch-6 Group Q fixed `voyage/workers/sfx_mmaudio.py::_extract_frames`: a
+  stderr-drain thread runs ahead of the stdout read loop (pipe can no longer fill
+  and block the child), and the trailing `communicate()` carries a timeout with
+  kill-on-expiry. New `tests/test_issue_286_sfx_stderr_drain.py` covers the drain
+  and timeout behavior. Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. The textbook pipe deadlock is closed on both ends: stderr is drained
+  concurrently, and no path can hang past the communicate timeout.

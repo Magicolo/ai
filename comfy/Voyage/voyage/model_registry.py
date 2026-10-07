@@ -1775,8 +1775,12 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
     Covers all shipped stacks: Wan2.1 + CausVid DMD, LTXV DiT/upscaler +
     its PixArt text encoder, LTX-2.5 Q3 + LTX-2.3 Q3 stacks (shared Mode-A
     upscaler), Qwen3-8B director, Qwen3.5-9B inspector,
-    MiniLM embeddings, ACE-Step music, MMAudio SFX, FILM interpolation,
-    Real-ESRGAN anime upscaler, SonicMaster mastering.
+    Qwen3.5-4B GGUF sidecar (`director_gguf_dir`), Qwen3-4B-AWQ decider
+    (`director_awq_dir`), MiniLM embeddings, ACE-Step music, MMAudio SFX,
+    FILM interpolation, RIFE interpolation (`rife_dir`, same
+    `frame_interpolation/` dir as FILM — one key per spec row so
+    spec-relative_dir coverage holds), Real-ESRGAN anime upscaler,
+    SonicMaster mastering.
     """
     return {
         "wan21_dir": str(models_dir / WAN21_SUBDIR),
@@ -1787,10 +1791,13 @@ def models_dir_layout(models_dir: Path) -> dict[str, str]:
         "ltxv_text_encoder_dir": str(models_dir / LTXV_TE_SUBDIR),
         "qwen_dir": str(models_dir / QWEN_SUBDIR),
         "inspector_dir": str(models_dir / QWEN35_SUBDIR),
+        "director_gguf_dir": str(models_dir / QWEN35_GGUF_SUBDIR),
+        "director_awq_dir": str(models_dir / QWEN4B_AWQ_SUBDIR),
         "minilm_dir": str(models_dir / MINILM_SUBDIR),
         "acestep_dir": str(models_dir / ACE_MAIN_SUBDIR),
         "sfx_dir": str(models_dir / MMAUDIO_SUBDIR),
         "film_dir": str(models_dir / FILM_SUBDIR),
+        "rife_dir": str(models_dir / RIFE_SUBDIR),
         "realesrgan_dir": str(models_dir / REALESRGAN_SUBDIR),
         "sonicmaster_dir": str(models_dir / SONICMASTER_SUBDIR),
         "manifest": str(models_dir / "manifest.json"),

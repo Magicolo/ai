@@ -30,6 +30,16 @@ RUN apt-get update \
 # FROM above keeps the snapshot reproducible; bump procedure: rebuild,
 # re-query, update the pins, note in docs/INSTALL.md (same contract as
 # the slim header `Dockerfile:5-7`).
+# Provenance decision (issue 230): the majors stay unaligned on purpose —
+# this image is jammy-based (CUDA 12.8 / torch 2.8 stack) while slim is
+# trixie-based, so aligning ffmpeg would need a base bump plus a full
+# pip re-freeze and an encode-byte revalidation. The cheaper correct path
+# is per-stage `ffmpeg_version` provenance: `voyage/doctor.py` already
+# captures `_ffmpeg_version`, and wiring it into the run manifest plus the
+# `finalize_completed` metrics event (media.py, follow-up) gives identical
+# configs a version trail when bytes differ. The ltx image's noble ffmpeg
+# is a third major by the same base-snapshot logic (see
+# worker/Dockerfile.ltx) — same recording, no alignment.
 
 # pip pinned exact (issue 012): 25.0.1 still supports python3.10.
 RUN pip install "pip==25.0.1" \

@@ -57,3 +57,19 @@ allocations.
 
 ## Log
 - Track D sweep, 2026-10-07. Read-only; nothing fixed.
+
+## Evaluation (2026-10-07)
+- Claim CURRENT on re-read: the direct path still accumulated `natives` across the
+  whole chunk before post-processing, outside the `_run_frame_batches` OOM-halving
+  loop. Fix candidate 1 (finish inline) adopted.
+
+## Progress log
+- Batch-6 Group Q implemented the inline finish in
+  `voyage/workers/augment_worker.py`: the direct path now calls
+  `_finish_upscaled(single, ...)` per frame with `del single` (matches the tiled
+  path shape). New `tests/test_issue_212_upscale_inline.py` pins peak-live-tensor
+  behavior. Scoped gates green (ruff + format + mypy strict + pytest).
+
+## Resolution (2026-10-07)
+- RESOLVED. Direct path finishes inline per frame; peak live natives bounded at ~1
+  frame instead of the full chunk. No behavior change for the tiled path.

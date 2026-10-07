@@ -27,10 +27,19 @@ stage prompt), so a shot evolves gradually instead of jumping.
 ## Novelty system
 
 `ConceptStore` (`voyage/concepts.py`, `novelty/` dir) keeps every accepted
-concept with its MiniLM embedding. A proposal whose cosine similarity to
-history exceeds `novelty_threshold = 0.85` is rejected with feedback and
-the director retries (bounded attempts, then the best candidate wins).
-Revisits are off by default (`allow_concept_revisit = false`).
+concept with its MiniLM embedding. Since 2026-10-01 novelty is
+steer-and-accept — it never rejects: the director prompt carries a
+`NOVELTY STEERING` section (visited worlds listed under
+`FORBIDDEN CONCEPT SUMMARY`, omitted entirely when revisits are allowed)
+nudging the destination slightly away from history, every generation is
+scored (`novelty_scored` metric: score vs `novelty_threshold = 0.85`,
+embeddings on/fallback), and the first schema/style-valid generation
+renders — a revisit simply carries `novelty_accepted = false`
+(`novel`/`hold` in the console). Bounded retries still apply to
+schema/style failures only (exhaustion falls back to the deterministic
+director). Revisits are off by default (`allow_concept_revisit = false`);
+the pre-2026-10-01 reject-and-retry regime is retired (pinned by
+`tests/test_novelty_steer_accept.py`).
 
 ## Staged prompt design
 
