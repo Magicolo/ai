@@ -1254,8 +1254,10 @@ def finalize_run(
             # Thread-A (2060, fork) or sequential: one interleaved pass —
             # each segment's upscale immediately followed by its interp
             # on the same card (RIFE's 0.65 GiB peak fits beside the
-            # llama sidecar), seams attempted early per boundary, then
-            # drain (+ seam/morph joints) to one intermediate. Both legs
+            # llama sidecar); the fix stage renders every boundary's
+            # joints first, then segments + joint units run the same
+            # up→ip loop, and the drain assembles [trimA, joint, trimB]
+            # into one intermediate. Both legs
             # pin cuda:1; the drain inherits the interp card. Report on
             # the shared "model pass" branch view (sequential bars, one
             # Live).
@@ -1293,9 +1295,9 @@ def finalize_run(
             # Bidirectional (finalize-only, RIFE-only, DESIGN §140): the
             # work-stealing deque renders every queued chunk (worker A on
             # cuda:1 front-to-back, worker B on cuda:0 back-to-front),
-            # then the same drain (+ seam/morph joints) as the single
-            # driver emits one intermediate. No seam-early in workers —
-            # the drain fallback owns seams. A set gate holds worker B
+            # then the same joint-aware drain as the single
+            # driver emits one intermediate. Joint units flow as joint
+            # tasks through the same deque. A set gate holds worker B
             # until the audio frees cuda:0 (2-stream fork below).
             from voyage.augment_finalize import _drain_to_intermediate, weights_key_for
             from voyage.augment_parallel import run_parallel_model_pass

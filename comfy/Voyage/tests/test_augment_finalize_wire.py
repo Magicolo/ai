@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import voyage.augment_finalize as finalize_module
 from voyage import augment_sidecar as sidecar
 from voyage.augment import AugmentWeights
 from voyage.augment_finalize import (
@@ -159,9 +160,12 @@ def test_plan_dir_matches_poller_derivation(tmp_path: Path) -> None:
     assert retuned != first  # recipe change never hits old outputs
 
 
-def test_polls_then_drains_each_usable_segment(tmp_path: Path) -> None:
+def test_polls_then_drains_each_usable_segment(tmp_path: Path, monkeypatch: Any) -> None:
     first = _make_segment(tmp_path, "000000", frames=8)
     second = _make_segment(tmp_path, "000001", frames=8, checksum="def456")
+    # Joint assembly is pinned in test_augment_joints: here the fix stage
+    # is stubbed empty so this test keeps pinning the segment-only path.
+    monkeypatch.setattr(finalize_module, "ensure_joint_units", lambda *a, **k: [])
     work = tmp_path / "work"
     work.mkdir()
     weights = _make_weights(work)
@@ -199,7 +203,7 @@ def test_polls_then_drains_each_usable_segment(tmp_path: Path) -> None:
         **_durable_kwargs(
             weights,
             work,
-            multiplier=1,  # upscale-only: zero seam mids, hard concat
+            multiplier=1,  # upscale-only: joints stubbed out, hard concat
             upscale_poll_fn=stub_upscale,
             interp_poll_fn=stub_interp,
             drain_fn=stub_drain,

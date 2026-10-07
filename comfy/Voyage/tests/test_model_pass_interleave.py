@@ -1,11 +1,12 @@
-"""Segment-interleaved model pass: scoping, order, seam-early, per-segment bars.
+"""Segment-interleaved model pass: scoping, order, joints, per-segment bars.
 
 Pins the pipeline fix: `_poll_to_completion` enumerates committed
 segments once per pass and runs each segment's upscale immediately
 followed by its interp (never a full upscale sweep then a full interp
-sweep), scopes both pollers to the current segment, attempts each
-boundary seam early, and renders one leg bar per segment. CPU-only —
-pollers and seams enter via seams.
+sweep), scopes both pollers to the current segment, polls the
+fix-stage joint units through the same legs after the segments, and
+renders one leg bar per segment. CPU-only — pollers and the fix enter
+via seams.
 """
 
 from __future__ import annotations
@@ -82,13 +83,36 @@ def _run_two_segments(
     calls: list[tuple[str, Any]],
     *,
     multiplier: int = 1,
-    seam_early: bool = True,
+    joint_ids: list[str] | None = None,
     progress: Any = None,
+    monkeypatch: Any = None,
+    include_upscale: bool = True,
+    include_interp: bool = True,
 ) -> None:
     run_dir = tmp_path / "run"
     _make_segment(run_dir, "000000", checksum="ck0")
     _make_segment(run_dir, "000001", checksum="ck1")
     weights = _make_weights(tmp_path / "weights")
+    if monkeypatch is not None:
+        from voyage.augment_joints import JointUnit
+
+        units = [
+            JointUnit(
+                joint_dir=run_dir / joint_id,
+                joint_video=run_dir / joint_id / "joint.mp4",
+                joint_key=f"jk-{joint_id}",
+                left_id="000000",
+                right_id="000001",
+                left_frames=8,
+                right_frames=8,
+            )
+            for joint_id in (joint_ids or [])
+        ]
+        monkeypatch.setattr(
+            finalize_module,
+            "ensure_joint_units",
+            lambda *args, **kwargs: units,
+        )
 
     def _rec_upscale(run_dir_arg: Path, **kwargs: Any) -> UpscalePollResult:
         calls.append(("up", kwargs.get("segment_ids")))
@@ -114,14 +138,15 @@ def _run_two_segments(
         upscale_poll_fn=_rec_upscale,
         interp_poll_fn=_rec_interp,
         progress=progress,
-        seam_early=seam_early,
+        include_upscale=include_upscale,
+        include_interp=include_interp,
     )
 
 
-def test_pollers_receive_scoped_segment_ids(tmp_path: Path) -> None:
+def test_pollers_receive_scoped_segment_ids(tmp_path: Path, monkeypatch: Any) -> None:
     """Both pollers run scoped to the current segment (never whole-dir)."""
     calls: list[tuple[str, Any]] = []
-    _run_two_segments(tmp_path, calls)
+    _run_two_segments(tmp_path, calls, monkeypatch=monkeypatch)
     assert calls == [
         ("up", ["000000"]),
         ("ip", ["000000"]),
@@ -130,46 +155,39 @@ def test_pollers_receive_scoped_segment_ids(tmp_path: Path) -> None:
     ]
 
 
-def test_interleave_order_up_then_ip_per_segment(tmp_path: Path) -> None:
+def test_interleave_order_up_then_ip_per_segment(tmp_path: Path, monkeypatch: Any) -> None:
     """Interp starts on committed frames: up,ip per segment, not sweep-then-sweep."""
     calls: list[tuple[str, Any]] = []
-    _run_two_segments(tmp_path, calls)
+    _run_two_segments(tmp_path, calls, monkeypatch=monkeypatch)
     legs = [leg for leg, _scope in calls]
     assert legs == ["up", "ip", "up", "ip"]
 
 
-def test_seam_early_attempts_boundary_once(tmp_path: Path, monkeypatch: Any) -> None:
-    """With multiplier > 1 the left boundary joint renders right after its interp."""
-    seams: list[dict[str, Any]] = []
-
-    def _fake_seam(*_args: Any, **kwargs: Any) -> bool:
-        seams.append(kwargs)
-        return True
-
-    monkeypatch.setattr(finalize_module, "maybe_render_seam_joint", _fake_seam)
+def test_joints_poll_through_both_legs_after_segments(tmp_path: Path, monkeypatch: Any) -> None:
+    """Fix-stage joint units poll through the same legs after the segments."""
     calls: list[tuple[str, Any]] = []
-    _run_two_segments(tmp_path, calls, multiplier=2)
-    assert len(seams) == 1
-    seam = seams[0]
-    assert seam["key_a"] == "ck0"
-    assert seam["key_b"] == "ck1"
-    assert seam["weights_key"] == "k|k"
-    assert seam["multiplier"] == 2
-    assert seam["interp_backend"] == "rife"
+    _run_two_segments(
+        tmp_path, calls, multiplier=2, joint_ids=["joint_000000_000001"], monkeypatch=monkeypatch
+    )
+    assert [leg for leg, _scope in calls] == ["up", "ip", "up", "ip", "up", "ip"]
+    assert calls[4] == ("up", ["joint_000000_000001"])
+    assert calls[5] == ("ip", ["joint_000000_000001"])
 
 
-def test_seam_early_disabled_skips_boundaries(tmp_path: Path, monkeypatch: Any) -> None:
-    """`seam_early=False` (e.g. morph-cut timelines) attempts no joints."""
-    seams: list[dict[str, Any]] = []
-
-    def _fake_seam(*_args: Any, **kwargs: Any) -> bool:
-        seams.append(kwargs)
-        return True
-
-    monkeypatch.setattr(finalize_module, "maybe_render_seam_joint", _fake_seam)
+def test_joints_poll_without_segments_in_interp_only_mode(tmp_path: Path, monkeypatch: Any) -> None:
+    """Interp-only polls still run the joint upscale (new units, no prior leg)."""
     calls: list[tuple[str, Any]] = []
-    _run_two_segments(tmp_path, calls, multiplier=2, seam_early=False)
-    assert seams == []
+    _run_two_segments(
+        tmp_path,
+        calls,
+        multiplier=2,
+        joint_ids=["joint_000000_000001"],
+        monkeypatch=monkeypatch,
+        include_upscale=False,
+        include_interp=True,
+    )
+    assert ("up", ["joint_000000_000001"]) in calls
+    assert ("ip", ["joint_000000_000001"]) in calls
 
 
 class _Tracker:
@@ -210,11 +228,11 @@ class _Sink:
         return _BarContext(tracker)
 
 
-def test_per_segment_leg_bars(tmp_path: Path) -> None:
+def test_per_segment_leg_bars(tmp_path: Path, monkeypatch: Any) -> None:
     """One leg bar per segment (sequential, never two concurrent displays)."""
     sink = _Sink()
     calls: list[tuple[str, Any]] = []
-    _run_two_segments(tmp_path, calls, progress=sink)  # type: ignore[arg-type]
+    _run_two_segments(tmp_path, calls, progress=sink, monkeypatch=monkeypatch)  # type: ignore[arg-type]
     assert [label for label, _total, _tracker in sink.bars] == [
         "upscale frames",
         "interp frames",

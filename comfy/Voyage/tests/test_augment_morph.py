@@ -1,9 +1,14 @@
-"""Morph-cut 2+2 joint assembly for ltx25/ltx23 finalize (DESIGN §140).
+"""Morph 2+2 bridges shared by the native path and the joint fix stage.
 
-Replaces the mids-insert seam (freeze-motion bridge) with a count-preserving
-morph-cut: per segment joint, A[-2:]+B[:2] are replaced by 4 FILM bridge
-frames morphed between anchors A[-3] and B[+2]. Frame count is unchanged,
-so committed audio timelines stay untouched.
+The durable model pass fixes joints at source resolution through
+`voyage.augment_joints` (same anchors, same bridge moments) and routes
+the bridge frames through the uniform upscale + interp pass; this module
+keeps the no-model-pass native assembly (`assemble_morphed_timeline`,
+all backends behind the ltx gate) plus the shared trim/TS/concat
+helpers the joint assembly reuses. Native morph-cut: per segment joint,
+``A[-2:]+B[:2]`` are replaced by 4 bridge frames morphed between anchors
+``A[-3]`` and ``B[+2]``. Frame count is unchanged, so committed audio
+timelines stay untouched.
 
 Uses real ffmpeg on synthetic testsrc clips (ffmpeg ships in every voyage
 image); FILM is a stub (no torch at module scope — same rule as the seam
@@ -113,7 +118,7 @@ def test_morph_joint_key_is_pair_and_recipe_sensitive() -> None:
     assert key(a_sha="b" * 64, b_sha="a" * 64, width=1216, height=704, fps_key=24) != base
     assert key(a_sha="a" * 64, b_sha="b" * 64, width=640, height=704, fps_key=24) != base
     assert key(a_sha="a" * 64, b_sha="b" * 64, width=1216, height=704, fps_key=24) == base
-    assert base.startswith("morph2x2|")
+    assert base.startswith(augment_morph.MORPH_KEY_VERSION + "|")
 
 
 def test_morph_backend_gate() -> None:
@@ -287,28 +292,44 @@ def _make_segment(
     return segment_dir
 
 
-def test_durable_morph_replaces_seams_with_trim_bridge_trim_order(
+def test_durable_joints_assemble_trim_joint_trim_order(
     tmp_path: Path,
 ) -> None:
     first = _make_segment(tmp_path, "000000", frames=12, checksum="abc123")
     second = _make_segment(tmp_path, "000001", frames=12, checksum="def456")
+    # The fix stage needs committable source videos: real clips here
+    # (manifest checksums stay opaque keys — nothing re-hashes).
+    first_video = _make_clip(first / "video.mp4", 12)
+    second_video = _make_clip(second / "video.mp4", 12)
     work = tmp_path / "work"
     work.mkdir()
     film = work / "film.safetensors"
     film.write_bytes(b"film-weights")
+    rife = work / "rife.safetensors"
+    rife.write_bytes(b"rife-weights")
     esrgan = work / "esrgan.pth"
     esrgan.write_bytes(b"esrgan-weights")
-    weights = SimpleNamespace(film=film, realesrgan=esrgan)
-    calls: dict[str, list[Any]] = {"concat": []}
+    weights = SimpleNamespace(film=film, rife=rife, realesrgan=esrgan)
+    calls: dict[str, list[Any]] = {"concat": [], "extract": []}
+    extracts: list[tuple[Path, int]] = []
+    real_extract = augment_morph._extract_frame_png
+
+    def _recording_extract(video: Path, index: int, dest: Path) -> Path:
+        extracts.append((video, index))
+        return real_extract(video, index, dest)
 
     def stub_poll(run_dir: Path, **kwargs: Any) -> Any:
         if "multiplier" in kwargs:
             return SimpleNamespace(chunks_done=0, chunks_waiting=0)
         return SimpleNamespace(chunks_done=0)
 
+    drained: list[Path] = []
+
     def stub_drain(plan_dir: Path, **kwargs: Any) -> Any:
+        drained.append(plan_dir)
         intermediate = plan_dir / "model_intermediate.mp4"
-        _make_clip(intermediate, 12)
+        # Segments drain whole (12f); the joint unit drains its 4 bridges.
+        _make_clip(intermediate, 4 if len(drained) == 3 else 12)
         return SimpleNamespace(intermediate_mp4=intermediate, chunks_drained=1)
 
     def stub_concat(chunks: list[Path], dest: Path) -> Path:
@@ -316,10 +337,10 @@ def test_durable_morph_replaces_seams_with_trim_bridge_trim_order(
         dest.write_bytes(b"".join(chunk.read_bytes() for chunk in chunks))
         return dest
 
-    def _seam(*args: object, **kwargs: object) -> object:
-        raise AssertionError("mids-insert seams must not run for ltx morph")
-
-    with patch("voyage.augment_finalize.weights_key_for", return_value="wkey"):
+    with (
+        patch("voyage.augment_finalize.weights_key_for", return_value="wkey"),
+        patch("voyage.augment_morph._extract_frame_png", _recording_extract),
+    ):
         final, final_fps = run_durable_model_pass(
             tmp_path,
             [first, second],
@@ -335,15 +356,17 @@ def test_durable_morph_replaces_seams_with_trim_bridge_trim_order(
             interp_poll_fn=stub_poll,
             drain_fn=stub_drain,
             concat_fn=stub_concat,
-            seam_interp_fn=_seam,
-            morph_joints=True,
-            morph_interp_fn=_stub_interp,
+            joint_interp_fn=_stub_interp,
+            morph_joints=True,  # legacy flag: still universal joints
         )
     assert final_fps == 24
     assert _frame_count(final) == 24
+    # Fix anchors are source-boundary frames (seam fix first): A[-3] + B[+2].
+    assert extracts == [(first_video, 9), (second_video, 2)]
+    assert len(drained) == 3  # two segments + the joint plan dir
     (concat_order,) = calls["concat"]
     names = [Path(p).name for p in concat_order]
     assert names[0].endswith("trim"), names
-    assert names[1].startswith("bridge"), names
+    assert names[1].startswith("joint_"), names
     assert names[2].endswith("trim"), names
     assert len(names) == 3

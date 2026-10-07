@@ -30,6 +30,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from voyage.augment import (
     chunk_frames_match_size,
@@ -186,6 +187,7 @@ def interp_poll_once(
     segment_ids: list[str] | None = None,
     chunk_ids: list[int] | None = None,
     prune_partials: bool = True,
+    sources: list[Any] | None = None,
 ) -> InterpPollResult:
     """Interpolate every upscaled-but-not-interpolated chunk (one pass).
 
@@ -212,6 +214,10 @@ def interp_poll_once(
     before the single `on_pair_frames` advance at chunk end. When
     `segment_ids` is given, only those committed segments are polled
     (segment-interleaved pipeline); None (default) polls every segment.
+    `sources`, when given, replaces the `committed_segment_sources`
+    scan (joint fix videos poll as first-class units through the same
+    legs/ledgers); None (default) scans `segments/`. `segment_ids`
+    still filters on top of an explicit list.
     When `chunk_ids` is given, only those chunk indexes are rendered by
     this call (parallel workers split disjoint index sets; unowned
     missing chunks count as skipped, never as this worker's `done`).
@@ -224,7 +230,14 @@ def interp_poll_once(
         raise ValueError("weights_key must be a non-empty string")
     if not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier < 1:
         raise ValueError(f"multiplier must be an int >= 1 (got {multiplier!r})")
-    sources, skipped = committed_segment_sources(run_dir)
+    if sources is None:
+        sources, skipped = committed_segment_sources(run_dir)
+    else:
+        if not isinstance(sources, list):
+            raise TypeError(
+                f"sources must be a list of SegmentSource or None (got {type(sources).__name__})"
+            )
+        skipped = 0
     if segment_ids is not None:
         if not isinstance(segment_ids, list) or not all(
             isinstance(item, str) for item in segment_ids

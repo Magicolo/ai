@@ -3,10 +3,11 @@
 Why this module exists: every settings/weights/segment re-render forks a
 new `<plan-hash>/` (old hashes never reused), so `run/augment/` grows
 without bound. `prune_orphan_plan_dirs` keeps the live set (current
-committed segments' plan dirs plus their seam joints, recomputed through
-the same derivation as the pollers) plus `morph_joints`, and deletes only
-16-hex plan dirs older than the grace period — these tests pin that live
-stays, old orphans go, young orphans wait, and unknown names survive.
+committed segments' plan dirs plus their fix-stage joint plan dirs,
+recomputed through the same derivation as the pollers) plus
+`morph_joints` (the media native path still assembles there), and deletes
+only 16-hex plan dirs older than the grace period — these tests pin that
+live stays, old orphans go, young orphans wait, and unknown names survive.
 Deliberately not wired into finalize (explicit later decision).
 """
 
@@ -18,8 +19,9 @@ import os
 from pathlib import Path
 
 from voyage.augment_drain import prune_orphan_plan_dirs
-from voyage.augment_seam import seam_plan_dir
+from voyage.augment_joints import joint_sources_root
 from voyage.augment_sidecar import plan_dir_for_segment
+from voyage.hashing import sha256_file
 
 
 def _recipe() -> dict[str, object]:
@@ -52,6 +54,15 @@ def _commit_segment(run_dir: Path, segment_id: str, checksum: str) -> Path:
     return segment_dir
 
 
+def _commit_joint_video(run_dir: Path, left: int = 0, right: int = 1) -> Path:
+    """Stage a fix-stage joint video (contents opaque — prune only hashes it)."""
+    joint_dir = joint_sources_root(run_dir) / f"joint_{left:06d}_{right:06d}"
+    joint_dir.mkdir(parents=True, exist_ok=True)
+    video = joint_dir / "joint.mp4"
+    video.write_bytes(b"fake-joint-video")
+    return video
+
+
 def _touch_old(target: Path, reference_time: float, days_old: float) -> None:
     """Backdate a tree to `days_old` before `reference_time` (deterministic GC age)."""
     stamp = reference_time - days_old * 86400.0
@@ -64,16 +75,21 @@ def _touch_old(target: Path, reference_time: float, days_old: float) -> None:
 
 
 def test_gc_keeps_live_and_deletes_old_orphans(tmp_path: Path) -> None:
-    """Live plan + seam dirs survive; an old forked hash is pruned."""
+    """Live plan + joint dirs survive; an old forked hash is pruned."""
     run_dir = tmp_path / "run"
     (run_dir / "segments").mkdir(parents=True)
     _commit_segment(run_dir, "000000", "aaa")
     _commit_segment(run_dir, "000001", "bbb")
+    joint_video = _commit_joint_video(run_dir)
     recipe = _recipe()
     live_first = plan_dir_for_segment(run_dir, source_key="aaa", **recipe)  # type: ignore[arg-type]
     live_second = plan_dir_for_segment(run_dir, source_key="bbb", **recipe)  # type: ignore[arg-type]
-    live_seam = seam_plan_dir(run_dir, key_a="aaa", key_b="bbb", **recipe)  # type: ignore[arg-type]
-    for live in (live_first, live_second, live_seam):
+    live_joint = plan_dir_for_segment(
+        run_dir,
+        source_key=sha256_file(joint_video),
+        **recipe,  # type: ignore[arg-type]
+    )
+    for live in (live_first, live_second, live_joint):
         live.mkdir(parents=True, exist_ok=True)
         (live / "chunks.jsonl").write_text("{}\n", encoding="utf-8")
     orphan = run_dir / "augment" / ("0" * 16)
@@ -86,7 +102,7 @@ def test_gc_keeps_live_and_deletes_old_orphans(tmp_path: Path) -> None:
     assert not orphan.exists()
     assert live_first.is_dir()
     assert live_second.is_dir()
-    assert live_seam.is_dir()
+    assert live_joint.is_dir()
 
 
 def test_gc_keeps_young_orphans_morph_joints_and_unknown_names(tmp_path: Path) -> None:

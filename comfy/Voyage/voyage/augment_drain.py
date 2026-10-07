@@ -248,20 +248,24 @@ def prune_orphan_plan_dirs(
     `<plan-hash>/` via `plan_dir_for_segment` (old hash never reused),
     so `run/augment/` accumulates orphans with no eviction. Live dirs are
     recomputed from the current committed segments (`plan_dir_for_segment`
-    per source plus `seam_plan_dir` per adjacent pair, same derivation as
-    the pollers/drain) and always kept; `morph_joints` is kept wholesale
-    (record.json ledger, not sidecar — different GC). Only 16-hex plan
-    dirs older than `grace_days` (default 7, by newest modification time
-    under the dir) are deleted; anything live, young, non-hash-named, or
-    unreadable is kept. Returns the pruned count. NOT wired into finalize
-    (explicit later decision) — callers invoke it deliberately.
+    per source plus one per fix-stage joint video already on disk — joints
+    render no new work here, existing videos only) and always kept;
+    `morph_joints` is kept wholesale (record.json ledger, not sidecar —
+    different GC; the media native path still uses it). Old `seam_*`
+    plan dirs are intentionally NOT live: they age out via `grace_days`.
+    Only 16-hex plan dirs older than `grace_days` (default 7, by newest
+    modification time under the dir) are deleted; anything live, young,
+    non-hash-named, or unreadable is kept. Returns the pruned count. NOT
+    wired into finalize (explicit later decision) — callers invoke it
+    deliberately.
 
     Stdlib-only like the rest of this module (supervisor §12 GPU ban):
     segment sources and plan derivations import locally to avoid cycles.
     """
-    from voyage.augment_seam import seam_plan_dir
+    from voyage.augment_joints import existing_joint_videos
     from voyage.augment_sidecar import AUGMENT_DIRNAME, plan_dir_for_segment
     from voyage.augment_upscale_poller import committed_segment_sources
+    from voyage.hashing import sha256_file
 
     if not isinstance(run_dir, Path):
         raise TypeError(f"run_dir must be a Path (got {type(run_dir).__name__})")
@@ -296,12 +300,15 @@ def prune_orphan_plan_dirs(
                 preset=preset,
             )
         )
-    for first, second in zip(sources, sources[1:], strict=False):
+    for joint_video in existing_joint_videos(run_dir):
+        try:
+            joint_sha = sha256_file(joint_video)
+        except (OSError, ValueError):
+            continue
         live_dirs.add(
-            seam_plan_dir(
+            plan_dir_for_segment(
                 run_dir,
-                key_a=first.source_key,
-                key_b=second.source_key,
+                source_key=joint_sha,
                 weights_key=weights_key,
                 out_width=out_width,
                 out_height=out_height,

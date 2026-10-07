@@ -20,8 +20,9 @@ Ledger safety: `append_chunk_record` takes an `fcntl` exclusive lock, so
 concurrent appends to the same `chunks.jsonl` never interleave. Each
 worker passes `prune_partials=False` (the driver prunes once upfront —
 a per-call sweep would rmtree the other worker's live `.partial` dir).
-Seams are never rendered by the workers (the drain fallback owns every
-segment joint — seam-early belongs to the single-driver path only).
+Seams are never rendered by the workers: the fix stage renders every
+boundary's source-res joint videos first, and joint chunks queue in the
+same deque, so bridge frames render through the same legs.
 """
 
 from __future__ import annotations
@@ -114,22 +115,26 @@ def build_parallel_tasks(
     multiplier: int,
     crf: int,
     preset: str,
+    extra_sources: list[Any] | None = None,
 ) -> collections.deque[ParallelChunkTask]:
     """Enumerate every ledger-missing chunk as a stealable deque (segment order).
 
     Prunes each segment plan dir once upfront (workers pass
     `prune_partials=False`). Ledger-complete chunks are never queued, so
-    a retry resumes instead of redoing.
+    a retry resumes instead of redoing. `extra_sources` carries fix-stage
+    joint units (SegmentSource shape): their chunks queue exactly like
+    segment chunks, so bridge frames render through the same legs.
     """
     from voyage.augment_upscale_poller import committed_segment_sources
 
     segment_sources, _skipped = committed_segment_sources(run_dir)
     ordered = sorted(segment_sources, key=lambda source: source.segment_id)
     tasks: collections.deque[ParallelChunkTask] = collections.deque()
-    for source in ordered:
+
+    def _queue_source(segment_id: str, source_key: str, total_frames: int) -> None:
         plan_dir = plan_dir_for_segment(
             run_dir,
-            source_key=source.source_key,
+            source_key=source_key,
             weights_key=weights_key,
             out_width=out_width,
             out_height=out_height,
@@ -141,7 +146,7 @@ def build_parallel_tasks(
         plan_dir.mkdir(parents=True, exist_ok=True)
         prune_stale_partials(plan_dir)
         records = load_chunk_ledger(plan_dir / "chunks.jsonl")
-        windows = list(chunk_windows(source.total_frames, chunk_frames))
+        windows = list(chunk_windows(total_frames, chunk_frames))
         indexes = list(range(len(windows)))
         # Mirror the pollers: ledger-missing plus exact-window
         # mismatches rejoin, for each stage independently.
@@ -184,13 +189,18 @@ def build_parallel_tasks(
             start, count = windows[index]
             tasks.append(
                 ParallelChunkTask(
-                    segment_id=source.segment_id,
-                    source_key=source.source_key,
+                    segment_id=segment_id,
+                    source_key=source_key,
                     chunk_index=index,
                     start=start,
                     count=count,
                 )
             )
+
+    for source in ordered:
+        _queue_source(source.segment_id, source.source_key, source.total_frames)
+    for extra in extra_sources or []:
+        _queue_source(extra.segment_id, extra.source_key, extra.total_frames)
     return tasks
 
 
@@ -242,6 +252,7 @@ def run_parallel_model_pass(
     crf: int,
     preset: str,
     interp_backend: str = "rife",
+    joint_interp_fn: Callable[..., Any] | None = None,
     upscale_poll_fn: Callable[..., Any] | None = None,
     interp_poll_fn: Callable[..., Any] | None = None,
     timings: dict[str, float] | None = None,
@@ -283,6 +294,24 @@ def run_parallel_model_pass(
     from voyage.augment_finalize import _interp_weights_path
 
     source_fps_key = int(round(source_fps))
+    from voyage.augment_joints import ensure_joint_units
+    from voyage.augment_upscale_poller import committed_segment_sources
+
+    fix_sources, _fix_skipped = committed_segment_sources(run_dir)
+    fix_ordered = sorted(fix_sources, key=lambda source: source.segment_id)
+    joint_units = ensure_joint_units(
+        run_dir,
+        fix_ordered,
+        source_fps=source_fps_key,
+        crf=crf,
+        preset=preset,
+        interp_fn=joint_interp_fn,
+        weights=_interp_weights_path(weights, interp_backend),
+        device=WORKER_A_DEVICE,
+        interp_backend=interp_backend,
+    )
+    joint_sources = [unit.as_source() for unit in joint_units]
+    poll_sources: list[Any] = [*fix_ordered, *joint_sources]
     if task_builder is not None:
         tasks = task_builder(
             run_dir,
@@ -308,6 +337,7 @@ def run_parallel_model_pass(
             multiplier=multiplier,
             crf=crf,
             preset=preset,
+            extra_sources=joint_sources,
         )
     if not tasks:
         return
@@ -316,10 +346,18 @@ def run_parallel_model_pass(
     ip_takes_prune = _takes_keyword(interp_poll_fn, "prune_partials")
     up_takes_segments = _takes_keyword(upscale_poll_fn, "segment_ids")
     ip_takes_segments = _takes_keyword(interp_poll_fn, "segment_ids")
+    up_takes_sources = _takes_keyword(upscale_poll_fn, "sources")
+    ip_takes_sources = _takes_keyword(interp_poll_fn, "sources")
     up_takes_chunks = _takes_keyword(upscale_poll_fn, "chunk_ids")
     up_takes_progress = _takes_keyword(upscale_poll_fn, "progress")
     ip_takes_chunks = _takes_keyword(interp_poll_fn, "chunk_ids")
     ip_takes_progress = _takes_keyword(interp_poll_fn, "progress")
+    if joint_sources and not (up_takes_sources and ip_takes_sources):
+        raise MediaError(
+            "parallel model pass with joints needs workers accepting `sources=` "
+            "(joint units are not committed segments, so segment-scoped "
+            "workers would never render them)"
+        )
     queue_lock = threading.Lock()
     timing_lock = threading.Lock()
     errors: dict[str, BaseException] = {}
@@ -375,6 +413,8 @@ def run_parallel_model_pass(
                     upscale_kwargs["progress"] = view
                 if up_takes_segments:
                     upscale_kwargs["segment_ids"] = [task.segment_id]
+                if up_takes_sources:
+                    upscale_kwargs["sources"] = poll_sources
                 if up_takes_chunks:
                     upscale_kwargs["chunk_ids"] = [task.chunk_index]
                 if up_takes_prune:
@@ -401,6 +441,8 @@ def run_parallel_model_pass(
                     interp_kwargs["progress"] = view
                 if ip_takes_segments:
                     interp_kwargs["segment_ids"] = [task.segment_id]
+                if ip_takes_sources:
+                    interp_kwargs["sources"] = poll_sources
                 if ip_takes_chunks:
                     interp_kwargs["chunk_ids"] = [task.chunk_index]
                 if ip_takes_prune:

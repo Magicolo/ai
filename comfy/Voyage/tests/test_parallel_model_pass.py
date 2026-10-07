@@ -738,3 +738,73 @@ def test_second_worker_starts_when_gate_already_set(
     preloads: list[str] = []
     _run_gated_pass(tmp_path, monkeypatch, gate, preloads)
     assert sorted(preloads) == ["cuda:0", "cuda:1"]
+
+
+def test_parallel_fails_fast_when_workers_lack_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Joint tasks need `sources=` workers — fail fast, never stall at settle."""
+    import voyage.augment_joints as joints_module
+    import voyage.augment_parallel as parallel_module
+    from voyage.errors import MediaError
+
+    _parallel_segment(tmp_path, "000000", frames=8)
+    _parallel_segment(tmp_path, "000001", frames=8)
+    joint_dir = tmp_path / "joint_000000_000001"
+    monkeypatch.setattr(
+        joints_module,
+        "ensure_joint_units",
+        lambda *args, **kwargs: [
+            joints_module.JointUnit(
+                joint_dir=joint_dir,
+                joint_video=joint_dir / "joint.mp4",
+                joint_key="jk",
+                left_id="000000",
+                right_id="000001",
+                left_frames=8,
+                right_frames=8,
+            )
+        ],
+    )
+
+    def _old_upscale(
+        run_dir: Path,
+        *,
+        weights_path: Path,
+        weights_key: str,
+        out_width: int,
+        out_height: int,
+        out_fps: int,
+        segment_ids: list[str] | None = None,
+    ) -> Any:
+        raise AssertionError("workers must never run past the fail-fast")
+
+    def _old_interp(
+        run_dir: Path,
+        *,
+        weights_path: Path,
+        weights_key: str,
+        out_width: int,
+        out_height: int,
+        out_fps: int,
+        segment_ids: list[str] | None = None,
+    ) -> Any:
+        raise AssertionError("workers must never run past the fail-fast")
+
+    with pytest.raises(MediaError, match="sources="):
+        parallel_module.run_parallel_model_pass(
+            tmp_path,
+            weights=_gated_weights(tmp_path),
+            weights_key="weights-abc",
+            out_width=1216,
+            out_height=704,
+            source_fps=24,
+            upscale_factor=2,
+            multiplier=4,
+            chunk_frames=4,
+            crf=15,
+            preset="veryfast",
+            interp_backend="rife",
+            upscale_poll_fn=_old_upscale,
+            interp_poll_fn=_old_interp,
+        )

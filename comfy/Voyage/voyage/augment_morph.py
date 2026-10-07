@@ -1,9 +1,11 @@
-"""Morph-cut 2x2 joint assembly for ltx25/ltx23 finalize (DESIGN §140).
+"""Morph-cut 2+2 joint assembly for the no-model-pass native path (DESIGN §140).
 
-Replaces the mids-insert seam (freeze-motion bridge) with a count-preserving
-morph-cut: per segment joint, ``A[-2:]+B[:2]`` are replaced by 4 FILM bridge
-frames morphed between anchors ``A[-3]`` and ``B[+2]``. Frame count is
-unchanged, so committed audio timelines stay untouched.
+Per segment joint, ``A[-2:]+B[:2]`` are replaced by 4 bridge frames
+morphed between anchors ``A[-3]`` and ``B[+2]`` of the passed mp4s.
+Frame count is unchanged, so committed audio timelines stay untouched.
+The durable model pass fixes joints at source resolution instead (see
+`voyage.augment_joints`) and shares this module's trim/TS/concat
+helpers — but never calls the assembly below.
 
 Ephemeral-harness numbers behind the recipe: morph 2+2 gaps ~3 meanabs,
 through-bridge mean steps at within-motion level, fullres transfer verified;
@@ -11,7 +13,8 @@ feathered masks and wider carries showed no further gain.
 
 Stdlib only at module scope (supervisor §12 GPU ban): torch enters through
 the caller-supplied `interp_fn` (tests) or the default FILM render's
-function-local lazy import (production). ffmpeg drives trims/encodes.
+function-local lazy import (production). ffmpeg drives
+anchor extraction, trims, and encodes.
 
 Joint pieces are extensionless MPEG-TS (explicit `-f mpegts` on encode):
 unlike MP4, TS byte-concatenates into a decodable stream, so the injected
@@ -37,6 +40,11 @@ from voyage.errors import MediaError, StateError
 
 MORPH_BACKENDS = frozenset({"ltx25", "ltx23"})
 """Backends whose finalize joints get morph-cuts (user decision: ltx pair only)."""
+
+MORPH_KEY_VERSION = "morph2x2-v2"
+"""Joint key version: v2 anchors bridges on source-boundary frames (v1
+used post-model intermediate anchors). Bumping the key orphans v1
+bridges — the record clash auto-heals by re-rendering, never migrating."""
 
 MORPH_ANCHOR_A = 3
 """`A[-3]`: last frozen-context frame feeding the bridge (eyeball winner 2+2)."""
@@ -86,7 +94,7 @@ class MorphRender:
 
 
 def morph_enabled_for_backend(backend: str) -> bool:
-    """True only for the ltx pair (all other backends keep their seams)."""
+    """True only for the ltx pair (all other backends keep plain concat)."""
     return backend in MORPH_BACKENDS
 
 
@@ -114,9 +122,10 @@ def morph_joint_key(*, a_sha: str, b_sha: str, width: int, height: int, fps_key:
     """Content-addressed joint key (pair order + recipe sensitive, fork-proof).
 
     Order matters (`A|B != B|A`); geometry/fps fork the key so a re-finalize
-    at new settings never reuses a stale bridge.
+    at new settings never reuses a stale bridge. The version prefix
+    orphans pre-source-anchor (v1) bridges.
     """
-    return f"morph2x2|{a_sha}|{b_sha}|{width}x{height}@{fps_key}"
+    return f"{MORPH_KEY_VERSION}|{a_sha}|{b_sha}|{width}x{height}@{fps_key}"
 
 
 def morph_anchors(a_count: int, b_count: int) -> tuple[int, int]:
@@ -611,15 +620,20 @@ def assemble_morphed_timeline(
 ) -> Path:
     """Assemble a count-preserving morphed timeline over segment mp4s.
 
-    Per joint: anchors `A[-3]`/`B[+2]` morph into 4 bridge frames (ledgered
-    under `joint_root/morph_II_JJ/`); trims keep `A[:-2]`/`B[2:]` (middle
-    segments lose both ends), each trim keyed on its source content plus
-    keep range plus recipe (`morph_trim_key` beside the TS piece) so a
-    re-rendered segment or retuned recipe never reuses a stale trim.
-    Pieces join as `[trim_0, bridge_0, trim_1, ...]` via `concat_fn`
-    (default: stream-copy concat). Frame total is unchanged, so audio
-    needs no work. A lone segment concats through untouched (no joints,
-    no interp calls).
+    Per joint: anchors `A[-3]`/`B[+2]` of the passed mp4s morph into 4
+    bridge frames (ledgered under `joint_root/morph_II_JJ/`); trims keep
+    `A[:-2]`/`B[2:]` (middle segments lose both ends), each trim keyed on
+    its source content plus keep range plus recipe (`morph_trim_key`
+    beside the TS piece) so a re-rendered segment or retuned recipe
+    never reuses a stale trim. Pieces join as `[trim_0, bridge_0,
+    trim_1, ...]` via `concat_fn` (default: stream-copy concat). Frame
+    total is unchanged, so audio needs no work. A lone segment concats
+    through untouched (no joints, no interp calls).
+
+    This is the no-model-pass native path (media.py): anchors come from
+    the passed mp4s themselves. The durable model pass fixes joints at
+    source resolution instead (see `voyage.augment_joints`) and never
+    calls this with external anchors.
     """
     if not isinstance(segment_mp4s, list) or not segment_mp4s:
         raise ValueError(f"morph needs at least one segment mp4 (got {segment_mp4s!r})")

@@ -114,14 +114,52 @@ otherwise): Thread-A runs one interleaved model pass on cuda:1
 (each segment's upscale immediately followed by its interp — RIFE
 peaks ~0.65 GiB at 2048×1152, so both legs fit the 6 GB card beside
 the llama director sidecar, gated by a 1.0 GiB free-VRAM floor;
-each boundary seam renders early right after its interp, idempotent
-with the drain fallback) while Thread-B renders ACE
+the fix stage renders every boundary's 4 source-res morph bridges
+first, then segments AND joint units run the same up→ip loop —
+joints re-interpolate by design) while Thread-B renders ACE
 music takes then the MMAudio SFX bed sequential on cuda:0; the
 join is followed by mix and publish, all reporting live bars on one
-shared display. Background pre-warm interleaves the same per-segment
-up→ip loop on cuda:1 during generation when the same headroom
-allows, gated by director idleness. A 1-GPU box runs everything
+shared display. Background pre-warm interleaves the same fix-then-
+segments+joints up→ip loop on cuda:1 during generation when the same
+headroom allows, gated by director idleness. A 1-GPU box runs everything
 sequential on cuda:0.
+
+Joint order (seam fix -> upscale -> interpolate, DESIGN §140): the fix
+renders morph 2+2 bridges at SOURCE resolution only (anchors `A[-3]`/
+`B[+2]`, no anchor upscale, no extra interp — `voyage/augment_joints.py`)
+into one 4-frame joint video per boundary (content key
+`jointfix2x2|a|b|WxH@fps`, ledger-hit resume); the joint video then
+flows through the SAME upscale + interp pollers as committed segments
+(the pollers' `sources=` override — standard ChunkKey ledger shapes in
+the joint's own plan dir, `(4-1)*m+1` frames out), and the drain
+assembles [trimA, joint, trimB] with source-derived trims (A keeps
+through model frame `(a-3)*m`, B drops its first `2m` — anchors owned
+exactly once, no duplicates, no gaps). The retired mids-insert seam
+path (`augment_seam.py`, `seam-v2` keys) is deleted; old seam sidecars
+age out via prune grace. The no-model-pass native morph assembly
+(`augment_morph.py`, ltx gate) is unchanged. Prune liveness = segment
+plan dirs + joint plan dirs derived from joint videos on disk (never
+rendered during prune).
+
+Bidirectional model pass (audio-first, `voyage/augment_parallel.py`):
+when `parallel_model_pass_armed` holds (RIFE-only backend, both cuda:1
+and cuda:0 visible, tensor path with both legs present) this branch
+takes precedence over the model∥music fork — audio runs first
+(music takes then SFX bed on cuda:0, mix inputs ready), then the model
+pass runs bidirectional across both cards: a shared in-process deque
+holds every (segment, chunk) task, worker A pops from the front on
+cuda:1 while worker B pops from the back on cuda:0 (meet-in-the-middle;
+the same worker renders a chunk's upscale immediately followed by its
+interp, so no cross-worker waiting). Tasks dispatch as per-chunk
+poller calls (`segment_ids=[seg]`, `chunk_ids=[idx]`); pruning runs
+once upfront per segment and the workers pass `prune_partials=False`
+(a per-pass whole-dir sweep would delete the other worker's live
+`.partial`); ledger appends are `flock`-guarded and settle is verified
+on the global ledger (fail-loud `MediaError`). Joint units flow as
+joint tasks through the same deque (the `sources=` override honors
+`segment_ids`/`chunk_ids` scoping); the drain assembles
+[trimA, joint, trimB]. After publish, resident nets
+are evicted via `evict_augment_models()`.
 `--sfx-workers 2` shards `small_44k` across both GPUs instead (needs
 2 visible GPUs, fails fast otherwise).
 
@@ -156,8 +194,7 @@ sequential on cuda:0.
   shared per-pair encode cache. No MIN_SIDE floor (padding covers
   all sizes); OOM propagates (the peaks make halving pointless).
 - `AugmentConfig.interp_backend` (`rife` default, `film` opt-in)
-  selects the leg at every render site (enhance, pollers, seam,
-  morph). The sidecar weights key keeps the legacy `sha|sha` shape,
+  selects the leg at every render site (fix, pollers, native morph). The sidecar weights key keeps the legacy `sha|sha` shape,
   so pre-knob FILM ledgers keep hitting with zero re-render, while a
   backend switch misses by construction (the interp-leg sha differs)
   and finalize prunes the other backend's stale plan dirs
