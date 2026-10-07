@@ -124,3 +124,15 @@ def test_pre_finalize_errors_clean_on_advisories_only(
     monkeypatch.setattr(generate_module, "validate_run", lambda _run_dir: [note])
     assert generate_module._pre_finalize_errors(tmp_path, {}, _mmaudio_effective()) == []
     assert note in capsys.readouterr().out
+
+
+def test_is_advisory_covers_both_producer_prefixes() -> None:
+    """The shared helper owns the advisory contract both gates filter on."""
+    from voyage.cli_validate import ADVISORY_PREFIXES, is_advisory
+
+    assert set(ADVISORY_PREFIXES) == {"warning:", "note:"}
+    assert is_advisory("warning: 000007 numeric dir without DONE (stranded commit attempt?)")
+    assert is_advisory("note: run tmp/ scratch holds 1000809116 bytes (disposable, not an error)")
+    assert not is_advisory("timeline frames 242 != sum of segment frames 121")
+    assert not is_advisory("sfx coverage 7.44s short of timeline 10.08s")
+    assert not is_advisory("")

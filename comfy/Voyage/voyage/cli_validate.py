@@ -333,6 +333,21 @@ def _safe_is_file(path: Path) -> bool:
         return False
 
 
+ADVISORY_PREFIXES = ("warning:", "note:")
+"""Prefixes marking hygiene info inside `validate_run` output (never INVALID).
+
+`warning:` = stranded-dir hints, `note:` = disposable scratch size. Gates
+that abort on validation output must filter these via `is_advisory`
+(configure's trim gate and generate's pre-finalize gate both do) instead
+of treating every line as fatal.
+"""
+
+
+def is_advisory(line: str) -> bool:
+    """True when a `validate_run` line is hygiene info, not a hard error."""
+    return line.startswith(ADVISORY_PREFIXES)
+
+
 def _warn_done_less_numeric_dirs(segments_root: Path) -> list[str]:
     """Warn on numeric dirs without DONE (Track C hygiene, never fatal).
 
