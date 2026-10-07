@@ -36,10 +36,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from voyage import paths
-from voyage.atomic import fsync_dir
+from voyage.atomic import atomic_write_bytes, fsync_dir
 from voyage.augment import augment_devices
 from voyage.console import optional_bar, optional_stage
-from voyage.errors import MediaError
+from voyage.errors import MediaError, StateError
 from voyage.media import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
     _audio_duration_seconds,
@@ -201,8 +201,13 @@ def plan_sfx_windows(
     transition (the per-segment-SFX incoherence the user flagged).
     Seeds derive deterministically (base + index) so re-finalize
     re-renders identical bytes. Empty captions stay empty — the worker
-    falls back to its neutral default.
+    falls back to its neutral default. M7: the timeline quantizes to
+    milliseconds on entry so probe dust never forks tiling.
     """
+    try:
+        timeline_seconds = round(float(timeline_seconds), 3)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"timeline must be numeric (got {timeline_seconds!r}): {exc}") from exc
     if not timeline_seconds > 0.0:
         raise ValueError(f"timeline must be positive (got {timeline_seconds})")
     step = window_seconds - overlap_seconds
@@ -439,24 +444,29 @@ def append_sfx_window(
 def load_sfx_ledger(ledger: Path) -> list[dict[str, Any]]:
     """Read the persisted SFX ledger (missing file → empty).
 
-    Torn trailing lines (a crash mid-append between `write` and the
-    newline+fsync) are skipped, not fatal — mirroring the sidecar
-    `load_chunk_ledger` contract: the interrupted window simply has no
-    record and is re-rendered on the next pass.
+    Torn-tail tolerance (H4, planner `load_takes` contract): a kill
+    mid-append leaves a truncated last line with no newline — skip only
+    that tail line, then re-render on the next pass. Any other JSON
+    failure (middle line, structurally invalid object) fails loud via
+    the original error or `StateError`, so a corrupt ledger never
+    silently drops windows.
     """
     if not ledger.exists():
         return []
+    stripped = [line.strip() for line in ledger.read_text(encoding="utf-8").splitlines()]
+    non_empty = [line for line in stripped if line]
     records: list[dict[str, Any]] = []
-    for line in ledger.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for position, line in enumerate(non_empty):
+        is_last = position == len(non_empty) - 1
         try:
-            parsed = json.loads(line)
+            parsed: Any = json.loads(line)
         except ValueError:
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
+            if is_last:
+                continue
+            raise
+        if not isinstance(parsed, dict):
+            raise StateError(f"corrupt sfx ledger record (not an object): {line!r}")
+        records.append(parsed)
     return records
 
 
@@ -496,7 +506,7 @@ def _validate_one_ledger(
     errors: list[str] = []
     try:
         records = load_sfx_ledger(ledger)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, StateError) as exc:
         return [f"{label} ledger unreadable: {exc}"]
     deduped = {}
     for record in records:
@@ -598,6 +608,18 @@ def _sfx_worker_module(backend: str) -> str:
     except KeyError:
         known = ", ".join(sorted(SFX_WORKER_MODULES))
         raise MediaError(f"unknown sfx backend {backend!r} (known: {known})") from None
+
+
+def _scratch_no_prune(run_dir: Path) -> Path:
+    """Run scratch dir without pruning (mid-run worker inits).
+
+    Thin alias over `paths.ensure_scratch_dir_no_prune` (canonical
+    mkdir-only helper, 2026-10-07 B-vs-C resolution): `ensure_scratch_dir`
+    prunes STALE prefixes — safe at startup but fatal mid-run on live
+    tmpdirs. Worker inits only need the dir to exist, never a prune.
+    Kept as a local name so worker-init call sites stay unchanged.
+    """
+    return paths.ensure_scratch_dir_no_prune(run_dir)
 
 
 def _stem_cache_hit(
@@ -804,6 +826,9 @@ def render_sfx_bed(
     from voyage.logrotate import append_line
 
     started = time.perf_counter()
+    if not math.isfinite(timeline_seconds) or timeline_seconds <= 0.0:
+        raise MediaError(f"sfx bed needs a positive timeline (got {timeline_seconds})")
+    timeline_seconds = round(float(timeline_seconds), 3)
 
     if num_workers not in (1, SFX_MAX_WORKERS):
         raise MediaError(f"sfx workers must be 1 or 2 (got {num_workers})")
@@ -826,6 +851,8 @@ def render_sfx_bed(
         conditioning_timeline if conditioning_timeline is not None else timeline_seconds
     )
     windows = plan_sfx_windows(timeline_seconds, bounds, seed_base=seed_base)
+    if windows and windows[0].start != 0.0:
+        raise MediaError(f"sfx head window must start at 0.0 (got {windows[0].start})")
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     sfx_dir.mkdir(parents=True, exist_ok=True)
     _prune_stale_partials(sfx_dir)
@@ -941,7 +968,15 @@ def _render_single_track(
     sfx_dir = run_dir / "audio" / SFX_STEMS_DIRNAME
     ledger = sfx_dir / ledger_name
     sfx_dir.mkdir(parents=True, exist_ok=True)
-    existing = {_sfx_ledger_key(record): record for record in load_sfx_ledger(ledger)}
+    ledger_records = load_sfx_ledger(ledger)
+    existing = {_sfx_ledger_key(record): record for record in ledger_records}
+    newest_ledgered_size: str | None = None
+    for record in reversed(ledger_records):
+        if str(record.get("conditioning_source", SFX_CONDITIONING_SHIPPED)) == conditioning_source:
+            model_raw = record.get("model_size")
+            if isinstance(model_raw, str) and model_raw:
+                newest_ledgered_size = model_raw
+                break
     ledger_lock = threading.Lock()
     # Orphan-stem adoption (SFX resume): batches killed before the old
     # serial-join append left completed stems with no ledger lines. Adopt
@@ -951,8 +986,11 @@ def _render_single_track(
     # source, so a rerun heals instead of re-rendering. A window_id the
     # ledger already attributes to another conditioning source is never
     # adopted (213: the stem file on disk belongs to that line's render —
-    # adopting it would false-hit across sources). Each adoption is
-    # logged loudly; anything not matching re-renders through the normal
+    # adopting it would false-hit across sources). M3 model-size gate: an
+    # orphan is never adopted under a different model size than the newest
+    # ledgered one (a large/small mix would step quality at window joints)
+    # — it re-renders instead, loudly logged with both sizes. Each adoption
+    # is logged loudly; anything not matching re-renders through the normal
     # path below.
     claimed_window_ids = {window_id for (_source, window_id) in existing}
     for adopt_index, adopt_window in enumerate(windows):
@@ -970,6 +1008,16 @@ def _render_single_track(
         if abs(probed_duration - adopt_window.duration) > SFX_ORPHAN_ADOPT_TOLERANCE:
             continue
         adopt_size = sizes[adopt_index % num_workers]
+        if newest_ledgered_size is not None and adopt_size != newest_ledgered_size:
+            size_message = (
+                f"sfx orphan not adopted: {adopt_window.window_id}{stem_suffix} "
+                f"(requested model_size {adopt_size} != ledgered {newest_ledgered_size})"
+            )
+            if progress is not None:
+                progress.warn(size_message)
+            else:
+                print(size_message, file=sys.stderr)
+            continue
         adopt_stored = f"audio/{SFX_STEMS_DIRNAME}/{adopt_window.window_id}{stem_suffix}.wav"
         append_sfx_window(
             ledger,
@@ -1017,7 +1065,12 @@ def _render_single_track(
                         "models_dir": models_dir,
                         "device": devices[slot],
                         "model_size": sizes[slot],
-                        "scratch_dir": str(paths.ensure_scratch_dir(run_dir)),
+                        # Prune-free scratch (never `ensure_scratch_dir`
+                        # mid-run: that prunes `voyage-sfx-final-*`, which
+                        # is the LIVE finalize tmpdir when called from
+                        # inside `finalize_sfx_pass` — Track C STALE wiring
+                        # deletes it and the bed copy fails with ENOENT).
+                        "scratch_dir": str(_scratch_no_prune(run_dir)),
                     },
                     # MMAudio venv (DESIGN §140 SFX continuity): the MMAudio
                     # stack is isolated from the LTX freeze; unset (video
@@ -1507,7 +1560,7 @@ def finalize_sfx_pass(
     # returned untouched (byte-identical legacy path).
     bounds = _scale_bounds_to_timeline(bounds, timeline)
     with tempfile.TemporaryDirectory(
-        prefix="voyage-sfx-final-", dir=paths.ensure_scratch_dir(run_dir)
+        prefix="voyage-sfx-final-", dir=paths.ensure_scratch_dir_no_prune(run_dir)
     ) as tmp:
         tmpdir = Path(tmp)
         bed = render_sfx_bed(

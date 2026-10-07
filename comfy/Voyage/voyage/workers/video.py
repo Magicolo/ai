@@ -24,7 +24,7 @@ from voyage.workers._validators import (
     validate_output_path,
 )
 from voyage.workers.loop import checked_request, serve, validate_benchmark_counts
-from voyage.workers.video_common import run_benchmark_harness, standard_serve_map
+from voyage.workers.video_common import run_benchmark_harness, standard_serve_map_with_cancel
 
 __all__ = [
     "validate_geometry",
@@ -167,10 +167,12 @@ def main() -> None:
     The nine-op map lives in `video_common.standard_serve_map` (single
     home, issue 084); `backend_name="video"` preserves the historical
     `"video-<segment_id>"` checkpoint prefix (the backend itself is named
-    `"fake"`, which would relabel checkpoints to `"fake-..."`).
+    `"fake"`, which would relabel checkpoints to `"fake-..."`). The Track D
+    `cancel` wire name rides via `standard_serve_map_with_cancel` (idle
+    handler — mid-render cancel stays client-side abandon-and-restart).
     """
     serve(
-        standard_serve_map(
+        standard_serve_map_with_cancel(
             "video",
             handle_init=handle_health,
             handle_health=handle_health,

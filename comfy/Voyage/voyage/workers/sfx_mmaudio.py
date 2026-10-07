@@ -13,6 +13,8 @@ GPU ban (DESIGN §12): `torch`/`mmaudio` only load inside functions via
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 import tempfile
 import time
@@ -326,8 +328,20 @@ def _extract_frames(
     return clip, sync, resolved
 
 
+def _check_convert_result(completed: Any) -> None:
+    """Fail loud on a non-zero ffmpeg SFX convert (TRY301 inner home)."""
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffmpeg sfx convert failed: {completed.stderr.strip()}")
+
+
 def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int) -> None:
-    """Convert the native 44.1 kHz FLAC window to the requested WAV shape."""
+    """Convert the native 44.1 kHz FLAC window to the requested WAV shape.
+
+    H1 atomic twin of the ACE worker: converts to a sibling
+    `*.partial.wav` then `os.replace` publishes, so a killed convert
+    never leaves a half-written stem the ledger could adopt.
+    """
+    staged = output.parent / f"{output.stem}.partial.wav"
     command = [
         "ffmpeg",
         "-y",
@@ -341,11 +355,16 @@ def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int)
         str(sample_rate),
         "-c:a",
         "pcm_s16le",
-        str(output),
+        str(staged),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise RuntimeError(f"ffmpeg sfx convert failed: {completed.stderr.strip()}")
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        _check_convert_result(completed)
+        os.replace(staged, output)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        raise
 
 
 def handle_generate_sfx(payload: dict[str, Any]) -> dict[str, Any]:
@@ -389,7 +408,7 @@ def handle_generate_sfx(payload: dict[str, Any]) -> dict[str, Any]:
             f"for {duration:.2f}s requested — timeline/video mismatch, failing loud"
         )
     with tempfile.TemporaryDirectory(
-        prefix="voyage-sfx-", dir=paths.staging_parent(_scratch_dir)
+        prefix="voyage-sfx-window-", dir=paths.staging_parent(_scratch_dir)
     ) as staging:
         rendered = render_window(
             _require_stack(),

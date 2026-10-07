@@ -27,6 +27,20 @@ from voyage.paths import resolve_stored_path
 
 TAKES_FILENAME = "takes.jsonl"
 
+AUDIO_EPSILON = 1e-4
+"""Shared float-dust budget for all audio coverage math (DESIGN §140 jango).
+
+`trim_repaint_head` re-anchors takes at sample-quantized offsets
+(`cut_frames / sample_rate`), which routinely lands `covers_from` ~1e-13
+above the replay cursor (jango 2026-10-07: take_0011 at cursor + 5.7e-14).
+Every coverage comparison (span walk, serve lookup, start-position, dry
+and render convergence) shares this single epsilon so the gate and the
+render can never disagree on contiguity. 1e-4 s = 0.1 ms = ~5 samples
+at 48 kHz: far below any audible boundary, far above float dust. The
+serve end edge stays strict (a take ending at the cursor must not serve
+it) — only the start edge carries the budget.
+"""
+
 
 @dataclass
 class AudioTake:
@@ -200,11 +214,22 @@ class AudioPlanner:
         takes are unaffected: their coverage starts in their start segment,
         so no earlier cursor ever sees them. None keeps legacy global
         newest-wins (single-take tests, ad-hoc probes).
+
+        The start edge carries `AUDIO_EPSILON` (same dust budget as
+        `coverage_span`): `trim_repaint_head` re-anchors takes at
+        sample-quantized offsets, which routinely lands `covers_from` ~1e-13
+        above the replay cursor (jango 2026-10-07: take_0011 at cursor +
+        5.7e-14). A strict `<=` then excludes every repaint of that anchor
+        forever — the planner keeps seeing the older take, repaints the
+        same region until the iteration cap, and finalize aborts with
+        "did not converge" (twice on jango). The end edge stays strict: a
+        take ending at or before the cursor must not serve it.
         """
         covering = [
             take
             for take in self.takes
-            if take.covers_from <= video_time < take.covers_until()
+            if take.covers_from <= video_time + AUDIO_EPSILON
+            and video_time < take.covers_until()
             and (max_segment_index is None or take.segment_index <= max_segment_index)
         ]
         if not covering:

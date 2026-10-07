@@ -216,3 +216,64 @@ def update_manifest_metrics(segment_dir: Path, metrics: dict[str, Any]) -> None:
     if recorded is not None and "metrics.json" in recorded:
         recorded["metrics.json"] = sha256_file(segment_dir / "metrics.json")
         atomic_write_json(legacy_checksums, recorded)
+
+
+def write_manifest_metrics_group(
+    segment_dir: Path, manifest: dict[str, Any], metrics: dict[str, Any]
+) -> Path:
+    """Stage manifest + metrics as one atomic group (Track C durability).
+
+    Stages both payloads to `*.partial` siblings, then replaces + fsyncs
+    the segment dir once — a crash never leaves a manifest advanced past
+    its metrics (or vice versa). The manifest payload always carries the
+    grouped metrics, so the two sources agree by construction. Returns
+    the manifest path. Legacy `metrics.json` + `sha256.json` refresh
+    rides the same group when the segment predates the flat manifest.
+    """
+    import os
+
+    from voyage.atomic import fsync_dir
+
+    grouped = dict(manifest)
+    grouped["metrics"] = dict(metrics)
+    grouped["format"] = SEGMENT_MANIFEST_FORMAT
+    dest = segment_manifest_path(segment_dir)
+    staged: list[tuple[Path, Path]] = []
+    for target, payload in (
+        (dest, grouped),
+        (segment_dir / "metrics.json", dict(metrics)),
+    ):
+        # The legacy metrics.json is only staged when the segment already
+        # carries one (pre-flat-manifest runs); flat runs keep the single
+        # manifest file as the only metrics source.
+        if target.name == "metrics.json" and dest.exists():
+            continue
+        if target.name == "metrics.json" and not (segment_dir / "metrics.json").exists():
+            continue
+        partial = target.with_name(f"{target.name}.partial")
+        with partial.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        staged.append((partial, target))
+    if not staged:
+        # Flat manifest, no legacy file: stage the manifest alone (the
+        # group collapses to the single atomic manifest write).
+        partial = dest.with_name(f"{dest.name}.partial")
+        with partial.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(grouped, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        staged.append((partial, dest))
+    for partial, target in staged:
+        os.replace(partial, target)
+    fsync_dir(segment_dir)
+    # Legacy checksum refresh rides inside the same group window (best
+    # effort — a missing legacy checksums file is not an error).
+    legacy_checksums = segment_dir / LEGACY_CHECKSUMS_FILENAME
+    if (segment_dir / "metrics.json").exists() and legacy_checksums.exists():
+        recorded = _read_json_object(legacy_checksums)
+        if recorded is not None and "metrics.json" in recorded:
+            recorded["metrics.json"] = sha256_file(segment_dir / "metrics.json")
+            atomic_write_json(legacy_checksums, recorded)
+    return dest

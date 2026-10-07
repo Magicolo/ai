@@ -169,12 +169,21 @@ concept-vector temps (`concept_vectors.npy.<pid>.tmp.npy`) and any future
 pid-suffixed staging. Legit artifacts never use these suffixes.
 """
 
+ORPHAN_PATTERNS = _ORPHAN_PATTERNS
+"""Unified orphan glob vocabulary (Track C single source).
+
+Run-root, segment, novelty, audio, and augment scans share this tuple —
+`_collect_transient_orphans` is the single collector. Kept as an alias
+(rather than renaming `_ORPHAN_PATTERNS` outright) so existing importers
+and tests hold while new code imports the public name.
+"""
+
 
 def _collect_transient_orphans(root: Path, base: Path) -> list[str]:
     """Sorted base-relative transient files under `root` (issue 058)."""
     found: set[str] = set()
     if root.exists():
-        for pattern in _ORPHAN_PATTERNS:
+        for pattern in ORPHAN_PATTERNS:
             for candidate in root.rglob(pattern):
                 if candidate.is_file():
                     found.add(str(candidate.relative_to(base)))
@@ -278,6 +287,78 @@ def _check_sidecar_plan_consistency(run_dir: Path) -> list[str]:
     return errors
 
 
+def _check_morph_joints_ledger_vs_output(run_dir: Path) -> list[str]:
+    """Read-only morph-joint ledger-vs-output notice (Track C).
+
+    Mirrors `_check_sidecar_plan_consistency` for the `morph_joints`
+    record.json ledger (skipped there): every ledgered joint video must
+    exist non-empty, else the next finalize re-renders it. Torn lines
+    are skipped by the loader, never fatal here.
+    """
+    errors: list[str] = []
+    morph_root = run_dir / "augment" / "morph_joints"
+    ledger = morph_root / "record.json"
+    if not morph_root.is_dir() or not ledger.is_file():
+        return []
+    try:
+        import json as _json
+
+        raw = _json.loads(ledger.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"augment morph_joints ledger unreadable: {ledger}"]
+    records = (
+        raw if isinstance(raw, list) else raw.get("joints", []) if isinstance(raw, dict) else []
+    )
+    if not isinstance(records, list):
+        return []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        rel = record.get("path", record.get("video", ""))
+        if not isinstance(rel, str) or not rel:
+            continue
+        if rel.startswith("/") or ".." in rel.split("/"):
+            continue
+        # Accept either run-relative or morph-dir-local resolution.
+        candidates = [run_dir / rel, morph_root / Path(rel).name]
+        if not any(c.is_file() and c.stat().st_size > 0 for c in candidates if _safe_is_file(c)):
+            errors.append(f"augment morph_joints ledgered but output missing or empty: {rel}")
+    return errors
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _warn_done_less_numeric_dirs(segments_root: Path) -> list[str]:
+    """Warn on numeric dirs without DONE (Track C hygiene, never fatal).
+
+    A `NNNNNN/` dir without DONE is a crashed/stranded commit attempt —
+    not corruption (validate only counts DONE dirs), but silent strands
+    accumulate. Warns sorted, capped at 20 entries to keep output stable.
+    """
+    warnings: list[str] = []
+    if not segments_root.exists():
+        return []
+    try:
+        children = sorted(segments_root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        try:
+            is_dir = child.is_dir() and not child.is_symlink()
+        except OSError:
+            continue
+        if is_dir and _SEGMENT_ID_PATTERN.match(child.name) and not (child / "DONE").exists():
+            warnings.append(f"{child.name} numeric dir without DONE (stranded commit attempt?)")
+    if len(warnings) > 20:
+        warnings = warnings[:20] + [f"... and {len(warnings) - 20} more"]
+    return [f"warning: {warning}" for warning in warnings]
+
+
 def validate_run(run_dir: Path) -> list[str]:
     """Read-only consistency check (DESIGN §70). Never mutates the run."""
     errors: list[str] = []
@@ -337,6 +418,17 @@ def validate_run(run_dir: Path) -> list[str]:
     if orphans:
         errors.append(f"orphan transient files: {orphans}")
     errors.extend(_check_sidecar_plan_consistency(run_dir))
+    errors.extend(_check_morph_joints_ledger_vs_output(run_dir))
+    errors.extend(_warn_done_less_numeric_dirs(segments_root))
+    # Track C tmp/ visibility: report-only size, never an error (scratch
+    # is disposable by design — a leaked session root shows up as hygiene
+    # in the message, not as INVALID).
+    try:
+        tmp_bytes = paths.scratch_tmp_size_bytes(run_dir)
+    except (OSError, ValueError):
+        tmp_bytes = None
+    if tmp_bytes is not None and tmp_bytes > 0:
+        errors.append(f"note: run tmp/ scratch holds {tmp_bytes} bytes (disposable, not an error)")
     novelty_dir = run_dir / "novelty"
     if novelty_dir.exists() or (run_dir / paths.CONCEPTS_FILENAME).exists():
         errors.extend(validate_concepts(novelty_dir))

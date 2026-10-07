@@ -49,6 +49,7 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from voyage.console import optional_bar
 from voyage.errors import MediaError
 from voyage.media_audio import (
     AV_ALIGNMENT_TOLERANCE_SECONDS,
@@ -134,6 +135,21 @@ def master_chunk_windows(
         windows.append((start, chunk))
         start += stride
     return windows
+
+
+def _check_tail_window(windows: list[tuple[float, float]]) -> None:
+    """Fail loud when the tail window cannot carry the overlap (M5).
+
+    Inner-function home for the `master_fn` tail gate (TRY301): raising
+    directly inside the `TemporaryDirectory` try would be caught by its
+    own `except MediaError` re-raise arm — abstracting here keeps the
+    raise out of the try body.
+    """
+    if len(windows) > 1 and windows[-1][1] <= MASTERING_OVERLAP_SECONDS:
+        raise MediaError(
+            f"mastering tail window {windows[-1][1]:.3f}s "
+            f"must exceed overlap {MASTERING_OVERLAP_SECONDS:.3f}s"
+        )
 
 
 def _resample_wav(source: Path, dest: Path, sample_rate: int, channels: int) -> Path:
@@ -239,6 +255,13 @@ def _join_mastered_chunks(
     doctrine as the music/SFX joins). A single chunk copies through;
     otherwise each joint blends the tail/head over exactly the overlap
     with a per-frame linear ramp, so no click lands on a window edge.
+
+    Streaming-join ceiling (M5): all windows load into RAM before the
+    blend (`~5 MB/min` stereo at 44.1 kHz s16le — a 30-min timeline holds
+    ~150 MB, an hour ~300 MB). Past hour-scale timelines prefer a
+    streaming join (window-at-a-time); this pass documents the ceiling
+    instead of implementing it — the `master_fn` tail gate bounds the
+    window count, not the RAM.
     """
     if not chunks:
         raise MediaError("mastering join needs at least one chunk (got none)")
@@ -333,6 +356,16 @@ def master_fn(
     (`sample_rate`, `channels`). Output duration must match the input
     within `AV_ALIGNMENT_TOLERANCE_SECONDS` (0.6 s), else `MediaError`.
 
+    M5 progress + tail gate: per-window renders report through the
+    shared `optional_bar` pattern (`mastering chunks`, silent when
+    `progress` is None), and the tail window must exceed the overlap —
+    a tail at or below the overlap would make the streaming join read
+    past the window (fail-loud `MediaError`, never a silent short join).
+    Join ceiling: `_join_mastered_chunks` holds all windows in RAM
+    (`array("h")` bodies, ~5 MB/min stereo at 44.1 kHz — a 30-min
+    timeline holds ~150 MB); a streaming join is the documented next
+    step past hour-scale timelines, not this pass.
+
     Raises: `TypeError` for mistyped rates/channels; `ValueError` for
     invalid rates/channels/geometry; `MediaError` for missing/unprobable
     input and any ffmpeg/probe/render/join/duration failure. Nothing
@@ -371,21 +404,25 @@ def master_fn(
             windows = master_chunk_windows(
                 resampled_duration, MASTERING_CHUNK_SECONDS, MASTERING_OVERLAP_SECONDS
             )
+            _check_tail_window(windows)
             rendered: list[Path] = []
-            for index, (start, duration) in enumerate(windows):
-                sliced = tmpdir / f"master_chunk_{index:04d}_in.wav"
-                _slice_wav(native_in, sliced, start, duration, MASTERING_SAMPLE_RATE, channels)
-                mastered = tmpdir / f"master_chunk_{index:04d}_out.wav"
-                _render_mastered_chunk(
-                    sliced,
-                    mastered,
-                    prompt=MASTERING_PROMPT,
-                    sampler=MASTERING_SAMPLER,
-                    steps=MASTERING_STEPS,
-                    guidance=MASTERING_GUIDANCE,
-                    seed=MASTERING_SEED,
-                )
-                rendered.append(mastered)
+            with optional_bar(progress, "mastering chunks", total=len(windows)) as tracker:
+                for index, (start, duration) in enumerate(windows):
+                    sliced = tmpdir / f"master_chunk_{index:04d}_in.wav"
+                    _slice_wav(native_in, sliced, start, duration, MASTERING_SAMPLE_RATE, channels)
+                    mastered = tmpdir / f"master_chunk_{index:04d}_out.wav"
+                    _render_mastered_chunk(
+                        sliced,
+                        mastered,
+                        prompt=MASTERING_PROMPT,
+                        sampler=MASTERING_SAMPLER,
+                        steps=MASTERING_STEPS,
+                        guidance=MASTERING_GUIDANCE,
+                        seed=MASTERING_SEED,
+                    )
+                    rendered.append(mastered)
+                    if tracker is not None:
+                        tracker.update()
             if timings is not None:
                 timings["master_render_s"] = time.monotonic() - stage_start
             stage_start = time.monotonic()

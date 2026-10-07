@@ -186,6 +186,37 @@ def required_specs(
     return required
 
 
+def validate_llama_placement(config: ProjectConfig) -> None:
+    """Refuse cpu+llama at config time (Track D), or mask explicitly.
+
+    The llama sidecar is GPU-only by design (`-ngl 99`); a `cpu`
+    director device carries no CUDA index to pin, so the server inherits
+    full visibility and can straddle the video card (or fail late with
+    `cannot spawn llama-server`). Refuse it here with `ConfigurationError`
+    so `configure` fails fast instead of dying mid-run. Explicit opt-out:
+    set `VOYAGE_LLAMA_ALLOW_CPU=1` to keep the inherited-visibility
+    behavior (documented, loud — the caller logs the bypass). Track A
+    calls this at config time; `required_specs` stays total (it still
+    selects the GGUF row for any llama backend — selection is not
+    validation).
+    """
+    import os as _os
+
+    from voyage.errors import ConfigurationError
+
+    if config.director.backend != "llama":
+        return
+    if config.director.device != "cpu":
+        return
+    if _os.environ.get("VOYAGE_LLAMA_ALLOW_CPU", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    raise ConfigurationError(
+        "director backend 'llama' requires a CUDA device (got 'cpu') — "
+        "the sidecar is GPU-only (`-ngl 99`); pass --director-device cuda:1 "
+        "or set VOYAGE_LLAMA_ALLOW_CPU=1 to keep inherited visibility explicitly"
+    )
+
+
 def _read_manifest_keys(models_dir: Path) -> dict[str, JsonValue] | None:
     """Manifest mapping, `{}` when absent, `None` when torn (never overwrite).
 

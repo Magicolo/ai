@@ -415,6 +415,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return int(args.func(args))
+    except KeyboardInterrupt:
+        # Cancellable generate (Track A): the supervisor rests PAUSED at
+        # the segment boundary (SIGINT handler → request_stop, plus a
+        # KeyboardInterrupt catch in `run_segments`); the CLI only maps
+        # the interrupt honestly instead of stranding RUNNING with a
+        # traceback.
+        print(
+            "interrupted — run rests at PAUSED (resume with `voyage generate`)",
+            file=sys.stderr,
+        )
+        return 130
     except VoyageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -20,6 +20,13 @@ Invoke: `python -m voyage.boundary_metrics --run Voyage/output/<name>`
 Exit 0 on PASS/N/A, 1 on FAIL verdict, 3 on tool error, 2 on CLI misuse
 (issue 242: FAIL and tool error used to share exit 1, so gate drivers
 could not tell a continuity cut from broken inputs).
+
+Run-status companion (Track E, DESIGN §59): for lifecycle state — stale
+RUNNING detection, stalled partials, torn metric lines — see
+`python -m voyage.scoreboard --run Voyage/output/<name> [--json]`
+(`voyage.scoreboard.run_status_summary`, read-only). This tool answers
+"do the joints continue"; scoreboard answers "what committed and is the
+run healthy".
 """
 
 from __future__ import annotations

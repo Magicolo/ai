@@ -23,13 +23,39 @@ from voyage.cli_paths import _check_run_id, output_root
 from voyage.cli_planning import _frames_per_segment, _require_cuda_stack, segments_for_duration
 from voyage.cli_validate import validate_run
 from voyage.console import RichSegmentProgress
-from voyage.errors import DiskSpaceError, StateError
+from voyage.errors import DiskSpaceError, MediaError, StateError, VoyageError
 from voyage.media import presented_frames
 from voyage.persistence import read_effective_config, read_manifest, read_state, write_manifest
-from voyage.supervisor import Supervisor
+from voyage.supervisor import Supervisor, acquire_run_lock
 
 
-def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
+def _log_discard_before_delete(segment: Path, segment_id: str) -> None:
+    """Log checksums/size before a discard delete (Track A forensics).
+
+    Best-effort, never fails the discard: records what is about to be
+    destroyed so an operator can distinguish an empty torn dir from a
+    real render. Failures degrade to `unknown`.
+    """
+    from voyage.hashing import sha256_file
+
+    video = segment / "video.mp4"
+    try:
+        size = video.stat().st_size if video.is_file() else -1
+    except OSError:
+        size = -1
+    try:
+        digest = sha256_file(video)[:16] if video.is_file() else "missing"
+    except OSError:
+        digest = "unreadable"
+    print(
+        f"discard {segment_id}: video.mp4 size={size} sha16={digest} (unverifiable, removing)",
+        file=sys.stderr,
+    )
+
+
+def _discard_uncommitted_segments(
+    run_dir: Path, committed: int, effective: Any | None = None
+) -> int:
     """Delete DONE-less segment folders at/after the committed count + transients.
 
     `state.json` rules with a crash-window exception (DESIGN §58, issue 013):
@@ -43,30 +69,132 @@ def _discard_uncommitted_segments(run_dir: Path, committed: int) -> int:
     removed, plus `*.partial`/`*.tmp*` transients; everything else is left
     for `validate_run` to report. Returns the number of removed entries.
 
+    DONE-less adoption (Track A): before any `rmtree`, a dir carrying
+    `video.mp4` + `manifest.json` is verified via
+    `verify_doneless_segment_for_adoption` (manifest parses + checksum
+    matches + `validate_video` passes + tail check). Verifiable dirs get a
+    DONE marker instead of deletion (the locked commit adopts them);
+    only unverifiable dirs are deleted, after logging checksums/size.
+    Manifest-read failures fail loud with the inspect-or-remove adoption
+    directive — never silent deletion. Re-stats DONE under the run lock
+    to close the TOCTOU between scan and delete.
+
     Why existence, not size: DONE is empty-by-design (`b""` in
     `_commit_segment`), so the adoptable signal is the file's presence,
     not a non-zero size.
     """
     from voyage import paths
+    from voyage.atomic import atomic_write_bytes
+    from voyage.supervisor import verify_doneless_segment_for_adoption
+
+    # Geometry for adoption verification: explicit `effective` wins
+    # (`cmd_generate` passes its already-loaded config); legacy 2-arg
+    # callers fall back to reading the run manifest. A torn manifest
+    # fails loud with the adoption directive (never silent deletion);
+    # a missing manifest (raw test scaffolds with segments only) falls
+    # back to legacy delete-without-adoption so those callers keep
+    # working — production always passes `effective`.
+    resolved_effective = effective
+    if resolved_effective is None:
+        try:
+            resolved_effective = read_effective_config(run_dir)
+        except StateError as exc:
+            from voyage import paths as _paths_for_missing_check
+
+            if not (run_dir / _paths_for_missing_check.MANIFEST_FILENAME).exists():
+                resolved_effective = None
+            else:
+                print(
+                    f"error: cannot verify DONE-less segments in {run_dir}: {exc} — "
+                    f"inspect {run_dir / 'segments'} manually (adoption or remove)",
+                    file=sys.stderr,
+                )
+                raise
+    width: int | None = None
+    height: int | None = None
+    fps_value: int | None = None
+    segment_frames_value: int | None = None
+    if resolved_effective is not None:
+        try:
+            width = int(resolved_effective.video.width)
+            height = int(resolved_effective.video.height)
+            fps_value = int(resolved_effective.video.fps)
+            segment_frames_value = int(resolved_effective.video.segment_frames)
+        except (AttributeError, TypeError, ValueError) as exc:
+            print(
+                f"error: cannot verify DONE-less segments in {run_dir}: bad geometry ({exc}) — "
+                f"inspect {run_dir / 'segments'} manually (adoption or remove)",
+                file=sys.stderr,
+            )
+            raise StateError(
+                f"cannot verify DONE-less segments in {run_dir}: bad geometry"
+            ) from exc
 
     removed = 0
-    segments_dir = run_dir / paths.SEGMENTS_DIRNAME
-    if segments_dir.is_dir():
-        for child in sorted(segments_dir.iterdir()):
-            if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= committed:
-                if child.is_dir() and not child.is_symlink():
-                    if (child / paths.DONE_MARKER).exists():
-                        continue
-                    shutil.rmtree(child)
-                    removed += 1
-                elif child.is_file():
-                    child.unlink()
-                    removed += 1
-        for pattern in ("*.partial", "*.tmp*"):
-            for stray in sorted(segments_dir.glob(pattern)):
-                if stray.is_file():
-                    stray.unlink()
-                    removed += 1
+    with acquire_run_lock(run_dir):
+        segments_dir = run_dir / paths.SEGMENTS_DIRNAME
+        if segments_dir.is_dir():
+            for child in sorted(segments_dir.iterdir()):
+                if len(child.name) == 6 and child.name.isdigit() and int(child.name) >= committed:
+                    if child.is_dir() and not child.is_symlink():
+                        try:
+                            done_now = (child / paths.DONE_MARKER).exists()
+                        except OSError:
+                            done_now = False
+                        if done_now:
+                            continue
+                        if (
+                            width is not None
+                            and height is not None
+                            and fps_value is not None
+                            and segment_frames_value is not None
+                        ):
+                            try:
+                                verifiable = verify_doneless_segment_for_adoption(
+                                    run_dir,
+                                    child,
+                                    width=width,
+                                    height=height,
+                                    fps=fps_value,
+                                    segment_frames=segment_frames_value,
+                                )
+                            except (MediaError, VoyageError, OSError, ValueError) as exc:
+                                # Manifest-read failures fail loud (Track A):
+                                # a torn manifest may still cover real media —
+                                # never delete, direct the operator instead.
+                                print(
+                                    f"error: segment {child.name} metadata unreadable ({exc}); "
+                                    f"refusing to delete — inspect or remove {child} manually",
+                                    file=sys.stderr,
+                                )
+                                raise
+                            if verifiable:
+                                try:
+                                    atomic_write_bytes(child / paths.DONE_MARKER, b"")
+                                except OSError as exc:
+                                    print(
+                                        f"error: cannot mark {child.name} DONE ({exc}); "
+                                        f"inspect or remove {child} manually",
+                                        file=sys.stderr,
+                                    )
+                                    raise
+                                print(
+                                    f"adopt: DONE-less {child.name} verified, "
+                                    "marked DONE for commit",
+                                    file=sys.stderr,
+                                )
+                                continue
+                        _log_discard_before_delete(child, child.name)
+                        shutil.rmtree(child)
+                        removed += 1
+                    elif child.is_file():
+                        child.unlink()
+                        removed += 1
+            for pattern in ("*.partial", "*.tmp*"):
+                for stray in sorted(segments_dir.glob(pattern)):
+                    if stray.is_file():
+                        stray.unlink()
+                        removed += 1
     return removed
 
 
@@ -432,12 +560,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
     try:
         manifest = read_manifest(run_dir)
     except StateError as exc:
-        print(f"error: {exc} — run `voyage configure {name}` first", file=sys.stderr)
+        print(
+            f"error: {exc} — inspect {run_dir / 'segments'} manually "
+            "(DONE-less adoption or remove) — run `voyage configure {name}` first",
+            file=sys.stderr,
+        )
         return 2
     try:
         effective = read_effective_config(run_dir)
     except StateError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(
+            f"error: {exc} — inspect {run_dir / 'segments'} manually "
+            "(DONE-less adoption or remove)",
+            file=sys.stderr,
+        )
         return 1
     planned = manifest.get("segments")
     if isinstance(planned, bool) or not isinstance(planned, int) or planned <= 0:
@@ -455,9 +591,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
     try:
         state = read_state(run_dir)
     except StateError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(
+            f"error: {exc} — inspect {run_dir / 'segments'} manually "
+            "(DONE-less adoption or remove)",
+            file=sys.stderr,
+        )
         return 1
-    removed = _discard_uncommitted_segments(run_dir, state.committed_segments)
+    try:
+        removed = _discard_uncommitted_segments(run_dir, state.committed_segments, effective)
+    except (MediaError, VoyageError, StateError, OSError, ValueError) as exc:
+        print(
+            f"error: reconcile refused ({exc}) — inspect {run_dir / 'segments'} manually "
+            "(DONE-less adoption or remove)",
+            file=sys.stderr,
+        )
+        return 1
     if removed:
         plural = "y" if removed == 1 else "ies"
         console.ok(f"reconcile: removed {removed} uncommitted segment entr{plural}")
@@ -566,7 +714,43 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
     progress = sink if sink is not None else RichSegmentProgress(console)
     supervisor = Supervisor(run_dir, effective, progress=progress)
-    committed = supervisor.run_segments(remaining)
+    from voyage.supervisor import install_stop_handlers
+
+    restore_signals = install_stop_handlers(supervisor)
+    try:
+        # Batch mutual exclusion (Track A): hold one lock across the
+        # reconcile tail + the whole `run_segments` batch (nested with
+        # the supervisor's own batch/per-commit locks via the shared
+        # registry) so no second writer interleaves between discard and
+        # the first commit. Re-validate the committed count under that
+        # lock before booting workers (fail fast on drift).
+        with acquire_run_lock(run_dir):
+            try:
+                live = read_state(run_dir)
+            except StateError as exc:
+                print(
+                    f"error: {exc} — inspect {run_dir / 'segments'} manually "
+                    "(DONE-less adoption or remove)",
+                    file=sys.stderr,
+                )
+                return 1
+            if live.committed_segments != state.committed_segments:
+                print(
+                    f"error: run {run_dir} advanced under lock "
+                    f"(was {state.committed_segments}, now {live.committed_segments}) — "
+                    f"refusing to interleave; inspect {run_dir / 'segments'} manually",
+                    file=sys.stderr,
+                )
+                return 1
+            committed = supervisor.run_segments(remaining)
+    except KeyboardInterrupt:
+        print("interrupted — run rests at PAUSED (resume with `voyage generate`)", file=sys.stderr)
+        return 130
+    finally:
+        try:
+            restore_signals()
+        except Exception:
+            pass
     if sink is None:
         console.ok(f"run finished · {len(committed)} segment(s) committed")
     _heal_and_report(run_dir)

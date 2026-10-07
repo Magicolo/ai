@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 from voyage import paths
 from voyage.audio.beat import beats_for_segment
 from voyage.audio.planner import (
+    AUDIO_EPSILON,
     TAKES_FILENAME,
     AudioPlanner,
     AudioTake,
@@ -51,6 +52,30 @@ from voyage.supervisor_proposal import effective_music_caption
 
 if TYPE_CHECKING:
     from voyage.console import VoyageConsole
+
+PRUNE_PREFIXES_NEEDED: frozenset[str] = frozenset(
+    {
+        "voyage-take-",
+        "voyage-bench-",
+        "voyage-sfx-window-",
+        "voyage-sfx-bench-",
+    }
+)
+"""Worker staging prefixes that strand scratch on kill (H6, Track C wires).
+
+`paths.STALE_SCRATCH_PREFIXES` already covers `voyage-ltx25-`,
+`voyage-ltx23-` and `voyage-acestep-cwd-`; the four above are the
+audio-side `TemporaryDirectory` prefixes (`audio_acestep` take/bench,
+`sfx_mmaudio` window/bench) which are self-cleaning on success but
+strand on SIGKILL. Deliberately specific (`voyage-sfx-window-`, not the
+broad `voyage-sfx-`): the broad form startswith-matches the LIVE
+`voyage-sfx-final-*` finalize tmpdir and a mid-run prune would delete
+it (ENOENT bed copy — the 2026-10-07 `test_finalize_sfx_pass` break).
+Track C wires this set into `paths.py` (do not edit `paths.py` from
+this track) but must NEVER add the live `voyage-sfx-final-*` /
+`voyage-master-*` finalize prefixes to STALE, nor prune mid-run —
+only at startup. See `prune_extra` for the wiring helper.
+"""
 
 #: Causvid default overlap (`workers/video_causvid.py:93
 #: DEFAULT_OVERLAP_FRAMES`; nothing outside the worker overrides it).
@@ -81,8 +106,61 @@ _CHAIN_OVERLAP_SECONDS = 6.0
 #: (DESIGN §140 resume hardening, SFX `SFX_ORPHAN_ADOPT_TOLERANCE` twin).
 #: A crash between render and `append_take` leaves a valid file with no
 #: ledger line — adopt when its probed duration matches the plan this
-#: closely; anything further off re-renders instead.
+#: closely; anything further off re-renders instead. Same budget gates
+#: the keep-path output-truth check (H1): a ledgered take whose file
+#: drifted past this (cleanup, corruption, stale copy) re-renders instead
+#: of stranding the mix on a lying ledger line.
 _ORPHAN_ADOPT_TOLERANCE_SECONDS = 0.05
+
+
+def prune_extra(run_dir: Path, prefixes: frozenset[str] = PRUNE_PREFIXES_NEEDED) -> tuple[int, int]:
+    """Prune extra worker staging dirs under the run scratch (H6 helper).
+
+    Track C wires this from configure/shrink and startup: iterates
+    `run_dir/tmp/`, removes dirs whose name starts with any of `prefixes`,
+    and returns `(pruned_count, pruned_bytes)`. Bytes sum `st_size` over
+    pruned files best-effort (missing files read as 0 — the count, not
+    the byte total, is the correctness signal). Logs the outcome to
+    stderr when anything was pruned so disk reclamation stays visible.
+    Never raises: leftover scratch only costs disk, never correctness.
+    """
+    import shutil
+
+    scratch = run_dir / paths.SCRATCH_DIRNAME
+    pruned_count = 0
+    pruned_bytes = 0
+    try:
+        if not scratch.is_dir():
+            return (0, 0)
+        for child in sorted(scratch.iterdir()):
+            try:
+                matches = child.is_dir() and any(
+                    child.name.startswith(prefix) for prefix in prefixes
+                )
+            except OSError:
+                continue
+            if not matches:
+                continue
+            try:
+                total = 0
+                for member in child.rglob("*"):
+                    try:
+                        if member.is_file():
+                            total += member.stat().st_size
+                    except OSError:
+                        continue
+                shutil.rmtree(child, ignore_errors=True)
+                pruned_count += 1
+                pruned_bytes += total
+            except OSError:
+                continue
+    except OSError:
+        return (pruned_count, pruned_bytes)
+    if pruned_count > 0:
+        sys.stderr.write(
+            f"pruned {pruned_count} staging dir(s), {pruned_bytes} byte(s) under {scratch}\n"
+        )
+    return (pruned_count, pruned_bytes)
 
 
 def deferred_tail_frames(
@@ -152,7 +230,7 @@ def _take_path(audio_dir: Path, run_dir: Path, take_id: str) -> tuple[Path, str]
 
 
 def _take_output_complete(run_dir: Path, take: AudioTake) -> bool:
-    """Whether a ledgered take's audio file exists and is non-empty.
+    """Whether a ledgered take's audio file exists, is non-empty, and matches.
 
     Output-truth companion to the ledger (DESIGN §140 resume hardening,
     sidecar `chunk_output_complete` + SFX `_stem_cache_hit` twins): the
@@ -160,12 +238,80 @@ def _take_output_complete(run_dir: Path, take: AudioTake) -> bool:
     non-zero bytes counts. A crash, cleanup, or disk corruption can remove
     output after its record was appended; anything incomplete re-renders
     instead of stranding the finalize mix on a missing file.
+
+    H1 keep-path duration gate: the probed file duration must agree with
+    the ledgered `take.duration` within
+    `_ORPHAN_ADOPT_TOLERANCE_SECONDS` (0.05 s). A stale copy, truncated
+    rewrite, or hand-edited ledger that drifted past the budget returns
+    False so the caller re-renders instead of slicing a lying file.
+    Unprobable files return False (re-render), never True.
     """
     try:
         take_file: Path = take.resolved_path(run_dir)
-        return take_file.is_file() and take_file.stat().st_size > 0
+        if not take_file.is_file():
+            return False
+        try:
+            if take_file.stat().st_size == 0:
+                return False
+        except OSError:
+            return False
+        try:
+            probed_duration = probed_take_seconds(take_file)
+        except (OSError, ValueError, MediaError):
+            return False
+        return abs(probed_duration - take.duration) <= _ORPHAN_ADOPT_TOLERANCE_SECONDS
     except (OSError, MediaError):
         return False
+
+
+def find_ledgerless_take_files(run_dir: Path, takes: list[AudioTake]) -> list[Path]:
+    """Take files with no ledger line (H1 flag helper, pure scan).
+
+    Lists `audio/take_*.wav` files (excluding `*_src*.wav` continuation
+    sources and `*.partial.wav` staging temps) whose filename stems match
+    no ledgered `take_id`. Callers log the result loudly — an orphan is
+    either adoptable (probe-matched, adopted on the next ensure) or stale
+    (re-rendered over). Never raises: an unreadable audio dir reads as
+    no orphans.
+    """
+    try:
+        audio_dir = run_dir / "audio"
+        if not audio_dir.is_dir():
+            return []
+        ledgered = {take.take_id for take in takes}
+        orphans: list[Path] = []
+        for candidate in sorted(audio_dir.glob("take_*.wav")):
+            name = candidate.name
+            if "_src" in name or name.endswith(".partial.wav"):
+                continue
+            stem = candidate.stem
+            if stem not in ledgered:
+                orphans.append(candidate)
+    except OSError:
+        return []
+    return orphans
+
+
+def atomic_take_replace(staged: Path, dest: Path) -> None:
+    """Publish a staged take file atomically (H1 helper, `os.replace`).
+
+    `render_take_fn` implementations render to a sibling
+    `take_file.partial.wav` and call this to publish: a killed render
+    leaves only the partial (pruned/ignored on resume), never a
+    half-written take the keep-path could adopt. Wraps `os.replace` so
+    both worker and finalize layers share one spelling.
+    """
+    os.replace(staged, dest)
+
+
+def _scratch_no_prune(run_dir: Path) -> Path:
+    """Run scratch dir without pruning (mid-run worker inits, SFX twin).
+
+    Thin alias over `paths.ensure_scratch_dir_no_prune` (canonical
+    mkdir-only helper, 2026-10-07 B-vs-C resolution). Worker inits only
+    need the dir to exist, never a prune.
+    """
+    return paths.ensure_scratch_dir_no_prune(run_dir)
 
 
 def _prune_stale_continuation_sources(audio_dir: Path) -> int:
@@ -367,11 +513,13 @@ def _coverage_start_position(
     director caption is its ACE prompt — not the caption of the segment
     being processed when the take chained (up to `ahead_seconds` earlier
     on the timeline). Clamps to the first segment for float dust at 0.0
-    and to the last for chained overhang past the timeline end.
+    and to the last for chained overhang past the timeline end. Shares
+    `AUDIO_EPSILON` with the planner so the replay walk and the serve
+    lookup agree on segment ownership.
     """
     position = 0
     for index, (start, _stretched, _number, _caption, _energy) in enumerate(replay):
-        if start <= covers_from + 1e-6:
+        if start <= covers_from + AUDIO_EPSILON:
             position = index
         else:
             break
@@ -620,6 +768,12 @@ def ensure_deferred_takes(
     _prune_stale_continuation_sources(audio_dir)
     ledger = audio_dir / TAKES_FILENAME
     takes: list[AudioTake] = _load_existing_takes(run_dir)
+    for orphan_flag in find_ledgerless_take_files(run_dir, takes):
+        flag_message = f"deferred take file without ledger line: {orphan_flag.name}"
+        if progress is not None:
+            progress.warn(flag_message)
+        else:
+            sys.stderr.write(f"{flag_message}\n")
     rendered: list[dict[str, Any]] = []
     replay = _replay_segments(usable, source_fps, stretch, music_style, explicit_caption)
     # Upfront total for the bar: the dry-walk count replays these same
@@ -668,12 +822,13 @@ def ensure_deferred_takes(
                         run_dir, keeping_take
                     ):
                         missing_file: Path = keeping_take.resolved_path(run_dir)
+                        missing_staged = missing_file.parent / f"{missing_file.stem}.partial.wav"
                         rerender_payload: dict[str, Any] = {
                             "segment_id": segment.name,
                             "style": keeping_take.caption,
                             "energy": energy,
                             "seed": keeping_take.seed,
-                            "output_path": str(missing_file),
+                            "output_path": str(missing_staged),
                             "sample_rate": sample_rate,
                             "channels": channels,
                             "duration_seconds": keeping_take.duration,
@@ -683,8 +838,11 @@ def ensure_deferred_takes(
                         }
                         try:
                             render_started = time.monotonic()
-                            render_take_fn(rerender_payload, missing_file)
+                            render_take_fn(rerender_payload, missing_staged)
+                            atomic_take_replace(missing_staged, missing_file)
                         except Exception as exc:
+                            with contextlib.suppress(OSError):
+                                missing_staged.unlink()
                             raise MediaError(
                                 f"deferred take {keeping_take.take_id} re-render failed: {exc}"
                             ) from exc
@@ -743,12 +901,13 @@ def ensure_deferred_takes(
                     if planner.coverage_until() >= end - 1e-6:
                         break
                     continue
+                take_staged = take_file.parent / f"{take_file.stem}.partial.wav"
                 payload: dict[str, Any] = {
                     "segment_id": segment.name,
                     "style": take.caption,
                     "energy": energy,
                     "seed": take.seed,
-                    "output_path": str(take_file),
+                    "output_path": str(take_staged),
                     "sample_rate": sample_rate,
                     "channels": channels,
                     "duration_seconds": take.duration,
@@ -782,8 +941,11 @@ def ensure_deferred_takes(
                     payload["repaint_end"] = take.duration
                 render_started = time.monotonic()
                 try:
-                    render_take_fn(payload, take_file)
+                    render_take_fn(payload, take_staged)
+                    atomic_take_replace(take_staged, take_file)
                 except Exception as exc:
+                    with contextlib.suppress(OSError):
+                        take_staged.unlink()
                     raise MediaError(f"deferred take {take.take_id} render failed: {exc}") from exc
                 _notify_take_rendered(
                     take_observer,
@@ -911,7 +1073,9 @@ def spawn_fake_render_fn(
     The worker writes `payload["output_path"]`; any worker error
     propagates and `ensure_deferred_takes` wraps it fail-loud.
     `shutdown_fn` stops the worker best-effort (never masks the render
-    result).
+    result). H1 atomic: renders to a sibling `take_file.partial.wav`
+    then `os.replace` publishes, so a killed render never leaves a
+    half-written take.
     """
     from voyage.rpc import SubprocessWorker
     from voyage.supervisor_routing import audio_worker_module
@@ -927,9 +1091,21 @@ def spawn_fake_render_fn(
     worker.start()
 
     def _render(payload: dict[str, Any], output_path: Path) -> None:
+        if output_path.name.endswith(".partial.wav"):
+            request = dict(payload)
+            request["output_path"] = str(output_path)
+            worker.call("generate_audio", request)
+            return
+        staged = output_path.parent / f"{output_path.stem}.partial.wav"
         request = dict(payload)
-        request["output_path"] = str(output_path)
-        worker.call("generate_audio", request)
+        request["output_path"] = str(staged)
+        try:
+            worker.call("generate_audio", request)
+            atomic_take_replace(staged, output_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            raise
 
     def _shutdown() -> None:
         with contextlib.suppress(Exception):
@@ -951,7 +1127,10 @@ def spawn_ace_render_fn(
     worker error propagates and `ensure_deferred_takes` wraps it
     fail-loud. `shutdown_fn` stops the worker best-effort (never masks
     the render result). Raises `MediaError` when `models_dir` is
-    missing — ACE finalize cannot render without weights.
+    missing — ACE finalize cannot render without weights. H1 atomic:
+    renders to a sibling `take_file.partial.wav` then `os.replace`
+    publishes (mirrors the fake backend so both paths share the crash
+    semantics `ensure_deferred_takes` relies on).
     """
     from voyage.rpc import SubprocessWorker
     from voyage.supervisor_routing import audio_worker_module
@@ -967,7 +1146,9 @@ def spawn_ace_render_fn(
         init_payload={
             "models_dir": str(models_dir),
             "device": device,
-            "scratch_dir": str(paths.ensure_scratch_dir(run_dir)),
+            # Prune-free scratch (same mid-run rule as SFX `_scratch_no_prune`:
+            # `ensure_scratch_dir` would prune live finalize/worker tmpdirs).
+            "scratch_dir": str(_scratch_no_prune(run_dir)),
         },
         # ACE-Step venv (DESIGN §140 audio continuity): the ACE stack is
         # isolated in /opt/venvs/acestep on voyage-ltx; unset (video
@@ -977,9 +1158,21 @@ def spawn_ace_render_fn(
     worker.start()
 
     def _render(payload: dict[str, Any], output_path: Path) -> None:
+        if output_path.name.endswith(".partial.wav"):
+            request = dict(payload)
+            request["output_path"] = str(output_path)
+            worker.call("generate_audio", request)
+            return
+        staged = output_path.parent / f"{output_path.stem}.partial.wav"
         request = dict(payload)
-        request["output_path"] = str(output_path)
-        worker.call("generate_audio", request)
+        request["output_path"] = str(staged)
+        try:
+            worker.call("generate_audio", request)
+            atomic_take_replace(staged, output_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            raise
 
     def _shutdown() -> None:
         with contextlib.suppress(Exception):

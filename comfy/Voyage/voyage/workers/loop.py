@@ -48,6 +48,28 @@ ERROR_INVALID_PAYLOAD = "INVALID_PAYLOAD"
 ERROR_WORKER = "WORKER_ERROR"
 """Unexpected failure: retryable so the supervisor's restart path engages."""
 
+CANCEL_OP = "cancel"
+"""Cooperative cancel op name (Track D liveness).
+
+Workers are serial: a `generate_blocks` in flight cannot serve this, so
+mid-render interrupt stays client-side abandon-and-restart
+(`rpc.call_cancel`). An idle worker answers `handle_cancel` below so the
+wire name is stable and Track A can probe cancel support without a render.
+"""
+
+
+def handle_cancel(payload: dict[str, Any]) -> dict[str, Any]:
+    """Idle cancel handler: nothing in flight, nothing to abandon.
+
+    Returns `cancelled=False` (no render was abandoned) with the reason so
+    callers distinguish idle-noop from a client-side abandon (which never
+    returns a wire response — the process is gone). Registered by
+    `video_common.standard_serve_map` when the caller passes no explicit
+    cancel handler.
+    """
+    del payload
+    return {"cancelled": False, "reason": "idle-or-noop"}
+
 
 def serve(handlers: dict[str, Handler]) -> None:
     stdin = sys.stdin

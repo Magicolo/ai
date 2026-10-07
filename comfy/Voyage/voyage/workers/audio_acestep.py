@@ -13,6 +13,7 @@ module never imports `torch` at top level. `torch` appears only inside
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess as subprocess
 import tempfile
@@ -238,8 +239,12 @@ def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int)
     restart rather than an instant Fatal. Carries the tree-standard
     `-hide_banner -nostdin` daemon hygiene (issues 053): without `-nostdin`
     an ffmpeg reading stdin in a pipelined supervisor can steal RPC bytes
-    or block, and the full banner pollutes worker logs.
+    or block, and the full banner pollutes worker logs. H1 atomic: converts
+    to a sibling `take_file.partial.wav` then `os.replace` publishes, so a
+    killed convert never leaves a half-written take the keep-path could
+    adopt.
     """
+    staged = output.parent / f"{output.stem}.partial.wav"
     command = [
         "ffmpeg",
         "-hide_banner",
@@ -255,11 +260,16 @@ def _convert(rendered_flac: Path, output: Path, sample_rate: int, channels: int)
         str(sample_rate),
         "-c:a",
         "pcm_s16le",
-        str(output),
+        str(staged),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise RuntimeError(f"ffmpeg take convert failed: {completed.stderr.strip()}")
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        _check_convert_result(completed)
+        os.replace(staged, output)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        raise
 
 
 def handle_generate_audio(payload: dict[str, Any]) -> dict[str, Any]:

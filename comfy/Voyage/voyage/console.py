@@ -48,6 +48,17 @@ _SPINNER_TICK_SECONDS = 0.2
 """Live-elapsed refresh interval for the rich spinner (fast enough to feel
 alive, slow enough to never fight the render thread)."""
 
+HEARTBEAT_AFTER_SECONDS = 30.0
+"""Elapsed threshold for quiet/non-TTY heartbeat lines (Track E, DESIGN §59).
+
+Stages running longer than this (video render, prompt enhance, model
+pass) emit a `heartbeat` line even when `quiet` or non-TTY would
+otherwise stay silent, plus Track A emits the `video_heartbeat` metric
+twin via `logrotate.emit_heartbeat`. Thirty seconds is long enough to
+stay quiet on fast fake/CPU commits and short enough to prove liveness
+on real GPU renders.
+"""
+
 
 def rich_available() -> bool:
     """Whether the ``rich`` display dependency can be imported."""
@@ -295,6 +306,29 @@ class VoyageConsole:
             f"     ⏱ {title}: {cells} · slowest {slowest[0]} ({slowest[1]:.1f}s)"
             f" · total {total:.1f}s"
         )
+
+    def generation_timing_table(self, stage_seconds: Mapping[str, float]) -> None:
+        """Generation-side timing table mirroring finalize (Track E, DESIGN §59).
+
+        Same `timing_table` words with the `generation` title so per-commit
+        `stage_seconds` (director / prompt_enhance / video / audio /
+        validate / commit / motion_sense) render exactly like the finalize
+        summary — one vocabulary, two phases. Quiet stays silent, like
+        `timing_table` itself.
+        """
+        self.timing_table("generation", stage_seconds)
+
+    def heartbeat(self, message: str) -> None:
+        """Liveness line that bypasses `quiet` (Track E, DESIGN §59).
+
+        Long stages (> `HEARTBEAT_AFTER_SECONDS`) call this even when the
+        console is quiet or non-TTY: silence there means "nothing to show",
+        but a heartbeat means "still alive". Always writes to the injected
+        stream (same contract as `error` — never to the real stderr
+        directly, so embeds and tests capturing the stream see it); the
+        metric twin is `logrotate.emit_heartbeat`.
+        """
+        print(f"♥ heartbeat {message}", file=self._stream)
 
     def segment_start(self, number: int, segment_id: str) -> None:
         self.line("")
@@ -917,3 +951,168 @@ class SharedBarTracker(BarTracker):
 #: video ∥ model-pass). A plain alias so call sites read in their own
 #: domain without a second implementation to drift.
 GenerationDisplay = ParallelFinalizeDisplay
+
+
+def should_heartbeat(elapsed: float, *, threshold: float = HEARTBEAT_AFTER_SECONDS) -> bool:
+    """Whether a stage deserves a quiet-bypassing heartbeat line (Track E).
+
+    Pure gate over `HEARTBEAT_AFTER_SECONDS`: True when `elapsed` meets or
+    exceeds the threshold. Track A checks this on long stages (video,
+    prompt enhance, model pass) and calls `VoyageConsole.heartbeat` plus
+    `logrotate.emit_heartbeat` so quiet/non-TTY runs still prove liveness
+    on both the screen and the metric stream.
+    """
+    return elapsed >= threshold
+
+
+def prompt_enhance_stage(progress: Any | None, backend: str) -> AbstractContextManager[Any]:
+    """Spinner around prompt enhancement, silent when `progress` is None (Track A).
+
+    Canonical label `"prompt enhance"` with the backend as detail, so the
+    enhancer stage shows exactly like every other `stage()` step. Thin
+    wrapper over `optional_stage` — Track A calls this at the top of
+    `_render_video` instead of inventing its own label.
+    """
+    return optional_stage(progress, "prompt enhance", backend)
+
+
+def prompt_enhance_bar(
+    progress: Any | None, total: int
+) -> AbstractContextManager[BarTracker | None]:
+    """Per-prompt X/Y counter inside the enhance stage (Track A, DESIGN §59).
+
+    Canonical label `"prompt enhance prompts"`: Track A advances once per
+    expanded prompt so multi-block segments show X/Y instead of one silent
+    sidecar call. Thin wrapper over `optional_bar` — `None` progress stays
+    a silent no-op yielding None.
+    """
+    return optional_bar(progress, "prompt enhance prompts", total)
+
+
+def pump_worker_log_tail(
+    progress: Any | None,
+    tails: Mapping[str, Sequence[str]],
+    *,
+    verbose_only: bool = True,
+) -> None:
+    """Forward worker-log tails to the progress sink (Track A, DESIGN §59).
+
+    No supervisor edits: Track A calls `logrotate.tail_worker_logs` on the
+    commit thread, then this helper to surface the last line per worker
+    via `progress.note`. `verbose_only=True` (default) keeps the default
+    output compact — tails show only under `--verbose`; pass False for
+    heartbeat-grade visibility. `None` progress stays silent. Never
+    raises: a progress sink without `note`/`verbose` degrades to silence.
+    """
+    if progress is None:
+        return
+    try:
+        verbose = bool(getattr(progress, "verbose", False))
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
+        return
+    if verbose_only and not verbose:
+        return
+    note = getattr(progress, "note", None)
+    if not callable(note):
+        note = getattr(progress, "info", None)
+    if not callable(note):
+        return
+    for name in sorted(tails):
+        lines = tails[name]
+        if not lines:
+            continue
+        last = lines[-1].strip()
+        if last:
+            try:
+                note(f"{name}: {last}")
+            except Exception:  # noqa: BLE001 - best-effort display, never fails output
+                continue
+
+
+def note_worker_rotation(
+    progress: Any | None,
+    rotated: Sequence[Any],
+    *,
+    verbose_only: bool = True,
+) -> None:
+    """Announce a worker-log rotation, verbose-only by default (Track E).
+
+    `rotated` is what `logrotate.rotate_worker_logs` returned. Silent
+    when empty (nothing rolled) or when `progress` is None. Verbose-only
+    so steady-state commits stay compact — the metric twin
+    (`logrotate.worker_log_rotation_event`) carries the record for
+    forensics regardless of verbosity.
+    """
+    if progress is None or not rotated:
+        return
+    try:
+        verbose = bool(getattr(progress, "verbose", False))
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
+        return
+    if verbose_only and not verbose:
+        return
+    note = getattr(progress, "note", None)
+    if not callable(note):
+        note = getattr(progress, "info", None)
+    if not callable(note):
+        return
+    names = ", ".join(str(sibling) for sibling in rotated)
+    try:
+        note(f"worker logs rotated: {names}")
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
+        return
+
+
+def note_prewarm_heartbeat(
+    progress: Any | None,
+    *,
+    upscale_frames: int,
+    interp_frames: int,
+    skip_reason: str,
+    segments_seen: int,
+) -> None:
+    """Always-on pre-warm console line, even when zero (Track E, DESIGN §59).
+
+    Unlike the legacy idle-silent report, this announces every sweep:
+    ledgered frames plus `skip_reason` plus `segments_seen`, so a held-back
+    pass (low VRAM, director busy) is visible instead of silent. `None`
+    progress stays silent; quiet consoles stay silent (the metric twin
+    `logrotate.prewarm_heartbeat_event` is the quiet-path record).
+    """
+    if progress is None:
+        return
+    note = getattr(progress, "note", None)
+    if not callable(note):
+        note = getattr(progress, "info", None)
+    if not callable(note):
+        return
+    try:
+        if upscale_frames or interp_frames:
+            note(
+                f"pre-warm heartbeat: +{upscale_frames}f upscale, "
+                f"+{interp_frames}f interp ({segments_seen} segments seen)"
+            )
+        elif skip_reason:
+            note(f"pre-warm heartbeat: held back ({skip_reason}, {segments_seen} seen)")
+        else:
+            note(f"pre-warm heartbeat: idle ({segments_seen} segments seen)")
+    except Exception:  # noqa: BLE001 - best-effort display, never fails output
+        return
+
+
+def warn_health_alerts(console: VoyageConsole | Any, alerts: Sequence[str]) -> None:
+    """One `warn` line per doctor alert (Track E runtime health, DESIGN §64).
+
+    Track A/C evaluates `doctor.health_alerts` on gauges + preflight facts,
+    then calls this so the operator sees the same strings the
+    `health_alert` metric event records. Never raises: a console without
+    `warn` degrades to silence.
+    """
+    warn = getattr(console, "warn", None)
+    if not callable(warn):
+        return
+    for alert in alerts:
+        try:
+            warn(str(alert))
+        except Exception:  # noqa: BLE001 - best-effort display, never fails output
+            continue

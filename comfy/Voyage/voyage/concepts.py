@@ -375,6 +375,13 @@ def validate_concepts(directory: Path) -> list[str]:
     three files is a fresh run — no errors. Token-only records
     (embedding_index == -1, e.g. legacy migrations) legitimately coexist
     with vector-backed ones, so mixed -1 is not an error.
+
+    Track C extra-row rule: when vector rows exist, `row_count` must equal
+    `max(accepted_index) + 1` exactly — extra untracked rows (a torn
+    append that stacked without an index entry, or a foreign write) fail
+    loud instead of silently shifting future appends. Repair is
+    truncate-under-lock or restore, never silent accept (see
+    `truncate_concept_vectors_to_tracked`).
     """
     errors: list[str] = []
     concepts_path = directory / "concepts.jsonl"
@@ -410,6 +417,18 @@ def validate_concepts(directory: Path) -> list[str]:
                 f"novelty/concept_vectors.npy has {row_count} rows "
                 f"but records reference missing rows: {dangling}"
             )
+        # Track C extra-row rule: tracked rows must exactly fill
+        # [0, max_index]; extra untracked rows fail loud (torn append or
+        # foreign write) — repair via truncate-under-lock, never silent.
+        tracked = sorted(index for index in accepted.values() if index >= 0)
+        if tracked and row_count >= 0:
+            expected_rows = max(tracked) + 1
+            if row_count != expected_rows:
+                errors.append(
+                    f"novelty/concept_vectors.npy has {row_count} rows "
+                    f"but tracked max index needs {expected_rows} "
+                    "(extra untracked rows — truncate under lock or restore)"
+                )
     if not concepts_path.exists() and vectors_path.exists():
         errors.append("novelty/concept_vectors.npy present but concepts.jsonl missing")
     if index_path.exists():
@@ -445,3 +464,88 @@ def validate_concepts(directory: Path) -> list[str]:
             "records exist (crash between jsonl append and index write?)"
         )
     return errors
+
+
+def truncate_concept_vectors_to_tracked(directory: Path, *, lock_path: Path | None = None) -> int:
+    """Truncate extra untracked vector rows under an exclusive lock (Track C).
+
+    Repair for the extra-row finding above: holds `fcntl.flock` on
+    `lock_path` (default `<directory>/concepts.jsonl.lock`) while
+    re-reading the jsonl, computing `max(accepted_index)+1`, and
+    atomically rewriting a truncated `.npy` when rows exceed it. Returns
+    removed rows (0 when already exact or when no vectors exist). Raises
+    `StateError` when the jsonl is unreadable or indices are inconsistent
+    (truncate would destroy tracked data) — fail loud, never silent.
+    Callers must hold the run lock (Track A helper owns it in production;
+    this takes the file lock only for the truncate window).
+    """
+    import fcntl as _fcntl
+
+    from voyage.errors import StateError as _StateError
+
+    concepts_path = directory / "concepts.jsonl"
+    vectors_path = directory / "concept_vectors.npy"
+    if not vectors_path.exists():
+        return 0
+    resolved_lock = lock_path if lock_path is not None else directory / "concepts.jsonl.lock"
+    resolved_lock.parent.mkdir(parents=True, exist_ok=True)
+    with resolved_lock.open("a+", encoding="utf-8") as lock_handle:
+        _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_EX)
+        try:
+            try:
+                records = [
+                    ConceptRecord.model_validate_json(line)
+                    for line in concepts_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, ValueError) as exc:
+                raise _StateError(
+                    f"cannot truncate concept vectors: jsonl unreadable ({exc})"
+                ) from exc
+            tracked = sorted(
+                record.embedding_index
+                for record in records
+                if record.accepted and record.embedding_index >= 0
+            )
+            if not tracked:
+                return 0
+            expected_rows = max(tracked) + 1
+            try:
+                import numpy as _np
+            except ImportError as exc:
+                raise _StateError(
+                    f"cannot truncate concept vectors: numpy missing ({exc})"
+                ) from exc
+            try:
+                matrix = _np.load(str(vectors_path))
+            except (OSError, ValueError) as exc:
+                raise _StateError(
+                    f"cannot truncate concept vectors: npy unreadable ({exc})"
+                ) from exc
+            row_count = int(matrix.shape[0])
+            if row_count < expected_rows:
+                raise _StateError(
+                    f"cannot truncate concept vectors: {row_count} rows "
+                    f"but tracked needs {expected_rows} (missing rows, not extra)"
+                )
+            if row_count == expected_rows:
+                return 0
+            import os as _os
+
+            truncated = _np.asarray(matrix[:expected_rows], dtype=_np.float32)
+            tmp_npy = vectors_path.parent / f"{vectors_path.name}.truncate.tmp.npy"
+            try:
+                _np.save(str(tmp_npy), truncated)
+                with tmp_npy.open("rb+") as handle:
+                    handle.flush()
+                    _os.fsync(handle.fileno())
+                _os.replace(tmp_npy, vectors_path)
+                fsync_dir(vectors_path.parent)
+            finally:
+                try:
+                    tmp_npy.unlink()
+                except OSError:
+                    pass
+            return row_count - expected_rows
+        finally:
+            _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_UN)
